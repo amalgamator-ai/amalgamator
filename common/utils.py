@@ -82,6 +82,24 @@ def safe_clean_dir(dir_path: str | Path) -> None:
     if dir_path.is_symlink():
         raise ValueError(f"Refusing to clean symlink target: {resolved}")
 
+    cwd_resolved = str(Path.cwd().resolve())
+    project_resolved = str(Path(_PROJECT_ROOT).resolve())
+    if resolved == cwd_resolved or resolved == project_resolved:
+        raise ValueError(
+            f"Refusing to clean directory that resolves to the current "
+            f"working directory or project root.\n"
+            f"  Resolved dir:   {resolved}\n"
+            f"  CWD:            {cwd_resolved}\n"
+            f"  Project root:   {project_resolved}\n"
+            f"  Use a dedicated subdirectory to avoid deleting project files."
+        )
+
+    if (dir_path / ".git").is_dir():
+        raise ValueError(
+            f"Refusing to clean directory that is a git repository root: {resolved}\n"
+            f"  Use a dedicated subdirectory to avoid deleting repository files."
+        )
+
     print(f"Cleaning directory: {resolved}")
     for child in dir_path.iterdir():
         if child.is_dir() and not child.is_symlink():
