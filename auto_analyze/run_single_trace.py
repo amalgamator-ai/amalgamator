@@ -209,6 +209,28 @@ if __name__ == "__main__":
             print(f"  - {e}")
         sys.exit(1)
 
+    # Guard: refuse to clean output_dir if it is the project root, CWD,
+    # or a git repository — prevents accidental deletion of user files.
+    output_resolved = os.path.realpath(config.output_dir)
+    cwd_resolved = os.path.realpath(os.getcwd())
+    project_resolved = os.path.realpath(_project_root)
+    if output_resolved == cwd_resolved or output_resolved == project_resolved:
+        print(
+            f"ERROR: output_dir ({config.output_dir}) resolves to the current "
+            f"working directory or project root.\n"
+            f"  Resolved output_dir: {output_resolved}\n"
+            f"  CWD:                 {cwd_resolved}\n"
+            f"  Project root:        {project_resolved}\n"
+            f"Use a dedicated subdirectory to avoid deleting project files."
+        )
+        sys.exit(1)
+    if os.path.isdir(os.path.join(output_resolved, ".git")):
+        print(
+            f"ERROR: output_dir ({config.output_dir}) is a git repository root.\n"
+            f"Use a dedicated subdirectory to avoid deleting repository files."
+        )
+        sys.exit(1)
+
     if not args.no_clean and os.path.exists(config.output_dir):
         safe_clean_dir(config.output_dir)
     os.makedirs(config.output_dir, exist_ok=True)
