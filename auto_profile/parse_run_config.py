@@ -3,7 +3,6 @@ import os
 import sys
 
 VALID_FRAMEWORKS = ("vllm", "sgl", "trt")
-VALID_MODE_PREFIXES = tuple(f"{fw}_" for fw in VALID_FRAMEWORKS)
 
 PROFILE_REQUIRED_FIELDS = {
     "model": str,
@@ -11,45 +10,61 @@ PROFILE_REQUIRED_FIELDS = {
 }
 
 
-def parse_modes(modes_list, profile_idx, errors):
+def parse_frameworks(frameworks_list, profile_idx, config_dir, errors):
     parsed = {}
-    if not isinstance(modes_list, list):
-        errors.append(f'"profiles[{profile_idx}].modes" must be a list.')
+    if not isinstance(frameworks_list, list):
+        errors.append(f'"profiles[{profile_idx}].frameworks" must be a list.')
         return parsed
 
-    for entry in modes_list:
-        if not isinstance(entry, str):
+    for entry in frameworks_list:
+        if not isinstance(entry, dict):
             errors.append(
-                f'"profiles[{profile_idx}].modes" entries must be strings. '
-                f"Got: {entry!r}."
+                f'"profiles[{profile_idx}].frameworks" entries must be objects '
+                f'with at least a "name" field. Got: {entry!r}.'
             )
             continue
 
-        matched = False
-        for fw in VALID_FRAMEWORKS:
-            prefix = f"{fw}_"
-            if entry.startswith(prefix):
-                mode_name = entry[len(prefix):]
-                if not mode_name:
-                    errors.append(
-                        f'"profiles[{profile_idx}].modes" entry "{entry}" '
-                        f"has empty mode name after prefix."
-                    )
-                elif fw in parsed:
-                    errors.append(
-                        f'"profiles[{profile_idx}].modes" has duplicate '
-                        f'framework prefix "{fw}": "{parsed[fw]}" and "{mode_name}".'
-                    )
-                else:
-                    parsed[fw] = mode_name
-                matched = True
-                break
-
-        if not matched:
+        name = entry.get("name")
+        if not isinstance(name, str) or name not in VALID_FRAMEWORKS:
             errors.append(
-                f'"profiles[{profile_idx}].modes" entry "{entry}" must start '
-                f"with a framework prefix: {', '.join(f'{fw}_' for fw in VALID_FRAMEWORKS)}."
+                f'"profiles[{profile_idx}].frameworks" entry has invalid '
+                f'"name": {name!r}. Must be one of: {list(VALID_FRAMEWORKS)}.'
             )
+            continue
+
+        if name in parsed:
+            errors.append(
+                f'"profiles[{profile_idx}].frameworks" has duplicate '
+                f'framework "{name}".'
+            )
+            continue
+
+        mode = entry.get("mode")
+        if mode is not None:
+            if not isinstance(mode, str) or len(mode) == 0:
+                errors.append(
+                    f'"profiles[{profile_idx}].frameworks" entry for "{name}" '
+                    f'has invalid "mode": must be a non-empty string.'
+                )
+                mode = None
+            else:
+                mode_path = f"{config_dir}/modes/{name}/{mode}"
+                if not os.path.isfile(mode_path):
+                    errors.append(
+                        f'"profiles[{profile_idx}].frameworks" entry for "{name}" '
+                        f'references mode "{mode}" but file not found '
+                        f"({mode_path})."
+                    )
+
+        enable_trace = entry.get("enable_trace", False)
+        if not isinstance(enable_trace, bool):
+            errors.append(
+                f'"profiles[{profile_idx}].frameworks" entry for "{name}" '
+                f'has invalid "enable_trace": must be a boolean.'
+            )
+            enable_trace = False
+
+        parsed[name] = {"mode": mode, "enable_trace": enable_trace}
 
     return parsed
 
@@ -168,7 +183,7 @@ def resolve_gpu_ids(i, p, gpu_configs, errors):
             p["gpu_ids"] = gpu_configs[gpu_ids]
 
 
-def validate_profile(i, p, errors):
+def validate_profile(i, p, config_dir, errors):
     if not isinstance(p, dict):
         errors.append(
             f'"profiles[{i}]" must be an object with fields: '
@@ -208,8 +223,8 @@ def validate_profile(i, p, errors):
         elif not isinstance(p["output_len"], int) or p["output_len"] <= 0:
             errors.append(f'"profiles[{i}].output_len" must be a positive integer.')
 
-    if "modes" in p:
-        parse_modes(p["modes"], i, errors)
+    if "frameworks" in p:
+        parse_frameworks(p["frameworks"], i, config_dir, errors)
 
 
 def shell_escape(s):
@@ -258,6 +273,8 @@ def parse_config(infra_config_path, run_config_path):
 
     errors = []
 
+    config_dir = os.path.dirname(run_config_path)
+
     docker_images, gpu_configs, exec_modes = load_infra_config(
         infra_config_path, errors
     )
@@ -269,50 +286,36 @@ def parse_config(infra_config_path, run_config_path):
         for i, p in enumerate(profiles):
             resolve_gpu_ids(i, p, gpu_configs, errors)
             resolve_exec_mode(i, p, exec_modes, errors)
-            validate_profile(i, p, errors)
+            validate_profile(i, p, config_dir, errors)
 
     if "concurrencies" not in c or not isinstance(c["concurrencies"], list) or len(c["concurrencies"]) == 0:
         errors.append('"concurrencies" must be a non-empty list of integers.')
 
-    frameworks = c.get("frameworks", [])
-    if not isinstance(frameworks, list):
-        errors.append('"frameworks" must be a list.')
-        frameworks = []
-    invalid_fw = [f for f in frameworks if f not in VALID_FRAMEWORKS]
-    if invalid_fw:
-        errors.append(
-            f'"frameworks" contains invalid entries: {invalid_fw}. '
-            f"Valid options are: {list(VALID_FRAMEWORKS)}."
-        )
+    all_parsed_frameworks = []
+    all_framework_names = set()
+    all_trace_frameworks = set()
 
-    enable_traces = c.get("enable_traces", [])
-    if not isinstance(enable_traces, list):
-        errors.append('"enable_traces" must be a list.')
-        enable_traces = []
-    invalid_tr = [t for t in enable_traces if t not in VALID_FRAMEWORKS]
-    if invalid_tr:
-        errors.append(
-            f'"enable_traces" contains invalid entries: {invalid_tr}. '
-            f"Valid options are: {list(VALID_FRAMEWORKS)}."
-        )
+    for i, p in enumerate(profiles):
+        parsed_fw = parse_frameworks(p.get("frameworks", []), i, config_dir, [])
+        all_parsed_frameworks.append(parsed_fw)
+        for fw_name, fw_cfg in parsed_fw.items():
+            all_framework_names.add(fw_name)
+            if fw_cfg["enable_trace"]:
+                all_trace_frameworks.add(fw_name)
 
-    traces_not_in_fw = [t for t in enable_traces if t in VALID_FRAMEWORKS and t not in frameworks]
-    if traces_not_in_fw:
-        errors.append(
-            f'"enable_traces" lists frameworks not in "frameworks": {traces_not_in_fw}. '
-            f'A framework must be in "frameworks" to enable tracing for it.'
-        )
+    frameworks_ordered = [fw for fw in VALID_FRAMEWORKS if fw in all_framework_names]
+    traces_ordered = [fw for fw in VALID_FRAMEWORKS if fw in all_trace_frameworks]
 
-    if docker_images is not None and frameworks:
-        fw_missing_image = [fw for fw in frameworks if fw not in docker_images]
+    if docker_images is not None and frameworks_ordered:
+        fw_missing_image = [fw for fw in frameworks_ordered if fw not in docker_images]
         if fw_missing_image:
             errors.append(
-                f'"frameworks" lists {fw_missing_image} but no docker image is defined '
-                f"for them in docker_images_file."
+                f'Profiles reference frameworks {fw_missing_image} but no docker image '
+                f"is defined for them in docker_images_file."
             )
-    elif docker_images is None and frameworks:
+    elif docker_images is None and frameworks_ordered:
         errors.append(
-            '"frameworks" is non-empty but no "docker_images_file" is specified in infra config.'
+            'Profiles reference frameworks but no "docker_images_file" is specified in infra config.'
         )
 
     if errors:
@@ -321,16 +324,12 @@ def parse_config(infra_config_path, run_config_path):
         print("return 1")
         return
 
-    parsed_modes = []
-    for p in profiles:
-        parsed_modes.append(parse_modes(p.get("modes", []), 0, []))
-
     concurrencies = " ".join(str(x) for x in c["concurrencies"])
 
     def make_assoc(value_fn):
         entries = " ".join(
-            f'["{shell_escape(p["model"])}"]="{shell_escape(value_fn(p, pm))}"'
-            for p, pm in zip(profiles, parsed_modes)
+            f'["{shell_escape(p["model"])}"]="{shell_escape(value_fn(p, pf))}"'
+            for p, pf in zip(profiles, all_parsed_frameworks)
         )
         return entries
 
@@ -345,12 +344,13 @@ def parse_config(infra_config_path, run_config_path):
     print(f"declare -gA PROFILE_GPU_IDS=({make_assoc(lambda p, _: ','.join(str(g) for g in p['gpu_ids']))})")
     print(f"declare -gA PROFILE_INPUT_LENS=({make_assoc(lambda p, _: str(p['input_len']))})")
     print(f"declare -gA PROFILE_OUTPUT_LENS=({make_assoc(lambda p, _: str(p['output_len']))})")
-    print(f"declare -gA PROFILE_VLLM_MODES=({make_assoc(lambda _, pm: pm.get('vllm', 'none'))})")
-    print(f"declare -gA PROFILE_SGL_MODES=({make_assoc(lambda _, pm: pm.get('sgl', 'none'))})")
-    print(f"declare -gA PROFILE_TRT_MODES=({make_assoc(lambda _, pm: pm.get('trt', 'none'))})")
+    print(f"declare -gA PROFILE_VLLM_MODES=({make_assoc(lambda _, pf: pf.get('vllm', {}).get('mode') or 'none')})")
+    print(f"declare -gA PROFILE_SGL_MODES=({make_assoc(lambda _, pf: pf.get('sgl', {}).get('mode') or 'none')})")
+    print(f"declare -gA PROFILE_TRT_MODES=({make_assoc(lambda _, pf: pf.get('trt', {}).get('mode') or 'none')})")
     print(f'PROFILE_CONCURRENCIES="{concurrencies}"')
-    print(f'RUN_FRAMEWORKS="{" ".join(frameworks)}"')
-    print(f'ENABLE_TRACES="{" ".join(enable_traces)}"')
+    print(f'RUN_FRAMEWORKS="{" ".join(frameworks_ordered)}"')
+    print(f'ENABLE_TRACES="{" ".join(traces_ordered)}"')
+    print(f'RUN_CONFIG_DIR="{shell_escape(config_dir)}"')
 
 
 if __name__ == "__main__":

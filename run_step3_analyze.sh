@@ -5,8 +5,8 @@
 #          and JIRA task creation.
 #
 # Usage: ./run_step3_analyze.sh <run_config> [options]
-# Example: ./run_step3_analyze.sh ./auto_profile/test_configs/run_deepseek_r1_nvfp4.json
-#          ./run_step3_analyze.sh ./auto_profile/test_configs/run_deepseek_r1_nvfp4.json --skip-pdf --skip-jiras
+# Example: ./run_step3_analyze.sh ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
+#          ./run_step3_analyze.sh ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json --skip-pdf --skip-jiras
 #
 # Options:
 #   --skip-pdf      Skip summary PDF report generation (step 3c)
@@ -44,7 +44,7 @@ done
 
 if [ -z "$run_config" ]; then
     echo "Usage: $0 <run_config> [--skip-pdf] [--skip-trace] [--skip-jiras]"
-    echo "Example: $0 ./auto_profile/test_configs/run_deepseek_r1_nvfp4.json"
+    echo "Example: $0 ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json"
     exit 1
 fi
 

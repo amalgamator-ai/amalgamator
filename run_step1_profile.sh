@@ -3,13 +3,13 @@
 # Step 1: Run benchmarks and profiling across frameworks (vllm, sgl, trt)
 #
 # Usage: ./run_step1_profile.sh <run_config>
-# Example: ./run_step1_profile.sh ./auto_profile/test_configs/run_deepseek_r1_nvfp4.json
+# Example: ./run_step1_profile.sh ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
 
 set -euo pipefail
 
 if [ $# -ne 1 ]; then
     echo "Usage: $0 <run_config>"
-    echo "Example: $0 ./auto_profile/test_configs/run_deepseek_r1_nvfp4.json"
+    echo "Example: $0 ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json"
     exit 1
 fi
 

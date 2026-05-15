@@ -45,8 +45,9 @@ for p in "${PROFILES[@]}"; do
                 && "${PROFILE_SGL_MODES[$p]}" != "none" ]]; then
                 mode=${PROFILE_SGL_MODES[$p]}
                 log_info "Set SGL MODE = ${mode}"
-                source "${AUTO_PROFILE_DIR}/${SGL}/${SGL}_mode_${mode}.sh"
+                source "${RUN_CONFIG_DIR}/modes/${SGL}/${mode}"
             fi
+            mode_name="${mode%.*}"
 
             # Generate test ID
             test_name="$(
@@ -57,7 +58,7 @@ for p in "${PROFILES[@]}"; do
                     ${concurrency} \
                     ${input_len} \
                     ${output_len} \
-                    ${mode}
+                    ${mode_name}
                 )"
             
             # Create test dir (for outputs)

@@ -589,6 +589,7 @@ load_run_config() {
   setup_results_dirs "$run_config"
 
   log_info "Loaded config: infra=$INFRA_CONFIG run=$run_config"
+  log_info "  RUN_CONFIG_DIR=${RUN_CONFIG_DIR}"
   log_info "  RESULTS_DIR=${RESULTS_DIR}"
   log_info "  VLLM_DOCKER_IMAGE=${VLLM_DOCKER_IMAGE}"
   log_info "  SGL_DOCKER_IMAGE=${SGL_DOCKER_IMAGE}"

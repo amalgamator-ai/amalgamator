@@ -60,11 +60,12 @@ for p in "${PROFILES[@]}"; do
                 && "${PROFILE_TRT_MODES[$p]}" != "none" ]]; then
             mode="${PROFILE_TRT_MODES[$p]}"
             log_info "Set TRT MODE = ${mode}"
-            yaml_file="${AUTO_PROFILE_DIR}/trt/trt_mode_${mode}.yaml"
+            yaml_file="${RUN_CONFIG_DIR}/modes/${TRT}/${mode}"
             log_info "Add yaml file: ${yaml_file}"
             yaml_flag="--extra_llm_api_options ${yaml_file}"
         fi
-        
+        mode_name="${mode%.*}"
+
         # Generate test ID
         test_name="$(
             make_test_name \
@@ -74,7 +75,7 @@ for p in "${PROFILES[@]}"; do
                 ${concurrency} \
                 ${input_len} \
                 ${output_len} \
-                ${mode}
+                ${mode_name}
             )"
         
         # Create test dir (for outputs)

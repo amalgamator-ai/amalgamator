@@ -45,8 +45,9 @@ for p in "${PROFILES[@]}"; do
                 && "${PROFILE_VLLM_MODES[$p]}" != "none" ]]; then
                 mode=${PROFILE_VLLM_MODES[$p]}
                 log_info "Set VLLM MODE = ${mode}"
-                source "${AUTO_PROFILE_DIR}/${VLLM}/${VLLM}_mode_${mode}.sh"
+                source "${RUN_CONFIG_DIR}/modes/${VLLM}/${mode}"
             fi
+            mode_name="${mode%.*}"
 
             # Set attn backend
             attn_backend=""
@@ -54,7 +55,7 @@ for p in "${PROFILES[@]}"; do
                 log_info "Set attn backend to ${VLLM_ATTN_BACKEND}"
                 attn_backend="--attention-backend ${VLLM_ATTN_BACKEND}"
             fi
-            
+
             # Generate test ID
             test_name="$(
                 make_test_name \
@@ -64,7 +65,7 @@ for p in "${PROFILES[@]}"; do
                     ${concurrency} \
                     ${input_len} \
                     ${output_len} \
-                    ${mode}
+                    ${mode_name}
                 )"
             
             # Create test dir (for outputs)

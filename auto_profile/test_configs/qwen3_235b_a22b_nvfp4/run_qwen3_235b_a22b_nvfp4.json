@@ -1,0 +1,14 @@
+{
+    "profiles": [
+        {
+            "model": "nvidia/Qwen3-235B-A22B-NVFP4",
+            "gpu_ids": "gpu_ids_2",
+            "exec_mode": "pure_decode",
+            "frameworks": [
+                {"name": "vllm", "mode": "vllm_moe_fp4_trtllm_b200.sh"},
+                {"name": "trt", "mode": "trt_moe_trtllm_b200.yaml"}
+            ]
+        }
+    ],
+    "concurrencies": [1, 16]
+}

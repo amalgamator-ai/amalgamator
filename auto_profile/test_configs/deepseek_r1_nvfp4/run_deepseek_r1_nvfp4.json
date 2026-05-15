@@ -1,0 +1,14 @@
+{
+    "profiles": [
+        {
+            "model": "nvidia/DeepSeek-R1-NVFP4",
+            "gpu_ids": "gpu_ids_4",
+            "exec_mode": "pure_decode",
+            "frameworks": [
+                {"name": "vllm", "mode": "vllm_kimi_k25_nvfp4_b200.sh", "enable_trace": true},
+                {"name": "sgl", "enable_trace": true}
+            ]
+        }
+    ],
+    "concurrencies": [1]
+}

@@ -4,10 +4,11 @@
             "model": "Qwen/Qwen3-Coder-Next",
             "gpu_ids": "gpu_ids_2",
             "exec_mode": "pure_decode",
-            "modes": []
+            "frameworks": [
+                {"name": "vllm"},
+                {"name": "sgl"}
+            ]
         }
     ],
-    "concurrencies": [1],
-    "frameworks": ["vllm", "sgl"],
-    "enable_traces": []
+    "concurrencies": [1]
 }

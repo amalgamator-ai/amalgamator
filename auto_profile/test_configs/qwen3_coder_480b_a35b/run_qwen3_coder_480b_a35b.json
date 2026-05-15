@@ -4,10 +4,11 @@
             "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
             "gpu_ids": "gpu_ids_4",
             "exec_mode": "pure_decode",
-            "modes": []
+            "frameworks": [
+                {"name": "vllm"},
+                {"name": "sgl"}
+            ]
         }
     ],
-    "concurrencies": [1, 16],
-    "frameworks": ["vllm", "sgl"],
-    "enable_traces": []
+    "concurrencies": [1, 16]
 }

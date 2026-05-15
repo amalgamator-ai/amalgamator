@@ -206,7 +206,7 @@ For automated profiling + analysis across multiple frameworks:
 
 ```bash
 ./run_all.sh <run_config>
-# Example: ./run_all.sh ./auto_profile/test_configs/run_deepseek_r1_nvfp4.json
+# Example: ./run_all.sh ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
 ```
 
 This orchestrates:

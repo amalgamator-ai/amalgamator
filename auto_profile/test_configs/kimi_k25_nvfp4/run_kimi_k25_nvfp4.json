@@ -4,10 +4,10 @@
             "model": "nvidia/Kimi-K2.5-NVFP4",
             "gpu_ids": "gpu_ids_8",
             "exec_mode": "pure_decode",
-            "modes": ["vllm_kimi_k25_nvfp4_b200", "sgl_kimi_k25_nvfp4_b200"]
+            "frameworks": [
+                {"name": "sgl", "mode": "sgl_kimi_k25_nvfp4_b200.sh", "enable_trace": true}
+            ]
         }
     ],
-    "concurrencies": [1],
-    "frameworks": ["sgl"],
-    "enable_traces": ["sgl"]
+    "concurrencies": [1]
 }

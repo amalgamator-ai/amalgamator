@@ -1,0 +1,14 @@
+{
+    "profiles": [
+        {
+            "model": "nvidia/Gemma-4-31B-IT-NVFP4",
+            "gpu_ids": "gpu_ids_1",
+            "exec_mode": "pure_decode",
+            "frameworks": [
+                {"name": "vllm", "mode": "vllm_gemma4_nvfp4_b200.sh"},
+                {"name": "sgl", "mode": "sgl_gemma4_nvfp4_b200.sh"}
+            ]
+        }
+    ],
+    "concurrencies": [1]
+}

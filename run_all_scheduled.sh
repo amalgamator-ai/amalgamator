@@ -9,14 +9,14 @@ usage() {
     echo "Before running, verifies that the required GPUs have no active processes."
     echo ""
     echo "Arguments:"
-    echo "  run_config  Path to run config JSON (e.g., ./auto_profile/test_configs/run_deepseek_r1_nvfp4.json)"
+    echo "  run_config  Path to run config JSON (e.g., ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json)"
     echo "  datetime    When to run, in any format accepted by 'date -d', e.g.:"
     echo "              '2026-05-01 03:00'    specific date and time"
     echo "              'tomorrow 14:30'      relative date"
     echo "              '2026-05-01T03:00:00' ISO format"
     echo ""
     echo "Example:"
-    echo "  $0 ./auto_profile/test_configs/run_deepseek_r1_nvfp4.json '2026-05-01 03:00'"
+    echo "  $0 ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json '2026-05-01 03:00'"
     exit 1
 }
 
