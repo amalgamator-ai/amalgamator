@@ -14,7 +14,7 @@ EXTRA_RUN_FLAGS="
     --chunked-prefill-size 8192 \
     --disable-flashinfer-autotune \
     --swa-full-tokens-ratio 0.1 \
-    --mem-fraction-static 0.90 \    
+    --mem-fraction-static 0.90 \
 "
 
 export SGLANG_JIT_DEEPGEMM_PRECOMPILE=0

@@ -5,10 +5,12 @@
             "gpu_ids": "gpu_ids_8",
             "exec_mode": "pure_decode",
             "frameworks": [
-                {"name": "vllm", "mode": "vllm_deepseek_v4_spec_decode_b200.sh", "enable_trace": false},
-                {"name": "sgl", "mode": "sgl_deepseek_v4_spec_decode_b200.sh", "enable_trace": false}
+                {"name": "vllm", "mode": "vllm_deepseek_v4_tp_b200.sh", "enable_trace": true},
+                {"name": "sgl", "mode": "sgl_deepseek_v4_tp_b200.sh", "enable_trace": true}
+                
             ]
         }
     ],
     "concurrencies": [1]
 }
+

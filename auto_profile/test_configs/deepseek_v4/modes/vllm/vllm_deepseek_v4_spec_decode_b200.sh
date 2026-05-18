@@ -6,8 +6,10 @@ EXTRA_RUN_FLAGS=" \
     --kv-cache-dtype fp8 \
     --block-size 256 \
     --no-enable-flashinfer-autotune \
-    --attention_config.use_fp4_indexer_cache=True \
-    --speculative_config '{"method":"mtp","num_speculative_tokens":2}' \
+    --speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":2} \
 "
+
+#--attention-config {\"use_fp4_indexer_cache\":true} \
+#--attention_config.use_fp4_indexer_cache=True \
 
 set +x

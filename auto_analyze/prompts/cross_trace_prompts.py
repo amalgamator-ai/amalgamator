@@ -64,6 +64,7 @@ Do the following:
     - High-level logical purpose
     - Order in the logical sequence of a transformer block
     - Source code inspections and deep dives
+    - It may be that each framework has a couple block types, then match each type individually. 
 - Take into account separate GPU streams and their synchronization points.
 - When operations do not match cleanly, perform a deeper analysis and source code deep-dive to fully understand it and fix it.
 

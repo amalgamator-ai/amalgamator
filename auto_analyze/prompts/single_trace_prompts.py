@@ -263,9 +263,9 @@ c. SOURCE CODE GROUNDING:
    - Every high_level_op name used in the correlation must be traceable back to a specific location in the source code at <framework_source_code>.
    - No operation should be labeled with a generic name like "unknown" or "misc" — if you cannot identify what a kernel does, search harder in the source code.
 
-STEP 7 — MEDIAN BLOCK SELECTION:
-- From REPRESENTATIVE blocks, select median wall-time block per type. Primary = most frequent type.
-- Compute timing distribution: min, p25, median, p75, max, CoV. Flag HIGH VARIANCE if CoV > 10%.
+STEP 7 — DOMINANT BLOCK SELECTION (maybe a couple of them, based on implementation of the forward-pass):
+- Based on high-level model implementation, identify the transformer block types that dominate the forward inference pass. Ensure the block types cover the full forward pass, and state for each block type, what's the relative part of the forward pass it consumes.
+- For each such transformer block type, select a single REPRESENTATIVE example of such a block from the found blocks. This example should have a "median" wall time across all blocks of such a type.
 
 STEP 8 — WRITE OUTPUTS:
 
@@ -283,7 +283,59 @@ FILE 1 — [output_file]: Structured text with:
       Ensure all "|" column separators are aligned across every row.
     - Median selection section.
 
-FILE 2 — [median_block_file]: Just the selected median block content.
+FILE 2 — [median_block_file]: Just the selected dominant block types content, that cover the forward pass.
+
+STEP 9 — CRITICAL REVIEW — before writing the output files, perform a thorough review of the entire correlation:
+
+a. BLOCK TYPE ASSIGNMENT REVIEW:
+   - For each detected block, re-verify that its type assignment is correct by comparing its operation sequence against the high-level block type definitions in [high_level_ops_file] AND the decoder layer's forward() method in the source code.
+   - Confirm that every block boundary is placed correctly — the first and last operations of each block must correspond to the entry and exit points of the decoder layer's forward() method for that block type.
+   - If any block's operation count or composition differs from other blocks of the same type, investigate and fix the boundary or type assignment before proceeding.
+
+b. PER-OPERATION HIGH-LEVEL CORRELATION REVIEW:
+   - For EACH low-level GPU operation in EVERY block, re-verify that its assigned high_level_op name correctly describes what the kernel does according to the source code.
+   - Re-verify that each operation's source_code_ref (file:line) is accurate — open the referenced location in <framework_source_code> and confirm it corresponds to this kernel's launch site.
+   - Re-verify that each operation's source_code_explanation accurately describes the kernel's role in the forward pass, its call chain from the decoder layer, and its relationship to the high-level operation.
+   - If any high_level_op name is vague, generic, or does not precisely describe the kernel's role, refine it with a more specific name derived from your source code analysis.
+
+c. CROSS-BLOCK CONSISTENCY REVIEW:
+   - Verify that the same kernel (identified by kernel_name, stream, grid) always receives the same high_level_op name across ALL blocks — no inconsistencies.
+   - Verify that within each stream, operations appear in the same relative order across all blocks of the same type.
+   - Fix any inconsistencies found before proceeding to the next review.
+
+STEP 10 — SECOND REVIEW — after fixing issues from the first review, perform a deeper pass:
+
+a. COMPLETENESS CHECK:
+   - Re-scan [gpu_ops_txt_file] from start to end and confirm that every single GPU operation is accounted for — either assigned to a block or classified as inter-block. No gaps allowed.
+   - For each inter-block operation, verify that it genuinely belongs outside block boundaries (e.g., embedding, sampling, LM head) by checking the source code.
+   - Verify the arithmetic: total GPU ops = ops in blocks + inter-block ops. If the sum is wrong, find the missing or double-counted operations.
+
+b. SOURCE CODE GROUNDING CHECK:
+   - For each DISTINCT kernel type that appears in the correlation, confirm you have a valid source_code_ref that traces back to the actual kernel launch in <framework_source_code>.
+   - Ensure no source_code_explanation is speculative or generic — each must describe the specific code path from the decoder layer's forward() method down to the kernel launch.
+   - If any source code reference cannot be verified, re-do the source code search for that kernel and correct the reference.
+
+c. HIGH-LEVEL OP NAMING QUALITY CHECK:
+   - Verify that each high_level_op name is unique within its block and descriptive enough to distinguish it from all other operations.
+   - Verify that the naming is consistent with the terminology used in the framework's source code (function names, class names, variable names).
+   - Fix any naming issues found before proceeding.
+
+STEP 11 — THIRD REVIEW — final quality and precision check:
+
+a. MEDIAN BLOCK VALIDATION:
+   - Re-verify that the selected median block(s) are correctly chosen — they must be REPRESENTATIVE blocks (not warmup/cooldown) with wall_time closest to the median of their block type.
+   - Verify that the median block's operation table is complete and matches the format of all other blocks.
+
+b. OUTPUT FORMAT AND CONTENT VALIDATION:
+   - Verify that every table row has ALL columns filled with complete, non-truncated values — no "..." or ellipsis anywhere.
+   - Verify that all "|" column separators are properly aligned across every row in every table.
+   - Verify that source_code_ref columns contain specific file:line references, not just file names.
+   - Verify that source_code_explanation columns contain meaningful explanations, not just kernel name repetitions.
+
+c. END-TO-END COHERENCE:
+   - Read through the complete output and verify it tells a coherent story: the block types, their boundaries, and the per-operation correlations must all be mutually consistent.
+   - Verify that the information in [median_block_file] is an exact subset of [output_file] — no discrepancies between the two files.
+   - Fix any issues found. Do NOT proceed to writing the output files until all three reviews pass cleanly.
 
 {script_error_handling}
 
@@ -295,6 +347,7 @@ VERIFICATION CHECKLIST:
 - [ ] Every kernel has UNIQUE high_level_op name within its block, determined by source code deep-dive
 - [ ] Warmup/cooldown flagged, median selected correctly
 - [ ] Source code was consulted for EACH distinct kernel type, not just the ones listed in [high_level_ops_file]
+- [ ] All three review phases completed and all issues fixed
 """
 
     def prompt(self):

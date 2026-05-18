@@ -78,7 +78,7 @@ class SingleTraceParams:
         if self.run_command:
             lines.append(f"<run_command> = {self.run_command}")
         if self.trace_gpu_focus is not None:
-            lines.append(f"<trace_gpu_focus> = {self.trace_gpu_focus.strip()}")
+            lines.append(f"<trace_gpu_focus> = {str(self.trace_gpu_focus).strip()}")
         if self.run_log:
             lines.append(f"<run_log> = {self.run_log}")
         if self.high_level_focus:
@@ -401,11 +401,12 @@ class SingleTraceConfig(SingleTraceParams):
             errors.append(f"run_log not found: {self.run_log}")
 
         if self.trace_gpu_focus is not None:
-            focus = self.trace_gpu_focus.strip()
+            focus = str(self.trace_gpu_focus).strip()
             if focus != TRACE_GPU_FOCUS_ALL and not focus.isdigit():
                 errors.append(
                     f'trace_gpu_focus must be null, "ALL", or a non-negative '
                     f'integer GPU ID, got "{self.trace_gpu_focus}"'
                 )
+            self.trace_gpu_focus = focus
 
         return errors
