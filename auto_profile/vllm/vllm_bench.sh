@@ -16,11 +16,13 @@ for p in "${PROFILES[@]}"; do
     gpu_ids=${PROFILE_GPU_IDS[$p]}
     input_len=${PROFILE_INPUT_LENS[$p]}
     output_len=${PROFILE_OUTPUT_LENS[$p]}
+    kv_cache_fill=${PROFILE_KV_CACHE_FILLS[$p]}
     log_info "  Profiling:"
-    log_info "    model      = ${model}"
-    log_info "    gpu_ids    = ${gpu_ids}"
-    log_info "    input_len  = ${input_len}"
-    log_info "    output_len = ${output_len}"
+    log_info "    model         = ${model}"
+    log_info "    gpu_ids       = ${gpu_ids}"
+    log_info "    input_len     = ${input_len}"
+    log_info "    output_len    = ${output_len}"
+    log_info "    kv_cache_fill = ${kv_cache_fill}"
 
     num_gpus=$(echo "${gpu_ids}" | awk -F',' '{print NF}')
     model_dirname=$(echo "${model}" | sed 's/\//__/g')
@@ -107,9 +109,13 @@ for p in "${PROFILES[@]}"; do
             profile_prefix=""
             if is_trace_enabled vllm; then
                 log_info "VLLM profile is enabled."
-                
-                num_warmups=0
-                start_iter=$(calc_start_iter ${num_warmups} ${NUM_WAVES} ${output_len})
+
+                if [[ ${kv_cache_fill} -gt 0 ]]; then
+                    start_iter=$(( kv_cache_fill - input_len ))
+                else
+                    num_warmups=0
+                    start_iter=$(calc_start_iter ${num_warmups} ${NUM_WAVES} ${output_len})
+                fi
 
                 printf -v profiler_config_json \
                     '{"profiler":"cuda","delay_iterations":%d,"max_iterations":%d}' \

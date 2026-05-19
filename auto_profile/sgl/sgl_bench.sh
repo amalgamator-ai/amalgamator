@@ -16,11 +16,13 @@ for p in "${PROFILES[@]}"; do
     gpu_ids=${PROFILE_GPU_IDS[$p]}
     input_len=${PROFILE_INPUT_LENS[$p]}
     output_len=${PROFILE_OUTPUT_LENS[$p]}
+    kv_cache_fill=${PROFILE_KV_CACHE_FILLS[$p]}
     log_info "  Profiling:"
-    log_info "    model      = ${model}"
-    log_info "    gpu_ids    = ${gpu_ids}"
-    log_info "    input_len  = ${input_len}"
-    log_info "    output_len = ${output_len}"
+    log_info "    model         = ${model}"
+    log_info "    gpu_ids       = ${gpu_ids}"
+    log_info "    input_len     = ${input_len}"
+    log_info "    output_len    = ${output_len}"
+    log_info "    kv_cache_fill = ${kv_cache_fill}"
 
     num_gpus=$(echo "${gpu_ids}" | awk -F',' '{print NF}')
     model_dirname=$(echo "${model}" | sed 's/\//__/g')
@@ -104,10 +106,12 @@ for p in "${PROFILES[@]}"; do
             profile_flag=""
             profile_acts=""
             profile_stage=""
+            profile_start_step_flag=""
+            profile_steps_flag=""
             profile_prefix=""
             if is_trace_enabled sgl; then
                 log_info "SGL profile is enabled."
-                
+
                 # Enable profile
                 profile_flag="--profile"
 
@@ -116,7 +120,12 @@ for p in "${PROFILES[@]}"; do
 
                 # Set profile stage
                 profile_stage="--profile-stage=decode" # Can be either all, prefill or decode
-                
+
+                if [[ ${kv_cache_fill} -gt 0 ]]; then
+                    profile_start_step_flag="--profile-start-step $(( kv_cache_fill - input_len ))"
+                    profile_steps_flag="--profile-steps ${NUM_TRACE_ITERS}"
+                fi
+
                 trace_file_prefix="$(
                     make_trace_file_prefix \
                         ${test_dir} \
@@ -165,7 +174,7 @@ for p in "${PROFILES[@]}"; do
                 log_info "RUN PROFILE"
                 run_and_log ${run_log_profile_filename} \
                     env CUDA_VISIBLE_DEVICES=${gpu_ids} \
-                    ${profile_prefix} ${run_cmd} $profile_flag $profile_acts $profile_stage
+                    ${profile_prefix} ${run_cmd} $profile_flag $profile_acts $profile_stage $profile_start_step_flag $profile_steps_flag
 
                 # Convert nsys binary file to SQLite format (python can read it)
                 nsys export \

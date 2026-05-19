@@ -2,5 +2,9 @@
     "pure_decode": {
         "input_len": 4,
         "output_len": 1024
+    },
+    "pure_decode_with_kv_cache_fill_32k": {
+        "input_len": 4,
+        "kv_cache_fill": 32768
     }
 }

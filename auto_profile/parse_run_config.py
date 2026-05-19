@@ -4,6 +4,12 @@ import sys
 
 VALID_FRAMEWORKS = ("vllm", "sgl", "trt")
 
+# Extra output tokens beyond kv_cache_fill to ensure the profiling window fits.
+# Must be >= NUM_TRACE_ITERS (50) defined in config.sh.
+PROFILING_BUFFER = 256
+
+DEFAULT_NUM_WAVES = 4
+
 PROFILE_REQUIRED_FIELDS = {
     "model": str,
     "gpu_ids": (str, list),
@@ -112,16 +118,28 @@ def load_docker_images(docker_images_file, errors):
 
 def validate_exec_modes(exec_modes, errors):
     if not isinstance(exec_modes, dict):
-        errors.append('"exec_modes_file" must contain an object mapping names to {input_len, output_len}.')
+        errors.append('"exec_modes_file" must contain an object mapping names to {input_len, output_len} or {input_len, kv_cache_fill}.')
         return
     for name, cfg in exec_modes.items():
         if not isinstance(cfg, dict):
-            errors.append(f'exec_modes.{name} must be an object with "input_len" and "output_len".')
+            errors.append(f'exec_modes.{name} must be an object with "input_len" and either "output_len" or "kv_cache_fill".')
             continue
         if "input_len" not in cfg or not isinstance(cfg["input_len"], int) or cfg["input_len"] <= 0:
             errors.append(f'exec_modes.{name}.input_len must be a positive integer.')
-        if "output_len" not in cfg or not isinstance(cfg["output_len"], int) or cfg["output_len"] <= 0:
-            errors.append(f'exec_modes.{name}.output_len must be a positive integer.')
+        has_output = "output_len" in cfg
+        has_kvcf = "kv_cache_fill" in cfg
+        if has_output and has_kvcf:
+            errors.append(f'exec_modes.{name} must have either "output_len" or "kv_cache_fill", not both.')
+        elif not has_output and not has_kvcf:
+            errors.append(f'exec_modes.{name} must have either "output_len" or "kv_cache_fill".')
+        elif has_output:
+            if not isinstance(cfg["output_len"], int) or cfg["output_len"] <= 0:
+                errors.append(f'exec_modes.{name}.output_len must be a positive integer.')
+        elif has_kvcf:
+            if not isinstance(cfg["kv_cache_fill"], int) or cfg["kv_cache_fill"] <= 0:
+                errors.append(f'exec_modes.{name}.kv_cache_fill must be a positive integer.')
+            elif isinstance(cfg.get("input_len"), int) and cfg["kv_cache_fill"] <= cfg["input_len"]:
+                errors.append(f'exec_modes.{name}.kv_cache_fill must be greater than input_len.')
 
 
 def resolve_exec_mode(i, p, exec_modes, errors):
@@ -146,7 +164,12 @@ def resolve_exec_mode(i, p, exec_modes, errors):
         return
     cfg = exec_modes[exec_mode]
     p["input_len"] = cfg["input_len"]
-    p["output_len"] = cfg["output_len"]
+    if "output_len" in cfg:
+        p["output_len"] = cfg["output_len"]
+        p["kv_cache_fill"] = 0
+    else:
+        p["output_len"] = cfg["kv_cache_fill"] + PROFILING_BUFFER
+        p["kv_cache_fill"] = cfg["kv_cache_fill"]
 
 
 def load_gpu_configs(gpu_configs_file, errors):
@@ -207,21 +230,34 @@ def validate_profile(i, p, config_dir, errors):
             errors.append(f'"profiles[{i}].gpu_ids" must contain non-negative integers.')
 
     has_exec_mode = "exec_mode" in p
-    has_inline = "input_len" in p or "output_len" in p
+    has_inline = "input_len" in p or "output_len" in p or "kv_cache_fill" in p
     if not has_exec_mode and not has_inline:
         errors.append(
             f'"profiles[{i}]" must specify either "exec_mode" '
-            f'or both "input_len" and "output_len".'
+            f'or "input_len" with "output_len" or "kv_cache_fill".'
         )
     elif not has_exec_mode:
         if "input_len" not in p:
             errors.append(f'"profiles[{i}].input_len" is required when "exec_mode" is not set.')
         elif not isinstance(p["input_len"], int) or p["input_len"] <= 0:
             errors.append(f'"profiles[{i}].input_len" must be a positive integer.')
-        if "output_len" not in p:
-            errors.append(f'"profiles[{i}].output_len" is required when "exec_mode" is not set.')
-        elif not isinstance(p["output_len"], int) or p["output_len"] <= 0:
-            errors.append(f'"profiles[{i}].output_len" must be a positive integer.')
+
+        has_output = "output_len" in p
+        has_kvcf = "kv_cache_fill" in p
+        if has_output and has_kvcf:
+            errors.append(f'"profiles[{i}]" must have either "output_len" or "kv_cache_fill", not both.')
+        elif not has_output and not has_kvcf:
+            errors.append(f'"profiles[{i}]" must have either "output_len" or "kv_cache_fill".')
+        elif has_output:
+            if not isinstance(p["output_len"], int) or p["output_len"] <= 0:
+                errors.append(f'"profiles[{i}].output_len" must be a positive integer.')
+        elif has_kvcf:
+            if not isinstance(p["kv_cache_fill"], int) or p["kv_cache_fill"] <= 0:
+                errors.append(f'"profiles[{i}].kv_cache_fill" must be a positive integer.')
+            elif isinstance(p.get("input_len"), int) and p["kv_cache_fill"] <= p["input_len"]:
+                errors.append(f'"profiles[{i}].kv_cache_fill" must be greater than input_len.')
+            else:
+                p["output_len"] = p["kv_cache_fill"] + PROFILING_BUFFER
 
     if "frameworks" in p:
         parse_frameworks(p["frameworks"], i, config_dir, errors)
@@ -291,6 +327,11 @@ def parse_config(infra_config_path, run_config_path):
     if "concurrencies" not in c or not isinstance(c["concurrencies"], list) or len(c["concurrencies"]) == 0:
         errors.append('"concurrencies" must be a non-empty list of integers.')
 
+    num_waves = c.get("num_waves", DEFAULT_NUM_WAVES)
+    if not isinstance(num_waves, int) or num_waves <= 0:
+        errors.append('"num_waves" must be a positive integer.')
+        num_waves = DEFAULT_NUM_WAVES
+
     all_parsed_frameworks = []
     all_framework_names = set()
     all_trace_frameworks = set()
@@ -344,10 +385,12 @@ def parse_config(infra_config_path, run_config_path):
     print(f"declare -gA PROFILE_GPU_IDS=({make_assoc(lambda p, _: ','.join(str(g) for g in p['gpu_ids']))})")
     print(f"declare -gA PROFILE_INPUT_LENS=({make_assoc(lambda p, _: str(p['input_len']))})")
     print(f"declare -gA PROFILE_OUTPUT_LENS=({make_assoc(lambda p, _: str(p['output_len']))})")
+    print(f"declare -gA PROFILE_KV_CACHE_FILLS=({make_assoc(lambda p, _: str(p.get('kv_cache_fill', 0)))})")
     print(f"declare -gA PROFILE_VLLM_MODES=({make_assoc(lambda _, pf: pf.get('vllm', {}).get('mode') or 'none')})")
     print(f"declare -gA PROFILE_SGL_MODES=({make_assoc(lambda _, pf: pf.get('sgl', {}).get('mode') or 'none')})")
     print(f"declare -gA PROFILE_TRT_MODES=({make_assoc(lambda _, pf: pf.get('trt', {}).get('mode') or 'none')})")
     print(f'PROFILE_CONCURRENCIES="{concurrencies}"')
+    print(f"NUM_WAVES={num_waves}")
     print(f'RUN_FRAMEWORKS="{" ".join(frameworks_ordered)}"')
     print(f'ENABLE_TRACES="{" ".join(traces_ordered)}"')
     print(f'RUN_CONFIG_DIR="{shell_escape(config_dir)}"')

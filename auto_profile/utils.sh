@@ -598,10 +598,11 @@ load_run_config() {
   for _p in "${PROFILES[@]}"; do
     log_info "    model=${_p}"
     log_info "      gpu_ids=${PROFILE_GPU_IDS[$_p]}"
-    log_info "      input_len=${PROFILE_INPUT_LENS[$_p]} output_len=${PROFILE_OUTPUT_LENS[$_p]}"
+    log_info "      input_len=${PROFILE_INPUT_LENS[$_p]} output_len=${PROFILE_OUTPUT_LENS[$_p]} kv_cache_fill=${PROFILE_KV_CACHE_FILLS[$_p]}"
     log_info "      vllm_mode=${PROFILE_VLLM_MODES[$_p]} sgl_mode=${PROFILE_SGL_MODES[$_p]} trt_mode=${PROFILE_TRT_MODES[$_p]}"
   done
   log_info "  PROFILE_CONCURRENCIES=${PROFILE_CONCURRENCIES}"
+  log_info "  NUM_WAVES=${NUM_WAVES}"
   log_info "  RUN_FRAMEWORKS=${RUN_FRAMEWORKS}"
   log_info "  ENABLE_TRACES=${ENABLE_TRACES}"
 }

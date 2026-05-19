@@ -1,0 +1,17 @@
+{
+    "profiles": [
+        {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "gpu_ids": "gpu_ids_8",
+            "exec_mode": "pure_decode_with_kv_cache_fill_32k",
+            "frameworks": [
+                {"name": "vllm", "mode": "vllm_deepseek_v4_tp_b200.sh", "enable_trace": true},
+                {"name": "sgl", "mode": "sgl_deepseek_v4_tp_b200.sh", "enable_trace": true}
+
+            ]
+        }
+    ],
+    "concurrencies": [1],
+    "num_waves": 1
+}
+
