@@ -1,8 +1,12 @@
 # AI-Based Automatic Performance Analysis
 
-End-to-end automation for profiling, analyzing, and comparing GPU traces of LLM inference frameworks (vLLM, SGLang, TensorRT-LLM). Uses Claude as an AI agent to correlate low-level GPU kernels with high-level transformer operations, perform cross-commit regression analysis between framework versions and cross-framework comparisons between different frameworks, and generate improvement plans with step-by-step coding guides.
+End-to-end automation for profiling, analyzing, and comparing GPU traces of LLM inference frameworks (vLLM, SGLang, TensorRT-LLM), and for porting bug fixes between branches of C/systems projects. Uses Claude as an AI agent.
 
 ## Overview
+
+This repo contains two independent AI pipelines:
+
+### GPU Performance Analysis (vLLM / SGLang / TRT-LLM)
 
 Manual analysis of GPU profile traces is labor-intensive, particularly when correlating hundreds of low-level CUDA kernels with high-level Python/C++/CUDA code. This tool automates the entire workflow:
 
@@ -11,7 +15,13 @@ Manual analysis of GPU profile traces is labor-intensive, particularly when corr
 3. **Profiling** *(optional)* — Run inference benchmarks with GPU profiling and auto-generate analysis configs
 4. **Code Generation** *(optional)* — Port optimizations from a faster framework to a slower one
 
+### Bug Fix Porting (C/Systems Projects)
+
+Port a bug fix from one branch of a C/systems project (gcc, openssl, glibc, etc.) to another using Claude as the AI engine. The pipeline traces what the fix touches, ports its tests, plans and generates the ported patch, then drives an autonomous build-test-fix loop until the fix is clean on the target branch — no manual copy-pasting of compiler errors required.
+
 ## Examples and Guides
+
+### GPU Performance Analysis
 
 Detailed guides with copy-pasteable commands are in `auto_analyze/examples/`:
 
@@ -26,6 +36,12 @@ Worked examples with full analysis results:
 
 - [Cross-commit example (Kimi-K2.5)](https://github.com/neuralmagic/ai_auto_perf_analysis/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi) — vLLM `main` vs `v0.16.0` on 8xB200, showing a 21.3% improvement from specialized CUDA kernels
 - [Cross-framework example (Kimi-K2.5)](https://github.com/neuralmagic/ai_auto_perf_analysis/tree/main/auto_analyze/examples/cross_framework_cmp_example_kimi) — vLLM vs SGLang on 8xB200, showing an 8.6% gap driven by MoE dual-stream design differences
+
+### Bug Fix Porting
+
+| Guide | Description |
+|-------|-------------|
+| [Bug Fix Porting Guide](auto_bug_fix/examples/bug_fix_porting_guide.md) | Port a bug fix from one branch to another — setup, configuration, pipeline walkthrough, and failure handling |
 
 ## Project Structure
 
@@ -67,6 +83,12 @@ ai_auto_perf_analysis/
 │   ├── run_investigate_issue.py
 │   ├── run_work_items.py
 │   └── run_summary.py
+├── auto_bug_fix/                       # AI-based bug fix porting pipeline
+│   ├── bug_fix_config.py              #   BugFixConfig dataclass — edit this before running
+│   ├── bug_fix_prompts.py             #   All prompt classes (incl. TestPortPrompt, RunAndFixPrompt)
+│   ├── run_bug_fix.py                 #   Pipeline entry point
+│   └── examples/
+│       └── bug_fix_porting_guide.md   #   Setup and usage guide
 ├── env.sh                              # Environment variables
 ├── run_all.sh                          # Full pipeline orchestrator
 └── run_all_scheduled.sh                # Scheduled pipeline execution
@@ -244,23 +266,14 @@ All pipeline steps log to `logs/run_{step_name}.log` with simultaneous stdout ou
 
 ## auto_bug_fix — Branch Bug Fix Porting
 
-Port a bug fix from one branch of a C/systems project to another using Claude as the AI engine.
+Port a bug fix from one branch of a C/systems project to another using Claude as the AI engine. Supported for any project with a git repository and shell-invokable build and test commands (gcc, openssl, glibc, etc.).
 
-**Supported projects:** Any project with a `git` repository and shell-invokable build and test commands (gcc, openssl, glibc, etc.).
+See **[auto_bug_fix/examples/bug_fix_porting_guide.md](auto_bug_fix/examples/bug_fix_porting_guide.md)** for the full setup and usage guide.
 
-**Setup:**
+**Quick start:**
 
-1. Edit `auto_bug_fix/bug_fix_config.py`:
-   - Set `repo_path`, `source_branch`, `target_branch`, `source_fix_commit`
-   - Set `build_command`, `test_command`, `build_dir`
-   - Set `bug_description`, `issue_id`, `disallowed_modules`
-   - Set `port_tests=True` to auto-extract and port test files from the fix commit
-
-2. Set `claude_config.cwd` to the directory where Claude should write output files.
-
-3. Run:
-   ```bash
-   python -m auto_bug_fix.run_bug_fix
-   ```
-
-**On failure:** If `RunAndFixPrompt` exhausts its retry limit, inspect `run_and_fix_failure.txt` in `claude_config.cwd`, then run `auto_code_gen/run_investigate_issue.py` manually for a deeper diagnostic pass.
+```bash
+# 1. Edit auto_bug_fix/bug_fix_config.py with your repo, branches, and commands
+# 2. Run
+python -m auto_bug_fix.run_bug_fix
+```
