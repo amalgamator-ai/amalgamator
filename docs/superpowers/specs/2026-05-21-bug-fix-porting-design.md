@@ -11,6 +11,47 @@ This design extends the system to support a second use case: **porting a bug fix
 
 ---
 
+## Design Decisions
+
+The following choices were made during the design session and are recorded here to explain the rationale behind the architecture.
+
+### Module layout: new `auto_bug_fix/` module with shared base in `common/`
+
+Three options were considered:
+- **New module `auto_bug_fix/`** — clean separation, existing `auto_code_gen/` untouched
+- **Extend `auto_code_gen/`** — both use cases share the same files
+- **Shared base, two modules** *(chosen)* — `common/` provides shared infrastructure; `auto_bug_fix/` and `auto_code_gen/` each consume it independently
+
+The shared-base approach provides the most reuse without entangling the two use cases. `common/` is already fully generic (`claude_run()`, `ClaudeConfig`, git utilities, logging), so no new abstraction layer was needed there.
+
+### Prompt sharing: per-module copies
+
+Two options were considered:
+- **Shared prompts with generic language** — rewrite existing classes to use branch/bug terminology, both modules use them
+- **Per-module prompt copies** *(chosen)* — `auto_bug_fix/` gets its own adapted copies; no imports from `auto_code_gen/`
+
+Per-module copies were chosen because the GPU-specific instruction text in the existing prompts (CUDA graphs, prefill/decode execution modes, kernel vendoring, shape verification) is deeply embedded and would produce awkward generic abstractions. Independent copies let each module evolve without risk of breaking the other.
+
+### `RunAndFixPrompt` loop architecture: Claude-owns-the-loop
+
+Three options were considered:
+- **Approach A: Claude-owns-the-loop** *(chosen)* — a single prompt class; Claude drives build, test, investigate, fix, retry entirely via Bash tool within one query
+- **Approach B: Python-orchestrated loop** — Python subprocess runs build/test; Claude is invoked only for repair steps; Python controls the retry counter
+- **Approach C: Hybrid** — Python subprocess loop with Claude invoked into the existing session on failure, preserving accumulated context
+
+Approach A was chosen because it is consistent with the pattern already established in `CodeGenPrompt` (which already instructs Claude to recompile and iterate until tests pass within a single query), requires no new Python subprocess machinery, and avoids breaking the uniform "everything is a prompt class" design. The token cost concern is bounded by `max_build_test_retries`.
+
+### Retry exhaustion behavior: surface failure and stop
+
+Three options were considered:
+- **Surface failure and stop** *(chosen)* — write final failure log to `run_and_fix_failure.txt`, exit; human reviews and re-triggers manually
+- **Auto-escalate** — automatically chain into `run_investigate_issue.py` then `run_fix_issue.py` for a deeper pass
+- **Configurable per run** — an `on_retry_exhausted` field controls behavior
+
+Surface-and-stop was chosen for simplicity. The manual escalation path (`run_investigate_issue.py` → `run_fix_issue.py`) already exists and is well-tested. Auto-escalation adds complexity without clear benefit for a first implementation; it can be added later if the failure rate justifies it.
+
+---
+
 ## Architecture & Module Structure
 
 ```
