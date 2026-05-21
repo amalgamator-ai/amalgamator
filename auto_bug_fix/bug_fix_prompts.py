@@ -394,3 +394,306 @@ def gen_ReviewCodePortPlanPrompt(
         output_fixed_file=output_fixed_file,
         output_total_review_summary_file=output_total_review_summary_file,
     )
+
+
+@dataclass
+class TestPlanPrompt:
+    context: str
+    branches: list[str]
+    branch_code_trace_files: list[str]
+    code_port_plan_file: str
+    test_port_manifest_file: str
+    output_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<branches>
+{branches}
+</branches>
+<branch_code_trace_files>
+{branch_code_trace_files}
+</branch_code_trace_files>
+<code_port_plan_file>
+{code_port_plan_file}
+</code_port_plan_file>
+<test_port_manifest_file>
+{test_port_manifest_file}
+</test_port_manifest_file>
+</definitions>
+
+<definition_explanations>
+- <branches> is a list of 2 branches: "source" (has the fix) and "target" (needs the fix).
+- <code_port_plan_file> describes the multi-step coding plan for applying the fix.
+- <test_port_manifest_file> lists the paths of test files already ported from the fix commit. These are the primary tests.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to validate that the ported tests in <test_port_manifest_file> give sufficient coverage, and to plan any supplemental tests needed. Think hard and do the following:
+- Read <test_port_manifest_file> and inspect each ported test file. Understand what each test covers.
+- Analyze the coding plan in <code_port_plan_file> to understand all code paths that will change on "target" branch.
+- Identify any code paths, edge cases, or integration points in the plan that are NOT covered by the ported tests.
+- For each coverage gap, plan a supplemental test: unit tests for isolated changes, integration tests for multi-component interactions, regression tests for uncovered edge cases.
+- If the ported tests already give full coverage, state that explicitly and add no supplemental tests.
+- Do not plan performance benchmarks or speed-gain tests.
+</instructions>
+
+<output>
+- Dump the supplemental test plan to <cwd>/{output_file}
+</output>
+
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            branches=self.branches,
+            branch_code_trace_files=self.branch_code_trace_files,
+            code_port_plan_file=self.code_port_plan_file,
+            test_port_manifest_file=self.test_port_manifest_file,
+            output_file=self.output_file,
+        )
+
+
+TEST_PLAN_PREFIX = "test_plan"
+
+
+def gen_TestPlanPrompt(
+    context: str,
+    branches: list[str],
+    branch_code_trace_files: list[str],
+    code_port_plan_file: str,
+    test_port_manifest_file: str,
+) -> TestPlanPrompt:
+    assert len(branches) == 2
+    return TestPlanPrompt(
+        context=context,
+        branches=branches,
+        branch_code_trace_files=branch_code_trace_files,
+        code_port_plan_file=code_port_plan_file,
+        test_port_manifest_file=test_port_manifest_file,
+        output_file="{}_from_{}_to_{}.txt".format(TEST_PLAN_PREFIX, branches[0], branches[1]),
+    )
+
+
+@dataclass
+class CodeGenPrompt:
+    context: str
+    branches: list[str]
+    branch_code_trace_files: list[str]
+    code_port_plan_file: str
+    test_plan_file: str
+    test_port_manifest_file: str
+    previous_attempt_file: str
+    output_info_file: str
+    output_pr_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<branches>
+{branches}
+</branches>
+<branch_code_trace_files>
+{branch_code_trace_files}
+</branch_code_trace_files>
+<code_port_plan_file>
+{code_port_plan_file}
+</code_port_plan_file>
+<test_plan_file>
+{test_plan_file}
+</test_plan_file>
+<test_port_manifest_file>
+{test_port_manifest_file}
+</test_port_manifest_file>
+<previous_attempt_file>
+{previous_attempt_file}
+</previous_attempt_file>
+</definitions>
+
+<definition_explanations>
+- <branches> is a list of 2 branches: "source" (has the fix) and "target" (needs the fix).
+- <code_port_plan_file> is the high-level multi-step coding plan to implement.
+- <test_plan_file> is the supplemental test plan to implement alongside the fix.
+- <test_port_manifest_file> lists the paths of test files already ported from the fix commit.
+- <previous_attempt_file> is the previous code generation attempt (if provided), used to improve this attempt.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to generate a code patch for the "target" branch that implements the coding plan and passes all tests. Think hard and do the following:
+- If <previous_attempt_file> exists, read it and use all learnings to improve this attempt.
+- Analyze and understand the coding plan in <code_port_plan_file> in full detail.
+- Read the ported test files listed in <test_port_manifest_file>.
+- Implement the plans in <code_port_plan_file> and <test_plan_file> EXACTLY as described. Do not diverge.
+- After applying the fix, compile "target" using <build_command> from <build_dir>.
+    - Use all available CPUs.
+    - Use incremental compilation. Do NOT do a full clean rebuild unless a stale artifact error explicitly requires it.
+    - If compilation fails, investigate, fix, and recompile. Do not stop until compilation succeeds.
+- Run all tests from <test_port_manifest_file> and <test_plan_file>. Do not skip any.
+    - If tests fail, fix the issue and rerun. Do not stop until all tests pass.
+- Ensure all code is written professionally and consistently with "target" branch conventions.
+</instructions>
+
+<output>
+- Dump an explanation of the code patch to <cwd>/{output_info_file}
+- Dump the code patch (fix code + all tests) to <cwd>/{output_pr_file}
+</output>
+
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            branches=self.branches,
+            branch_code_trace_files=self.branch_code_trace_files,
+            code_port_plan_file=self.code_port_plan_file,
+            test_plan_file=self.test_plan_file,
+            test_port_manifest_file=self.test_port_manifest_file,
+            previous_attempt_file=self.previous_attempt_file,
+            output_info_file=self.output_info_file,
+            output_pr_file=self.output_pr_file,
+        )
+
+
+CODE_GEN_FILE_PREFIX = "code_gen"
+
+
+def gen_CodeGenPrompt(
+    context: str,
+    branches: list[str],
+    branch_code_trace_files: list[str],
+    code_port_plan_file: str,
+    test_plan_file: str,
+    test_port_manifest_file: str,
+    previous_attempt_file: str,
+    output_info_file: str,
+    output_pr_file: str,
+) -> CodeGenPrompt:
+    assert len(branches) == 2
+    return CodeGenPrompt(
+        context=context,
+        branches=branches,
+        branch_code_trace_files=branch_code_trace_files,
+        code_port_plan_file=code_port_plan_file,
+        test_plan_file=test_plan_file,
+        test_port_manifest_file=test_port_manifest_file,
+        previous_attempt_file=previous_attempt_file,
+        output_info_file=output_info_file,
+        output_pr_file=output_pr_file,
+    )
+
+
+@dataclass
+class ReviewCodeGenPrompt:
+    context: str
+    branches: list[str]
+    branch_code_trace_files: list[str]
+    code_port_plan_file: str
+    test_plan_file: str
+    test_port_manifest_file: str
+    code_pr_info_file: str
+    code_pr_file: str
+    output_review_file: str
+    output_fixed_file: str
+    output_total_review_summary_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<branches>
+{branches}
+</branches>
+<branch_code_trace_files>
+{branch_code_trace_files}
+</branch_code_trace_files>
+<code_port_plan_file>
+{code_port_plan_file}
+</code_port_plan_file>
+<test_plan_file>
+{test_plan_file}
+</test_plan_file>
+<test_port_manifest_file>
+{test_port_manifest_file}
+</test_port_manifest_file>
+<code_pr_info_file>
+{code_pr_info_file}
+</code_pr_info_file>
+<code_pr_file>
+{code_pr_file}
+</code_pr_file>
+</definitions>
+
+<definition_explanations>
+- <branches> is a list of 2 branches: "source" (has the fix) and "target" (needs the fix).
+- <code_port_plan_file> is the coding plan that was implemented.
+- <test_plan_file> is the supplemental test plan that was implemented.
+- <test_port_manifest_file> lists the ported test file paths.
+- <code_pr_file> is the code patch to review.
+- <code_pr_info_file> describes <code_pr_file>.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to perform a critical, in-depth review of the code patch in <code_pr_file>. Think hard and do the following:
+- Understand the code patch in full detail. Restate the changes step-by-step.
+- Review for correctness: does the patch fully implement the coding plan? Are all ported APIs used correctly?
+- Review for completeness: missing steps, coverage gaps in the tests.
+- Review for risks: incorrect assumptions, missing edge cases, hidden dependencies.
+- For each issue: document the affected code, what is wrong, why it matters, how to fix it.
+- Produce a corrected patch with all issues resolved.
+- Add new tests to cover any newly found issues.
+</instructions>
+
+<output>
+- Dump the documentation of issues found to <cwd>/{output_review_file}
+- Dump the corrected code patch to <cwd>/{output_fixed_file}
+- If multiple code gen => review iterations have been done, summarize the evolution in <cwd>/{output_total_review_summary_file}
+</output>
+
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            branches=self.branches,
+            branch_code_trace_files=self.branch_code_trace_files,
+            code_port_plan_file=self.code_port_plan_file,
+            test_plan_file=self.test_plan_file,
+            test_port_manifest_file=self.test_port_manifest_file,
+            code_pr_info_file=self.code_pr_info_file,
+            code_pr_file=self.code_pr_file,
+            output_review_file=self.output_review_file,
+            output_fixed_file=self.output_fixed_file,
+            output_total_review_summary_file=self.output_total_review_summary_file,
+        )
+
+
+def gen_ReviewCodeGenPrompt(
+    context: str,
+    branches: list[str],
+    branch_code_trace_files: list[str],
+    code_port_plan_file: str,
+    test_plan_file: str,
+    test_port_manifest_file: str,
+    code_pr_info_file: str,
+    code_pr_file: str,
+    output_review_file: str,
+    output_fixed_file: str,
+    output_total_review_summary_file: str,
+) -> ReviewCodeGenPrompt:
+    assert len(branches) == 2
+    return ReviewCodeGenPrompt(
+        context=context,
+        branches=branches,
+        branch_code_trace_files=branch_code_trace_files,
+        code_port_plan_file=code_port_plan_file,
+        test_plan_file=test_plan_file,
+        test_port_manifest_file=test_port_manifest_file,
+        code_pr_info_file=code_pr_info_file,
+        code_pr_file=code_pr_file,
+        output_review_file=output_review_file,
+        output_fixed_file=output_fixed_file,
+        output_total_review_summary_file=output_total_review_summary_file,
+    )

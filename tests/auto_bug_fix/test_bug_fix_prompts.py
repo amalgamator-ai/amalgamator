@@ -6,6 +6,11 @@ from auto_bug_fix.bug_fix_prompts import (
     TEST_PORT_MANIFEST_FILE,
 )
 from auto_bug_fix.bug_fix_prompts import gen_CodePortPlanPrompt, gen_ReviewCodePortPlanPrompt
+from auto_bug_fix.bug_fix_prompts import (
+    gen_TestPlanPrompt,
+    gen_CodeGenPrompt,
+    gen_ReviewCodeGenPrompt,
+)
 
 
 class TestCreateContextStr:
@@ -139,3 +144,80 @@ class TestReviewCodePortPlanPrompt:
         assert "plan.txt" in text
         assert "review.txt" in text
         assert "fixed.txt" in text
+
+
+class TestTestPlanPrompt:
+    def test_references_manifest(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        p = gen_TestPlanPrompt(
+            context=ctx,
+            branches=[bug_cfg.source_branch, bug_cfg.target_branch],
+            branch_code_trace_files=["trace.txt"],
+            code_port_plan_file="plan.txt",
+            test_port_manifest_file=TEST_PORT_MANIFEST_FILE,
+        )
+        assert TEST_PORT_MANIFEST_FILE in p.prompt()
+
+    def test_no_performance_language(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        p = gen_TestPlanPrompt(
+            context=ctx,
+            branches=[bug_cfg.source_branch, bug_cfg.target_branch],
+            branch_code_trace_files=["trace.txt"],
+            code_port_plan_file="plan.txt",
+            test_port_manifest_file=TEST_PORT_MANIFEST_FILE,
+        )
+        text = p.prompt()
+        assert "speedup" not in text.lower()
+        assert "throughput" not in text.lower()
+
+
+class TestCodeGenPrompt:
+    def _make(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        return gen_CodeGenPrompt(
+            context=ctx,
+            branches=[bug_cfg.source_branch, bug_cfg.target_branch],
+            branch_code_trace_files=["trace.txt"],
+            code_port_plan_file="plan.txt",
+            test_plan_file="test_plan.txt",
+            test_port_manifest_file=TEST_PORT_MANIFEST_FILE,
+            previous_attempt_file="",
+            output_info_file="info.txt",
+            output_pr_file="patch.patch",
+        )
+
+    def test_references_build_command(self, claude_cfg, bug_cfg):
+        p = self._make(claude_cfg, bug_cfg)
+        assert "build_command" in p.prompt()
+
+    def test_no_vllm_cmake_steps(self, claude_cfg, bug_cfg):
+        p = self._make(claude_cfg, bug_cfg)
+        text = p.prompt()
+        assert "generate_cmake_presets" not in text
+        assert "cmake --preset" not in text
+
+    def test_references_manifest(self, claude_cfg, bug_cfg):
+        p = self._make(claude_cfg, bug_cfg)
+        assert TEST_PORT_MANIFEST_FILE in p.prompt()
+
+
+class TestReviewCodeGenPrompt:
+    def test_references_pr_and_output_files(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        p = gen_ReviewCodeGenPrompt(
+            context=ctx,
+            branches=[bug_cfg.source_branch, bug_cfg.target_branch],
+            branch_code_trace_files=["trace.txt"],
+            code_port_plan_file="plan.txt",
+            test_plan_file="test_plan.txt",
+            test_port_manifest_file=TEST_PORT_MANIFEST_FILE,
+            code_pr_info_file="info.txt",
+            code_pr_file="patch.patch",
+            output_review_file="review.txt",
+            output_fixed_file="fixed.txt",
+            output_total_review_summary_file="evolution.txt",
+        )
+        text = p.prompt()
+        assert "patch.patch" in text
+        assert "review.txt" in text
