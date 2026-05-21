@@ -11,6 +11,7 @@ from auto_bug_fix.bug_fix_prompts import (
     gen_CodeGenPrompt,
     gen_ReviewCodeGenPrompt,
 )
+from auto_bug_fix.bug_fix_prompts import gen_RunAndFixPrompt, RUN_AND_FIX_FAILURE_FILE
 
 
 class TestCreateContextStr:
@@ -221,3 +222,40 @@ class TestReviewCodeGenPrompt:
         text = p.prompt()
         assert "patch.patch" in text
         assert "review.txt" in text
+
+
+class TestRunAndFixPrompt:
+    def _make(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        return gen_RunAndFixPrompt(
+            context=ctx,
+            build_command=bug_cfg.build_command,
+            test_command=bug_cfg.test_command,
+            build_dir=bug_cfg.build_dir,
+            max_build_test_retries=bug_cfg.max_build_test_retries,
+        )
+
+    def test_contains_build_command(self, claude_cfg, bug_cfg):
+        p = self._make(claude_cfg, bug_cfg)
+        assert "make -j$(nproc)" in p.prompt()
+
+    def test_contains_test_command(self, claude_cfg, bug_cfg):
+        p = self._make(claude_cfg, bug_cfg)
+        assert "make check -j$(nproc)" in p.prompt()
+
+    def test_references_failure_file(self, claude_cfg, bug_cfg):
+        p = self._make(claude_cfg, bug_cfg)
+        assert RUN_AND_FIX_FAILURE_FILE in p.prompt()
+
+    def test_contains_retry_limit(self, claude_cfg, bug_cfg):
+        p = self._make(claude_cfg, bug_cfg)
+        assert "3" in p.prompt()
+
+    def test_mentions_incremental_build(self, claude_cfg, bug_cfg):
+        p = self._make(claude_cfg, bug_cfg)
+        text = p.prompt()
+        assert "incremental" in text.lower() or "stale artifact" in text.lower()
+
+    def test_output_failure_file_is_constant(self, claude_cfg, bug_cfg):
+        p = self._make(claude_cfg, bug_cfg)
+        assert p.output_failure_file == RUN_AND_FIX_FAILURE_FILE
