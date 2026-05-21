@@ -275,3 +275,8 @@ def clear_vllm_source_tree(
         raise RuntimeError(
             f"`{' '.join(clean_cmd)}` failed:\n{clean_result.stderr.strip()}"
         )
+
+
+def clear_repo(path: str | Path) -> None:
+    """Reset a git repository to a clean state. Generic alias for clear_vllm_source_tree."""
+    clear_vllm_source_tree(path)
