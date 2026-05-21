@@ -1,3 +1,9 @@
+"""Configuration dataclass and default instance for the auto_bug_fix pipeline.
+
+Edit the ``bug_fix_config`` instance at the bottom of this file before running
+``python -m auto_bug_fix.run_bug_fix``.
+"""
+
 from dataclasses import dataclass
 from common.claude_utils import ClaudeConfig
 

@@ -1,3 +1,20 @@
+"""Main orchestrator for the auto_bug_fix pipeline.
+
+Usage:
+    Edit ``auto_bug_fix/bug_fix_config.py`` to configure your project, then run:
+
+        python -m auto_bug_fix.run_bug_fix
+
+The pipeline steps are:
+    1. Reset target branch (git reset + clean)
+    2. Trace what the fix commit touches on the source branch
+    3. Port tests from the fix commit (if config.port_tests is True)
+    4. Plan how to apply the fix on the target branch (N review iterations)
+    5. Validate test coverage; plan supplemental tests
+    6. Generate the fix patch and apply it (M review iterations)
+    7. Autonomous build-test-fix loop until clean or retry limit hit
+"""
+
 import sys
 import time
 import asyncio

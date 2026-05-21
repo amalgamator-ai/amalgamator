@@ -1,3 +1,14 @@
+"""Prompt classes for the auto_bug_fix pipeline.
+
+Each class wraps a single Claude query. All classes follow the same pattern:
+a dataclass with a ``ClassVar[str]`` prompt template and a ``prompt()`` method
+that formats the template with the instance's fields.
+
+New classes in this module (not in auto_code_gen):
+- ``TestPortPrompt``  — extracts and ports tests from the source fix commit.
+- ``RunAndFixPrompt`` — autonomous build-test-fix loop (Claude uses Bash tool).
+"""
+
 from dataclasses import dataclass
 from typing import ClassVar
 

@@ -241,3 +241,26 @@ All pipeline steps log to `logs/run_{step_name}.log` with simultaneous stdout ou
 | Summary PDF | `logs/run_summary_pdf.log` |
 | Chrome trace | `logs/run_chrome_trace.log` |
 | JIRA creation | `logs/run_create_jiras.log` |
+
+## auto_bug_fix — Branch Bug Fix Porting
+
+Port a bug fix from one branch of a C/systems project to another using Claude as the AI engine.
+
+**Supported projects:** Any project with a `git` repository and shell-invokable build and test commands (gcc, openssl, glibc, etc.).
+
+**Setup:**
+
+1. Edit `auto_bug_fix/bug_fix_config.py`:
+   - Set `repo_path`, `source_branch`, `target_branch`, `source_fix_commit`
+   - Set `build_command`, `test_command`, `build_dir`
+   - Set `bug_description`, `issue_id`, `disallowed_modules`
+   - Set `port_tests=True` to auto-extract and port test files from the fix commit
+
+2. Set `claude_config.cwd` to the directory where Claude should write output files.
+
+3. Run:
+   ```bash
+   python -m auto_bug_fix.run_bug_fix
+   ```
+
+**On failure:** If `RunAndFixPrompt` exhausts its retry limit, inspect `run_and_fix_failure.txt` in `claude_config.cwd`, then run `auto_code_gen/run_investigate_issue.py` manually for a deeper diagnostic pass.
