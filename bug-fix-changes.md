@@ -59,6 +59,9 @@ The `claude_run()` async function and `ClaudeConfig` dataclass are the heart of 
   - `source_fix_commit` — the specific commit SHA on the source branch that introduced the fix (used to extract the diff and associated test files)
   - `source_test_files` — list of test files added/modified in `source_fix_commit`, populated after extraction
   - `port_tests` — boolean flag; when true, extracted test cases are ported before code generation begins
+  - `build_command` — shell command to compile the target branch (e.g., `make -j$(nproc)` or `cmake --build build -j$(nproc)`); always incremental, never a clean rebuild unless the previous attempt explicitly failed due to a stale artifact
+  - `test_command` — shell command to run the relevant test suite (e.g., `make check -j$(nproc)`, `ctest --output-on-failure`, or a specific dejagnu/OpenSSL harness invocation)
+  - `build_dir` — working directory from which `build_command` and `test_command` are invoked (defaults to repo root)
 
 ---
 
@@ -72,7 +75,8 @@ This is the most directly applicable module. Each prompt class wraps a multi-ste
 | `CodePortPlanPrompt` | Plan how to port code from one framework to another | **High** — plan how to apply the same fix on the diverged target branch |
 | `ReviewCodePortPlanPrompt` | Review and refine the porting plan | **High** — iterative plan refinement |
 | `TestPlanPrompt` | Generates a new test plan by analyzing existing test structures in both frameworks | **Medium** — useful for supplemental coverage, but **does not port existing tests from the fix commit**; see gap below |
-| `CodeGenPrompt` | Generate code patch AND test implementations; runs all tests and enforces pass | **High** — writes ported fix; will also run ported tests and iterate until they pass |
+| `CodeGenPrompt` | Generate code patch AND test implementations; triggers compilation and enforces build success before handing off to `RunAndFixPrompt` | **High** — writes ported fix; uses `config.build_command` for incremental compilation with all available CPUs; never hard-codes framework-specific build steps |
+| `RunAndFixPrompt` | Run the compiled binary or test suite, capture stdout/stderr, and feed failures directly into `InvestigateIssuePrompt` without manual copy-paste; loops until all tests pass | **High — new** — replaces the manual run → copy-paste-error → re-run cycle; see gap note below |
 | `ReviewCodeGenPrompt` | Review generated code and tests; can add new tests | **High** — verify generated patch; enforces test coverage |
 | `InvestigateIssuePrompt` | Investigate test failures after patch is applied; iterates until resolved | **High** — debug porting problems in both fix code and ported tests |
 | `FixIssuePrompt` | Generate fixes for identified issues | **High** — correct porting errors |
@@ -94,6 +98,23 @@ For projects like gcc (dejagnu `.exp` files, `.c` regression files) or openssl (
 4. Generates the ported test code as a separate patch, before the fix code is generated
 
 This test patch is then fed into `CodeGenPrompt` alongside the fix patch, so `CodeGenPrompt`'s existing test-execution loop runs the ported tests and enforces that they pass.
+
+#### Gap: Automatic Build and Test Execution with Error Feedback
+
+**The existing pipeline requires manual intervention to run code and pass failure logs to Claude.** In the vLLM/SGLang context, GPU availability checks made automatic execution impractical, so the workflow was: run manually → copy-paste the error log into `run_investigate_issue.sh` → rerun manually after Claude's fix.
+
+For C/systems projects (gcc, openssl, etc.) there is no GPU gating, so a fully automated compile → run → fix loop is feasible.
+
+**Proposed addition: `RunAndFixPrompt`** — a new prompt class that:
+1. Invokes `config.build_command` from `config.build_dir` using all available CPUs (incremental by default; full rebuild only if the error is a stale-artifact failure)
+2. Captures stdout/stderr from the build step; if the build fails, immediately routes the captured log to `InvestigateIssuePrompt` and then `FixIssuePrompt`, then retries
+3. On a successful build, invokes `config.test_command` and captures its output
+4. If tests fail, routes the captured log to `InvestigateIssuePrompt` → `FixIssuePrompt`, then recompiles and reruns
+5. Loops until both build and tests are clean, or until a configurable retry limit is hit
+
+This eliminates the copy-paste step entirely and turns what was a human-in-the-loop debugging cycle into a fully autonomous build-test-fix loop.
+
+**Compilation note**: The `build_command` in `CodeGenConfig` replaces the vLLM-specific incremental build sequence (`generate_cmake_presets.py` → `cmake --preset release` → `cmake --build --preset release --target install`). For a generic C project the equivalent is just `make -j$(nproc)` or `cmake --build <build_dir> -j$(nproc)`. Claude should never hard-code framework-specific build steps in prompts; it reads `config.build_command` instead.
 
 ---
 
@@ -181,6 +202,9 @@ Using the relevant modules, the workflow for porting a bug fix from `gcc-14-bran
    │    bug_description    = "CVE-2024-XXXX: buffer overflow in fold_convert()"
    │    disallowed_modules = ["gcc/config/arm/"]
    │    port_tests         = True
+   │    build_command      = "make -j$(nproc)"          (incremental; project-specific)
+   │    test_command       = "make check -j$(nproc)"    (or ctest, dejagnu, etc.)
+   │    build_dir          = "/path/to/gcc/build"       (where build/test commands run)
    └─ Use common/utils.py for repo checkout/reset
 
 2. Understand the Fix (CodeTracePrompt)
@@ -207,27 +231,45 @@ Using the relevant modules, the workflow for porting a bug fix from `gcc-14-bran
 5. Generate Fix Code (CodeGenPrompt + ReviewCodeGenPrompt, multi-iteration)
    ├─ Receives both the fix patch plan AND the ported test files from step 2b
    ├─ Applies fix to target_branch
-   ├─ Runs ALL tests including ported tests — enforces every test passes
-   └─ Iterates (fix → compile → test) until clean
+   ├─ Compiles using config.build_command (incremental, all CPUs)
+   │    - Falls back to a full rebuild only if the error is a stale-artifact failure
+   │    - Never uses framework-specific build steps; reads build_command from config
+   └─ Hands off to RunAndFixPrompt once the patch is written
 
-6. Execute Work Items (run_work_items.py)
+6. Run, Test, and Auto-Fix Loop (RunAndFixPrompt — NEW)
+   ├─ Invoke config.build_command from config.build_dir
+   ├─ If build fails:
+   │    ├─ Capture stdout/stderr
+   │    ├─ Pass captured log → InvestigateIssuePrompt → FixIssuePrompt
+   │    └─ Retry build (no manual copy-paste required)
+   ├─ On successful build, invoke config.test_command
+   ├─ If tests fail:
+   │    ├─ Capture stdout/stderr
+   │    ├─ Pass captured log → InvestigateIssuePrompt → FixIssuePrompt
+   │    └─ Recompile and rerun tests
+   └─ Loop until build + tests are clean (or configurable retry limit reached)
+
+7. Execute Work Items (run_work_items.py)
    └─ Apply combined patch (fix + tests), run full build, run test suite
 
-7. If tests fail → run_investigate_issue.py → run_fix_issue.py
-   ├─ Iterates until all ported tests (and existing suite) pass
+8. If RunAndFixPrompt exhausts retries → run_investigate_issue.py → run_fix_issue.py
+   ├─ Deeper investigation for stubborn failures
    └─ Handles cases where test infrastructure itself needs further adaptation
 
-8. All steps run via claude_run() from common/claude_utils.py
+9. All steps run via claude_run() from common/claude_utils.py
 ```
 
 ### What Already Works for Test Verification
 
-The execution and iteration infrastructure handles test verification without changes:
-- `CodeGenPrompt` already enforces "run ALL tests, ensure ALL PASS" — including any ported tests fed into it
+The iteration infrastructure handles investigation and fixing without changes:
 - `InvestigateIssuePrompt` already iterates until failures are resolved, covering both fix code and test adaptation failures
 - `ReviewCodeGenPrompt` already adds tests if coverage gaps are found
 
-The only missing piece is **step 2b** — a prompt that reads the source branch fix commit's diff and ports its test additions to the target branch before code generation begins.
+Two pieces are missing:
+
+1. **Step 2b** — `TestPortPrompt`: reads the source branch fix commit's diff and ports its test additions to the target branch before code generation begins.
+
+2. **Step 6** — `RunAndFixPrompt`: eliminates the manual run → copy-paste error log → re-run cycle. In the vLLM/SGLang case, GPU availability checks made automation impractical, so `run_investigate_issue.sh` required a human to paste the failure log. For C/systems projects there is no such gating: `RunAndFixPrompt` runs `config.test_command`, captures its output, and routes failures directly into `InvestigateIssuePrompt` without any manual step.
 
 ---
 
@@ -250,8 +292,10 @@ The only missing piece is **step 2b** — a prompt that reads the source branch 
 | `auto_profile/*` | **No** | Benchmark profiling infrastructure |
 | Shell scripts (`run_all.sh`, etc.) | **No** | Orchestrate GPU profiling pipeline |
 
-### New Component Required
+### New Components Required
 
 | Component | Type | Purpose |
 |---|---|---|
 | `TestPortPrompt` | New prompt class in `code_gen_prompts.py` | Reads `git show <source_fix_commit>`, identifies test files in the diff, plans and generates ported test code for the target branch's test infrastructure |
+| `RunAndFixPrompt` | New prompt class in `code_gen_prompts.py` | Invokes `config.build_command` then `config.test_command`; captures stdout/stderr; on failure routes the log directly to `InvestigateIssuePrompt` → `FixIssuePrompt` and retries; loops until clean — no manual copy-paste of error logs |
+| `build_command`, `test_command`, `build_dir` | New fields on `CodeGenConfig` | Replace the hard-coded vLLM incremental build sequence (`generate_cmake_presets.py` / `cmake --preset` / `cmake --build`) with project-specific shell commands; prompts read these fields instead of embedding framework-specific steps |
