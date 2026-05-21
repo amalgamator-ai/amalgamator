@@ -2,6 +2,8 @@ import pytest
 from auto_bug_fix.bug_fix_prompts import (
     create_context_str,
     gen_CodeTracePrompt,
+    gen_TestPortPrompt,
+    TEST_PORT_MANIFEST_FILE,
 )
 
 
@@ -56,3 +58,25 @@ class TestCodeTracePrompt:
         ctx = create_context_str(claude_cfg, bug_cfg)
         p = gen_CodeTracePrompt(ctx, bug_cfg.source_branch)
         assert "gcc-14-branch" in p.output_file
+
+
+class TestTestPortPrompt:
+    def test_references_git_show(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        p = gen_TestPortPrompt(ctx, bug_cfg.source_fix_commit, bug_cfg.target_branch)
+        assert "git show" in p.prompt()
+
+    def test_contains_commit_sha(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        p = gen_TestPortPrompt(ctx, bug_cfg.source_fix_commit, bug_cfg.target_branch)
+        assert "abc1234" in p.prompt()
+
+    def test_references_manifest_file(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        p = gen_TestPortPrompt(ctx, bug_cfg.source_fix_commit, bug_cfg.target_branch)
+        assert TEST_PORT_MANIFEST_FILE in p.prompt()
+
+    def test_output_manifest_is_constant(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        p = gen_TestPortPrompt(ctx, bug_cfg.source_fix_commit, bug_cfg.target_branch)
+        assert p.output_manifest_file == TEST_PORT_MANIFEST_FILE
