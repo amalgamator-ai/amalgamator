@@ -797,3 +797,310 @@ def gen_RunAndFixPrompt(
         max_build_test_retries=max_build_test_retries,
         output_failure_file=RUN_AND_FIX_FAILURE_FILE,
     )
+
+
+@dataclass
+class InvestigateIssuePrompt:
+    context: str
+    branches: list[str]
+    branch_code_trace_files: list[str]
+    code_port_plan_file: str
+    test_plan_file: str
+    code_port_plan_review_evolution_file: str
+    code_pr_info_file: str
+    code_pr_file: str
+    code_pr_review_evolution_file: str
+    issue_desc_file: str
+    issue_fix_previous_attempt_file: str
+    issue_fix_previous_attempt_review_evolution_file: str
+    issue_fix_file: str
+    code_pr_fixed_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<branches>
+{branches}
+</branches>
+<branch_code_trace_files>
+{branch_code_trace_files}
+</branch_code_trace_files>
+<code_port_plan_file>
+{code_port_plan_file}
+</code_port_plan_file>
+<test_plan_file>
+{test_plan_file}
+</test_plan_file>
+<code_port_plan_review_evolution_file>
+{code_port_plan_review_evolution_file}
+</code_port_plan_review_evolution_file>
+<code_pr_info_file>
+{code_pr_info_file}
+</code_pr_info_file>
+<code_pr_file>
+{code_pr_file}
+</code_pr_file>
+<code_pr_review_evolution_file>
+{code_pr_review_evolution_file}
+</code_pr_review_evolution_file>
+<issue_desc_file>
+{issue_desc_file}
+</issue_desc_file>
+<issue_fix_previous_attempt_file>
+{issue_fix_previous_attempt_file}
+</issue_fix_previous_attempt_file>
+<issue_fix_previous_attempt_review_evolution_file>
+{issue_fix_previous_attempt_review_evolution_file}
+</issue_fix_previous_attempt_review_evolution_file>
+</definitions>
+
+<definition_explanations>
+- <branches> is a list of 2 branches: "source" (has the fix) and "target" (needs the fix).
+- <issue_desc_file> describes the issue that needs investigation.
+- <issue_fix_previous_attempt_file> and <issue_fix_previous_attempt_review_evolution_file> describe any previous fix attempt.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to investigate the issue in <issue_desc_file> and produce a fix. Think hard and do the following:
+- If previous fix attempt files exist, read them and use all learnings. The current attempt is done from scratch but informed by them.
+- Read all previous issue files in <cwd> to avoid repeating mistakes.
+- Analyze the coding plan, review evolution, and code patch to understand the full context.
+- Detect and analyze the root cause of the issue on "target" branch:
+    - Dive deep into source code of both branches.
+    - Trace all relevant call chains end-to-end.
+    - Understand why the issue appears on "target" but not "source".
+- Provide a detailed explanation: why it happens, key root causes with source references, and steps to fix.
+- Apply the fix, add new tests to verify the issue is resolved, and run all tests.
+- Do NOT stop until the issue is fixed and all tests pass.
+</instructions>
+
+<output>
+- Dump the issue analysis and fix plan to <cwd>/{issue_fix_file}
+- Add new tests to verify the fix.
+- Dump the fixed code patch to <cwd>/{code_pr_fixed_file}
+- Apply the new patch to "target" source code.
+- Run all tests and ensure ALL PASS. If any fail, fix and rerun.
+</output>
+
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            branches=self.branches,
+            branch_code_trace_files=self.branch_code_trace_files,
+            code_port_plan_file=self.code_port_plan_file,
+            test_plan_file=self.test_plan_file,
+            code_port_plan_review_evolution_file=self.code_port_plan_review_evolution_file,
+            code_pr_info_file=self.code_pr_info_file,
+            code_pr_file=self.code_pr_file,
+            code_pr_review_evolution_file=self.code_pr_review_evolution_file,
+            issue_desc_file=self.issue_desc_file,
+            issue_fix_previous_attempt_file=self.issue_fix_previous_attempt_file,
+            issue_fix_previous_attempt_review_evolution_file=self.issue_fix_previous_attempt_review_evolution_file,
+            issue_fix_file=self.issue_fix_file,
+            code_pr_fixed_file=self.code_pr_fixed_file,
+        )
+
+
+def gen_InvestigateIssuePrompt(
+    context: str,
+    branches: list[str],
+    branch_code_trace_files: list[str],
+    code_port_plan_file: str,
+    test_plan_file: str,
+    code_port_plan_review_evolution_file: str,
+    code_pr_info_file: str,
+    code_pr_file: str,
+    code_pr_review_evolution_file: str,
+    issue_desc_file: str,
+    issue_fix_previous_attempt_file: str,
+    issue_fix_previous_attempt_review_evolution_file: str,
+    issue_fix_file: str,
+    code_pr_fixed_file: str,
+) -> InvestigateIssuePrompt:
+    assert len(branches) == 2
+    return InvestigateIssuePrompt(
+        context=context,
+        branches=branches,
+        branch_code_trace_files=branch_code_trace_files,
+        code_port_plan_file=code_port_plan_file,
+        test_plan_file=test_plan_file,
+        code_port_plan_review_evolution_file=code_port_plan_review_evolution_file,
+        code_pr_info_file=code_pr_info_file,
+        code_pr_file=code_pr_file,
+        code_pr_review_evolution_file=code_pr_review_evolution_file,
+        issue_desc_file=issue_desc_file,
+        issue_fix_previous_attempt_file=issue_fix_previous_attempt_file,
+        issue_fix_previous_attempt_review_evolution_file=issue_fix_previous_attempt_review_evolution_file,
+        issue_fix_file=issue_fix_file,
+        code_pr_fixed_file=code_pr_fixed_file,
+    )
+
+
+@dataclass
+class ReviewInvestigatedIssuePrompt:
+    context: str
+    branches: list[str]
+    branch_code_trace_files: list[str]
+    code_port_plan_file: str
+    test_plan_file: str
+    code_port_plan_review_evolution_file: str
+    code_pr_info_file: str
+    code_pr_file: str
+    code_pr_review_evolution_file: str
+    issue_desc_file: str
+    issue_fix_file: str
+    issue_fix_review_file: str
+    issue_fix_fixed_file: str
+    issue_fix_review_evolution_file: str
+    code_pr_review_fixed_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<branches>
+{branches}
+</branches>
+<issue_desc_file>
+{issue_desc_file}
+</issue_desc_file>
+<issue_fix_file>
+{issue_fix_file}
+</issue_fix_file>
+</definitions>
+
+<instructions>
+The goal of this task is to critically review the issue fix in <issue_fix_file>. Think hard and do the following:
+- Analyze the issue in <issue_desc_file> and the fix in <issue_fix_file> in full detail.
+- Review the fix for: incorrect root cause assumptions, missing steps, ambiguity, missing edge cases, hidden dependencies.
+- For each problem found: document the affected part, what is wrong, why it matters, and how to fix it.
+- Produce a corrected issue fix with all problems resolved.
+- Apply the corrected patch, run all tests, and ensure they all pass.
+</instructions>
+
+<output>
+- Dump the review of the fix to <cwd>/{issue_fix_review_file}
+- Dump the corrected fix to <cwd>/{issue_fix_fixed_file}
+- Dump the corrected code patch to <cwd>/{code_pr_review_fixed_file}. Add new tests if needed. Apply and run.
+- Summarize the iteration evolution in <cwd>/{issue_fix_review_evolution_file}
+</output>
+
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            branches=self.branches,
+            branch_code_trace_files=self.branch_code_trace_files,
+            code_port_plan_file=self.code_port_plan_file,
+            test_plan_file=self.test_plan_file,
+            code_port_plan_review_evolution_file=self.code_port_plan_review_evolution_file,
+            code_pr_info_file=self.code_pr_info_file,
+            code_pr_file=self.code_pr_file,
+            code_pr_review_evolution_file=self.code_pr_review_evolution_file,
+            issue_desc_file=self.issue_desc_file,
+            issue_fix_file=self.issue_fix_file,
+            issue_fix_review_file=self.issue_fix_review_file,
+            issue_fix_fixed_file=self.issue_fix_fixed_file,
+            issue_fix_review_evolution_file=self.issue_fix_review_evolution_file,
+            code_pr_review_fixed_file=self.code_pr_review_fixed_file,
+        )
+
+
+def gen_ReviewInvestigatedIssuePrompt(
+    context: str,
+    branches: list[str],
+    branch_code_trace_files: list[str],
+    code_port_plan_file: str,
+    test_plan_file: str,
+    code_port_plan_review_evolution_file: str,
+    code_pr_info_file: str,
+    code_pr_file: str,
+    code_pr_review_evolution_file: str,
+    issue_desc_file: str,
+    issue_fix_file: str,
+    issue_fix_review_file: str,
+    issue_fix_fixed_file: str,
+    issue_fix_review_evolution_file: str,
+    code_pr_review_fixed_file: str,
+) -> ReviewInvestigatedIssuePrompt:
+    assert len(branches) == 2
+    return ReviewInvestigatedIssuePrompt(
+        context=context,
+        branches=branches,
+        branch_code_trace_files=branch_code_trace_files,
+        code_port_plan_file=code_port_plan_file,
+        test_plan_file=test_plan_file,
+        code_port_plan_review_evolution_file=code_port_plan_review_evolution_file,
+        code_pr_info_file=code_pr_info_file,
+        code_pr_file=code_pr_file,
+        code_pr_review_evolution_file=code_pr_review_evolution_file,
+        issue_desc_file=issue_desc_file,
+        issue_fix_file=issue_fix_file,
+        issue_fix_review_file=issue_fix_review_file,
+        issue_fix_fixed_file=issue_fix_fixed_file,
+        issue_fix_review_evolution_file=issue_fix_review_evolution_file,
+        code_pr_review_fixed_file=code_pr_review_fixed_file,
+    )
+
+
+@dataclass
+class WorkItemsPrompt:
+    context: str
+    code_gen_dir: str
+    work_items_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<code_gen_dir>
+{code_gen_dir}
+</code_gen_dir>
+<work_items_file>
+{work_items_file}
+</work_items_file>
+</definitions>
+
+<definition_explanations>
+- <code_gen_dir> is a directory holding the results of the bug fix porting process: code traces, port plans, code gen iterations, and issue fix sequences.
+- <work_items_file> describes the work items to execute.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to execute the work items in <work_items_file>. Think hard and do the following:
+- Read all result files in <code_gen_dir> to understand the full porting process. Take all learnings from review evolutions and issue fixing sequences.
+- Read the "context section" and "work_items section" from <work_items_file>.
+- Execute each work item one by one:
+    - Find, analyze, and understand any relevant data needed to execute it.
+    - For complex items, split into smaller steps, execute each, and verify before proceeding.
+    - Do a final critical review and fix issues before marking each item done.
+</instructions>
+
+<output>
+- Read the "output section" from <work_items_file> and generate the outputs described there.
+</output>
+
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            code_gen_dir=self.code_gen_dir,
+            work_items_file=self.work_items_file,
+        )
+
+
+def gen_WorkItemsPrompt(
+    context: str,
+    code_gen_dir: str,
+    work_items_file: str,
+) -> WorkItemsPrompt:
+    return WorkItemsPrompt(
+        context=context,
+        code_gen_dir=code_gen_dir,
+        work_items_file=work_items_file,
+    )

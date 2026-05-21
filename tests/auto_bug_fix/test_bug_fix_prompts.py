@@ -12,6 +12,11 @@ from auto_bug_fix.bug_fix_prompts import (
     gen_ReviewCodeGenPrompt,
 )
 from auto_bug_fix.bug_fix_prompts import gen_RunAndFixPrompt, RUN_AND_FIX_FAILURE_FILE
+from auto_bug_fix.bug_fix_prompts import (
+    gen_InvestigateIssuePrompt,
+    gen_ReviewInvestigatedIssuePrompt,
+    gen_WorkItemsPrompt,
+)
 
 
 class TestCreateContextStr:
@@ -259,3 +264,77 @@ class TestRunAndFixPrompt:
     def test_output_failure_file_is_constant(self, claude_cfg, bug_cfg):
         p = self._make(claude_cfg, bug_cfg)
         assert p.output_failure_file == RUN_AND_FIX_FAILURE_FILE
+
+
+def _investigate_prompt(claude_cfg, bug_cfg):
+    ctx = create_context_str(claude_cfg, bug_cfg)
+    branches = [bug_cfg.source_branch, bug_cfg.target_branch]
+    return gen_InvestigateIssuePrompt(
+        context=ctx,
+        branches=branches,
+        branch_code_trace_files=["trace.txt"],
+        code_port_plan_file="plan.txt",
+        test_plan_file="test_plan.txt",
+        code_port_plan_review_evolution_file="plan_evolution.txt",
+        code_pr_info_file="info.txt",
+        code_pr_file="patch.patch",
+        code_pr_review_evolution_file="code_evolution.txt",
+        issue_desc_file="issue.txt",
+        issue_fix_previous_attempt_file="",
+        issue_fix_previous_attempt_review_evolution_file="",
+        issue_fix_file="fix.txt",
+        code_pr_fixed_file="fixed.patch",
+    )
+
+
+class TestInvestigateIssuePrompt:
+    def test_references_issue_and_fix_files(self, claude_cfg, bug_cfg):
+        p = _investigate_prompt(claude_cfg, bug_cfg)
+        text = p.prompt()
+        assert "issue.txt" in text
+        assert "fix.txt" in text
+
+    def test_no_transformer_block_language(self, claude_cfg, bug_cfg):
+        p = _investigate_prompt(claude_cfg, bug_cfg)
+        text = p.prompt()
+        assert "transformer block" not in text.lower()
+        assert "median block" not in text.lower()
+
+
+class TestReviewInvestigatedIssuePrompt:
+    def test_references_fix_and_review_files(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        branches = [bug_cfg.source_branch, bug_cfg.target_branch]
+        p = gen_ReviewInvestigatedIssuePrompt(
+            context=ctx,
+            branches=branches,
+            branch_code_trace_files=["trace.txt"],
+            code_port_plan_file="plan.txt",
+            test_plan_file="test_plan.txt",
+            code_port_plan_review_evolution_file="plan_evolution.txt",
+            code_pr_info_file="info.txt",
+            code_pr_file="patch.patch",
+            code_pr_review_evolution_file="code_evolution.txt",
+            issue_desc_file="issue.txt",
+            issue_fix_file="fix.txt",
+            issue_fix_review_file="fix_review.txt",
+            issue_fix_fixed_file="fix_fixed.txt",
+            issue_fix_review_evolution_file="fix_evolution.txt",
+            code_pr_review_fixed_file="pr_fixed.patch",
+        )
+        text = p.prompt()
+        assert "fix.txt" in text
+        assert "fix_review.txt" in text
+
+
+class TestWorkItemsPrompt:
+    def test_references_work_items_and_code_gen_dir(self, claude_cfg, bug_cfg):
+        ctx = create_context_str(claude_cfg, bug_cfg)
+        p = gen_WorkItemsPrompt(
+            context=ctx,
+            code_gen_dir="/tmp/code_gen",
+            work_items_file="work_items.txt",
+        )
+        text = p.prompt()
+        assert "work_items.txt" in text
+        assert "/tmp/code_gen" in text
