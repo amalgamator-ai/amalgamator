@@ -24,11 +24,12 @@ gcc (dejagnu), openssl, glibc, binutils, llvm, or any project using make/cmake/c
 
 ## Prerequisites
 
-- Python 3.11+
-- [Claude Agent SDK](https://pypi.org/project/claude-agent-sdk/) installed
+- Python 3.14+
+- [uv](https://docs.astral.sh/uv/) (used to run the pipeline; installs `claude-agent-sdk` automatically via `pyproject.toml`)
 - A cloned git repository with both the source and target branches available locally
 - The commit SHA of the fix on the source branch (`git log` on the source branch to find it)
 - Working `build_command` and `test_command` for the target branch
+- For cmake-based projects: `cmake` installed (`brew install cmake` on macOS) and the build directory configured (`cmake ..` run from `build_dir`) before the pipeline starts
 
 ---
 
@@ -138,7 +139,7 @@ so any local modifications are safe to leave — they will be removed.
 
 ```bash
 cd /path/to/ai_auto_perf_analysis
-python -m auto_bug_fix.run_bug_fix
+uv run uv run python -m auto_bug_fix.run_bug_fix
 ```
 
 All output is logged to stdout and to `__run_log_bug_fix.txt` in the current directory.
@@ -213,6 +214,27 @@ All files are written to `claude_config.cwd`.
 A full rebuild is only triggered if the error output explicitly indicates a stale artifact
 (e.g., a missing symbol that clearly exists in a source file that wasn't recompiled).
 
+**Parallelism flag:** Use `-j$(nproc)` on Linux. On macOS, `nproc` is not available — use
+`-j$(sysctl -n hw.logicalcpu)` instead.
+
+**cmake-based projects:** Use `cmake --build` and `ctest` rather than invoking `make`
+directly. Specify the build directory explicitly so the commands work regardless of the
+current working directory:
+
+```bash
+# cmake build
+build_command="cmake --build /path/to/build -j$(sysctl -n hw.logicalcpu)"
+
+# ctest — run all tests
+test_command="ctest --test-dir /path/to/build -j$(sysctl -n hw.logicalcpu)"
+
+# ctest — run a named test only
+test_command="ctest --test-dir /path/to/build -R test_foo --output-on-failure"
+```
+
+The `build_dir` must be configured (i.e., `cmake ..` run from it) before the pipeline
+starts — the pipeline does not run cmake configuration itself.
+
 **Scope the test command** to the relevant test file or suite when possible — it reduces
 cycle time in the build-test-fix loop significantly:
 
@@ -224,7 +246,7 @@ test_command="make check RUNTESTFLAGS='gcc.dg/CVE-2024-XXXX.c' -j$(nproc)"
 test_command="make test TESTS=test_aes -j$(nproc)"
 
 # cmake/ctest — run a named test
-test_command="ctest -R test_foo --output-on-failure"
+test_command="ctest --test-dir /path/to/build -R test_foo --output-on-failure"
 
 # Full suite (slower, but gives full coverage)
 test_command="make check -j$(nproc)"
@@ -245,8 +267,8 @@ summary of every fix attempted during the loop.
    mismatch), run the deeper investigation pipeline manually:
 
    ```bash
-   python -m auto_code_gen.run_investigate_issue
-   python -m auto_code_gen.run_fix_issue
+   uv run python -m auto_code_gen.run_investigate_issue
+   uv run python -m auto_code_gen.run_fix_issue
    ```
 
 3. Alternatively, increase `max_build_test_retries` and re-run — Claude picks up where
@@ -289,8 +311,10 @@ claude_config = ClaudeConfig(
 mkdir -p /tmp/gcc_cve_output
 cd /home/user/gcc && git checkout gcc-13-branch
 cd /path/to/ai_auto_perf_analysis
-python -m auto_bug_fix.run_bug_fix
+uv run python -m auto_bug_fix.run_bug_fix
 ```
+
+> **macOS note:** Replace `-j$(nproc)` with `-j$(sysctl -n hw.logicalcpu)` in all commands.
 
 ---
 
@@ -310,6 +334,36 @@ bug_fix_config = BugFixConfig(
     port_tests=True,
     build_command="make -j$(nproc)",
     test_command="make test TESTS=test_ssl_old -j$(nproc)",
+    max_build_test_retries=3,
+)
+```
+
+---
+
+## Example: curl (cmake, macOS)
+
+Prerequisites: `brew install cmake libpsl`, then configure the build directory once before
+running the pipeline:
+
+```bash
+mkdir /path/to/curl/build
+cd /path/to/curl/build && cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_DEBUG=ON -DBUILD_SHARED_LIBS=OFF
+cd /path/to/curl && git checkout curl-8_18_0
+```
+
+```python
+bug_fix_config = BugFixConfig(
+    repo_path="/path/to/curl",
+    build_dir="/path/to/curl/build",
+    source_branch="curl-8_19_0",
+    target_branch="curl-8_18_0",
+    source_fix_commit="b35e58b24c",
+    bug_description="openssl: fix potential OOB read in debug/verbose logging",
+    issue_id="20656",
+    disallowed_modules=[],
+    port_tests=False,
+    build_command="cmake --build /path/to/curl/build -j$(sysctl -n hw.logicalcpu)",
+    test_command="ctest --test-dir /path/to/curl/build -j$(sysctl -n hw.logicalcpu)",
     max_build_test_retries=3,
 )
 ```
