@@ -4,27 +4,25 @@ import argparse
 import asyncio
 
 from pathlib import Path
-from common.utils import Tee
+from common.utils import setup_logging
 from common.claude_utils import claude_run
 
-from auto_code_gen.code_gen_configs import claude_config, code_gen_config
+from auto_code_gen.code_gen_configs import CodeGenConfig
 from auto_code_gen.code_gen_prompts import (
     create_context_str,
     gen_InvestigateIssuePrompt,
     gen_ReviewInvestigatedIssuePrompt,
 )
 
-LOG_FILE = "__run_log_investigate_issue.txt"
 
 NUM_ITERS = 2
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Investigate issue in PR")
     parser.add_argument(
-        "--frameworks",
-        nargs="+",
+        "--config",
         required=True,
-        help="List of framework names.",
+        help="Path to the code generation JSON config file.",
     )
     parser.add_argument(
         "--framework-code-trace-files",
@@ -83,10 +81,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def gen_prompts(args):
-    clear_vllm_dir_cmd = {
+def gen_prompts(args, code_gen_config, claude_config):
+    clear_target_dir_cmd = {
         "cmd": 'utils.clear_vllm_source_tree("{}")'.format(
-            code_gen_config.framework_source_codes[0]
+            code_gen_config.source_code_dir
         )
     }
 
@@ -107,7 +105,6 @@ def gen_prompts(args):
 
         investigate_issue_prompt = gen_InvestigateIssuePrompt(
             context=context,
-            frameworks=args.frameworks,
             framework_code_trace_files=args.framework_code_trace_files,
             code_port_plan_file=args.code_port_plan_file,
             test_plan_file=args.test_plan_file,
@@ -136,7 +133,6 @@ def gen_prompts(args):
 
         review_investigated_issue_prompt = gen_ReviewInvestigatedIssuePrompt(
             context=context,
-            frameworks=args.frameworks,
             framework_code_trace_files=args.framework_code_trace_files,
             code_port_plan_file=args.code_port_plan_file,
             test_plan_file=args.test_plan_file,
@@ -158,24 +154,22 @@ def gen_prompts(args):
             issue_fix_review_evolution_file
         )
 
-        # prompts.append(clear_vllm_dir_cmd)
         prompts.append(investigate_issue_prompt.prompt())
-        # prompts.append(clear_vllm_dir_cmd)
         prompts.append(review_investigated_issue_prompt.prompt())
 
     return prompts
 
 
 if __name__ == "__main__":
-    # Redirect output to file as well
-    log_file = open(LOG_FILE, "w")
-    original_stdout = sys.stdout
-    sys.stdout = Tee(original_stdout, log_file)
-
     args = parse_args()
 
+    code_gen_config = CodeGenConfig.from_json(args.config)
+    claude_config = code_gen_config.make_claude_config()
+
+    setup_logging("investigate_issue")
+
     start_time = time.time()
-    asyncio.run(claude_run(claude_config, gen_prompts(args)))
+    asyncio.run(claude_run(claude_config, gen_prompts(args, code_gen_config, claude_config)))
     duration_time = time.time() - start_time
 
     print("FINISHED ALL: total_duration = {}".format(duration_time))

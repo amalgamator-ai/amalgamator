@@ -4,18 +4,22 @@ import argparse
 import asyncio
 
 from pathlib import Path
-from common.utils import Tee
+from common.utils import setup_logging
 from common.claude_utils import claude_run
 
-from auto_code_gen.code_gen_configs import claude_config, code_gen_config
+from auto_code_gen.code_gen_configs import CodeGenConfig
 from auto_code_gen.code_gen_prompts import gen_FixIssuePrompt
 
-LOG_FILE = "__run_log_fix_issue.txt"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Fix issue in PR"
+    )
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to the code generation JSON config file.",
     )
     parser.add_argument(
         "--high_level_code_plan_file",
@@ -45,10 +49,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def gen_prompts(args):
+def gen_prompts(args, code_gen_config, claude_config):
     fix_issue_prompt = gen_FixIssuePrompt(
-        claude_config=claude_config, 
-        code_gen_config=code_gen_config, 
+        claude_config=claude_config,
+        code_gen_config=code_gen_config,
         high_level_code_plan_file=args.high_level_code_plan_file,
         prs_dir=args.prs_dir,
         issue_to_fix_file=args.issue_to_fix_file,
@@ -60,15 +64,15 @@ def gen_prompts(args):
 
 
 if __name__ == "__main__":
-    # Redirect output to file as well
-    log_file = open(LOG_FILE, "w")
-    original_stdout = sys.stdout
-    sys.stdout = Tee(original_stdout, log_file)
-
     args = parse_args()
 
+    code_gen_config = CodeGenConfig.from_json(args.config)
+    claude_config = code_gen_config.make_claude_config()
+
+    setup_logging("fix_issue")
+
     start_time = time.time()
-    asyncio.run(claude_run(claude_config, gen_prompts(args)))
+    asyncio.run(claude_run(claude_config, gen_prompts(args, code_gen_config, claude_config)))
     duration_time = time.time() - start_time
 
     print("FINISHED ALL: total_duration = {}".format(duration_time))
