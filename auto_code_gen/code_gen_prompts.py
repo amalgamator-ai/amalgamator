@@ -24,9 +24,9 @@ def create_context_str(claude_config: ClaudeConfig, code_gen_config: CodeGenConf
     return """
 <context>
 
-<cwd>
-{cwd}
-</cwd>
+<output_dir>
+{output_dir}
+</output_dir>
 
 <model>
 {model}
@@ -81,6 +81,10 @@ Execution of model <model> on <gpu_type> GPU with ISL <isl>, OSL <osl> and batch
 {slower_framework}
 </slower_framework>
 
+<target_source_code_dir>
+{target_source_code_dir}
+</target_source_code_dir>
+
 </context>
 
 <definitions>
@@ -90,7 +94,7 @@ code-paths, code-pieces, and their associated call-chains
 </definitions>
 
 <context_explanations>
-- <cwd> is the current working directory
+- <output_dir> is the output directory where all generated artifacts (plans, summaries, patches, test plans) must be saved. ALL output files MUST be written to this directory.
 
 - <framework_names> is the list of frameworks involved.
 - <source_framework> is the "source" framework from which code pieces are ported
@@ -100,12 +104,14 @@ code-paths, code-pieces, and their associated call-chains
 - <transformer_block_high_level_ops_files> is the list of high-level transformer block operation files for <framework_names> respectively.
 - <median_transformer_block_files> is the list of median low-level => high-level transformer block operation files for <framework_names> respectively.
 
+- <target_source_code_dir> is the directory containing the "target" framework source code. ALL code modifications MUST be made exclusively inside this directory. Do NOT modify files outside of <target_source_code_dir>.
+
 - The file <plan_file> has a sequence of improvement steps for <slower_framework> based on the comparison between frameworks running <tested_execution>.
 - The improvement plan step <plan_step> from <plan_file> is what we want to implement for <slower_framework>
 </context_explanations>
 
 """.format(
-        cwd=claude_config.cwd,
+        output_dir=claude_config.cwd,
         model=code_gen_config.model,
         gpu_type=code_gen_config.gpu_type,
         batch_size=code_gen_config.batch_size,
@@ -121,6 +127,7 @@ code-paths, code-pieces, and their associated call-chains
         plan_file=code_gen_config.plan_file,
         plan_step=code_gen_config.plan_step,
         slower_framework=code_gen_config.target_framework,
+        target_source_code_dir=code_gen_config.source_code_dir,
     )
 
 
@@ -159,7 +166,7 @@ The goal of this task is to detect the <code_trace> inside <framework> that is a
 </instructions>
 
 <output>
-- Dump results to <cwd>/{output_file}
+- Dump results to <output_dir>/{output_file}
 </output>
 
 """
@@ -195,6 +202,7 @@ class CodePortPlanPrompt:
     output_summary_file: str
     prev_output_file: Optional[str]
     prev_output_summary_file: Optional[str]
+    iteration: int
     prompt_template: ClassVar[str] = """
 
 {context}
@@ -258,8 +266,10 @@ The goal of this task is to provide a high-level multi-step coding plan that imp
 </instructions>
 
 <output>
-- Dump the high-level multi-step coding plan to <cwd>/{output_file}
-- Dump a summary explaining the work done to generate the coding plan to <cwd>/{output_summary_file}
+- Dump the high-level multi-step coding plan to <output_dir>/{output_file}
+- Dump a summary to <output_dir>/{output_summary_file} that includes:
+    - An explanation of the work done to generate the coding plan in this iteration
+    - A summary of the iteration evolution across all iterations up to and including iteration {iteration}, describing the progression of fixes and improvements
 </output>
 
 """
@@ -272,6 +282,7 @@ The goal of this task is to provide a high-level multi-step coding plan that imp
             code_port_disallowed_modules=self.code_port_disallowed_modules,
             output_file=self.output_file,
             output_summary_file=self.output_summary_file,
+            iteration=self.iteration,
         )
 
 
@@ -286,6 +297,7 @@ def gen_CodePortPlanPrompt(
     output_summary_file: str,
     prev_output_file: Optional[str],
     prev_output_summary_file: Optional[str],
+    iteration: int,
 ):
     assert len(framework_code_trace_files) == 2
 
@@ -297,6 +309,7 @@ def gen_CodePortPlanPrompt(
         output_summary_file=output_summary_file,
         prev_output_file=prev_output_file,
         prev_output_summary_file=prev_output_summary_file,
+        iteration=iteration,
     )
 
 
@@ -358,8 +371,8 @@ The goal of this task is to perform a critical, in-depth review of the high-leve
 </instructions>
 
 <output>
-- Dump the corrected plan to <cwd>/{output_file}
-- Dump a summary to <cwd>/{output_summary_file} that includes:
+- Dump the corrected plan to <output_dir>/{output_file}
+- Dump a summary to <output_dir>/{output_summary_file} that includes:
     - Documentation of the issues found and fixed in this review
     - A summary of the iteration evolution across all iterations up to and including iteration {iteration}
 </output>
@@ -449,8 +462,8 @@ The goal of this task is to generate a multi-step testing plan for the implement
 </instructions>
 
 <output>
-- Dump the planned tests to <cwd>/{output_file}
-- Dump a summary to <cwd>/{output_summary_file} that includes:
+- Dump the planned tests to <output_dir>/{output_file}
+- Dump a summary to <output_dir>/{output_summary_file} that includes:
     - An explanation of the test plan generated in this iteration
     - A summary of the iteration evolution across all iterations up to and including iteration {iteration}, describing the progression of fixes and improvements
 </output>
@@ -546,15 +559,16 @@ The goal of this task is to generate a code patch for the "target" framework tha
     - For recompile, use all available CPUs to make the process as fast as possible.
     - Avoid recompilation from scratch, and instead use the incremental compilation process described above.
     - Make sure to take into account all execution modes and verify their <code_trace> inputs/outputs/shapes for decode-only, prefill-only and mixed.
-- Apply the new code patch to "target" framework, and if needed, fully re-compile the codebase.
+- Apply the new code patch to "target" framework inside <target_source_code_dir>, and if needed, fully re-compile the codebase.
+- IMPORTANT: ALL code modifications (source code, tests, build files) MUST be made exclusively inside <target_source_code_dir>. Do NOT modify any files outside of this directory.
 - Run all of the tests, do NOT SKIP anything, and make sure ALL TESTS ARE RUNNING AND PASSING (with the fully recompiled codebase if needed). If there are failures, then fix, revisit, rewrite, and re-run everything again.
 - Ensure the code, both main code and test code, is written professionally, clearly, well-documented, and well-formatted, while taking into account how code is written in the "target" framework.
 - Review your work critically and fix issues
 </instructions>
 
 <output>
-- Dump the code patch to <cwd>/{output_patch_file} (it must have both code and its tests inside)
-- Dump a summary to <cwd>/{output_summary_file} that includes:
+- Dump the code patch to <output_dir>/{output_patch_file} (it must have both code and its tests inside)
+- Dump a summary to <output_dir>/{output_summary_file} that includes:
     - An explanation of the code patch and tests generated in this iteration
     - A summary of the iteration evolution across all iterations up to and including iteration {iteration}, describing the progression of fixes and improvements
 </output>
@@ -669,11 +683,12 @@ The goal of this task is to perform a critical, in-depth review of the code patc
     - How it should be improved
 - Produce a corrected code patch with all issues fixed.
 - Add additional tests if needed to cover new issues, or fixed issues.
+- IMPORTANT: ALL code modifications (source code, tests, build files) MUST be made exclusively inside <target_source_code_dir>. Do NOT modify any files outside of this directory.
 </instructions>
 
 <output>
-- Dump the corrected code patch to <cwd>/{output_patch_file}
-- Dump a summary to <cwd>/{output_summary_file} that includes:
+- Dump the corrected code patch to <output_dir>/{output_patch_file}
+- Dump a summary to <output_dir>/{output_summary_file} that includes:
     - Documentation of the issues found and fixed in this review
     - A summary of the iteration evolution across all iterations up to and including iteration {iteration}, describing the progression of fixes and improvements
 </output>
@@ -787,7 +802,7 @@ class InvestigateIssuePrompt:
 The goal of this task is to investigate the issue described in <issue_desc_file> that arises after the <code_pr_file> is applied to <target_framework>. Do the following and think hard:
 - If <issue_fix_previous_attempt_file> is provided and is an existing real file, then read and analyze in-detail this contents to get all of the information about the previous attempt to generate a fix to the issue described here. Use all of the learnings and details from the previous attempt to improve the current attempt. Note that the current attempt is still done from scratch, but it can use the learnings from the previous attempt.
 - If <issue_fix_previous_attempt_review_evolution_file> is provided and is an existing real file, then read and analyze in-detail this contents to get all of the information about the previous attempt to generate a fix to the issue described here. Use all of the learnings and details from the previous attempt to improve the current attempt. Note that the current attempt is still done from scratch, but it can use the learnings from the previous attempt.
-- Read, analyze and understand in-detail all previous issues that were reported and are in the <cwd>. These are may be relevant to avoid repeating mistakes, bugs or misleading information. Take all of the learning of previous issues into account while working on this issue from scratch.
+- Read, analyze and understand in-detail all previous issues that were reported and are in the <output_dir>. These are may be relevant to avoid repeating mistakes, bugs or misleading information. Take all of the learning of previous issues into account while working on this issue from scratch.
 - Analyze and understand in-detail the code port plan in <code_port_plan_file>, and restate the code port plan process step-by-step.
     - Analyze and understand in-detail the code port plan => review iteration evolution that is described in <code_port_plan_review_evolution_file> that lead to the final <code_port_plan_file>.
 - Analyze and understand in-detail the code patch in <code_pr_file>, and restate the coding process step-by-step.
@@ -811,10 +826,10 @@ The goal of this task is to investigate the issue described in <issue_desc_file>
 </instructions>
 
 <output>
-- Dump the detailed explanation of the issue, key reasons, and how to fix to <cwd>/{issue_fix_file}
+- Dump the detailed explanation of the issue, key reasons, and how to fix to <output_dir>/{issue_fix_file}
 - Add new tests to verify that the issue is fully fixed.
-- Dump the fixed code pr patch with old and new tests to <cwd>/{code_pr_fixed_file}
-- Apply the new code patch to the "target" source code
+- Dump the fixed code pr patch with old and new tests to <output_dir>/{code_pr_fixed_file}
+- Apply the new code patch to the "target" source code inside <target_source_code_dir>. ALL code modifications MUST be made exclusively inside <target_source_code_dir>.
 - Run the tests and ensure ALL PASS (NO SKIPS). If some test fails, then review the work, fix the issue again, and re-run again. DO NOT STOP UNTIL THE ISSUE IS FIXED.
 </output>
 
@@ -956,10 +971,10 @@ The goal of this task is to perform a critical, in-depth review of issue fix in 
 </instructions>
 
 <output>
-- Dump the documentation of the fixes to the <issue_fix_file> to <cwd>/{issue_fix_review_file}
-- Dump the corrected issue fix to <cwd>/{issue_fix_fixed_file}
-- Dump the corrected code PR file to <cwd>/{code_pr_review_fixed_file}. For this add new tests if needed, apply the new patch, and re-run the tests.
-- If multiple issue investigation => review iterations were done till now, then summarize the iteration evolution in <cwd>/{issue_fix_review_evolution_file}
+- Dump the documentation of the fixes to the <issue_fix_file> to <output_dir>/{issue_fix_review_file}
+- Dump the corrected issue fix to <output_dir>/{issue_fix_fixed_file}
+- Dump the corrected code PR file to <output_dir>/{code_pr_review_fixed_file}. For this add new tests if needed, apply the new patch inside <target_source_code_dir>, and re-run the tests. ALL code modifications MUST be made exclusively inside <target_source_code_dir>.
+- If multiple issue investigation => review iterations were done till now, then summarize the iteration evolution in <output_dir>/{issue_fix_review_evolution_file}
 </output>
 
 """
@@ -1281,7 +1296,7 @@ Visual design rules:
 
 <instructions>
 The goal of this task is to generate a sequence of PPTX slides that describe the AI-based automatic code generation process that implemented improvement step <plan_step> from the <plan_file>. Do the following and think hard:
-- Analyze and understand in-depth the AI-based automatic code generation process that is composed of the sequence of generated files in <cwd>. Read all of these files in <cwd> and analyze their contents. The general steps are as follows:
+- Analyze and understand in-depth the AI-based automatic code generation process that is composed of the sequence of generated files in <output_dir>. Read all of these files in <output_dir> and analyze their contents. The general steps are as follows:
     - Generate a code trace for the "source" framework, to get the call-chain of active code pieces 
     - Generate a code trace for the "target" framework, to get the call-chain of active code pieces 
     - Generate a code port plan from "source" to "target" framework that implements the improvement plan.
@@ -1303,7 +1318,7 @@ The goal of this task is to generate a sequence of PPTX slides that describe the
     - Show and explain in-detail the Claude query prompt that is used to generate the code port plan review, based on the source code here /home/alexm-redhat/code/ai_auto_perf_analysis/auto_code_gen/code_gen_prompts.py.
     - Show and explain in-detail the "code port plan" => "review" iterations that are used to fix bugs and issues before running the code:
         - The key problem is that a code that is generated on first iteration is usually incorrect due to the complexity of the task, and the key idea to solve it is to use iterations to evolve the generated code to the point where it is fully correct. 
-        - Show each iteration (based on the files in <cwd>), what bugs/issues it found (in-detail), why it is important, and how it is fixed. This "gen" => "review" evolution flow is important to understand since it is the key for correctness.
+        - Show each iteration (based on the files in <output_dir>), what bugs/issues it found (in-detail), why it is important, and how it is fixed. This "gen" => "review" evolution flow is important to understand since it is the key for correctness.
     - For code patch generation, same as for previous bullet:
         - Show the generated code vs the iteration evolution process that fixes bugs and issues. Show each iterations, with what it found, why it is important and how it is fixed.
     - Present the final pipeline of the process with all steps in a diagram, where "gen" => "review" is annotated properly with back arrows.
@@ -1320,7 +1335,7 @@ The goal of this task is to generate a sequence of PPTX slides that describe the
 </instructions>
 
 <output>
-- Dump the resulting PPTX slides to <cwd>/{output_file}
+- Dump the resulting PPTX slides to <output_dir>/{output_file}
 </output>
 
 """

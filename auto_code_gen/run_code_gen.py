@@ -69,6 +69,7 @@ def gen_prompts(code_gen_config, claude_config):
             ),
             prev_output_file=prev_output_file,
             prev_output_summary_file=prev_output_summary_file,
+            iteration=i + 1,
         )
 
         # Step 2: Review and fix
