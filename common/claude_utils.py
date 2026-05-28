@@ -166,9 +166,14 @@ async def claude_run(claude_config: ClaudeConfig, prompts: list[str]):
         prompt_step = 0
         for i, prompt in enumerate(prompts):
             if isinstance(prompt, dict):
-                cmd = prompt["cmd"]
-                print("{} RUN CMD: {} {}".format(Fore.GREEN, cmd, Style.RESET_ALL))
-                eval(cmd)
+                if "fn" in prompt:
+                    fn_name = prompt.get("fn_name", str(prompt["fn"]))
+                    print("{} RUN CMD: {} {}".format(Fore.GREEN, fn_name, Style.RESET_ALL))
+                    prompt["fn"]()
+                else:
+                    cmd = prompt["cmd"]
+                    print("{} RUN CMD: {} {}".format(Fore.GREEN, cmd, Style.RESET_ALL))
+                    eval(cmd)
                 continue
 
             prompt_step += 1

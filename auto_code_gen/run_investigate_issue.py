@@ -4,7 +4,7 @@ import argparse
 import asyncio
 
 from pathlib import Path
-from common.utils import setup_logging
+from common.utils import setup_logging, clear_vllm_source_tree
 from common.claude_utils import claude_run
 
 from auto_code_gen.code_gen_configs import CodeGenConfig
@@ -83,9 +83,8 @@ def parse_args() -> argparse.Namespace:
 
 def gen_prompts(args, code_gen_config, claude_config):
     clear_target_dir_cmd = {
-        "cmd": 'utils.clear_vllm_source_tree("{}")'.format(
-            code_gen_config.source_code_dir
-        )
+        "fn": lambda: clear_vllm_source_tree(code_gen_config.source_code_dir),
+        "fn_name": 'clear_vllm_source_tree("{}")'.format(code_gen_config.source_code_dir),
     }
 
     context = create_context_str(claude_config, code_gen_config)
