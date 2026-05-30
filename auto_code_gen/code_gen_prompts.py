@@ -375,6 +375,7 @@ The goal of this task is to perform a critical, in-depth review of the high-leve
 - Dump a summary to <output_dir>/{output_summary_file} that includes:
     - Documentation of the issues found and fixed in this review
     - A summary of the iteration evolution across all iterations up to and including iteration {iteration}
+- IMPORTANT: If no changes were needed to the code port plan, write CONVERGED as the very first line of <output_dir>/{output_summary_file}. Otherwise, do NOT write CONVERGED.
 </output>
 
 """
@@ -505,6 +506,113 @@ def gen_TestPlanPrompt(
         output_summary_file=output_summary_file,
         prev_output_file=prev_output_file,
         prev_output_summary_file=prev_output_summary_file,
+        iteration=iteration,
+    )
+
+
+@dataclass
+class ReviewTestPlanPrompt:
+    context: str
+    framework_code_trace_files: list[str]
+    code_port_plan_file: str
+    input_file: str
+    input_summary_file: str
+    output_file: str
+    output_summary_file: str
+    iteration: int
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<framework_code_trace_files>
+{framework_code_trace_files}
+</framework_code_trace_files>
+<code_port_plan_file>
+{code_port_plan_file}
+</code_port_plan_file>
+<input_file>
+{input_file}
+</input_file>
+<input_summary_file>
+{input_summary_file}
+</input_summary_file>
+</definitions>
+
+<definition_explanations>
+- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
+- <code_port_plan_file> is a file that describes the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
+- <input_file> is a file that describes the multi-step testing plan for the implementation in <code_port_plan_file>.
+- <input_summary_file> is a file that summarizes the work done to generate <input_file>.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to perform a critical, in-depth review of the multi-step testing plan in <input_file> (iteration {iteration}). Do the following and think hard:
+- Understand in-detail the test plan in <input_file>, and restate the plan step-by-step.
+- Verify the test plan covers all execution modes: decode-only, prefill-only, and mixed.
+- Verify the test plan covers cuda graphs behavior.
+- Verify the test plan has proper unit tests for each ported/modified component.
+- Verify the test plan has end-to-end tests that exercise the full change.
+- Verify the test plan has performance tests that measure the expected speedup.
+- Review misc issues:
+    - missing test coverage
+    - incorrect test assumptions
+    - missing edge cases
+    - tests that would not actually verify correctness
+    - tests that would not detect regressions
+    - missing baselines for comparison
+
+- For each issue found, document:
+    - The affected part of the test plan
+    - What is wrong
+    - Why it matters
+    - How it should be improved
+- Produce a corrected test plan with all issues fixed.
+</instructions>
+
+<output>
+- Dump the corrected test plan to <output_dir>/{output_file}
+- Dump a summary to <output_dir>/{output_summary_file} that includes:
+    - Documentation of the issues found and fixed in this review
+    - A summary of the iteration evolution across all iterations up to and including iteration {iteration}
+- IMPORTANT: If no changes were needed, write CONVERGED as the very first line of <output_dir>/{output_summary_file}. Otherwise, do NOT write CONVERGED.
+</output>
+
+"""
+
+    def prompt(self):
+        return self.prompt_template.format(
+            context=self.context,
+            framework_code_trace_files=self.framework_code_trace_files,
+            code_port_plan_file=self.code_port_plan_file,
+            input_file=self.input_file,
+            input_summary_file=self.input_summary_file,
+            output_file=self.output_file,
+            output_summary_file=self.output_summary_file,
+            iteration=self.iteration,
+        )
+
+
+def gen_ReviewTestPlanPrompt(
+    context: str,
+    framework_code_trace_files: list[str],
+    code_port_plan_file: str,
+    input_file: str,
+    input_summary_file: str,
+    output_file: str,
+    output_summary_file: str,
+    iteration: int,
+):
+    assert len(framework_code_trace_files) == 2
+
+    return ReviewTestPlanPrompt(
+        context=context,
+        framework_code_trace_files=framework_code_trace_files,
+        code_port_plan_file=code_port_plan_file,
+        input_file=input_file,
+        input_summary_file=input_summary_file,
+        output_file=output_file,
+        output_summary_file=output_summary_file,
         iteration=iteration,
     )
 
@@ -691,6 +799,7 @@ The goal of this task is to perform a critical, in-depth review of the code patc
 - Dump a summary to <output_dir>/{output_summary_file} that includes:
     - Documentation of the issues found and fixed in this review
     - A summary of the iteration evolution across all iterations up to and including iteration {iteration}, describing the progression of fixes and improvements
+- IMPORTANT: If no changes were needed, write CONVERGED as the very first line of <output_dir>/{output_summary_file}. Otherwise, do NOT write CONVERGED.
 </output>
 
 """

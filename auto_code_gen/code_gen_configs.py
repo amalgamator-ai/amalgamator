@@ -50,6 +50,7 @@ class CodeGenConfig:
     num_test_plan_iterations: int = 3
     num_code_gen_iterations: int = 3
     code_port_disallowed_modules: list[str] = field(default_factory=list)
+    thinking_mode: str = "deep"
 
     # --- Auto-inferred fields ---
     model: str = ""
@@ -112,6 +113,10 @@ class CodeGenConfig:
         if not isinstance(num_code_gen_iterations, int) or num_code_gen_iterations <= 0:
             errors.append('"num_code_gen_iterations" must be a positive integer.')
 
+        thinking_mode = data.get("thinking-mode", "deep")
+        if thinking_mode not in ("normal", "deep"):
+            errors.append('"thinking-mode" must be "normal" or "deep".')
+
         if errors:
             raise ValueError(
                 "Code gen config errors:\n" + "\n".join(f"  - {e}" for e in errors)
@@ -129,6 +134,7 @@ class CodeGenConfig:
             num_code_gen_iterations=num_code_gen_iterations,
             plan_step=improvement_id,
             code_port_disallowed_modules=code_port_disallowed_modules,
+            thinking_mode=thinking_mode,
         )
         config._load_from_cross_trace()
         return config
@@ -289,10 +295,29 @@ class CodeGenConfig:
             self.source_framework_code_dir, self.source_commit_id, source_branch, "source"
         )
 
+    _MODE_PARAMS = {
+        "deep": {
+            "model": "claude-opus-4-6[1m]",
+            "thinking": {"type": "adaptive"},
+            "effort": "max",
+            "max_thinking_tokens": 1048576,
+        },
+        "normal": {
+            "model": "claude-sonnet-4-6",
+            "thinking": {"type": "adaptive"},
+            "effort": "medium",
+            "max_thinking_tokens": 65536,
+        },
+    }
+
     def make_claude_config(self) -> ClaudeConfig:
+        params = self._MODE_PARAMS[self.thinking_mode]
         return ClaudeConfig(
-            model="claude-opus-4-6[1m]",
+            model=params["model"],
             allowed_tools=["Read", "Write", "Bash"],
             perm_mode="acceptEdits",
             cwd=self.output_dir,
+            thinking=params["thinking"],
+            effort=params["effort"],
+            max_thinking_tokens=params["max_thinking_tokens"],
         )
