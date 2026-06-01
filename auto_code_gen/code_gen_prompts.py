@@ -182,6 +182,10 @@ The goal of this task is to detect the <code_trace> inside <framework> that is a
 CODE_TRACE_FILE = "code_trace.txt"
 
 
+def code_trace_filename(framework: str) -> str:
+    return "{}_{}".format(framework, CODE_TRACE_FILE)
+
+
 def gen_CodeTracePrompt(
     context: str,
     framework: str,
@@ -189,7 +193,7 @@ def gen_CodeTracePrompt(
     return CodeTracePrompt(
         context=context,
         framework=framework,
-        output_file="{}_{}".format(framework, CODE_TRACE_FILE),
+        output_file=code_trace_filename(framework),
     )
 
 
@@ -672,6 +676,16 @@ The goal of this task is to generate a code patch for the "target" framework tha
 - Run all of the tests, do NOT SKIP anything, and make sure ALL TESTS ARE RUNNING AND PASSING (with the fully recompiled codebase if needed). If there are failures, then fix, revisit, rewrite, and re-run everything again.
 - Ensure the code, both main code and test code, is written professionally, clearly, well-documented, and well-formatted, while taking into account how code is written in the "target" framework.
 - Review your work critically and fix issues
+
+Feature Toggle and Startup Verification:
+- The generated code MUST include the following two mechanisms:
+    1. STARTUP LOG: Add a log message that prints during "target" framework startup (e.g., during model initialization or engine startup) when the new feature is active. The message must follow the format:
+       `[AutoPerf] Plan step <plan_step>: <short_description_of_feature> is ENABLED`
+       This log must appear in stdout/stderr so it can be detected in runtime logs.
+    2. ENVIRONMENT VARIABLE DISABLE SWITCH: Add an environment variable named `VLLM_DISABLE_AUTO_PERF_PLAN_<plan_step>` (e.g., `VLLM_DISABLE_AUTO_PERF_PLAN_2`) that, when set to "1", disables the new feature entirely and falls back to the original code paths. When disabled, print:
+       `[AutoPerf] Plan step <plan_step>: <short_description_of_feature> is DISABLED (env override)`
+    - The env var check must happen early in the relevant code path (e.g., during model/layer initialization).
+    - When the env var is NOT set or set to anything other than "1", the new feature runs by default.
 </instructions>
 
 <output>
@@ -679,6 +693,9 @@ The goal of this task is to generate a code patch for the "target" framework tha
 - Dump a summary to <output_dir>/{output_summary_file} that includes:
     - An explanation of the code patch and tests generated in this iteration
     - A summary of the iteration evolution across all iterations up to and including iteration {iteration}, describing the progression of fixes and improvements
+    - The exact environment variable name used to disable the new feature (e.g., VLLM_DISABLE_AUTO_PERF_PLAN_2)
+    - The exact startup log message that confirms the feature is enabled
+    - The exact startup log message that confirms the feature is disabled
 </output>
 
 """
@@ -841,6 +858,699 @@ def gen_ReviewCodeGenPrompt(
         output_patch_file=output_patch_file,
         output_summary_file=output_summary_file,
         iteration=iteration,
+    )
+
+
+RUNTIME_FILE_PREFIX = "code_gen_runtime"
+RUNTIME_SUCCESS_FILE = "runtime_success_result.txt"
+RUNTIME_LOGS_DIR = "runtime_logs"
+RUNTIME_SMALLER_MODEL_FILE = "runtime_smaller_model.txt"
+
+
+@dataclass
+class FindSmallerModelPrompt:
+    context: str
+    framework_code_trace_files: list[str]
+    code_port_plan_file: str
+    output_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<framework_code_trace_files>
+{framework_code_trace_files}
+</framework_code_trace_files>
+<code_port_plan_file>
+{code_port_plan_file}
+</code_port_plan_file>
+</definitions>
+
+<definition_explanations>
+- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively.
+- <code_port_plan_file> is the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to find a smaller version of the model <model> that can be used for runtime testing of the improvement plan implementation during runtime iterations. The smaller model must exercise the same code paths that the improvement plan modifies, but require fewer GPUs of the same type (<gpu_type>).
+
+Follow these steps and think hard:
+
+Step 1: Analyze the Current Model
+- Identify <model> architecture family, total parameter count, active parameter count, precision format, and key characteristics.
+- Determine the current GPU requirements: how many <gpu_type> GPUs are needed, what tensor-parallel-size is used.
+- Understand the model's architecture components: attention mechanism (MHA, MQA, GQA, MLA, CSA, HCA, etc.), MoE structure (number of experts, active experts), KV cache format, and any special features.
+
+Step 2: Analyze the Improvement Plan
+- Read and understand the code port plan from <code_port_plan_file>.
+- Read the framework code traces from <framework_code_trace_files>.
+- Identify which architectural components are modified by the improvement plan: attention kernels, MoE routing, KV cache management, scheduling, CUDA graph handling, specific operator implementations, etc.
+- Determine what code paths MUST be exercised to validate the improvement.
+
+Step 3: Find a Smaller Model
+- Search for smaller models in the same family as <model>. Look for:
+    - Smaller variants from the same organization (e.g., Flash, Mini, Lite, Small versions)
+    - Models with fewer total parameters but the same architecture
+    - Models that use the same attention mechanism and kernel interfaces
+- The smaller model MUST:
+    - Share the same architecture and code paths that the improvement plan modifies
+    - Be compatible with <target_framework> (same serving flags, same attention mechanism, same kernel interfaces)
+    - Require fewer <gpu_type> GPUs than <model>
+    - Be publicly available with open weights (e.g., on Hugging Face)
+- Prefer models that:
+    - Are from the same model family and organization as <model>
+    - Use the same or compatible precision format (FP4/FP8)
+    - Exercise identical kernel code paths for the improvement plan
+    - Have the same MoE structure (if the improvement involves MoE-related code)
+
+Step 4: Validate the Choice
+- Verify that the improvement plan's code changes would be exercised when running the smaller model.
+- Check that the smaller model uses the same attention mechanism, MoE structure (if applicable), and kernel interfaces that the improvement plan modifies.
+- Confirm the GPU count reduction is significant.
+- Assess risks: different expert counts, different hidden dimensions, different head counts, different batch behavior, and whether these differences affect the code paths under test.
+
+Step 5: Write the Output
+- Write the results to <output_dir>/{output_file} with the following structure:
+    - First line must be exactly: SMALLER_MODEL_NAME: <full_model_name_on_huggingface>
+    - Second line must be exactly: SMALLER_MODEL_NUM_GPUS: <number_of_gpus_needed>
+    - Third line: blank
+    - Then a detailed summary explaining:
+        - Why this smaller model is appropriate for testing the improvement plan
+        - Which architectural components are shared with <model>
+        - What code paths from the improvement plan are exercised by both models
+        - The GPU reduction achieved (from N GPUs to M GPUs of <gpu_type>)
+        - Any limitations or differences to be aware of during testing
+        - The recommended execution command adjustments (--model, --tensor-parallel-size, CUDA_VISIBLE_DEVICES)
+</instructions>
+
+<output>
+- <output_dir>/{output_file}
+</output>
+
+"""
+
+    def prompt(self):
+        return self.prompt_template.format(
+            context=self.context,
+            framework_code_trace_files=self.framework_code_trace_files,
+            code_port_plan_file=self.code_port_plan_file,
+            output_file=self.output_file,
+        )
+
+
+def gen_FindSmallerModelPrompt(
+    context: str,
+    framework_code_trace_files: list[str],
+    code_port_plan_file: str,
+):
+    assert len(framework_code_trace_files) == 2
+
+    return FindSmallerModelPrompt(
+        context=context,
+        framework_code_trace_files=framework_code_trace_files,
+        code_port_plan_file=code_port_plan_file,
+        output_file=RUNTIME_SMALLER_MODEL_FILE,
+    )
+
+
+@dataclass
+class ApplyCodeAndCompilePrompt:
+    context: str
+    patch_file: str
+    iteration: int
+    output_status_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<patch_file>
+{patch_file}
+</patch_file>
+</definitions>
+
+<instructions>
+The goal of this task is to apply the code patch <patch_file> to the "target" framework source code in <target_source_code_dir> and perform incremental compilation (runtime iteration {iteration}).
+
+Follow these steps precisely:
+
+Step 1: Verify Clean Repository State
+- Run `git -C <target_source_code_dir> status --porcelain` to check for any modifications or uncommitted changes.
+- If the repository has ANY modifications (staged or unstaged tracked files):
+    - Print a clear WARNING message: "WARNING: Repository at <target_source_code_dir> is not clean. Cannot apply patch."
+    - List all dirty files.
+    - Write "REPO_NOT_CLEAN" to <output_dir>/{output_status_file}
+    - STOP immediately. Do NOT proceed to the next steps.
+- If the repository is clean, proceed to Step 2.
+
+Step 2: Apply the Code Patch
+- Apply the patch to <target_source_code_dir> using: `cd <target_source_code_dir> && git apply <output_dir>/{patch_file}`
+- If `git apply` fails, try with: `cd <target_source_code_dir> && git apply --3way <output_dir>/{patch_file}`
+- If that also fails, try with: `cd <target_source_code_dir> && patch -p1 < <output_dir>/{patch_file}`
+- Verify the patch was applied correctly by checking `git -C <target_source_code_dir> diff --stat`
+- IMPORTANT: ALL code modifications MUST be exclusively inside <target_source_code_dir>. Do NOT modify files outside of it.
+
+Step 3: Incremental Compilation
+- Run incremental compilation for the "target" framework in <target_source_code_dir>:
+    1. `cd <target_source_code_dir> && python tools/generate_cmake_presets.py --force-overwrite`
+    2. `cd <target_source_code_dir> && cmake --preset release`
+    3. `cd <target_source_code_dir> && cmake --build --preset release --target install` (use all available CPUs for speed)
+- If compilation fails:
+    - Analyze the compilation errors carefully.
+    - Fix the code issues directly in <target_source_code_dir>.
+    - Re-run the compilation commands.
+    - Repeat until compilation fully succeeds with zero errors.
+    - Do NOT give up on compilation — iterate until it succeeds.
+
+Step 4: Write Success Status
+- Write "SUCCESS" to <output_dir>/{output_status_file}
+</instructions>
+
+<output>
+- <output_dir>/{output_status_file}
+</output>
+
+"""
+
+    def prompt(self):
+        return self.prompt_template.format(
+            context=self.context,
+            patch_file=self.patch_file,
+            iteration=self.iteration,
+            output_status_file=self.output_status_file,
+        )
+
+
+def gen_ApplyCodeAndCompilePrompt(
+    context: str,
+    patch_file: str,
+    iteration: int,
+):
+    return ApplyCodeAndCompilePrompt(
+        context=context,
+        patch_file=patch_file,
+        iteration=iteration,
+        output_status_file="runtime_apply_status_V{}.txt".format(iteration),
+    )
+
+
+@dataclass
+class RunAndLogPrompt:
+    context: str
+    execution_command: str
+    runtime_logs_dir: str
+    iteration: int
+    gpu_wait_timeout_minutes: int
+    smaller_model_file: Optional[str]
+    disable_new_feature: bool
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<execution_command>
+{execution_command}
+</execution_command>
+<runtime_logs_dir>
+{runtime_logs_dir}
+</runtime_logs_dir>
+<gpu_wait_timeout_minutes>
+{gpu_wait_timeout_minutes}
+</gpu_wait_timeout_minutes>
+{smaller_model_section}
+</definitions>
+
+<instructions>
+The goal of this task is to run the benchmark execution command for <tested_execution> and capture all output (runtime iteration {iteration}).
+{smaller_model_instructions}
+
+Follow these steps precisely:
+
+Step 1: Wait for GPUs to Become Available
+- Determine the number of GPUs needed (K):
+{gpu_count_instructions}
+- Run `nvidia-smi` and analyze the output for ALL GPUs on the machine.
+- Find K GPUs that are free — i.e. not running other significant workloads (training jobs, other inference servers, large GPU processes). Small monitoring processes (a few MB of VRAM) are acceptable. The free GPUs do NOT need to be consecutive — any K free GPUs will work.
+- If fewer than K GPUs are free:
+    - Print a status message listing the busy GPUs and their conflicting processes (PID, process name, GPU memory usage), and how many free GPUs were found vs. needed.
+    - Sleep for 60 seconds, then re-check by running `nvidia-smi` again.
+    - Keep polling in this loop until K GPUs are free.
+    - Track elapsed wait time. If the total wait exceeds <gpu_wait_timeout_minutes> minutes:
+        - Print "ERROR: Not enough free GPUs after <gpu_wait_timeout_minutes> minutes, giving up."
+        - Write "GPUS_TIMEOUT" to {runtime_logs_dir}/runtime_run_status_V{iteration}.txt
+        - STOP immediately. Do NOT proceed.
+    - Each poll iteration, print the current wait time and remaining timeout so progress is visible.
+- Once K free GPUs are found, record their GPU IDs (e.g. 2,5,6). These will be used for CUDA_VISIBLE_DEVICES in Step 3.
+
+Step 2: Create Output Directory
+- Ensure {runtime_logs_dir} exists: `mkdir -p {runtime_logs_dir}`
+
+Step 3: Run the Execution Command
+- The original execution command is: <execution_command>
+- Before running, make these adjustments:
+    - Set CUDA_VISIBLE_DEVICES to the specific free GPU IDs discovered in Step 1 (e.g. CUDA_VISIBLE_DEVICES=2,5,6). Replace any existing CUDA_VISIBLE_DEVICES in the command.
+{command_model_adjustments}
+{feature_toggle_env_var}
+    - If the command contains Docker-internal paths (paths starting with `/app/`), replace them with the corresponding local paths.
+    - If the command has `--output-json <path>`, update the path to: {runtime_logs_dir}/runtime_bench_result_V{iteration}.json
+    - Ensure all other paths in the command are valid local paths.
+- Run the adjusted command and capture ALL output:
+    - Use a script or shell construct to capture stdout and stderr separately AND as a combined stream:
+      ```
+      <adjusted_command> > {runtime_logs_dir}/runtime_run_V{iteration}_stdout.log 2> {runtime_logs_dir}/runtime_run_V{iteration}_stderr.log ; echo $? > {runtime_logs_dir}/runtime_run_V{iteration}_exit_code.txt
+      ```
+    - Then create the combined log:
+      ```
+      cat {runtime_logs_dir}/runtime_run_V{iteration}_stdout.log {runtime_logs_dir}/runtime_run_V{iteration}_stderr.log > {runtime_logs_dir}/runtime_run_V{iteration}_combined.log
+      ```
+    - Alternatively, use `tee` and process substitution to capture everything in real time.
+
+Step 4: Write Run Status
+- Read the exit code from {runtime_logs_dir}/runtime_run_V{iteration}_exit_code.txt
+- If exit code is 0: write "COMPLETED" to {runtime_logs_dir}/runtime_run_status_V{iteration}.txt
+- If exit code is non-zero: write "FAILED" to {runtime_logs_dir}/runtime_run_status_V{iteration}.txt
+- In both cases, the detailed output is in the log files for subsequent analysis.
+
+{feature_verification_step}
+</instructions>
+
+<output>
+- {runtime_logs_dir}/runtime_run_V{iteration}_stdout.log
+- {runtime_logs_dir}/runtime_run_V{iteration}_stderr.log
+- {runtime_logs_dir}/runtime_run_V{iteration}_combined.log
+- {runtime_logs_dir}/runtime_run_V{iteration}_exit_code.txt
+- {runtime_logs_dir}/runtime_run_status_V{iteration}.txt
+</output>
+
+"""
+
+    def prompt(self):
+        if self.smaller_model_file:
+            smaller_section = (
+                "<smaller_model_file>\n"
+                "{}\n"
+                "</smaller_model_file>".format(self.smaller_model_file)
+            )
+            smaller_instructions = (
+                "\n\nIMPORTANT: A smaller model is being used for runtime testing instead of <model>. "
+                "Read <smaller_model_file> from <output_dir> to get the smaller model name (SMALLER_MODEL_NAME) "
+                "and GPU count (SMALLER_MODEL_NUM_GPUS). Use these values when adjusting the execution command "
+                "in Step 3, and use SMALLER_MODEL_NUM_GPUS as K in Step 1."
+            )
+            gpu_count_instructions = (
+                "    - Read SMALLER_MODEL_NUM_GPUS from <smaller_model_file> in <output_dir> — that is K."
+            )
+            command_model_adjustments = (
+                "    - Replace the --model value with SMALLER_MODEL_NAME from <smaller_model_file>.\n"
+                "    - Replace --tensor-parallel-size with K (SMALLER_MODEL_NUM_GPUS)."
+            )
+        else:
+            smaller_section = ""
+            smaller_instructions = ""
+            gpu_count_instructions = (
+                "    - K is the tensor-parallel-size from <execution_command> "
+                "(or the count of GPUs in CUDA_VISIBLE_DEVICES)."
+            )
+            command_model_adjustments = ""
+
+        if self.disable_new_feature:
+            feature_toggle_env_var = (
+                "    - Read the latest code gen or runtime summary file in <output_dir> to find the "
+                "environment variable name that disables the new feature (e.g., VLLM_DISABLE_AUTO_PERF_PLAN_<plan_step>).\n"
+                "    - Set this environment variable to \"1\" in the command prefix to disable the new feature."
+            )
+            feature_verification_step = (
+                "Step 5: Verify Feature is DISABLED\n"
+                "- Search the combined log for the expected disabled message: "
+                "\"[AutoPerf] Plan step <plan_step>:\" followed by \"is DISABLED (env override)\".\n"
+                "- If found, the feature was successfully disabled.\n"
+                "- If NOT found, print a WARNING that the feature disable mechanism may not be working."
+            )
+        else:
+            feature_toggle_env_var = ""
+            feature_verification_step = (
+                "Step 5: Verify Feature is ENABLED\n"
+                "- Search the combined log for the expected enabled message: "
+                "\"[AutoPerf] Plan step <plan_step>:\" followed by \"is ENABLED\".\n"
+                "- If found, the new feature is confirmed active — good.\n"
+                "- If NOT found, print a WARNING that the new feature may not be running. "
+                "Write \"FEATURE_NOT_VERIFIED\" to {runtime_logs_dir}/runtime_run_status_V{iteration}.txt "
+                "and include details about what was searched for and what was found instead."
+            )
+
+        return self.prompt_template.format(
+            context=self.context,
+            execution_command=self.execution_command,
+            runtime_logs_dir=self.runtime_logs_dir,
+            iteration=self.iteration,
+            gpu_wait_timeout_minutes=self.gpu_wait_timeout_minutes,
+            smaller_model_section=smaller_section,
+            smaller_model_instructions=smaller_instructions,
+            gpu_count_instructions=gpu_count_instructions,
+            command_model_adjustments=command_model_adjustments,
+            feature_toggle_env_var=feature_toggle_env_var,
+            feature_verification_step=feature_verification_step,
+        )
+
+
+def gen_RunAndLogPrompt(
+    context: str,
+    execution_command: str,
+    runtime_logs_dir: str,
+    iteration: int,
+    gpu_wait_timeout_minutes: int = 30,
+    smaller_model_file: Optional[str] = None,
+    disable_new_feature: bool = False,
+):
+    return RunAndLogPrompt(
+        context=context,
+        execution_command=execution_command,
+        runtime_logs_dir=runtime_logs_dir,
+        iteration=iteration,
+        gpu_wait_timeout_minutes=gpu_wait_timeout_minutes,
+        smaller_model_file=smaller_model_file,
+        disable_new_feature=disable_new_feature,
+    )
+
+
+@dataclass
+class InvestigateRuntimeOutputAndFixCodePrompt:
+    context: str
+    framework_code_trace_files: list[str]
+    code_port_plan_file: str
+    test_plan_file: str
+    runtime_logs_dir: str
+    iteration: int
+    prev_patch_file: str
+    prev_summary_file: Optional[str]
+    iteration_history_summary_file: str
+    smaller_model_file: Optional[str]
+    output_patch_file: str
+    output_summary_file: str
+    success_result_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+{prev_iteration_section}
+
+<definitions>
+<framework_code_trace_files>
+{framework_code_trace_files}
+</framework_code_trace_files>
+<code_port_plan_file>
+{code_port_plan_file}
+</code_port_plan_file>
+<test_plan_file>
+{test_plan_file}
+</test_plan_file>
+<runtime_logs_dir>
+{runtime_logs_dir}
+</runtime_logs_dir>
+<prev_patch_file>
+{prev_patch_file}
+</prev_patch_file>
+<iteration_history_summary_file>
+{iteration_history_summary_file}
+</iteration_history_summary_file>
+{smaller_model_section}
+</definitions>
+
+<definition_explanations>
+- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
+- <code_port_plan_file> is the high-level multi-step coding plan that implements the improvement plan step.
+- <test_plan_file> is the testing plan for the implementation.
+- <runtime_logs_dir> contains the captured output from the benchmark execution for this iteration.
+- <prev_patch_file> is the code patch that was applied for this runtime execution.
+- <iteration_history_summary_file> is a comprehensive summary of ALL previous code generation phases (code traces, port plan, test plan, code gen iterations) and any previous runtime iterations. Read it first to get full context before analyzing the current runtime output.
+{smaller_model_explanation}
+</definition_explanations>
+
+<instructions>
+The goal of this task is to analyze the runtime benchmark output from iteration {iteration} of <tested_execution> and determine whether the execution succeeded or failed. Think hard and be extremely thorough.
+
+Step 1: Analyze Previous History
+- Read <iteration_history_summary_file> from <output_dir> to get full context of all previous code generation phases and runtime iterations.
+- Read the previous/latest code patch from <output_dir>/<prev_patch_file> to understand the current state of the code changes.
+- Read all previous runtime iteration summaries (code_gen_runtime_summary_V*.txt) in <output_dir> to understand what was tried before, what errors occurred, what was fixed, and what patterns emerged across iterations.
+- Read all other relevant files in <output_dir> (code port plan, test plan, code gen summaries, etc.) to have full context of the implementation.
+
+Step 2: Read and Analyze Runtime Output
+- Read the runtime logs from <runtime_logs_dir>:
+    - runtime_run_V{iteration}_stdout.log (standard output)
+    - runtime_run_V{iteration}_stderr.log (error output)
+    - runtime_run_V{iteration}_combined.log (combined view)
+    - runtime_run_V{iteration}_exit_code.txt (process exit code)
+    - runtime_run_status_V{iteration}.txt (run status: COMPLETED, FAILED, GPUS_TIMEOUT, or FEATURE_NOT_VERIFIED)
+- Determine whether the execution SUCCEEDED or FAILED:
+    - SUCCEEDED means ALL of the following:
+        - Process exited with code 0
+        - Benchmark completed fully without errors
+        - Performance results (throughput, latency, tokens/s) are present in the output
+        - No error tracebacks, crashes, segmentation faults, or assertion failures in stderr
+    - FAILED means ANY of the following:
+        - Non-zero exit code
+        - Error tracebacks or Python exceptions
+        - Segmentation faults, CUDA errors, or OOM errors
+        - Process was killed (SIGKILL, SIGTERM) or timed out
+        - Missing or incomplete performance results
+        - Any runtime error that prevented normal completion
+        - runtime_run_status file contains GPUS_TIMEOUT (GPUs were not available — this is NOT a code error, note it in the summary and do NOT attempt code fixes)
+        - runtime_run_status file contains FEATURE_NOT_VERIFIED (the new feature startup log was not detected — investigate why the feature is not activating)
+
+Step 3A: If SUCCEEDED
+- Extract the performance results from the output, including:
+    - Throughput (requests/s, tokens/s)
+    - TTFT (Time To First Token) — extract directly if reported, or calculate from the output data (e.g., time from request submission to first generated token)
+    - TPOT (Time Per Output Token) — extract directly if reported, or calculate as: (total_generation_time - TTFT) / (output_tokens - 1)
+    - Latency percentiles (p50, p90, p99) if available
+    - Total generation time
+    - Any other relevant metrics
+- Write a comprehensive performance summary to <output_dir>/{success_result_file}:
+    - Raw performance numbers with units
+    - TTFT and TPOT values with calculation methodology
+    - Execution context: model=<model>, gpu=<gpu_type>, ISL=<isl>, OSL=<osl>, batch_size=<batch_size>
+    - Number of runtime iterations required to reach success
+    - Summary of all issues fixed across runtime iterations (if any)
+- STOP here. Do NOT generate a new patch.
+
+Step 3B: If FAILED
+- Detect ALL errors and issues in the runtime output. Be extremely thorough and precise:
+    - Analyze every error traceback line by line
+    - Identify the root cause by tracing through the source code in both <target_source_code_dir> and the framework code traces
+    - Look for: CUDA errors, shape mismatches, type errors, missing attributes, import errors, memory errors, assertion failures, timeout issues, incorrect kernel invocations, wrong tensor dtypes/devices, and any other runtime errors
+    - Cross-reference errors with the applied code patch to understand what in the patch caused each error
+    - If an error is recurring from a previous iteration (visible in previous runtime summaries in <output_dir>), understand why the previous fix was insufficient and fix the root cause properly this time
+- For EACH error/issue found, document:
+    - The exact error message and full stack trace location
+    - The root cause in the source code (file path, function name, line)
+    - Why this error occurs (what assumption was wrong, what was missed, what code path triggers it)
+    - The precise fix, with explanation of why this fix is correct
+- Apply ALL fixes to the code in <target_source_code_dir>:
+    - Fix each error precisely at its root cause
+    - Trace through the execution flow for all modes (decode-only, prefill-only, mixed) to ensure fixes are correct
+    - Do NOT introduce new bugs while fixing existing ones
+    - IMPORTANT: ALL code modifications MUST be exclusively inside <target_source_code_dir>. Do NOT modify files outside of it.
+- Add NEW tests that specifically verify these runtime fixes:
+    - For each fixed error, add a targeted test that would catch the same error if it regressed
+    - Include edge cases related to the errors
+    - Follow the existing test patterns in <target_source_code_dir>
+- Run ONLY the tests that this patch introduces (from all iterations including the current one, and the NEW TESTS from above):
+    - Identify every test file and test function that was added or modified by the patch (use `git diff` to find them).
+    - Do NOT run general framework tests — only the patch's own tests.
+    - Run every one of those patch-introduced tests. Do NOT skip any.
+    - If any test fails: analyze the failure, fix the issue, and re-run all patch-introduced tests again.
+    - Repeat until every patch-introduced test PASSES with zero failures and zero skips.
+    - Do NOT stop until full success on all patch-introduced tests + NEW tests from above.
+- Feature Toggle and Startup Verification:
+    - Ensure the fixed patch preserves the feature toggle mechanism from the original code gen patch:
+        1. STARTUP LOG: A log message during framework startup that prints `[AutoPerf] Plan step <plan_step>: <description> is ENABLED` when the new feature is active.
+        2. ENVIRONMENT VARIABLE DISABLE SWITCH: The env var `VLLM_DISABLE_AUTO_PERF_PLAN_<plan_step>` that, when set to "1", disables the new feature and falls back to original code paths, printing `[AutoPerf] Plan step <plan_step>: <description> is DISABLED (env override)`.
+    - If these mechanisms are missing or broken in the current patch, add or fix them.
+    - Do NOT remove or weaken these mechanisms during fixes.
+- Generate the fixed code patch:
+    - Generate from <target_source_code_dir> using `git diff` (include both staged and unstaged changes)
+    - The patch MUST include the code fixes AND all patch-introduced tests (previous iterations + new)
+    - Save to <output_dir>/{output_patch_file}
+- Write a detailed summary to <output_dir>/{output_summary_file}:
+    - All errors/issues found in the runtime output with exact error messages
+    - Root cause analysis for each error with source code references
+    - How each error was fixed with the specific code changes made
+    - New tests added and what they verify
+    - The exact environment variable name used to disable the new feature
+    - The exact startup log message that confirms the feature is enabled
+    - The exact startup log message that confirms the feature is disabled
+    - Iteration evolution summary from iteration 1 through iteration {iteration}:
+        - What happened in each runtime iteration
+        - How the errors evolved (which were fixed, which are new, which recurred and why)
+        - Key learnings accumulated across iterations
+        - Current state and any remaining concerns
+</instructions>
+
+<output>
+On SUCCESS:
+- <output_dir>/{success_result_file}
+
+On FAILURE:
+- <output_dir>/{output_patch_file}
+- <output_dir>/{output_summary_file}
+</output>
+
+"""
+
+    def prompt(self):
+        if self.smaller_model_file:
+            smaller_section = (
+                "<smaller_model_file>\n"
+                "{}\n"
+                "</smaller_model_file>".format(self.smaller_model_file)
+            )
+            smaller_explanation = (
+                "- <smaller_model_file> describes the smaller model being used for runtime "
+                "testing instead of <model>. The runtime output comes from this smaller model. "
+                "Take this into account when interpreting performance numbers and errors."
+            )
+        else:
+            smaller_section = ""
+            smaller_explanation = ""
+
+        return self.prompt_template.format(
+            context=self.context,
+            prev_iteration_section=_prev_iteration_section(
+                self.prev_patch_file if self.prev_summary_file else None,
+                self.prev_summary_file,
+            ),
+            framework_code_trace_files=self.framework_code_trace_files,
+            code_port_plan_file=self.code_port_plan_file,
+            test_plan_file=self.test_plan_file,
+            runtime_logs_dir=self.runtime_logs_dir,
+            prev_patch_file=self.prev_patch_file,
+            iteration_history_summary_file=self.iteration_history_summary_file,
+            smaller_model_section=smaller_section,
+            smaller_model_explanation=smaller_explanation,
+            output_patch_file=self.output_patch_file,
+            output_summary_file=self.output_summary_file,
+            success_result_file=self.success_result_file,
+            iteration=self.iteration,
+        )
+
+
+def gen_InvestigateRuntimeOutputAndFixCodePrompt(
+    context: str,
+    framework_code_trace_files: list[str],
+    code_port_plan_file: str,
+    test_plan_file: str,
+    runtime_logs_dir: str,
+    iteration: int,
+    prev_patch_file: str,
+    prev_summary_file: Optional[str],
+    iteration_history_summary_file: str,
+    smaller_model_file: Optional[str] = None,
+):
+    assert len(framework_code_trace_files) == 2
+
+    return InvestigateRuntimeOutputAndFixCodePrompt(
+        context=context,
+        framework_code_trace_files=framework_code_trace_files,
+        code_port_plan_file=code_port_plan_file,
+        test_plan_file=test_plan_file,
+        runtime_logs_dir=runtime_logs_dir,
+        iteration=iteration,
+        prev_patch_file=prev_patch_file,
+        prev_summary_file=prev_summary_file,
+        iteration_history_summary_file=iteration_history_summary_file,
+        smaller_model_file=smaller_model_file,
+        output_patch_file="{}_V{}.patch".format(RUNTIME_FILE_PREFIX, iteration),
+        output_summary_file="{}_summary_V{}.txt".format(RUNTIME_FILE_PREFIX, iteration),
+        success_result_file=RUNTIME_SUCCESS_FILE,
+    )
+
+
+@dataclass
+class IterationHistorySummaryPrompt:
+    context: str
+    code_gen_output_dir: str
+    output_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<code_gen_output_dir>
+{code_gen_output_dir}
+</code_gen_output_dir>
+</definitions>
+
+<instructions>
+The goal of this task is to read and analyze ALL previous code generation iteration results to build a comprehensive understanding of the work done so far. This is required before starting runtime iterations as a standalone process.
+
+Follow these steps:
+
+Step 1: Read All Generated Artifacts
+- List all files in <code_gen_output_dir> and its subdirectories.
+- Read and analyze each file in the following order of phases:
+    1. Framework code traces (*_code_trace.txt) — understand the active code paths in both "source" and "target" frameworks for <tested_execution>.
+    2. Code port plan iterations (code_port_plan_V*.txt, code_port_plan_summary_V*.txt) — understand the planned porting steps and their evolution.
+    3. Code port plan reviews (code_port_plan_review_V*.txt, code_port_plan_review_summary_V*.txt) — understand issues found and fixed during plan review.
+    4. Test plan iterations (test_plan_V*.txt, test_plan_summary_V*.txt) — understand the testing strategy.
+    5. Test plan reviews (test_plan_review_V*.txt, test_plan_review_summary_V*.txt) — understand test review fixes.
+    6. Code gen iterations (code_gen_V*.patch, code_gen_summary_V*.txt) — understand the generated code patches.
+    7. Code gen reviews (code_gen_review_V*.patch, code_gen_review_summary_V*.txt) — understand code review fixes and the final patch.
+    8. Any previous runtime iteration files (code_gen_runtime_V*.patch, code_gen_runtime_summary_V*.txt) — understand previous runtime fix attempts.
+    9. Any runtime logs in runtime_logs/ subdirectory — understand previous execution results.
+    10. Any runtime success result (runtime_success_result.txt) — if already succeeded.
+
+Step 2: Build Comprehensive Understanding
+- For each phase, understand:
+    - What was generated in each iteration
+    - What issues/bugs were found during reviews
+    - How issues were fixed and what the key learnings were
+    - The convergence status (did it converge, at which iteration?)
+- For code patches, understand:
+    - What code was changed/added/ported in <target_source_code_dir>
+    - What tests were created
+    - What compilation issues were encountered and how they were resolved
+- For any runtime iterations already done:
+    - What runtime errors occurred during execution
+    - How they were diagnosed and fixed
+    - What the current state of the code is
+- Identify the latest/final code patch (either code_gen_review_V<N>.patch or code_gen_runtime_V<N>.patch, where <N> is the highest iteration number)
+
+Step 3: Generate History Summary
+- Write a comprehensive history summary to <output_dir>/{output_file} that includes:
+    - Overview of all phases completed (code traces, port plan, test plan, code gen)
+    - Key decisions and changes in each phase, with iteration counts
+    - The iteration evolution across all phases: what was found, fixed, and learned
+    - Issues found and fixed throughout the entire process
+    - Current state: which patch file is the latest, what is the code status
+    - Patterns of recurring issues across iterations
+    - Key learnings that should inform upcoming runtime iterations
+    - The final code port plan summary and test plan summary
+    - A clear statement of what the code is expected to do and what risks remain
+</instructions>
+
+<output>
+- <output_dir>/{output_file}
+</output>
+
+"""
+
+    def prompt(self):
+        return self.prompt_template.format(
+            context=self.context,
+            code_gen_output_dir=self.code_gen_output_dir,
+            output_file=self.output_file,
+        )
+
+
+def gen_IterationHistorySummaryPrompt(
+    context: str,
+    code_gen_output_dir: str,
+):
+    return IterationHistorySummaryPrompt(
+        context=context,
+        code_gen_output_dir=code_gen_output_dir,
+        output_file="runtime_iterations_history.txt",
     )
 
 

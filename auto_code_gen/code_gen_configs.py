@@ -49,6 +49,10 @@ class CodeGenConfig:
     num_code_port_plan_iterations: int = 3
     num_test_plan_iterations: int = 3
     num_code_gen_iterations: int = 3
+    num_runtime_iterations: int = 10
+    gpu_wait_timeout_minutes: int = 30
+    use_smaller_model_for_runtime: bool = False
+    disable_new_feature_for_runtime: bool = False
     code_port_disallowed_modules: list[str] = field(default_factory=list)
     thinking_mode: str = "deep"
 
@@ -73,6 +77,7 @@ class CodeGenConfig:
     target_commit_id: str = ""
     source_commit_id: str = ""
     source_framework_code_dir: str = ""
+    target_run_command: str = ""
 
     @classmethod
     def from_json(cls, path: str) -> "CodeGenConfig":
@@ -113,6 +118,22 @@ class CodeGenConfig:
         if not isinstance(num_code_gen_iterations, int) or num_code_gen_iterations <= 0:
             errors.append('"num_code_gen_iterations" must be a positive integer.')
 
+        num_runtime_iterations = data.get("num_runtime_iterations", 10)
+        if not isinstance(num_runtime_iterations, int) or num_runtime_iterations <= 0:
+            errors.append('"num_runtime_iterations" must be a positive integer.')
+
+        gpu_wait_timeout_minutes = data.get("gpu_wait_timeout_minutes", 30)
+        if not isinstance(gpu_wait_timeout_minutes, (int, float)) or gpu_wait_timeout_minutes <= 0:
+            errors.append('"gpu_wait_timeout_minutes" must be a positive number.')
+
+        use_smaller_model_for_runtime = data.get("use_smaller_model_for_runtime", False)
+        if not isinstance(use_smaller_model_for_runtime, bool):
+            errors.append('"use_smaller_model_for_runtime" must be a boolean.')
+
+        disable_new_feature_for_runtime = data.get("disable_new_feature_for_runtime", False)
+        if not isinstance(disable_new_feature_for_runtime, bool):
+            errors.append('"disable_new_feature_for_runtime" must be a boolean.')
+
         thinking_mode = data.get("thinking-mode", "deep")
         if thinking_mode not in ("normal", "deep"):
             errors.append('"thinking-mode" must be "normal" or "deep".')
@@ -132,6 +153,10 @@ class CodeGenConfig:
             num_code_port_plan_iterations=num_code_port_plan_iterations,
             num_test_plan_iterations=num_test_plan_iterations,
             num_code_gen_iterations=num_code_gen_iterations,
+            num_runtime_iterations=num_runtime_iterations,
+            gpu_wait_timeout_minutes=int(gpu_wait_timeout_minutes),
+            use_smaller_model_for_runtime=use_smaller_model_for_runtime,
+            disable_new_feature_for_runtime=disable_new_feature_for_runtime,
             plan_step=improvement_id,
             code_port_disallowed_modules=code_port_disallowed_modules,
             thinking_mode=thinking_mode,
@@ -167,6 +192,7 @@ class CodeGenConfig:
         self.target_commit_id = target_trace.commit_id
         self.source_commit_id = source_trace.commit_id
         self.source_framework_code_dir = source_trace.framework_source_code
+        self.target_run_command = target_trace.run_command
 
         self.model = target_trace.model
         self.gpu_type = target_trace.gpu_type
@@ -294,6 +320,77 @@ class CodeGenConfig:
         self._prepare_branch(
             self.source_framework_code_dir, self.source_commit_id, source_branch, "source"
         )
+
+    def get_target_branch_name(self) -> str:
+        model_slug = self.model.replace("/", "_").replace("-", "_")
+        return (
+            f"auto_code_gen_{model_slug}"
+            f"_isl_{self.isl}_osl_{self.osl}_b_{self.batch_size}"
+            f"_plan_{self.improvement_id}"
+            f"_commit_{self.target_commit_id[:6]}"
+        )
+
+    def verify_target_branch(self) -> bool:
+        """Verify the target source code repo is on the correct branch.
+
+        Attempts to switch if not already on the branch.
+        Returns True on success, False if the repo needs manual cleanup.
+        """
+        branch = self.get_target_branch_name()
+        cwd = self.source_code_dir
+
+        result = _run_git(["branch", "--show-current"], cwd, check=False)
+        current = result.stdout.strip()
+
+        if current == branch:
+            head = _run_git(["rev-parse", "HEAD"], cwd).stdout.strip()
+            ancestor_check = _run_git(
+                ["merge-base", "--is-ancestor", self.target_commit_id, head],
+                cwd, check=False,
+            )
+            if ancestor_check.returncode == 0:
+                print(f"Target repo on correct branch '{branch}', HEAD={head[:12]}")
+                return True
+            else:
+                print(
+                    f"WARNING: Branch '{branch}' HEAD ({head[:12]}) does NOT "
+                    f"descend from tested commit ({self.target_commit_id[:12]})."
+                )
+                return False
+
+        status = _run_git(["status", "--porcelain"], cwd, check=False)
+        dirty = [
+            l for l in status.stdout.strip().splitlines()
+            if l and not l.startswith("??")
+        ]
+        if dirty:
+            print(
+                f"WARNING: Cannot switch to branch '{branch}': "
+                f"repo at {cwd} has uncommitted changes.\n"
+                f"  Please clean the repo before running runtime iterations."
+            )
+            return False
+
+        branch_check = _run_git(["branch", "--list", branch], cwd, check=False)
+        if branch not in branch_check.stdout:
+            print(
+                f"WARNING: Branch '{branch}' does not exist in {cwd}.\n"
+                f"  Run the code generation pipeline first."
+            )
+            return False
+
+        result = _run_git(["checkout", branch], cwd, check=False)
+        if result.returncode != 0:
+            print(
+                f"WARNING: Cannot switch to branch '{branch}': "
+                f"{result.stderr.strip()}\n"
+                f"  Please clean the repo at {cwd} and retry."
+            )
+            return False
+
+        head = _run_git(["rev-parse", "HEAD"], cwd).stdout.strip()
+        print(f"Switched to branch '{branch}', HEAD={head[:12]}")
+        return True
 
     _MODE_PARAMS = {
         "deep": {

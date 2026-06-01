@@ -6,6 +6,7 @@ if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
 import os
+import re
 import sys
 import time
 import argparse
@@ -25,9 +26,18 @@ from auto_code_gen.code_gen_prompts import (
     gen_ReviewTestPlanPrompt,
     gen_CodeGenPrompt,
     gen_ReviewCodeGenPrompt,
+    gen_ApplyCodeAndCompilePrompt,
+    gen_RunAndLogPrompt,
+    gen_InvestigateRuntimeOutputAndFixCodePrompt,
+    gen_IterationHistorySummaryPrompt,
+    gen_FindSmallerModelPrompt,
     CODE_PORT_PLAN_FILE_PREFIX,
     CODE_GEN_FILE_PREFIX,
     TEST_PLAN_PREFIX,
+    RUNTIME_FILE_PREFIX,
+    RUNTIME_SUCCESS_FILE,
+    RUNTIME_LOGS_DIR,
+    RUNTIME_SMALLER_MODEL_FILE,
 )
 
 
@@ -56,6 +66,65 @@ def _check_converged(output_dir, summary_file):
     with open(path) as f:
         first_line = f.readline().strip()
     return CONVERGENCE_MARKER in first_line
+
+
+def _find_latest_patch(output_dir):
+    """Find the latest code patch file from code gen or runtime iterations."""
+    _runtime_pat = re.compile(r'^code_gen_runtime_V(\d+)\.patch$')
+    _codegen_pat = re.compile(r'^code_gen_review_V(\d+)\.patch$')
+
+    latest_runtime = None
+    latest_runtime_ver = 0
+    latest_codegen = None
+    latest_codegen_ver = 0
+
+    for f in os.listdir(output_dir):
+        m = _runtime_pat.match(f)
+        if m:
+            ver = int(m.group(1))
+            if ver > latest_runtime_ver:
+                latest_runtime_ver = ver
+                latest_runtime = f
+        m = _codegen_pat.match(f)
+        if m:
+            ver = int(m.group(1))
+            if ver > latest_codegen_ver:
+                latest_codegen_ver = ver
+                latest_codegen = f
+
+    if latest_runtime:
+        return latest_runtime
+    return latest_codegen
+
+
+def _find_latest_runtime_iteration(output_dir):
+    """Find the latest runtime iteration number (0 if none exist)."""
+    pattern = re.compile(r'^code_gen_runtime_V(\d+)\.patch$')
+    max_ver = 0
+    for f in os.listdir(output_dir):
+        m = pattern.match(f)
+        if m:
+            ver = int(m.group(1))
+            if ver > max_ver:
+                max_ver = ver
+    return max_ver
+
+
+def _check_apply_succeeded(output_dir, iteration):
+    """Check if apply and compile succeeded for the given runtime iteration."""
+    status_file = os.path.join(
+        output_dir, "runtime_apply_status_V{}.txt".format(iteration)
+    )
+    if not os.path.isfile(status_file):
+        return False
+    with open(status_file) as f:
+        status = f.read().strip()
+    return status == "SUCCESS"
+
+
+def _check_runtime_success(output_dir):
+    """Check if runtime iteration resulted in a successful benchmark run."""
+    return os.path.isfile(os.path.join(output_dir, RUNTIME_SUCCESS_FILE))
 
 
 def _gen_code_trace_steps(context, code_gen_config):
@@ -323,28 +392,20 @@ def _print_phase_summary(phase_results, all_step_timings, total_duration):
     phase_usage = {}
     for s in all_step_timings:
         name = s["name"]
-        for phase_name in ["Code traces", "Code port plan", "Test plan", "Code gen"]:
-            key = phase_name.lower().replace(" ", "_")
-            if key == "code_traces" and name.startswith("code_trace_"):
+        _PHASE_STEP_PREFIXES = {
+            "Code traces": ["code_trace_"],
+            "Code port plan": ["code_port_plan"],
+            "Test plan": ["test_plan"],
+            "Code gen": ["code_gen_V", "code_gen_review", "clear_target_dir_code_gen"],
+            "Runtime": ["apply_compile_", "run_log_", "investigate_runtime_", "clear_runtime_"],
+        }
+        for phase_name, prefixes in _PHASE_STEP_PREFIXES.items():
+            if any(name.startswith(p) for p in prefixes):
                 phase_usage.setdefault(phase_name, {"input": 0, "output": 0, "cost": 0.0})
                 phase_usage[phase_name]["input"] += s["input_tokens"]
                 phase_usage[phase_name]["output"] += s["output_tokens"]
                 phase_usage[phase_name]["cost"] += s["cost_usd"]
-            elif key == "code_port_plan" and name.startswith("code_port_plan"):
-                phase_usage.setdefault(phase_name, {"input": 0, "output": 0, "cost": 0.0})
-                phase_usage[phase_name]["input"] += s["input_tokens"]
-                phase_usage[phase_name]["output"] += s["output_tokens"]
-                phase_usage[phase_name]["cost"] += s["cost_usd"]
-            elif key == "test_plan" and name.startswith("test_plan"):
-                phase_usage.setdefault(phase_name, {"input": 0, "output": 0, "cost": 0.0})
-                phase_usage[phase_name]["input"] += s["input_tokens"]
-                phase_usage[phase_name]["output"] += s["output_tokens"]
-                phase_usage[phase_name]["cost"] += s["cost_usd"]
-            elif key == "code_gen" and name.startswith("code_gen"):
-                phase_usage.setdefault(phase_name, {"input": 0, "output": 0, "cost": 0.0})
-                phase_usage[phase_name]["input"] += s["input_tokens"]
-                phase_usage[phase_name]["output"] += s["output_tokens"]
-                phase_usage[phase_name]["cost"] += s["cost_usd"]
+                break
 
     total_input = sum(s["input_tokens"] for s in all_step_timings)
     total_output = sum(s["output_tokens"] for s in all_step_timings)
@@ -560,6 +621,256 @@ async def run_pipeline(code_gen_config, claude_config, resume=False):
         "converged": code_gen_converged,
         "duration": time.time() - phase_start,
     })
+
+    # Phase 5: Iteration history summary + Runtime iterations
+    print("Generating iteration history summary before runtime iterations...")
+    history_prompt = gen_IterationHistorySummaryPrompt(
+        context=context,
+        code_gen_output_dir=output_dir,
+    )
+    steps_history = [
+        PipelineStep(
+            name="iteration_history_summary",
+            prompt=history_prompt.prompt(),
+            output_files=[history_prompt.output_file],
+        ),
+    ]
+    timings = await claude_run(claude_config, steps_history)
+    all_step_timings.extend(timings)
+
+    smaller_model_file = None
+    if code_gen_config.use_smaller_model_for_runtime:
+        print("Finding smaller model for runtime iterations...")
+        smaller_prompt = gen_FindSmallerModelPrompt(
+            context=context,
+            framework_code_trace_files=framework_code_trace_files,
+            code_port_plan_file=final_code_port_plan_file,
+        )
+        steps_smaller = [
+            PipelineStep(
+                name="find_smaller_model",
+                prompt=smaller_prompt.prompt(),
+                output_files=[smaller_prompt.output_file],
+            ),
+        ]
+        timings = await claude_run(claude_config, steps_smaller)
+        all_step_timings.extend(timings)
+        smaller_model_file = smaller_prompt.output_file
+
+    runtime_phase_results, runtime_timings = await run_runtime_iterations(
+        context, framework_code_trace_files, code_gen_config, claude_config,
+        final_code_port_plan_file, final_test_plan_file,
+        history_prompt.output_file, resume=resume,
+        smaller_model_file=smaller_model_file,
+        disable_new_feature=code_gen_config.disable_new_feature_for_runtime,
+    )
+    phase_results.extend(runtime_phase_results)
+    all_step_timings.extend(runtime_timings)
+
+    return phase_results, all_step_timings
+
+
+async def run_runtime_iterations(
+    context, framework_code_trace_files, code_gen_config, claude_config,
+    code_port_plan_file, test_plan_file, iteration_history_summary_file,
+    resume=False, start_iteration=None, smaller_model_file=None,
+    disable_new_feature=False,
+):
+    """Run the runtime iteration loop: apply patch, run benchmark, investigate.
+
+    This function can be called either as Phase 5 of the full pipeline
+    (from run_pipeline) or standalone (from run_runtime_iters.py).
+
+    Returns (phase_results, all_step_timings).
+    """
+    output_dir = code_gen_config.output_dir
+    max_runtime_iterations = code_gen_config.num_runtime_iterations
+    runtime_logs_dir = os.path.join(output_dir, RUNTIME_LOGS_DIR)
+    os.makedirs(runtime_logs_dir, exist_ok=True)
+
+    phase_start = time.time()
+    all_step_timings = []
+    runtime_succeeded = False
+    runtime_iterations = 0
+
+    if resume and _check_runtime_success(output_dir):
+        print("Resume: runtime iterations already succeeded (found {})".format(
+            RUNTIME_SUCCESS_FILE
+        ))
+        return [{
+            "name": "Runtime",
+            "iterations": 0,
+            "max_iterations": max_runtime_iterations,
+            "converged": True,
+            "duration": 0.0,
+        }], []
+
+    if start_iteration is not None:
+        iter_start = start_iteration
+    else:
+        iter_start = _find_latest_runtime_iteration(output_dir) + 1
+        if resume and iter_start > 1:
+            print("Resume: continuing runtime iterations from V{}".format(iter_start))
+
+    latest_patch = _find_latest_patch(output_dir)
+    if latest_patch is None:
+        print("ERROR: No code patch found in {}. Cannot run runtime iterations.".format(
+            output_dir
+        ))
+        return [{
+            "name": "Runtime",
+            "iterations": 0,
+            "max_iterations": max_runtime_iterations,
+            "converged": False,
+            "duration": time.time() - phase_start,
+        }], []
+
+    prev_patch_file = latest_patch
+    prev_summary_file = None
+
+    if iter_start > 1:
+        prev_summary = "{}_summary_V{}.txt".format(
+            RUNTIME_FILE_PREFIX, iter_start - 1
+        )
+        if os.path.isfile(os.path.join(output_dir, prev_summary)):
+            prev_summary_file = prev_summary
+
+    if not code_gen_config.target_run_command:
+        print("ERROR: No execution command found in target trace run_params.txt.")
+        print("  Ensure the single-trace analysis has a valid run_command.")
+        return [{
+            "name": "Runtime",
+            "iterations": 0,
+            "max_iterations": max_runtime_iterations,
+            "converged": False,
+            "duration": time.time() - phase_start,
+        }], []
+
+    print("\n" + "=" * 80)
+    print("PHASE 5: RUNTIME ITERATIONS")
+    print("=" * 80)
+    print("  Max iterations: {}".format(max_runtime_iterations))
+    print("  Starting from iteration: {}".format(iter_start))
+    print("  Initial patch: {}".format(prev_patch_file))
+    print("  Execution command: {}".format(code_gen_config.target_run_command[:120]))
+    print("  Runtime logs dir: {}".format(runtime_logs_dir))
+    print("=" * 80 + "\n")
+
+    for i in range(iter_start - 1, max_runtime_iterations):
+        iteration = i + 1
+        runtime_iterations = iteration
+
+        print("\n--- Runtime Iteration {} / {} ---".format(
+            iteration, max_runtime_iterations
+        ))
+        print("  Applying patch: {}".format(prev_patch_file))
+
+        # Step 1: Clear target repo + Apply patch + Compile
+        clear_cmd = {
+            "fn": lambda: clear_vllm_source_tree(code_gen_config.source_code_dir),
+            "fn_name": 'clear_vllm_source_tree("{}")'.format(
+                code_gen_config.source_code_dir
+            ),
+        }
+        apply_prompt = gen_ApplyCodeAndCompilePrompt(
+            context=context,
+            patch_file=prev_patch_file,
+            iteration=iteration,
+        )
+        steps_apply = [
+            PipelineStep(
+                name="clear_runtime_V{}".format(iteration),
+                prompt=clear_cmd,
+            ),
+            PipelineStep(
+                name="apply_compile_V{}".format(iteration),
+                prompt=apply_prompt.prompt(),
+                output_files=[apply_prompt.output_status_file],
+            ),
+        ]
+
+        timings = await claude_run(claude_config, steps_apply)
+        all_step_timings.extend(timings)
+
+        if not _check_apply_succeeded(output_dir, iteration):
+            print("Runtime iteration {}: Patch apply/compile FAILED, stopping.".format(
+                iteration
+            ))
+            break
+
+        # Step 2: Run benchmark and capture output
+        run_prompt = gen_RunAndLogPrompt(
+            context=context,
+            execution_command=code_gen_config.target_run_command,
+            runtime_logs_dir=runtime_logs_dir,
+            iteration=iteration,
+            gpu_wait_timeout_minutes=code_gen_config.gpu_wait_timeout_minutes,
+            smaller_model_file=smaller_model_file,
+            disable_new_feature=disable_new_feature,
+        )
+        steps_run = [
+            PipelineStep(
+                name="run_log_V{}".format(iteration),
+                prompt=run_prompt.prompt(),
+            ),
+        ]
+
+        timings = await claude_run(claude_config, steps_run)
+        all_step_timings.extend(timings)
+
+        # Step 3: Investigate runtime output
+        investigate_prompt = gen_InvestigateRuntimeOutputAndFixCodePrompt(
+            context=context,
+            framework_code_trace_files=framework_code_trace_files,
+            code_port_plan_file=code_port_plan_file,
+            test_plan_file=test_plan_file,
+            runtime_logs_dir=runtime_logs_dir,
+            iteration=iteration,
+            prev_patch_file=prev_patch_file,
+            prev_summary_file=prev_summary_file,
+            iteration_history_summary_file=iteration_history_summary_file,
+            smaller_model_file=smaller_model_file,
+        )
+        steps_investigate = [
+            PipelineStep(
+                name="investigate_runtime_V{}".format(iteration),
+                prompt=investigate_prompt.prompt(),
+            ),
+        ]
+
+        timings = await claude_run(claude_config, steps_investigate)
+        all_step_timings.extend(timings)
+
+        # Check if the run succeeded
+        if _check_runtime_success(output_dir):
+            print("\nRuntime iteration {}: SUCCESS! Performance results written to {}".format(
+                iteration, RUNTIME_SUCCESS_FILE
+            ))
+            runtime_succeeded = True
+            break
+
+        # Check if a new fixed patch was generated
+        new_patch = "{}_V{}.patch".format(RUNTIME_FILE_PREFIX, iteration)
+        new_summary = "{}_summary_V{}.txt".format(RUNTIME_FILE_PREFIX, iteration)
+        if not os.path.isfile(os.path.join(output_dir, new_patch)):
+            print("Runtime iteration {}: No new patch generated, stopping.".format(
+                iteration
+            ))
+            break
+
+        prev_patch_file = new_patch
+        prev_summary_file = new_summary
+        print("Runtime iteration {}: Errors fixed, new patch: {}".format(
+            iteration, new_patch
+        ))
+
+    phase_results = [{
+        "name": "Runtime",
+        "iterations": runtime_iterations,
+        "max_iterations": max_runtime_iterations,
+        "converged": runtime_succeeded,
+        "duration": time.time() - phase_start,
+    }]
 
     return phase_results, all_step_timings
 
