@@ -752,7 +752,7 @@ async def run_runtime_iterations(
     print("  Max iterations: {}".format(max_runtime_iterations))
     print("  Starting from iteration: {}".format(iter_start))
     print("  Initial patch: {}".format(prev_patch_file))
-    print("  Execution command: {}".format(code_gen_config.target_run_command[:120]))
+    print("  Execution command: {}".format(code_gen_config.target_run_command))
     print("  Runtime logs dir: {}".format(runtime_logs_dir))
     print("=" * 80 + "\n")
 

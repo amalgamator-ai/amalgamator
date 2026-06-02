@@ -147,7 +147,7 @@ async def run_standalone_runtime_iterations(code_gen_config, claude_config, resu
     print("  Test plan: {}".format(test_plan_file))
     print("  Starting iteration: {}".format(start_iteration))
     print("  Execution command: {}".format(
-        code_gen_config.target_run_command[:120]
+        code_gen_config.target_run_command
     ))
     print("=" * 80 + "\n")
 
