@@ -31,6 +31,7 @@ from auto_code_gen.code_gen_prompts import (
     gen_InvestigateRuntimeOutputAndFixCodePrompt,
     gen_IterationHistorySummaryPrompt,
     gen_FindSmallerModelPrompt,
+    gen_RunLMEvalPrompt,
     CODE_PORT_PLAN_FILE_PREFIX,
     CODE_GEN_FILE_PREFIX,
     TEST_PLAN_PREFIX,
@@ -125,6 +126,17 @@ def _check_apply_succeeded(output_dir, iteration):
 def _check_runtime_success(output_dir):
     """Check if runtime iteration resulted in a successful benchmark run."""
     return os.path.isfile(os.path.join(output_dir, RUNTIME_SUCCESS_FILE))
+
+
+def _check_run_succeeded(runtime_logs_dir, iteration):
+    """Check if the RunAndLog patched run completed successfully."""
+    status_file = os.path.join(
+        runtime_logs_dir, "runtime_run_status_V{}.txt".format(iteration)
+    )
+    if not os.path.isfile(status_file):
+        return False
+    with open(status_file) as f:
+        return f.read().strip() == "COMPLETED"
 
 
 def _gen_code_trace_steps(context, code_gen_config):
@@ -640,22 +652,29 @@ async def run_pipeline(code_gen_config, claude_config, resume=False):
 
     smaller_model_file = None
     if code_gen_config.use_smaller_model_for_runtime:
-        print("Finding smaller model for runtime iterations...")
-        smaller_prompt = gen_FindSmallerModelPrompt(
-            context=context,
-            framework_code_trace_files=framework_code_trace_files,
-            code_port_plan_file=final_code_port_plan_file,
-        )
-        steps_smaller = [
-            PipelineStep(
-                name="find_smaller_model",
-                prompt=smaller_prompt.prompt(),
-                output_files=[smaller_prompt.output_file],
-            ),
-        ]
-        timings = await claude_run(claude_config, steps_smaller)
-        all_step_timings.extend(timings)
-        smaller_model_file = smaller_prompt.output_file
+        smaller_model_path = os.path.join(output_dir, RUNTIME_SMALLER_MODEL_FILE)
+        if os.path.isfile(smaller_model_path) and os.path.getsize(smaller_model_path) > 0:
+            print("Reusing existing smaller model selection ({})".format(
+                RUNTIME_SMALLER_MODEL_FILE
+            ))
+            smaller_model_file = RUNTIME_SMALLER_MODEL_FILE
+        else:
+            print("Finding smaller model for runtime iterations...")
+            smaller_prompt = gen_FindSmallerModelPrompt(
+                context=context,
+                framework_code_trace_files=framework_code_trace_files,
+                code_port_plan_file=final_code_port_plan_file,
+            )
+            steps_smaller = [
+                PipelineStep(
+                    name="find_smaller_model",
+                    prompt=smaller_prompt.prompt(),
+                    output_files=[smaller_prompt.output_file],
+                ),
+            ]
+            timings = await claude_run(claude_config, steps_smaller)
+            all_step_timings.extend(timings)
+            smaller_model_file = smaller_prompt.output_file
 
     runtime_phase_results, runtime_timings = await run_runtime_iterations(
         context, framework_code_trace_files, code_gen_config, claude_config,
@@ -818,6 +837,33 @@ async def run_runtime_iterations(
         timings = await claude_run(claude_config, steps_run)
         all_step_timings.extend(timings)
 
+        # Step 2.5: Run lm_eval correctness check (only when patched run succeeded and feature is enabled)
+        lm_eval_result_file = None
+        if (not disable_new_feature
+                and _check_run_succeeded(runtime_logs_dir, iteration)):
+            print("Runtime iteration {}: Patched run succeeded, running lm_eval correctness check...".format(
+                iteration
+            ))
+            lm_eval_prompt = gen_RunLMEvalPrompt(
+                context=context,
+                execution_command=code_gen_config.target_run_command,
+                runtime_logs_dir=runtime_logs_dir,
+                iteration=iteration,
+                gpu_wait_timeout_minutes=code_gen_config.gpu_wait_timeout_minutes,
+                smaller_model_file=smaller_model_file,
+            )
+            steps_lm_eval = [
+                PipelineStep(
+                    name="lm_eval_V{}".format(iteration),
+                    prompt=lm_eval_prompt.prompt(),
+                    output_files=[lm_eval_prompt.output_file],
+                ),
+            ]
+
+            timings = await claude_run(claude_config, steps_lm_eval)
+            all_step_timings.extend(timings)
+            lm_eval_result_file = lm_eval_prompt.output_file
+
         # Step 3: Investigate runtime output
         investigate_prompt = gen_InvestigateRuntimeOutputAndFixCodePrompt(
             context=context,
@@ -830,6 +876,7 @@ async def run_runtime_iterations(
             prev_summary_file=prev_summary_file,
             iteration_history_summary_file=iteration_history_summary_file,
             smaller_model_file=smaller_model_file,
+            lm_eval_result_file=lm_eval_result_file,
         )
         steps_investigate = [
             PipelineStep(
@@ -843,7 +890,7 @@ async def run_runtime_iterations(
 
         # Check if the run succeeded
         if _check_runtime_success(output_dir):
-            print("\nRuntime iteration {}: SUCCESS! Performance results written to {}".format(
+            print("\nRuntime iteration {}: SUCCESS! Results written to {}".format(
                 iteration, RUNTIME_SUCCESS_FILE
             ))
             runtime_succeeded = True

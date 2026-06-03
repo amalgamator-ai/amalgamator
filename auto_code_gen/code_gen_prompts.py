@@ -1140,6 +1140,7 @@ Step 4: Write Run Status
 - {runtime_logs_dir}/runtime_run_V{iteration}_combined.log
 - {runtime_logs_dir}/runtime_run_V{iteration}_exit_code.txt
 - {runtime_logs_dir}/runtime_run_status_V{iteration}.txt
+{baseline_output_files}
 </output>
 
 """
@@ -1195,8 +1196,46 @@ Step 4: Write Run Status
                 "- If found, the new feature is confirmed active — good.\n"
                 "- If NOT found, print a WARNING that the new feature may not be running. "
                 "Write \"FEATURE_NOT_VERIFIED\" to {runtime_logs_dir}/runtime_run_status_V{iteration}.txt "
-                "and include details about what was searched for and what was found instead."
+                "and include details about what was searched for and what was found instead.\n"
+                "\n"
+                "Step 6: Baseline Comparison Run (only if the patched run in Step 3 succeeded with exit code 0 AND Step 5 confirmed the feature is enabled)\n"
+                "- Read the latest code gen or runtime summary file in <output_dir> to find the environment variable "
+                "name that disables the new feature (e.g., VLLM_DISABLE_AUTO_PERF_PLAN_<plan_step>).\n"
+                "- Re-run the SAME adjusted command from Step 3, but with the disable env var set to \"1\" in the "
+                "command prefix. This runs the original code paths WITHOUT the new feature, to establish a baseline.\n"
+                "- Capture output to:\n"
+                "    - {runtime_logs_dir}/runtime_baseline_V{iteration}_stdout.log\n"
+                "    - {runtime_logs_dir}/runtime_baseline_V{iteration}_stderr.log\n"
+                "    - {runtime_logs_dir}/runtime_baseline_V{iteration}_combined.log\n"
+                "    - {runtime_logs_dir}/runtime_baseline_V{iteration}_exit_code.txt\n"
+                "  If --output-json is present, set it to {runtime_logs_dir}/runtime_baseline_bench_result_V{iteration}.json\n"
+                "- Verify the baseline run log contains the \"[AutoPerf]...is DISABLED (env override)\" message.\n"
+                "- The baseline run MUST succeed (exit code 0), since it runs the original unmodified code paths. "
+                "If it fails:\n"
+                "    - This indicates something is wrong with the patch's disable mechanism or the patch broke original code paths.\n"
+                "    - Analyze the error, document it, and note it in the status file.\n"
+                "    - Fix the issue in <target_source_code_dir> and retry the baseline run until it succeeds.\n"
+                "- Once the baseline run succeeds, extract performance results from BOTH runs:\n"
+                "    - Patched run (Step 3): throughput, TTFT, TPOT\n"
+                "    - Baseline run (Step 6): throughput, TTFT, TPOT\n"
+                "- Write the comparison to {runtime_logs_dir}/runtime_perf_comparison_V{iteration}.txt:\n"
+                "    - Patched results (feature ENABLED)\n"
+                "    - Baseline results (feature DISABLED)\n"
+                "    - Delta and percentage change for each metric (TTFT, TPOT, throughput)\n"
+                "    - Analysis: whether the patch provides the expected performance improvement\n"
+                "    - Clear statement of whether the patched version is faster or slower than baseline, and by how much"
             )
+
+        if self.disable_new_feature:
+            baseline_output_files = ""
+        else:
+            baseline_output_files = (
+                "- {runtime_logs_dir}/runtime_baseline_V{iteration}_stdout.log\n"
+                "- {runtime_logs_dir}/runtime_baseline_V{iteration}_stderr.log\n"
+                "- {runtime_logs_dir}/runtime_baseline_V{iteration}_combined.log\n"
+                "- {runtime_logs_dir}/runtime_baseline_V{iteration}_exit_code.txt\n"
+                "- {runtime_logs_dir}/runtime_perf_comparison_V{iteration}.txt"
+            ).format(runtime_logs_dir=self.runtime_logs_dir, iteration=self.iteration)
 
         return self.prompt_template.format(
             context=self.context,
@@ -1210,6 +1249,7 @@ Step 4: Write Run Status
             command_model_adjustments=command_model_adjustments,
             feature_toggle_env_var=feature_toggle_env_var,
             feature_verification_step=feature_verification_step,
+            baseline_output_files=baseline_output_files,
         )
 
 
@@ -1233,6 +1273,167 @@ def gen_RunAndLogPrompt(
     )
 
 
+RUNTIME_LM_EVAL_FILE_PREFIX = "runtime_lm_eval"
+
+
+@dataclass
+class RunLMEvalPrompt:
+    context: str
+    execution_command: str
+    runtime_logs_dir: str
+    iteration: int
+    gpu_wait_timeout_minutes: int
+    smaller_model_file: Optional[str]
+    output_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<execution_command>
+{execution_command}
+</execution_command>
+<runtime_logs_dir>
+{runtime_logs_dir}
+</runtime_logs_dir>
+<gpu_wait_timeout_minutes>
+{gpu_wait_timeout_minutes}
+</gpu_wait_timeout_minutes>
+{smaller_model_section}
+</definitions>
+
+<instructions>
+The goal of this task is to run lm_eval correctness checks on the patched "target" framework with the new feature both ENABLED and DISABLED, and compare the results (runtime iteration {iteration}).
+
+Follow these steps precisely:
+
+Step 1: Wait for GPUs to Become Available
+- Determine the number of GPUs needed (K):
+{gpu_count_instructions}
+- Run `nvidia-smi` and analyze the output for ALL GPUs on the machine.
+- Find K GPUs that are free — i.e. not running other significant workloads. Small monitoring processes are acceptable. The free GPUs do NOT need to be consecutive.
+- If fewer than K GPUs are free:
+    - Print a status message listing the busy GPUs and their conflicting processes.
+    - Sleep for 60 seconds, then re-check.
+    - Track elapsed wait time. If the total wait exceeds <gpu_wait_timeout_minutes> minutes:
+        - Print "ERROR: Not enough free GPUs after <gpu_wait_timeout_minutes> minutes, giving up."
+        - Write "GPUS_TIMEOUT" to {runtime_logs_dir}/{output_file}
+        - STOP immediately. Do NOT proceed.
+    - Each poll iteration, print the current wait time and remaining timeout.
+- Once K free GPUs are found, record their GPU IDs (e.g. 2,5,6).
+
+Step 2: Determine Model and Parameters
+- Determine the model to use:
+{model_selection_instructions}
+- Determine tensor_parallel_size = K (number of GPUs).
+- Determine max_model_len: use the --max-model-len value from <execution_command>. If this value is very large and may cause OOM for lm_eval, reduce it to a reasonable value (e.g., 16384 or 32768) that fits in available VRAM while being sufficient for gsm8k 5-shot evaluation.
+
+Step 3: Run lm_eval with Feature ENABLED
+- Read the latest code gen or runtime summary file in <output_dir> to find the environment variable name that disables the new feature (e.g., VLLM_DISABLE_AUTO_PERF_PLAN_<plan_step>).
+- Ensure this env var is NOT set (or unset it) so the new feature is active.
+- Construct and run the lm_eval command:
+    ```
+    CUDA_VISIBLE_DEVICES=<free_gpu_ids> lm_eval --model vllm --model_args pretrained=<model>,max_model_len=<len>,tensor_parallel_size=<K> --trust_remote_code --tasks gsm8k --num_fewshot 5 --batch_size auto
+    ```
+- Capture all output to {runtime_logs_dir}/runtime_lm_eval_V{iteration}_enabled_stdout.log and stderr to {runtime_logs_dir}/runtime_lm_eval_V{iteration}_enabled_stderr.log
+- Record exit code to {runtime_logs_dir}/runtime_lm_eval_V{iteration}_enabled_exit_code.txt
+- Extract the exact_match scores (flexible-extract and strict-match) from the output.
+
+Step 4: Run lm_eval with Feature DISABLED
+- Set the disable env var to "1" in the command prefix to disable the new feature.
+- Run the same lm_eval command with the disable env var:
+    ```
+    <DISABLE_ENV_VAR>=1 CUDA_VISIBLE_DEVICES=<free_gpu_ids> lm_eval --model vllm --model_args pretrained=<model>,max_model_len=<len>,tensor_parallel_size=<K> --trust_remote_code --tasks gsm8k --num_fewshot 5 --batch_size auto
+    ```
+- Capture output to {runtime_logs_dir}/runtime_lm_eval_V{iteration}_disabled_stdout.log and stderr to {runtime_logs_dir}/runtime_lm_eval_V{iteration}_disabled_stderr.log
+- Record exit code to {runtime_logs_dir}/runtime_lm_eval_V{iteration}_disabled_exit_code.txt
+- Extract the exact_match scores from the output.
+
+Step 5: Compare and Report
+- Compare the exact_match scores from both runs:
+    - Feature ENABLED: flexible-extract exact_match, strict-match exact_match
+    - Feature DISABLED (baseline): flexible-extract exact_match, strict-match exact_match
+    - Delta for each metric (enabled - disabled)
+- Analyze the results:
+    - If the enabled scores are equal or very close to disabled scores (within ±0.005), correctness is preserved — GOOD.
+    - If the enabled scores are significantly LOWER than disabled scores (drop > 0.01), this indicates a correctness regression — the patch may be introducing errors. Document this clearly.
+    - If the enabled scores are HIGHER than disabled scores, this is unexpected but acceptable — document it.
+    - If either run failed (non-zero exit code), document the error and which run failed.
+- Write the full comparison to {runtime_logs_dir}/{output_file}:
+    - Feature ENABLED results: exact_match scores, exit code
+    - Feature DISABLED results: exact_match scores, exit code
+    - Delta and analysis
+    - Clear PASS/FAIL verdict: PASS if correctness is preserved, FAIL if significant degradation detected
+    - If FAIL: detailed description of the degradation for the investigation step to fix
+</instructions>
+
+<output>
+- {runtime_logs_dir}/{output_file}
+- {runtime_logs_dir}/runtime_lm_eval_V{iteration}_enabled_stdout.log
+- {runtime_logs_dir}/runtime_lm_eval_V{iteration}_enabled_stderr.log
+- {runtime_logs_dir}/runtime_lm_eval_V{iteration}_enabled_exit_code.txt
+- {runtime_logs_dir}/runtime_lm_eval_V{iteration}_disabled_stdout.log
+- {runtime_logs_dir}/runtime_lm_eval_V{iteration}_disabled_stderr.log
+- {runtime_logs_dir}/runtime_lm_eval_V{iteration}_disabled_exit_code.txt
+</output>
+
+"""
+
+    def prompt(self):
+        if self.smaller_model_file:
+            smaller_section = (
+                "<smaller_model_file>\n"
+                "{}\n"
+                "</smaller_model_file>".format(self.smaller_model_file)
+            )
+            gpu_count_instructions = (
+                "    - Read SMALLER_MODEL_NUM_GPUS from <smaller_model_file> in <output_dir> — that is K."
+            )
+            model_selection_instructions = (
+                "    - Read SMALLER_MODEL_NAME from <smaller_model_file> in <output_dir> — use that as the model."
+            )
+        else:
+            smaller_section = ""
+            gpu_count_instructions = (
+                "    - K is the tensor-parallel-size from <execution_command> "
+                "(or the count of GPUs in CUDA_VISIBLE_DEVICES)."
+            )
+            model_selection_instructions = (
+                "    - Use <model> (the model from the context)."
+            )
+
+        return self.prompt_template.format(
+            context=self.context,
+            execution_command=self.execution_command,
+            runtime_logs_dir=self.runtime_logs_dir,
+            iteration=self.iteration,
+            gpu_wait_timeout_minutes=self.gpu_wait_timeout_minutes,
+            smaller_model_section=smaller_section,
+            gpu_count_instructions=gpu_count_instructions,
+            model_selection_instructions=model_selection_instructions,
+            output_file=self.output_file,
+        )
+
+
+def gen_RunLMEvalPrompt(
+    context: str,
+    execution_command: str,
+    runtime_logs_dir: str,
+    iteration: int,
+    gpu_wait_timeout_minutes: int = 30,
+    smaller_model_file: Optional[str] = None,
+):
+    return RunLMEvalPrompt(
+        context=context,
+        execution_command=execution_command,
+        runtime_logs_dir=runtime_logs_dir,
+        iteration=iteration,
+        gpu_wait_timeout_minutes=gpu_wait_timeout_minutes,
+        smaller_model_file=smaller_model_file,
+        output_file="{}_V{}.txt".format(RUNTIME_LM_EVAL_FILE_PREFIX, iteration),
+    )
+
+
 @dataclass
 class InvestigateRuntimeOutputAndFixCodePrompt:
     context: str
@@ -1245,6 +1446,7 @@ class InvestigateRuntimeOutputAndFixCodePrompt:
     prev_summary_file: Optional[str]
     iteration_history_summary_file: str
     smaller_model_file: Optional[str]
+    lm_eval_result_file: Optional[str]
     output_patch_file: str
     output_summary_file: str
     success_result_file: str
@@ -1274,6 +1476,7 @@ class InvestigateRuntimeOutputAndFixCodePrompt:
 {iteration_history_summary_file}
 </iteration_history_summary_file>
 {smaller_model_section}
+{lm_eval_section}
 </definitions>
 
 <definition_explanations>
@@ -1284,6 +1487,7 @@ class InvestigateRuntimeOutputAndFixCodePrompt:
 - <prev_patch_file> is the code patch that was applied for this runtime execution.
 - <iteration_history_summary_file> is a comprehensive summary of ALL previous code generation phases (code traces, port plan, test plan, code gen iterations) and any previous runtime iterations. Read it first to get full context before analyzing the current runtime output.
 {smaller_model_explanation}
+{lm_eval_explanation}
 </definition_explanations>
 
 <instructions>
@@ -1304,12 +1508,17 @@ Step 2: Read and Analyze Runtime Output
     - runtime_run_status_V{iteration}.txt (run status: COMPLETED, FAILED, GPUS_TIMEOUT, or FEATURE_NOT_VERIFIED)
 - Determine whether the execution SUCCEEDED or FAILED:
     - SUCCEEDED means ALL of the following:
-        - Process exited with code 0
-        - Benchmark completed fully without errors
-        - Performance results (throughput, latency, tokens/s) are present in the output
-        - No error tracebacks, crashes, segmentation faults, or assertion failures in stderr
+        - The benchmark run (RunAndLog) succeeded:
+            - Process exited with code 0
+            - Benchmark completed fully without errors
+            - Performance results (throughput, latency, tokens/s) are present in the output
+            - No error tracebacks, crashes, segmentation faults, or assertion failures in stderr
+        - The lm_eval correctness check (if <lm_eval_result_file> is provided) passed:
+            - Read <lm_eval_result_file> from <runtime_logs_dir>
+            - The verdict must be PASS (no significant correctness degradation)
+            - If the lm_eval verdict is FAIL, the overall result is FAILED even if the benchmark run succeeded
     - FAILED means ANY of the following:
-        - Non-zero exit code
+        - Non-zero exit code from the benchmark run
         - Error tracebacks or Python exceptions
         - Segmentation faults, CUDA errors, or OOM errors
         - Process was killed (SIGKILL, SIGTERM) or timed out
@@ -1317,18 +1526,28 @@ Step 2: Read and Analyze Runtime Output
         - Any runtime error that prevented normal completion
         - runtime_run_status file contains GPUS_TIMEOUT (GPUs were not available — this is NOT a code error, note it in the summary and do NOT attempt code fixes)
         - runtime_run_status file contains FEATURE_NOT_VERIFIED (the new feature startup log was not detected — investigate why the feature is not activating)
+        - lm_eval verdict is FAIL (correctness regression detected — the patch must be fixed to preserve correctness)
 
-Step 3A: If SUCCEEDED
-- Extract the performance results from the output, including:
+Step 3A: If SUCCEEDED (both benchmark AND lm_eval passed)
+- Extract the performance results from the benchmark output, including:
     - Throughput (requests/s, tokens/s)
     - TTFT (Time To First Token) — extract directly if reported, or calculate from the output data (e.g., time from request submission to first generated token)
     - TPOT (Time Per Output Token) — extract directly if reported, or calculate as: (total_generation_time - TTFT) / (output_tokens - 1)
     - Latency percentiles (p50, p90, p99) if available
     - Total generation time
     - Any other relevant metrics
-- Write a comprehensive performance summary to <output_dir>/{success_result_file}:
-    - Raw performance numbers with units
-    - TTFT and TPOT values with calculation methodology
+- Also read the baseline performance comparison file from <runtime_logs_dir>/runtime_perf_comparison_V{iteration}.txt (if it exists). This contains side-by-side patched vs baseline results from the RunAndLog step.
+- Also read the lm_eval results from <lm_eval_result_file> in <runtime_logs_dir> (if it exists). This contains correctness scores for both feature enabled and disabled.
+- Write a comprehensive summary to <output_dir>/{success_result_file}:
+    - Performance results:
+        - Patched run performance: throughput, TTFT, TPOT with units
+        - Baseline run performance (from comparison file): throughput, TTFT, TPOT with units
+        - Performance delta: absolute and percentage change for each metric
+        - Clear statement of whether the patch delivers the expected improvement
+    - Correctness results (from lm_eval):
+        - Feature ENABLED: gsm8k exact_match scores (flexible-extract, strict-match)
+        - Feature DISABLED: gsm8k exact_match scores (flexible-extract, strict-match)
+        - Delta and analysis of correctness impact
     - Execution context: model=<model>, gpu=<gpu_type>, ISL=<isl>, OSL=<osl>, batch_size=<batch_size>
     - Number of runtime iterations required to reach success
     - Summary of all issues fixed across runtime iterations (if any)
@@ -1414,6 +1633,22 @@ On FAILURE:
             smaller_section = ""
             smaller_explanation = ""
 
+        if self.lm_eval_result_file:
+            lm_eval_section = (
+                "<lm_eval_result_file>\n"
+                "{}\n"
+                "</lm_eval_result_file>".format(self.lm_eval_result_file)
+            )
+            lm_eval_explanation = (
+                "- <lm_eval_result_file> contains lm_eval (gsm8k) correctness results comparing "
+                "the new feature ENABLED vs DISABLED. Read it from <runtime_logs_dir> to check if "
+                "there is a correctness regression. If the verdict is FAIL, the patch has a correctness "
+                "issue that must be investigated and fixed."
+            )
+        else:
+            lm_eval_section = ""
+            lm_eval_explanation = ""
+
         return self.prompt_template.format(
             context=self.context,
             prev_iteration_section=_prev_iteration_section(
@@ -1428,6 +1663,8 @@ On FAILURE:
             iteration_history_summary_file=self.iteration_history_summary_file,
             smaller_model_section=smaller_section,
             smaller_model_explanation=smaller_explanation,
+            lm_eval_section=lm_eval_section,
+            lm_eval_explanation=lm_eval_explanation,
             output_patch_file=self.output_patch_file,
             output_summary_file=self.output_summary_file,
             success_result_file=self.success_result_file,
@@ -1446,6 +1683,7 @@ def gen_InvestigateRuntimeOutputAndFixCodePrompt(
     prev_summary_file: Optional[str],
     iteration_history_summary_file: str,
     smaller_model_file: Optional[str] = None,
+    lm_eval_result_file: Optional[str] = None,
 ):
     assert len(framework_code_trace_files) == 2
 
@@ -1460,6 +1698,7 @@ def gen_InvestigateRuntimeOutputAndFixCodePrompt(
         prev_summary_file=prev_summary_file,
         iteration_history_summary_file=iteration_history_summary_file,
         smaller_model_file=smaller_model_file,
+        lm_eval_result_file=lm_eval_result_file,
         output_patch_file="{}_V{}.patch".format(RUNTIME_FILE_PREFIX, iteration),
         output_summary_file="{}_summary_V{}.txt".format(RUNTIME_FILE_PREFIX, iteration),
         success_result_file=RUNTIME_SUCCESS_FILE,
@@ -1482,11 +1721,16 @@ class IterationHistorySummaryPrompt:
 </definitions>
 
 <instructions>
-The goal of this task is to read and analyze ALL previous code generation iteration results to build a comprehensive understanding of the work done so far. This is required before starting runtime iterations as a standalone process.
+The goal of this task is to read and analyze ALL previous code generation iteration results to build a comprehensive understanding of the work done so far. This is required before starting runtime iterations.
 
 Follow these steps:
 
-Step 1: Read All Generated Artifacts
+Step 0: Check for Existing Summary
+- Check if <output_dir>/{output_file} already exists from a previous run.
+- If it exists, read it first — it contains a summary of artifacts that were already analyzed in a previous run. Use it as a starting point: you do NOT need to re-read artifacts that are already covered by this summary. Focus on reading only NEW or UPDATED artifacts that were created after the previous summary was written.
+- If it does not exist, proceed to read all artifacts from scratch.
+
+Step 1: Read Generated Artifacts
 - List all files in <code_gen_output_dir> and its subdirectories.
 - Read and analyze each file in the following order of phases:
     1. Framework code traces (*_code_trace.txt) — understand the active code paths in both "source" and "target" frameworks for <tested_execution>.

@@ -173,8 +173,8 @@ async def run_standalone_runtime_iterations(code_gen_config, claude_config, resu
     smaller_model_file = None
     if code_gen_config.use_smaller_model_for_runtime:
         smaller_model_path = os.path.join(output_dir, RUNTIME_SMALLER_MODEL_FILE)
-        if resume and os.path.isfile(smaller_model_path):
-            print("Resume: reusing existing smaller model selection ({})".format(
+        if os.path.isfile(smaller_model_path) and os.path.getsize(smaller_model_path) > 0:
+            print("Reusing existing smaller model selection ({})".format(
                 RUNTIME_SMALLER_MODEL_FILE
             ))
             smaller_model_file = RUNTIME_SMALLER_MODEL_FILE
