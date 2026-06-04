@@ -41,6 +41,8 @@ LLM framework — see [`configs/code_gen_config_example.json`](configs/code_gen_
 
 Bug fix — see [`configs/bug_fix_config_example.json`](configs/bug_fix_config_example.json).
 
+Bug fix (fast — skips all reviews, uses combined plan, normal thinking mode) — see [`configs/bug_fix_config_fast_example.json`](configs/bug_fix_config_fast_example.json).
+
 ### 2. Run
 
 ```bash

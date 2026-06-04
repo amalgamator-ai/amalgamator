@@ -37,9 +37,9 @@ details in the bottom panel:
 </p>
 
 An example of single trace analysis results is here:
-[vllm_kimi_v0.16.0/analyze](https://github.com/neuralmagic/ai_auto_perf_analysis/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze)
+[vllm_kimi_v0.16.0/analyze](https://github.com/neuralmagic/ai_auto_analyze/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze)
 
-Here is a snippet from the [v0.16.0 median transformer block](https://github.com/neuralmagic/ai_auto_perf_analysis/blob/main/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze/median_block.txt) showing the high-level to
+Here is a snippet from the [v0.16.0 median transformer block](https://github.com/neuralmagic/ai_auto_analyze/blob/main/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze/median_block.txt) showing the high-level to
 low-level correlation (Kimi-K2.5 MoE decoder layer, 29 operations across 2 CUDA streams):
 
 <sub>
@@ -227,7 +227,7 @@ After the analysis completes, the output directory contains:
 | `run_originals/` | Copies of the original trace file, run command, and run log |
 
 An example of these output files is available at:
-[vllm_kimi_v0.16.0/analyze](https://github.com/neuralmagic/ai_auto_perf_analysis/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze)
+[vllm_kimi_v0.16.0/analyze](https://github.com/neuralmagic/ai_auto_analyze/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze)
 
 ## Optional: Enable Performance Analysis
 

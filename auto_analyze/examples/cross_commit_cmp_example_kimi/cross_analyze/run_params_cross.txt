@@ -9,16 +9,16 @@ output_size_range: 1024
 target_trace_id: 0
 target_framework: vllm
 target_commit_id: 8f89381fc6b2d54591a7a560e20ee5211ce1ac33
-output_dir: /home/alexm-redhat/code/ai_auto_perf_analysis/auto_analyze/examples/cross_commit_cmp_example_kimi/cross_analyze
+output_dir: /home/alexm-redhat/code/ai_auto_analyze/auto_analyze/examples/cross_commit_cmp_example_kimi/cross_analyze
 num_traces: 2
 
 trace_0 (TARGET):
   framework_name: vllm
   commit_id: 8f89381fc6b2d54591a7a560e20ee5211ce1ac33
   framework_source_code: /home/alexm-redhat/code/vllm
-  result_dir: /home/alexm-redhat/code/ai_auto_perf_analysis/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_latest/analyze
+  result_dir: /home/alexm-redhat/code/ai_auto_analyze/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_latest/analyze
 trace_1:
   framework_name: vllm
   commit_id: 89a77b10846fd96273cce78d86d2556ea582d26e
   framework_source_code: /home/alexm-redhat/code/vllm
-  result_dir: /home/alexm-redhat/code/ai_auto_perf_analysis/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze
+  result_dir: /home/alexm-redhat/code/ai_auto_analyze/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze

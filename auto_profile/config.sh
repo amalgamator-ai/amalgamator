@@ -38,7 +38,7 @@ H200="h200"
 DOCKER_PORT=30000
 DOCKER_HF_HUB_CACHE="/app/hf_hub_cache"
 DOCKER_HF_HOME="/app/hf_home"
-DOCKER_BASE_DIR="/app/ai_auto_perf_analysis"
+DOCKER_BASE_DIR="/app/ai_auto_analyze"
 
 # Framework names
 SGL="sgl"

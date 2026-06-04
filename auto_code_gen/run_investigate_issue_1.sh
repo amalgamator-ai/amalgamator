@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/../auto_profile/utils.sh"
 
-PRS_DIR="/home/alexm-redhat/code/ai_auto_perf_analysis/auto_code_gen/prs"
+PRS_DIR="/home/alexm-redhat/code/ai_auto_analyze/auto_code_gen/prs"
 
 # Run
 source "$(dirname "$0")/../env.sh"

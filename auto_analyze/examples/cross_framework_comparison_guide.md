@@ -18,7 +18,7 @@ analysis results from different frameworks running the same model, it:
    to port optimizations from the faster framework
 
 This guide walks through the complete process using a concrete example:
-[comparing vLLM (v0.19.2, May 13, 2026) against SGLang (May 5, 2026)](https://github.com/neuralmagic/ai_auto_perf_analysis/tree/main/auto_analyze/examples/cross_framework_cmp_example_kimi)
+[comparing vLLM (v0.19.2, May 13, 2026) against SGLang (May 5, 2026)](https://github.com/neuralmagic/ai_auto_analyze/tree/main/auto_analyze/examples/cross_framework_cmp_example_kimi)
 running Kimi-K2.5-NVFP4 on 8xB200 GPUs in a low-latency pure-decode configuration
 (BS=1, ISL=4, OSL=1024).
 

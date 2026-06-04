@@ -27,15 +27,15 @@ Detailed guides with copy-pasteable commands are in `auto_analyze/examples/`:
 
 | Guide | Description |
 |-------|-------------|
-| [Single-Trace Analysis and Annotation](https://github.com/neuralmagic/ai_auto_perf_analysis/blob/main/auto_analyze/examples/single_trace_analysis_and_annotation_guide.md) | Analyze a GPU trace and produce an annotated Perfetto visualization |
-| [Cross-Commit Comparison](https://github.com/neuralmagic/ai_auto_perf_analysis/blob/main/auto_analyze/examples/cross_commit_comparison_guide.md) | Compare two commits of the same framework |
-| [Cross-Framework Comparison](https://github.com/neuralmagic/ai_auto_perf_analysis/blob/main/auto_analyze/examples/cross_framework_comparison_guide.md) | Compare different frameworks (e.g., vLLM vs SGLang) |
-| [vLLM Trace Generation](https://github.com/neuralmagic/ai_auto_perf_analysis/blob/main/auto_analyze/examples/vllm_generate_trace_example.md) | How to capture PyTorch profiling traces with vLLM |
+| [Single-Trace Analysis and Annotation](https://github.com/neuralmagic/ai_auto_analyze/blob/main/auto_analyze/examples/single_trace_analysis_and_annotation_guide.md) | Analyze a GPU trace and produce an annotated Perfetto visualization |
+| [Cross-Commit Comparison](https://github.com/neuralmagic/ai_auto_analyze/blob/main/auto_analyze/examples/cross_commit_comparison_guide.md) | Compare two commits of the same framework |
+| [Cross-Framework Comparison](https://github.com/neuralmagic/ai_auto_analyze/blob/main/auto_analyze/examples/cross_framework_comparison_guide.md) | Compare different frameworks (e.g., vLLM vs SGLang) |
+| [vLLM Trace Generation](https://github.com/neuralmagic/ai_auto_analyze/blob/main/auto_analyze/examples/vllm_generate_trace_example.md) | How to capture PyTorch profiling traces with vLLM |
 
 Worked examples with full analysis results:
 
-- [Cross-commit example (Kimi-K2.5)](https://github.com/neuralmagic/ai_auto_perf_analysis/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi) — vLLM `main` vs `v0.16.0` on 8xB200, showing a 21.3% improvement from specialized CUDA kernels
-- [Cross-framework example (Kimi-K2.5)](https://github.com/neuralmagic/ai_auto_perf_analysis/tree/main/auto_analyze/examples/cross_framework_cmp_example_kimi) — vLLM vs SGLang on 8xB200, showing an 8.6% gap driven by MoE dual-stream design differences
+- [Cross-commit example (Kimi-K2.5)](https://github.com/neuralmagic/ai_auto_analyze/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi) — vLLM `main` vs `v0.16.0` on 8xB200, showing a 21.3% improvement from specialized CUDA kernels
+- [Cross-framework example (Kimi-K2.5)](https://github.com/neuralmagic/ai_auto_analyze/tree/main/auto_analyze/examples/cross_framework_cmp_example_kimi) — vLLM vs SGLang on 8xB200, showing an 8.6% gap driven by MoE dual-stream design differences
 
 ### Bug Fix Porting
 
@@ -46,7 +46,7 @@ Worked examples with full analysis results:
 ## Project Structure
 
 ```
-ai_auto_perf_analysis/
+ai_auto_analyze/
 ├── common/                             # Shared utilities
 │   ├── claude_utils.py                 #   Claude Agent SDK wrapper
 │   ├── utils.py                        #   Logging, directory cleanup, output dir helpers
@@ -266,16 +266,16 @@ All pipeline steps log to `logs/run_{step_name}.log` with simultaneous stdout ou
 | Chrome trace | `logs/run_chrome_trace.log` |
 | JIRA creation | `logs/run_create_jiras.log` |
 
-## auto_bug_fix — Branch Bug Fix Porting
+## Bug Fix Porting
 
 Port a bug fix from one branch of a C/systems project to another using Claude as the AI engine. Supported for any project with a git repository and shell-invokable build and test commands (gcc, openssl, glibc, etc.).
 
-See **[auto_bug_fix/examples/bug_fix_porting_guide.md](auto_bug_fix/examples/bug_fix_porting_guide.md)** for the full setup and usage guide.
+See **[auto_code_gen/README.md](auto_code_gen/README.md)** for the full setup and usage guide (covers both LLM framework and bug fix use cases).
 
 **Quick start:**
 
 ```bash
-# 1. Edit auto_bug_fix/bug_fix_config.py with your repo, branches, and commands
+# 1. Create a JSON config (see auto_code_gen/configs/bug_fix_config_example.json)
 # 2. Run
-python -m auto_bug_fix.run_bug_fix
+python -m auto_code_gen.run_code_gen --config <path_to_config.json>
 ```

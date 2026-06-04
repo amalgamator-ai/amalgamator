@@ -1,4 +1,4 @@
-(vllm) alexm-redhat@dgx-b200-02:~/code/ai_auto_perf_analysis$ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 vllm serve $MODEL \
+(vllm) alexm-redhat@dgx-b200-02:~/code/ai_auto_analyze$ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 vllm serve $MODEL \
         --tensor-parallel-size 8 \
         --port 8123 \
         --no-enable-prefix-caching \

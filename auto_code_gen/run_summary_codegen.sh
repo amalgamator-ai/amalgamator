@@ -2,7 +2,7 @@
 
 source "$(dirname "$0")/../auto_profile/utils.sh"
 
-PRS_DIR="/home/alexm-redhat/code/ai_auto_perf_analysis/auto_code_gen/prs"
+PRS_DIR="/home/alexm-redhat/code/ai_auto_analyze/auto_code_gen/prs"
 
 # Run
 source "$(dirname "$0")/../env.sh"
@@ -17,6 +17,6 @@ python -m auto_code_gen.run_summary \
     --code-pr-review-evolution-file $PRS_DIR/code_gen_V2_PR_TOTAL_REVIEW_EVOLUTION_from_sglang_to_vllm.txt \
     --issue-desc-files $PRS_DIR/issue_1.txt $PRS_DIR/issue_2.txt \
     --issue-fix-review-evolution-files $PRS_DIR/issue_1_research_fix_V3_REVIEW_EVOLUTION.txt $PRS_DIR/issue_2_research_fix_V3_REVIEW_EVOLUTION.txt \
-    --auto-analyze-project-brief /home/alexm-redhat/code/ai_auto_perf_analysis/auto_analyze_project_brief.pdf \
+    --auto-analyze-project-brief /home/alexm-redhat/code/ai_auto_analyze/auto_analyze_project_brief.pdf \
     --output-file summary_slides.pptx
         

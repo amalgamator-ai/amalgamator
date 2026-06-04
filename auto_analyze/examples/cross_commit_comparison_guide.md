@@ -18,7 +18,7 @@ results from different commits of the same framework, it:
    to recover any regressions
 
 This guide walks through the complete process using a concrete example: [comparing
-vLLM `v0.16.0` (Feb 12, 2026) against the latest `main` branch (May 12, 2026)](https://github.com/neuralmagic/ai_auto_perf_analysis/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi) running Kimi-K2.5-NVFP4 on B200
+vLLM `v0.16.0` (Feb 12, 2026) against the latest `main` branch (May 12, 2026)](https://github.com/neuralmagic/ai_auto_analyze/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi) running Kimi-K2.5-NVFP4 on B200
 GPUs in a low-latency pure-decode configuration (BS=1, ISL=4, OSL=1024).
 
 The analysis found that `main` is **21.3% faster** per MoE decoder layer than
@@ -92,7 +92,7 @@ Block wall time:  TARGET = 96,992 ns  |  Baseline = 123,232 ns  |  Delta = -26,2
    their wall-time impact is minimal — but they are visible in the trace.
 
 The full example with detailed source code analysis is at
-[cross_commit_cmp_example_kimi](https://github.com/neuralmagic/ai_auto_perf_analysis/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi).
+[cross_commit_cmp_example_kimi](https://github.com/neuralmagic/ai_auto_analyze/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi).
 
 ## Prerequisites
 

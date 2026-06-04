@@ -1,13 +1,13 @@
 {
     "traces": [
         {
-            "result_dir": "/home/alexm-redhat/code/ai_auto_perf_analysis/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_latest/analyze"
+            "result_dir": "/home/alexm-redhat/code/ai_auto_analyze/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_latest/analyze"
         },
         {
-            "result_dir": "/home/alexm-redhat/code/ai_auto_perf_analysis/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze"
+            "result_dir": "/home/alexm-redhat/code/ai_auto_analyze/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze"
         }
     ],
     "target_trace_id": 0,
-    "output_dir": "/home/alexm-redhat/code/ai_auto_perf_analysis/auto_analyze/examples/cross_commit_cmp_example_kimi/cross_analyze",
+    "output_dir": "/home/alexm-redhat/code/ai_auto_analyze/auto_analyze/examples/cross_commit_cmp_example_kimi/cross_analyze",
     "make_improvement_plan": false
 }

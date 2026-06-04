@@ -1,8 +1,8 @@
 {
-    "cross_trace_config": "/home/alexm-redhat/code/ai_auto_perf_analysis/auto_analyze/results/results_analyze_deepseek_v4_pro_tp/test_results/deepseek-ai__DeepSeek-V4-Pro-tp_8-isl_4-osl_1024-b_1/cross_trace_config.json",
+    "cross_trace_config": "/home/alexm-redhat/code/ai_auto_analyze/auto_analyze/results/results_analyze_deepseek_v4_pro_tp/test_results/deepseek-ai__DeepSeek-V4-Pro-tp_8-isl_4-osl_1024-b_1/cross_trace_config.json",
     "improvement_id": 2,
     "source_code_dir": "/home/alexm-redhat/code/vllm",
-    "output_dir": "/home/alexm-redhat/code/ai_auto_perf_analysis/auto_code_gen/results/improvement_2",
+    "output_dir": "/home/alexm-redhat/code/ai_auto_analyze/auto_code_gen/results/improvement_2",
     "num_code_port_plan_iterations": 4,
     "num_test_port_plan_iterations": 3,
     "num_code_gen_iterations": 3,
