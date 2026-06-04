@@ -99,7 +99,7 @@ def gen_prompts(args, code_gen_config, claude_config):
 
     summary_prompt = gen_SummarizeCodeGenProcessPrompt(
         context=context,
-        framework_code_trace_files=args.framework_code_trace_files,
+        code_trace_files=args.code_trace_files,
         code_port_plan_file=args.code_port_plan_file,
         test_plan_file=args.test_plan_file,
         code_port_plan_review_evolution_file=args.code_port_plan_review_evolution_file,

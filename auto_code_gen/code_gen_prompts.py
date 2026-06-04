@@ -136,40 +136,7 @@ class CodeTracePrompt:
     context: str
     framework: str
     output_file: str
-    prompt_template: ClassVar[str] = """
-
-{context}
-
-<definitions>
-<framework>
-{framework}
-</framework>
-</definitions>
-
-<instructions>
-The goal of this task is to detect the <code_trace> inside <framework> that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>). Think hard for this task and follow these guidelines:
-- Analyze and understand in-detail the improvement plan step <plan_step> by inspecting all relevant files and data.
-- Detect the <code_trace> inside <framework> that is relevant for improvement plan step <plan_step>.
-    - Find all of the trace from higher levels to lower levels of the code
-    - Go deep, into the kernel source codes if needed, including the C/C++/CUDA source codes of the kernel, and the associated C/C++/python wrappers, including any third-party libraries. Do not miss anything.
-    - I.e find all of the relevant code pieces in the code that are relevant here and activated
-- For the detected <code_trace>, perform a detailed analysis of how exactly the <code_trace> executes for the following iteration modes:
-    - decode-only runs
-    - prefill-only runs
-    - a mix of prefill and decode runs
-- Document each execution mode with its details, step-by-step from the high-level point of the <code_trace> to the lower-level point. Provide all critical details, which includes:
-    - For each function in the trace, provide its goal, info, inputs (+shapes), and outputs (+shapes)
-    - For the lowest level functions, inspect their source code in detail, and understand their inputs/outputs, including shapes and function assumptions.
-    - Document classes/objects and their relations
-    - Be professional, clear and consice, while documenting the trace gradually, in an incremental way from top to bottom.
-- Document how cuda graphs affect each execution mode as well and how it is handled in the codebase
-</instructions>
-
-<output>
-- Dump results to <output_dir>/{output_file}
-</output>
-
-"""
+    prompt_template: str
 
     def prompt(self):
         return self.prompt_template.format(
@@ -189,101 +156,34 @@ def code_trace_filename(framework: str) -> str:
 def gen_CodeTracePrompt(
     context: str,
     framework: str,
+    prompt_template: str,
 ):
     return CodeTracePrompt(
         context=context,
         framework=framework,
         output_file=code_trace_filename(framework),
+        prompt_template=prompt_template,
     )
 
 
 @dataclass
 class CodePortPlanPrompt:
     context: str
-    framework_code_trace_files: list[str]
-    code_port_disallowed_modules: list[str]
+    code_trace_files: list[str]
+    disallowed_modules: list[str]
     output_file: str
     output_summary_file: str
     prev_output_file: Optional[str]
     prev_output_summary_file: Optional[str]
     iteration: int
-    prompt_template: ClassVar[str] = """
-
-{context}
-
-{prev_iteration_section}
-
-<definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
-<code_port_disallowed_modules>
-{code_port_disallowed_modules}
-</code_port_disallowed_modules>
-</definitions>
-
-<definition_explanations>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
-</definition_explanations>
-
-<instructions>
-The goal of this task is to provide a high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside "target" framework by porting <code_trace> parts from the "source" framework to "target" framework. Think hard for this task and follow these guidelines:
-- Analyze and understand in-detail the <code_trace> of the "source" framework from <framework_code_trace_files>.
-- Analyze and understand in-detail the <code_trace> of the "target" framework from <framework_code_trace_files>.
-- Compare in-detail these 2 code traces step-by-step by traversing their code pieces via the associated call-chains.
-- Detect <code_trace> parts of the "source" framework to port to "target" framework. Maximize the amount of code parts that are ported AS IS with MINIMAL necessary changes. Take into account the execution modes (and their effects on inputs/outputs/shapes and call-chains):
-    - decode-only
-    - prefill-only
-    - mixed prefill and decode
-    - For each execution mode above, trace fully input/outputs/shapes over various sizes of tokens, including edge cases, to see that everything looks good and makes total sense in terms of correctness.
-- The goal of the porting process is to COPY-PASTE from the "source" framework AS MUCH AS POSSIBLE. Keep things simple, and add only minimal code integration points that are actually required.
-- Ensure maximal size parts are ported so that the integration points for each ported part are minimal in terms of code changes inside the "target" framework. I.e. prefer to port code as much as possible and not invent new code (to avoid potential new bugs).
-
-- For each ported code part, ensure minimal changes to the part and minimal changes to the "target" framework. 
-- For each ported code part, if code adjustments are necessary due to "target" framework constraints, then try best to minimize these code adjustments as much as possible.
-- For each ported code part, provide step-by-step integration coding details into "target" framework. Make sure to take care of decode-only, prefill-only and mix execution modes correctly. 
-- For each ported code part, provide porting idea documentation, with what is ported, why, what is unchanged, and what is changed, and why. Be clear, concise and professional.
-- For any code part in "target" framework that is used here, ensure it is used correctly with the ported code parts. 
-    - Verify inputs/outputs for all execution modes: decode, prefill, and mix
-    - Verify all constraints and dependencies
-
-- For the porting process, if a faster kernel from the "source" framework is the reason for the speedups, then strictly follow these guidelines to copy-paste (vendor) the faster kernel to the "target" framework:
-    - DO NOT import or use any of the <code_port_disallowed_modules>
-    - Find faster kernel source codes on all levels:
-        - The full C/C++/CUDA source code with the associated compilation/flags process.
-        - C/C++/CUDA wrappers that are to propagate calls to the kernel.
-    - Analyze and understand in-depth how kernels are implemented in the "target" framework and reuse this logic for the porting process of the faster kernel.
-    - Copy-paste, vedor and re-implement this kernel in the "target" framework fully, including the C/C++/CUDA source code, compilation process, and its C/C++ and python wrappers. Make sure to copy-paste AS IS as much as possible to keep similar logic to the "source" framework. 
-    - If there is a similar kernel in the "target" framework already, then DO NOT REUSE IT. Instead, vendor and copy-paste the implementation as described above, since it is highly unlikely that the kernels are the same unless you can check the source codes and compare line by line.
-    
-- Ensure cuda graphs are handled properly for all execution modes
-- Ensure the end-to-end multi-step plan is coherent, bug-free and works for all execution modes:
-    - Sanity and verify shapes of inputs/outputs
-    - Verify API usage is fully correct and coherent
-    - Verify the lowest level parts are used correctly
-    - Inspect and trace all of the necessary source code points that are sensitive.
-
-- Ensure the new code in the "target" framework will run by default for the case that we care about.
-
-- Provide risk analysis and potential sensitive breaking points
-
-</instructions>
-
-<output>
-- Dump the high-level multi-step coding plan to <output_dir>/{output_file}
-- Dump a summary to <output_dir>/{output_summary_file} that includes:
-    - An explanation of the work done to generate the coding plan in this iteration
-    - A summary of the iteration evolution across all iterations up to and including iteration {iteration}, describing the progression of fixes and improvements
-</output>
-
-"""
+    prompt_template: str
 
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
             prev_iteration_section=_prev_iteration_section(self.prev_output_file, self.prev_output_summary_file),
-            framework_code_trace_files=self.framework_code_trace_files,
-            code_port_disallowed_modules=self.code_port_disallowed_modules,
+            code_trace_files=self.code_trace_files,
+            disallowed_modules=self.disallowed_modules,
             output_file=self.output_file,
             output_summary_file=self.output_summary_file,
             iteration=self.iteration,
@@ -295,99 +195,45 @@ CODE_PORT_PLAN_FILE_PREFIX = "code_port_plan"
 
 def gen_CodePortPlanPrompt(
     context: str,
-    framework_code_trace_files: list[str],
-    code_port_disallowed_modules: list[str],
+    code_trace_files: list[str],
+    disallowed_modules: list[str],
     output_file: str,
     output_summary_file: str,
     prev_output_file: Optional[str],
     prev_output_summary_file: Optional[str],
     iteration: int,
+    prompt_template: str,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return CodePortPlanPrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
-        code_port_disallowed_modules=code_port_disallowed_modules,
+        code_trace_files=code_trace_files,
+        disallowed_modules=disallowed_modules,
         output_file=output_file,
         output_summary_file=output_summary_file,
         prev_output_file=prev_output_file,
         prev_output_summary_file=prev_output_summary_file,
         iteration=iteration,
+        prompt_template=prompt_template,
     )
 
 
 @dataclass
 class ReviewCodePortPlanPrompt:
     context: str
-    framework_code_trace_files: list[str]
+    code_trace_files: list[str]
     input_file: str
     input_summary_file: str
     output_file: str
     output_summary_file: str
     iteration: int
-    prompt_template: ClassVar[str] = """
-
-{context}
-
-<definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
-<input_file>
-{input_file}
-</input_file>
-<input_summary_file>
-{input_summary_file}
-</input_summary_file>
-</definitions>
-
-<definition_explanations>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
-- <input_file> is a file that describes the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
-- <input_summary_file> is a file that summarizes the work done to generate <input_file>.
-</definition_explanations>
-
-<instructions>
-The goal of this task is to perform a critical, in-depth review of the high-level multi-step coding plan in <input_file> (iteration {iteration}). Do the following and think hard:
-- Understand in-detail the plan in <input_file>, and restate the plan step-by-step.
-- Review the plan in-detail for execution modes (1) decode-only, (2) prefill-only, and (3) mixed.
-    - Fully trace each execution mode with simulated propagation of inputs/outputs/shapes, and verify all shapes are correct with respect to function APIs.
-    - If a low-level (or third party) kernel API is invoked, then verify all input parameters and assumptions of this kernel API. Go deep and analyze kernel's source code as well, by fetching it from whether it is located.
-- Review that the plan fully implements the related improvement plan step, and the default execution triggers it.
-- Review plan has correct memory management of CPU/GPU buffers in general and with respect to cuda graphs.
-- Review proper scheduling constraints and separation between prefill/decode/mixed (if needed)
-- Review misc issues:
-    - incorrect assumptions
-    - missing steps
-    - bad ordering or sequencing
-    - ambiguity or vagueness
-    - missing edge cases
-    - architectural risks
-    - hidden dependencies
-
-- For each issue found, document:
-    - The affected part of the plan
-    - What is wrong
-    - Why it matters
-    - How it should be improved
-- Produce a corrected plan with all issues fixed.
-</instructions>
-
-<output>
-- Dump the corrected plan to <output_dir>/{output_file}
-- Dump a summary to <output_dir>/{output_summary_file} that includes:
-    - Documentation of the issues found and fixed in this review
-    - A summary of the iteration evolution across all iterations up to and including iteration {iteration}
-- IMPORTANT: If no changes were needed to the code port plan, write CONVERGED as the very first line of <output_dir>/{output_summary_file}. Otherwise, do NOT write CONVERGED.
-</output>
-
-"""
+    prompt_template: str
 
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
-            framework_code_trace_files=self.framework_code_trace_files,
+            code_trace_files=self.code_trace_files,
             input_file=self.input_file,
             input_summary_file=self.input_summary_file,
             output_file=self.output_file,
@@ -398,88 +244,45 @@ The goal of this task is to perform a critical, in-depth review of the high-leve
 
 def gen_ReviewCodePortPlanPrompt(
     context: str,
-    framework_code_trace_files: list[str],
+    code_trace_files: list[str],
     input_file: str,
     input_summary_file: str,
     output_file: str,
     output_summary_file: str,
     iteration: int,
+    prompt_template: str,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return ReviewCodePortPlanPrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
+        code_trace_files=code_trace_files,
         input_file=input_file,
         input_summary_file=input_summary_file,
         output_file=output_file,
         output_summary_file=output_summary_file,
         iteration=iteration,
+        prompt_template=prompt_template,
     )
 
 
 @dataclass
 class TestPlanPrompt:
     context: str
-    framework_code_trace_files: list[str]
+    code_trace_files: list[str]
     code_port_plan_file: str
     output_file: str
     output_summary_file: str
     prev_output_file: Optional[str]
     prev_output_summary_file: Optional[str]
     iteration: int
-    prompt_template: ClassVar[str] = """
-
-{context}
-
-{prev_iteration_section}
-
-<definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
-<code_port_plan_file>
-{code_port_plan_file}
-</code_port_plan_file>
-</definitions>
-
-<definition_explanations>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
-- <code_port_plan_file> is a file that describes the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
-</definition_explanations>
-
-<instructions>
-The goal of this task is to generate a multi-step testing plan for the implementation described in <code_port_plan_file> (iteration {iteration}). Do the following and think hard:
-- Analyze and understand in-detail the coding plan in <code_port_plan_file>. Ensure to have a full understanding of the multi-step process, intended behaviors, features and implementation details.
-- Analyze and understand in-detail the tests in "source" framework that are relevant for the <code_port_plan_file>, and the associated <code_trace> call-chains, params etc...
-- Analyze and understand in-detail the tests in "target" framework that are relevant for the <code_port_plan_file> and the associated <code_trace> call-chains, params etc...
-- For both frameworks, understand test structures, test code reuse patterns, baselines used, and main ideas used to implement these tests. Dive deep into details to get a good understanding of how testing works.
-- Plan a sequence of unit tests to verify small and large changes. Ensure to cover execution modes: decode-only, prefill-only and mix. Also cover cuda graphs, and any input/output tensor behavior that is needed.
-    - Provide FULL coverage.
-    - Provide edge case testing.
-    - And anything else that is critical to check for correctness and speed gains.
-- Plan a sequence of end-to-end tests for <code_port_plan_file> that test the whole change from <code_port_plan_file> end-to-end.
-    - For the logical part of the transformer block that was modified, create this WHOLE part in the test with relevant classes/objects/functions, and test it end-to-end for correctness and speed gains. Ensure to compare vs known baseline.
-    - Make sure to have a test that actually runs a model (maybe a smaller version of <model>) and verifies it works.
-- Plan a sequence of tests to verify the expected performance gains:
-    - If a kernel was modified, then provide a kernel-level test to verify it is faster than before, with proper inputs/outputs and comparison vs known baseline.
-    - Otherwise, plan the relevant minimal test to verify speed gains exist vs a known baseline.
-</instructions>
-
-<output>
-- Dump the planned tests to <output_dir>/{output_file}
-- Dump a summary to <output_dir>/{output_summary_file} that includes:
-    - An explanation of the test plan generated in this iteration
-    - A summary of the iteration evolution across all iterations up to and including iteration {iteration}, describing the progression of fixes and improvements
-</output>
-
-"""
+    prompt_template: str
 
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
             prev_iteration_section=_prev_iteration_section(self.prev_output_file, self.prev_output_summary_file),
-            framework_code_trace_files=self.framework_code_trace_files,
+            code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             output_file=self.output_file,
             output_summary_file=self.output_summary_file,
@@ -492,102 +295,46 @@ TEST_PLAN_PREFIX = "test_plan"
 
 def gen_TestPlanPrompt(
     context: str,
-    framework_code_trace_files: list[str],
+    code_trace_files: list[str],
     code_port_plan_file: str,
     output_file: str,
     output_summary_file: str,
     prev_output_file: Optional[str],
     prev_output_summary_file: Optional[str],
     iteration: int,
+    prompt_template: str,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return TestPlanPrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
+        code_trace_files=code_trace_files,
         code_port_plan_file=code_port_plan_file,
         output_file=output_file,
         output_summary_file=output_summary_file,
         prev_output_file=prev_output_file,
         prev_output_summary_file=prev_output_summary_file,
         iteration=iteration,
+        prompt_template=prompt_template,
     )
 
 
 @dataclass
 class ReviewTestPlanPrompt:
     context: str
-    framework_code_trace_files: list[str]
+    code_trace_files: list[str]
     code_port_plan_file: str
     input_file: str
     input_summary_file: str
     output_file: str
     output_summary_file: str
     iteration: int
-    prompt_template: ClassVar[str] = """
-
-{context}
-
-<definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
-<code_port_plan_file>
-{code_port_plan_file}
-</code_port_plan_file>
-<input_file>
-{input_file}
-</input_file>
-<input_summary_file>
-{input_summary_file}
-</input_summary_file>
-</definitions>
-
-<definition_explanations>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
-- <code_port_plan_file> is a file that describes the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
-- <input_file> is a file that describes the multi-step testing plan for the implementation in <code_port_plan_file>.
-- <input_summary_file> is a file that summarizes the work done to generate <input_file>.
-</definition_explanations>
-
-<instructions>
-The goal of this task is to perform a critical, in-depth review of the multi-step testing plan in <input_file> (iteration {iteration}). Do the following and think hard:
-- Understand in-detail the test plan in <input_file>, and restate the plan step-by-step.
-- Verify the test plan covers all execution modes: decode-only, prefill-only, and mixed.
-- Verify the test plan covers cuda graphs behavior.
-- Verify the test plan has proper unit tests for each ported/modified component.
-- Verify the test plan has end-to-end tests that exercise the full change.
-- Verify the test plan has performance tests that measure the expected speedup.
-- Review misc issues:
-    - missing test coverage
-    - incorrect test assumptions
-    - missing edge cases
-    - tests that would not actually verify correctness
-    - tests that would not detect regressions
-    - missing baselines for comparison
-
-- For each issue found, document:
-    - The affected part of the test plan
-    - What is wrong
-    - Why it matters
-    - How it should be improved
-- Produce a corrected test plan with all issues fixed.
-</instructions>
-
-<output>
-- Dump the corrected test plan to <output_dir>/{output_file}
-- Dump a summary to <output_dir>/{output_summary_file} that includes:
-    - Documentation of the issues found and fixed in this review
-    - A summary of the iteration evolution across all iterations up to and including iteration {iteration}
-- IMPORTANT: If no changes were needed, write CONVERGED as the very first line of <output_dir>/{output_summary_file}. Otherwise, do NOT write CONVERGED.
-</output>
-
-"""
+    prompt_template: str
 
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
-            framework_code_trace_files=self.framework_code_trace_files,
+            code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             input_file=self.input_file,
             input_summary_file=self.input_summary_file,
@@ -599,32 +346,34 @@ The goal of this task is to perform a critical, in-depth review of the multi-ste
 
 def gen_ReviewTestPlanPrompt(
     context: str,
-    framework_code_trace_files: list[str],
+    code_trace_files: list[str],
     code_port_plan_file: str,
     input_file: str,
     input_summary_file: str,
     output_file: str,
     output_summary_file: str,
     iteration: int,
+    prompt_template: str,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return ReviewTestPlanPrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
+        code_trace_files=code_trace_files,
         code_port_plan_file=code_port_plan_file,
         input_file=input_file,
         input_summary_file=input_summary_file,
         output_file=output_file,
         output_summary_file=output_summary_file,
         iteration=iteration,
+        prompt_template=prompt_template,
     )
 
 
 @dataclass
 class CodeGenPrompt:
     context: str
-    framework_code_trace_files: list[str]
+    code_trace_files: list[str]
     code_port_plan_file: list[str]
     test_plan_file: list[str]
     output_patch_file: str
@@ -632,79 +381,13 @@ class CodeGenPrompt:
     prev_output_patch_file: Optional[str]
     prev_output_summary_file: Optional[str]
     iteration: int
-    prompt_template: ClassVar[str] = """
-
-{context}
-
-{prev_iteration_section}
-
-<definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
-<code_port_plan_file>
-{code_port_plan_file}
-</code_port_plan_file>
-<test_plan_file>
-{test_plan_file}
-</test_plan_file>
-</definitions>
-
-<definition_explanations>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
-- <code_port_plan_file> is a file that describes the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
-- <test_plan_file> is a file that describes the high-level multi-step testing plan for the implementation in <code_port_plan_file>.
-</definition_explanations>
-
-<instructions>
-The goal of this task is to generate a code patch for the "target" framework that implements the coding plan in <code_port_plan_file> and the testing plan in <test_plan_file> (iteration {iteration}). Do the following and think hard:
-- Analyze and understand in-detail the coding plan in <code_port_plan_file>
-- Analyze and understand in-detail the testing plan in <test_plan_file>
-- Implement the plans in <code_port_plan_file> and <test_plan_file> EXACTLY as they described:
-    - Follow strictly the code and test plans as described, DO NOT DIVERGE.
-    - If there is new (ported/vendored) C/C++/CUDA kernel code, then proceed on implementing the porting as planned, execute on it fully even it is really complex.
-    - Recompile the "target" when there are changes to C/C++/CUDA codes. Ensure re-compilation succeeds, else iterate and fix until full success. Do not skip this step.
-    - For recompile, USE INCREMENTAL compilation for the "target" by running the following commands (based on https://docs.vllm.ai/en/latest/contributing/incremental_build/):
-        1. python tools/generate_cmake_presets.py --force-overwrite
-        2. cmake --preset release
-        3. cmake --build --preset release --target install
-    - For recompile, use all available CPUs to make the process as fast as possible.
-    - Avoid recompilation from scratch, and instead use the incremental compilation process described above.
-    - Make sure to take into account all execution modes and verify their <code_trace> inputs/outputs/shapes for decode-only, prefill-only and mixed.
-- Apply the new code patch to "target" framework inside <target_source_code_dir>, and if needed, fully re-compile the codebase.
-- IMPORTANT: ALL code modifications (source code, tests, build files) MUST be made exclusively inside <target_source_code_dir>. Do NOT modify any files outside of this directory.
-- Run all of the tests, do NOT SKIP anything, and make sure ALL TESTS ARE RUNNING AND PASSING (with the fully recompiled codebase if needed). If there are failures, then fix, revisit, rewrite, and re-run everything again.
-- Ensure the code, both main code and test code, is written professionally, clearly, well-documented, and well-formatted, while taking into account how code is written in the "target" framework.
-- Review your work critically and fix issues
-
-Feature Toggle and Startup Verification:
-- The generated code MUST include the following two mechanisms:
-    1. STARTUP LOG: Add a log message that prints during "target" framework startup (e.g., during model initialization or engine startup) when the new feature is active. The message must follow the format:
-       `[AutoPerf] Plan step <plan_step>: <short_description_of_feature> is ENABLED`
-       This log must appear in stdout/stderr so it can be detected in runtime logs.
-    2. ENVIRONMENT VARIABLE DISABLE SWITCH: Add an environment variable named `VLLM_DISABLE_AUTO_PERF_PLAN_<plan_step>` (e.g., `VLLM_DISABLE_AUTO_PERF_PLAN_2`) that, when set to "1", disables the new feature entirely and falls back to the original code paths. When disabled, print:
-       `[AutoPerf] Plan step <plan_step>: <short_description_of_feature> is DISABLED (env override)`
-    - The env var check must happen early in the relevant code path (e.g., during model/layer initialization).
-    - When the env var is NOT set or set to anything other than "1", the new feature runs by default.
-</instructions>
-
-<output>
-- Dump the code patch to <output_dir>/{output_patch_file} (it must have both code and its tests inside)
-- Dump a summary to <output_dir>/{output_summary_file} that includes:
-    - An explanation of the code patch and tests generated in this iteration
-    - A summary of the iteration evolution across all iterations up to and including iteration {iteration}, describing the progression of fixes and improvements
-    - The exact environment variable name used to disable the new feature (e.g., VLLM_DISABLE_AUTO_PERF_PLAN_2)
-    - The exact startup log message that confirms the feature is enabled
-    - The exact startup log message that confirms the feature is disabled
-</output>
-
-"""
+    prompt_template: str
 
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
             prev_iteration_section=_prev_iteration_section(self.prev_output_patch_file, self.prev_output_summary_file),
-            framework_code_trace_files=self.framework_code_trace_files,
+            code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             test_plan_file=self.test_plan_file,
             output_patch_file=self.output_patch_file,
@@ -718,7 +401,7 @@ CODE_GEN_FILE_PREFIX = "code_gen"
 
 def gen_CodeGenPrompt(
     context: str,
-    framework_code_trace_files: list[str],
+    code_trace_files: list[str],
     code_port_plan_file: str,
     test_plan_file: str,
     output_patch_file: str,
@@ -726,12 +409,13 @@ def gen_CodeGenPrompt(
     prev_output_patch_file: Optional[str],
     prev_output_summary_file: Optional[str],
     iteration: int,
+    prompt_template: str,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return CodeGenPrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
+        code_trace_files=code_trace_files,
         code_port_plan_file=code_port_plan_file,
         test_plan_file=test_plan_file,
         output_patch_file=output_patch_file,
@@ -739,13 +423,14 @@ def gen_CodeGenPrompt(
         prev_output_patch_file=prev_output_patch_file,
         prev_output_summary_file=prev_output_summary_file,
         iteration=iteration,
+        prompt_template=prompt_template,
     )
 
 
 @dataclass
 class ReviewCodeGenPrompt:
     context: str
-    framework_code_trace_files: list[str]
+    code_trace_files: list[str]
     code_port_plan_file: str
     test_plan_file: str
     input_patch_file: str
@@ -753,78 +438,12 @@ class ReviewCodeGenPrompt:
     output_patch_file: str
     output_summary_file: str
     iteration: int
-    prompt_template: ClassVar[str] = """
-
-{context}
-
-<definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
-<code_port_plan_file>
-{code_port_plan_file}
-</code_port_plan_file>
-<test_plan_file>
-{test_plan_file}
-</test_plan_file>
-<input_patch_file>
-{input_patch_file}
-</input_patch_file>
-<input_summary_file>
-{input_summary_file}
-</input_summary_file>
-</definitions>
-
-<definition_explanations>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
-- <code_port_plan_file> is a file that describes the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
-- <test_plan_file> is a file that describes the high-level multi-step testing plan for the implementation in <code_port_plan_file>.
-- <input_patch_file> is the code patch for <target_framework> that implements the coding plan in <code_port_plan_file> and the testing plan in <test_plan_file>.
-- <input_summary_file> is a file that summarizes the work done to generate <input_patch_file>.
-</definition_explanations>
-
-<instructions>
-The goal of this task is to perform a critical, in-depth review of the code patch in <input_patch_file> (iteration {iteration}). Do the following and think hard:
-- Understand in-detail the code in <input_patch_file>, and restate the coding process step-by-step.
-- Review the code in-detail for execution modes (1) decode-only, (2) prefill-only, and (3) mixed.
-    - Fully trace each execution mode with simulated propagation of inputs/outputs/shapes, and verify all shapes are correct with respect to function APIs.
-    - If a low-level (or third party) kernel API is invoked, then verify all input parameters and assumptions of this kernel API. Go deep and analyze kernel's source code as well, by fetching it from whether it is located.
-- Review that the code fully implements the related improvement plan step, and the default execution triggers it.
-- Review plan has correct memory management of CPU/GPU buffers in general and with respect to cuda graphs.
-- Review proper scheduling constraints and separation between prefill/decode/mixed (if needed)
-- Review misc issues:
-    - incorrect assumptions
-    - missing steps
-    - bad ordering or sequencing
-    - ambiguity or vagueness
-    - missing edge cases
-    - architectural risks
-    - hidden dependencies
-
-- For each issue found, document:
-    - The affected part of the plan
-    - What is wrong
-    - Why it matters
-    - How it should be improved
-- Produce a corrected code patch with all issues fixed.
-- Add additional tests if needed to cover new issues, or fixed issues.
-- IMPORTANT: ALL code modifications (source code, tests, build files) MUST be made exclusively inside <target_source_code_dir>. Do NOT modify any files outside of this directory.
-</instructions>
-
-<output>
-- Dump the corrected code patch to <output_dir>/{output_patch_file}
-- Dump a summary to <output_dir>/{output_summary_file} that includes:
-    - Documentation of the issues found and fixed in this review
-    - A summary of the iteration evolution across all iterations up to and including iteration {iteration}, describing the progression of fixes and improvements
-- IMPORTANT: If no changes were needed, write CONVERGED as the very first line of <output_dir>/{output_summary_file}. Otherwise, do NOT write CONVERGED.
-</output>
-
-"""
+    prompt_template: str
 
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
-            framework_code_trace_files=self.framework_code_trace_files,
+            code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             test_plan_file=self.test_plan_file,
             input_patch_file=self.input_patch_file,
@@ -837,7 +456,7 @@ The goal of this task is to perform a critical, in-depth review of the code patc
 
 def gen_ReviewCodeGenPrompt(
     context: str,
-    framework_code_trace_files: list[str],
+    code_trace_files: list[str],
     code_port_plan_file: str,
     test_plan_file: str,
     input_patch_file: str,
@@ -845,12 +464,13 @@ def gen_ReviewCodeGenPrompt(
     output_patch_file: str,
     output_summary_file: str,
     iteration: int,
+    prompt_template: str,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return ReviewCodeGenPrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
+        code_trace_files=code_trace_files,
         code_port_plan_file=code_port_plan_file,
         test_plan_file=test_plan_file,
         input_patch_file=input_patch_file,
@@ -858,6 +478,7 @@ def gen_ReviewCodeGenPrompt(
         output_patch_file=output_patch_file,
         output_summary_file=output_summary_file,
         iteration=iteration,
+        prompt_template=prompt_template,
     )
 
 
@@ -870,7 +491,7 @@ RUNTIME_SMALLER_MODEL_FILE = "runtime_smaller_model.txt"
 @dataclass
 class FindSmallerModelPrompt:
     context: str
-    framework_code_trace_files: list[str]
+    code_trace_files: list[str]
     code_port_plan_file: str
     output_file: str
     prompt_template: ClassVar[str] = """
@@ -878,16 +499,16 @@ class FindSmallerModelPrompt:
 {context}
 
 <definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
+<code_trace_files>
+{code_trace_files}
+</code_trace_files>
 <code_port_plan_file>
 {code_port_plan_file}
 </code_port_plan_file>
 </definitions>
 
 <definition_explanations>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively.
+- <code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively.
 - <code_port_plan_file> is the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
 </definition_explanations>
 
@@ -903,7 +524,7 @@ Step 1: Analyze the Current Model
 
 Step 2: Analyze the Improvement Plan
 - Read and understand the code port plan from <code_port_plan_file>.
-- Read the framework code traces from <framework_code_trace_files>.
+- Read the framework code traces from <code_trace_files>.
 - Identify which architectural components are modified by the improvement plan: attention kernels, MoE routing, KV cache management, scheduling, CUDA graph handling, specific operator implementations, etc.
 - Determine what code paths MUST be exercised to validate the improvement.
 
@@ -952,7 +573,7 @@ Step 5: Write the Output
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
-            framework_code_trace_files=self.framework_code_trace_files,
+            code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             output_file=self.output_file,
         )
@@ -960,14 +581,14 @@ Step 5: Write the Output
 
 def gen_FindSmallerModelPrompt(
     context: str,
-    framework_code_trace_files: list[str],
+    code_trace_files: list[str],
     code_port_plan_file: str,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return FindSmallerModelPrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
+        code_trace_files=code_trace_files,
         code_port_plan_file=code_port_plan_file,
         output_file=RUNTIME_SMALLER_MODEL_FILE,
     )
@@ -1437,7 +1058,7 @@ def gen_RunLMEvalPrompt(
 @dataclass
 class InvestigateRuntimeOutputAndFixCodePrompt:
     context: str
-    framework_code_trace_files: list[str]
+    code_trace_files: list[str]
     code_port_plan_file: str
     test_plan_file: str
     runtime_logs_dir: str
@@ -1457,9 +1078,9 @@ class InvestigateRuntimeOutputAndFixCodePrompt:
 {prev_iteration_section}
 
 <definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
+<code_trace_files>
+{code_trace_files}
+</code_trace_files>
 <code_port_plan_file>
 {code_port_plan_file}
 </code_port_plan_file>
@@ -1480,7 +1101,7 @@ class InvestigateRuntimeOutputAndFixCodePrompt:
 </definitions>
 
 <definition_explanations>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
+- <code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
 - <code_port_plan_file> is the high-level multi-step coding plan that implements the improvement plan step.
 - <test_plan_file> is the testing plan for the implementation.
 - <runtime_logs_dir> contains the captured output from the benchmark execution for this iteration.
@@ -1655,7 +1276,7 @@ On FAILURE:
                 self.prev_patch_file if self.prev_summary_file else None,
                 self.prev_summary_file,
             ),
-            framework_code_trace_files=self.framework_code_trace_files,
+            code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             test_plan_file=self.test_plan_file,
             runtime_logs_dir=self.runtime_logs_dir,
@@ -1674,7 +1295,7 @@ On FAILURE:
 
 def gen_InvestigateRuntimeOutputAndFixCodePrompt(
     context: str,
-    framework_code_trace_files: list[str],
+    code_trace_files: list[str],
     code_port_plan_file: str,
     test_plan_file: str,
     runtime_logs_dir: str,
@@ -1685,11 +1306,11 @@ def gen_InvestigateRuntimeOutputAndFixCodePrompt(
     smaller_model_file: Optional[str] = None,
     lm_eval_result_file: Optional[str] = None,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return InvestigateRuntimeOutputAndFixCodePrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
+        code_trace_files=code_trace_files,
         code_port_plan_file=code_port_plan_file,
         test_plan_file=test_plan_file,
         runtime_logs_dir=runtime_logs_dir,
@@ -1801,7 +1422,7 @@ def gen_IterationHistorySummaryPrompt(
 @dataclass
 class InvestigateIssuePrompt:
     context: str
-    framework_code_trace_files: list[str]
+    code_trace_files: list[str]
     code_port_plan_file: str
     test_plan_file: str
     code_port_plan_review_evolution_file: str
@@ -1818,9 +1439,9 @@ class InvestigateIssuePrompt:
 {context}
 
 <definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
+<code_trace_files>
+{code_trace_files}
+</code_trace_files>
 <code_port_plan_file>
 {code_port_plan_file}
 </code_port_plan_file>
@@ -1851,7 +1472,7 @@ class InvestigateIssuePrompt:
 </definitions>
 
 <definition_explanations>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
+- <code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
 - <code_port_plan_file> is a file that describes the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
 - <test_plan_file> is a file that describes the high-level multi-step testing plan for the implementation in <code_port_plan_file>.
 - <code_port_plan_review_evolution_file> describes the review evolution process during the code port plan => review generation iterations that lead to <code_port_plan_file>.
@@ -1901,7 +1522,7 @@ The goal of this task is to investigate the issue described in <issue_desc_file>
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
-            framework_code_trace_files=self.framework_code_trace_files,
+            code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             test_plan_file=self.test_plan_file,
             code_port_plan_review_evolution_file=self.code_port_plan_review_evolution_file,
@@ -1918,7 +1539,7 @@ The goal of this task is to investigate the issue described in <issue_desc_file>
 
 def gen_InvestigateIssuePrompt(
     context: str,
-    framework_code_trace_files: list[str],
+    code_trace_files: list[str],
     code_port_plan_file: str,
     test_plan_file: str,
     code_port_plan_review_evolution_file: str,
@@ -1931,11 +1552,11 @@ def gen_InvestigateIssuePrompt(
     issue_fix_file: str,
     code_pr_fixed_file: str,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return InvestigateIssuePrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
+        code_trace_files=code_trace_files,
         code_port_plan_file=code_port_plan_file,
         test_plan_file=test_plan_file,
         code_port_plan_review_evolution_file=code_port_plan_review_evolution_file,
@@ -1953,7 +1574,7 @@ def gen_InvestigateIssuePrompt(
 @dataclass
 class ReviewInvestigatedIssuePrompt:
     context: str
-    framework_code_trace_files: list[str]
+    code_trace_files: list[str]
     code_port_plan_file: str
     test_plan_file: str
     code_port_plan_review_evolution_file: str
@@ -1971,9 +1592,9 @@ class ReviewInvestigatedIssuePrompt:
 {context}
 
 <definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
+<code_trace_files>
+{code_trace_files}
+</code_trace_files>
 <code_port_plan_file>
 {code_port_plan_file}
 </code_port_plan_file>
@@ -2001,7 +1622,7 @@ class ReviewInvestigatedIssuePrompt:
 </definitions>
 
 <definition_explanations>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
+- <code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
 - <code_port_plan_file> is a file that describes the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
 - <test_plan_file> is a file that describes the high-level multi-step testing plan for the implementation in <code_port_plan_file>.
 - <code_port_plan_review_evolution_file> describes the review evolution process during the code port plan => review generation iterations that lead to <code_port_plan_file>.
@@ -2045,7 +1666,7 @@ The goal of this task is to perform a critical, in-depth review of issue fix in 
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
-            framework_code_trace_files=self.framework_code_trace_files,
+            code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             test_plan_file=self.test_plan_file,
             code_port_plan_review_evolution_file=self.code_port_plan_review_evolution_file,
@@ -2063,7 +1684,7 @@ The goal of this task is to perform a critical, in-depth review of issue fix in 
 
 def gen_ReviewInvestigatedIssuePrompt(
     context: str,
-    framework_code_trace_files: list[str],
+    code_trace_files: list[str],
     code_port_plan_file: str,
     test_plan_file: str,
     code_port_plan_review_evolution_file: str,
@@ -2077,11 +1698,11 @@ def gen_ReviewInvestigatedIssuePrompt(
     issue_fix_review_evolution_file: str,
     code_pr_review_fixed_file: str,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return ReviewInvestigatedIssuePrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
+        code_trace_files=code_trace_files,
         code_port_plan_file=code_port_plan_file,
         test_plan_file=test_plan_file,
         code_port_plan_review_evolution_file=code_port_plan_review_evolution_file,
@@ -2164,7 +1785,7 @@ def gen_WorkItemsPrompt(
 @dataclass
 class SummarizeCodeGenProcessPrompt:
     context: str
-    framework_code_trace_files: list[str]
+    code_trace_files: list[str]
     code_port_plan_file: str
     test_plan_file: str
     code_port_plan_review_evolution_file: str
@@ -2180,9 +1801,9 @@ class SummarizeCodeGenProcessPrompt:
 {context}
 
 <definitions>
-<framework_code_trace_files>
-{framework_code_trace_files}
-</framework_code_trace_files>
+<code_trace_files>
+{code_trace_files}
+</code_trace_files>
 <code_port_plan_file>
 {code_port_plan_file}
 </code_port_plan_file>
@@ -2214,7 +1835,7 @@ class SummarizeCodeGenProcessPrompt:
 
 <definition_explanations>
 - <auto_analyze_project_brief> is a PDF file that summarizes the auto-analyze process that resulted in the improvement plan file <plan_file>
-- <framework_code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
+- <code_trace_files> is a list of code trace files for <source_framework> and <target_framework> respectively. Each code trace file describes the <code_trace> of the specific framework that is active during the execution of <tested_execution> for improvement plan step <plan_step> (from <plan_file>).
 - <code_port_plan_file> is a file that describes the high-level multi-step coding plan that implements the improvement plan step <plan_step> (from <plan_file>) inside <target_framework>.
 - <test_plan_file> is a file that describes the high-level multi-step testing plan for the implementation in <code_port_plan_file>.
 - <code_port_plan_review_evolution_file> describes the review evolution process during the code port plan => review generation iterations that lead to <code_port_plan_file>.
@@ -2372,7 +1993,7 @@ The goal of this task is to generate a sequence of PPTX slides that describe the
     - After the code patch is done, the code was ran manually with the model <model> and a couple of issues, issue_1 and issue_2, where for each issue AI was used to fix the issue in the context of the previous generations. AI was able to fix these issues and after these fixes everything worked: has both correctness and speedups. 
 
 - Generate a sequence of PPTX slides as follows:
-    - A comparison one-to-one, on the same slide, of the code traces of both frameworks from <framework_code_trace_files>. Make sure to show:
+    - A comparison one-to-one, on the same slide, of the code traces of both frameworks from <code_trace_files>. Make sure to show:
         - The full operation call-chains with all the necessary details, with the specific per-operation time breakdowns based on the median transformer blocks. 
         - Explain the differences that can be seen in both the code traces and the transformer blocks, how the correlate and why the "target" is faster.
     - Explain what needs to be done to port the "source" code pieces to the "target" codebase. Base the explanation on the code port plan file. Make sure to explain:
@@ -2406,7 +2027,7 @@ The goal of this task is to generate a sequence of PPTX slides that describe the
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
-            framework_code_trace_files=self.framework_code_trace_files,
+            code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             test_plan_file=self.test_plan_file,
             code_port_plan_review_evolution_file=self.code_port_plan_review_evolution_file,
@@ -2422,7 +2043,7 @@ The goal of this task is to generate a sequence of PPTX slides that describe the
 
 def gen_SummarizeCodeGenProcessPrompt(
     context: str,
-    framework_code_trace_files: list[str],
+    code_trace_files: list[str],
     code_port_plan_file: str,
     test_plan_file: str,
     code_port_plan_review_evolution_file: str,
@@ -2434,11 +2055,11 @@ def gen_SummarizeCodeGenProcessPrompt(
     auto_analyze_project_brief: str,
     output_file: str,
 ):
-    assert len(framework_code_trace_files) == 2
+    assert len(code_trace_files) == 2
 
     return SummarizeCodeGenProcessPrompt(
         context=context,
-        framework_code_trace_files=framework_code_trace_files,
+        code_trace_files=code_trace_files,
         code_port_plan_file=code_port_plan_file,
         test_plan_file=test_plan_file,
         code_port_plan_review_evolution_file=code_port_plan_review_evolution_file,

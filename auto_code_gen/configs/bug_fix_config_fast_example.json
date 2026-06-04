@@ -1,0 +1,23 @@
+{
+    "use_case": "bug_fix",
+    "repo_path": "/path/to/gcc",
+    "build_dir": "/path/to/gcc/build",
+    "source_branch": "gcc-14-branch",
+    "target_branch": "gcc-13-branch",
+    "source_fix_commit": "abc1234",
+    "bug_description": "CVE-2024-XXXX: buffer overflow in fold_convert()",
+    "issue_id": "CVE-2024-XXXX",
+    "output_dir": "/path/to/output",
+    "build_command": "make -j$(nproc)",
+    "test_command": "make check -j$(nproc)",
+    "max_build_test_retries": 3,
+    "disallowed_modules": ["gcc/config/arm/"],
+    "num_code_port_plan_iterations": 3,
+    "num_test_plan_iterations": 3,
+    "num_code_gen_iterations": 3,
+    "use_combined_code_and_test_port_plan": true,
+    "code_port_plan_skip_review": true,
+    "test_plan_skip_review": true,
+    "code_gen_skip_review": true,
+    "thinking-mode": "normal"
+}

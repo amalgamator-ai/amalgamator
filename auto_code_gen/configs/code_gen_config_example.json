@@ -6,8 +6,11 @@
     "num_code_port_plan_iterations": 4,
     "num_test_port_plan_iterations": 3,
     "num_code_gen_iterations": 3,
-    "code_port_disallowed_modules": ["sglang", "sgl_kernel", "sgl*"],
+    "disallowed_modules": ["sglang", "sgl_kernel", "sgl*"],
     "use_smaller_model_for_runtime": false,
     "disable_new_feature_for_runtime": false,
+    "code_port_plan_skip_review": false,
+    "test_plan_skip_review": false,
+    "code_gen_skip_review": false,
     "thinking-mode": "deep"
 }

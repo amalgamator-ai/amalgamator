@@ -25,7 +25,7 @@ _CODE_PORT_DISALLOWED_MODULES_MAP = {
 }
 
 
-def _infer_code_port_disallowed_modules(source_framework: str) -> list[str]:
+def _infer_disallowed_modules(source_framework: str) -> list[str]:
     return _CODE_PORT_DISALLOWED_MODULES_MAP.get(source_framework, [source_framework])
 
 
@@ -40,21 +40,28 @@ def _run_git(args: list[str], cwd: str, check: bool = True) -> subprocess.Comple
 
 
 @dataclass
-class CodeGenConfig:
-    # --- Primary inputs (from JSON) ---
-    cross_trace_config_path: str = ""
-    improvement_id: int = 0
-    source_code_dir: str = ""
+class PipelineConfig:
     output_dir: str = ""
+    source_code_dir: str = ""
     num_code_port_plan_iterations: int = 3
     num_test_plan_iterations: int = 3
     num_code_gen_iterations: int = 3
+    disallowed_modules: list[str] = field(default_factory=list)
+    thinking_mode: str = "deep"
+    code_port_plan_skip_review: bool = False
+    test_plan_skip_review: bool = False
+    code_gen_skip_review: bool = False
+
+
+@dataclass
+class CodeGenConfig(PipelineConfig):
+    # --- Primary inputs (from JSON) ---
+    cross_trace_config_path: str = ""
+    improvement_id: int = 0
     num_runtime_iterations: int = 10
     gpu_wait_timeout_minutes: int = 30
     use_smaller_model_for_runtime: bool = False
     disable_new_feature_for_runtime: bool = False
-    code_port_disallowed_modules: list[str] = field(default_factory=list)
-    thinking_mode: str = "deep"
 
     # --- Auto-inferred fields ---
     model: str = ""
@@ -138,12 +145,16 @@ class CodeGenConfig:
         if thinking_mode not in ("normal", "deep"):
             errors.append('"thinking-mode" must be "normal" or "deep".')
 
+        code_port_plan_skip_review = data.get("code_port_plan_skip_review", False)
+        test_plan_skip_review = data.get("test_plan_skip_review", False)
+        code_gen_skip_review = data.get("code_gen_skip_review", False)
+
         if errors:
             raise ValueError(
                 "Code gen config errors:\n" + "\n".join(f"  - {e}" for e in errors)
             )
 
-        code_port_disallowed_modules = data.get("code_port_disallowed_modules", [])
+        disallowed_modules = data.get("disallowed_modules", [])
 
         config = cls(
             cross_trace_config_path=cross_trace_config_path,
@@ -158,8 +169,11 @@ class CodeGenConfig:
             use_smaller_model_for_runtime=use_smaller_model_for_runtime,
             disable_new_feature_for_runtime=disable_new_feature_for_runtime,
             plan_step=improvement_id,
-            code_port_disallowed_modules=code_port_disallowed_modules,
+            disallowed_modules=disallowed_modules,
             thinking_mode=thinking_mode,
+            code_port_plan_skip_review=code_port_plan_skip_review,
+            test_plan_skip_review=test_plan_skip_review,
+            code_gen_skip_review=code_gen_skip_review,
         )
         config._load_from_cross_trace()
         return config
@@ -236,9 +250,9 @@ class CodeGenConfig:
             )
         self.plan_file = plan_path
 
-        if not self.code_port_disallowed_modules:
-            self.code_port_disallowed_modules = (
-                _infer_code_port_disallowed_modules(self.source_framework)
+        if not self.disallowed_modules:
+            self.disallowed_modules = (
+                _infer_disallowed_modules(self.source_framework)
             )
 
     def _prepare_branch(self, repo_dir: str, commit: str, branch: str, label: str):
@@ -418,3 +432,140 @@ class CodeGenConfig:
             effort=params["effort"],
             max_thinking_tokens=params["max_thinking_tokens"],
         )
+
+
+@dataclass
+class BugFixConfig(PipelineConfig):
+    repo_path: str = ""
+    build_dir: str = ""
+    source_branch: str = ""
+    target_branch: str = ""
+    source_fix_commit: str = ""
+    bug_description: str = ""
+    issue_id: str = ""
+    build_command: str = ""
+    test_command: str = ""
+    max_build_test_retries: int = 3
+    use_combined_code_and_test_port_plan: bool = True
+
+    @classmethod
+    def from_json(cls, path: str) -> "BugFixConfig":
+        with open(path) as f:
+            data = json.load(f)
+
+        errors = []
+
+        # Validate required fields
+        repo_path = data.get("repo_path", "")
+        if not repo_path:
+            errors.append('"repo_path" is required.')
+        elif not os.path.isdir(repo_path):
+            errors.append(f'"repo_path" directory not found: {repo_path}')
+
+        source_branch = data.get("source_branch", "")
+        if not source_branch:
+            errors.append('"source_branch" is required.')
+
+        target_branch = data.get("target_branch", "")
+        if not target_branch:
+            errors.append('"target_branch" is required.')
+
+        source_fix_commit = data.get("source_fix_commit", "")
+        if not source_fix_commit:
+            errors.append('"source_fix_commit" is required.')
+
+        output_dir = data.get("output_dir", "")
+        if not output_dir:
+            errors.append('"output_dir" is required.')
+
+        build_command = data.get("build_command", "")
+        if not build_command:
+            errors.append('"build_command" is required.')
+
+        test_command = data.get("test_command", "")
+        if not test_command:
+            errors.append('"test_command" is required.')
+
+        # Optional fields with defaults
+        build_dir = data.get("build_dir", repo_path)
+        bug_description = data.get("bug_description", "")
+        issue_id = data.get("issue_id", "")
+        max_build_test_retries = data.get("max_build_test_retries", 3)
+        use_combined_code_and_test_port_plan = data.get("use_combined_code_and_test_port_plan", True)
+        disallowed_modules = data.get("disallowed_modules", [])
+        thinking_mode = data.get("thinking-mode", "deep")
+
+        # Iteration counts
+        num_code_port_plan_iterations = data.get("num_code_port_plan_iterations", 3)
+        num_test_plan_iterations = data.get("num_test_plan_iterations", 3)
+        num_code_gen_iterations = data.get("num_code_gen_iterations", 3)
+
+        code_port_plan_skip_review = data.get("code_port_plan_skip_review", False)
+        test_plan_skip_review = data.get("test_plan_skip_review", False)
+        code_gen_skip_review = data.get("code_gen_skip_review", False)
+
+        if thinking_mode not in ("normal", "deep"):
+            errors.append('"thinking-mode" must be "normal" or "deep".')
+
+        if errors:
+            raise ValueError(
+                "Bug fix config errors:\n" + "\n".join(f"  - {e}" for e in errors)
+            )
+
+        return cls(
+            output_dir=os.path.abspath(output_dir),
+            source_code_dir=os.path.abspath(repo_path),
+            num_code_port_plan_iterations=num_code_port_plan_iterations,
+            num_test_plan_iterations=num_test_plan_iterations,
+            num_code_gen_iterations=num_code_gen_iterations,
+            disallowed_modules=disallowed_modules,
+            thinking_mode=thinking_mode,
+            repo_path=os.path.abspath(repo_path),
+            build_dir=os.path.abspath(build_dir),
+            source_branch=source_branch,
+            target_branch=target_branch,
+            source_fix_commit=source_fix_commit,
+            bug_description=bug_description,
+            issue_id=issue_id,
+            build_command=build_command,
+            test_command=test_command,
+            max_build_test_retries=max_build_test_retries,
+            use_combined_code_and_test_port_plan=use_combined_code_and_test_port_plan,
+            code_port_plan_skip_review=code_port_plan_skip_review,
+            test_plan_skip_review=test_plan_skip_review,
+            code_gen_skip_review=code_gen_skip_review,
+        )
+
+    # Reuse the same _MODE_PARAMS pattern from CodeGenConfig
+    def make_claude_config(self) -> ClaudeConfig:
+        params = CodeGenConfig._MODE_PARAMS[self.thinking_mode]
+        return ClaudeConfig(
+            model=params["model"],
+            allowed_tools=["Read", "Write", "Bash"],
+            perm_mode="acceptEdits",
+            cwd=self.output_dir,
+            thinking=params["thinking"],
+            effort=params["effort"],
+            max_thinking_tokens=params["max_thinking_tokens"],
+        )
+
+
+def load_config_and_use_case(path: str):
+    """Load a pipeline config and its corresponding UseCase from a JSON file.
+
+    The JSON must have a "use_case" field ("llm_framework" or "bug_fix").
+    Defaults to "llm_framework" if not specified.
+    """
+    with open(path) as f:
+        data = json.load(f)
+
+    use_case_name = data.get("use_case", "llm_framework")
+
+    if use_case_name == "llm_framework":
+        from auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase
+        return CodeGenConfig.from_json(path), LLMFrameworkUseCase()
+    elif use_case_name == "bug_fix":
+        from auto_code_gen.use_cases.bug_fix import BugFixUseCase
+        return BugFixConfig.from_json(path), BugFixUseCase()
+    else:
+        raise ValueError(f'Unknown use_case: "{use_case_name}". Must be "llm_framework" or "bug_fix".')

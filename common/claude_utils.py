@@ -19,7 +19,7 @@ from claude_agent_sdk import (
 
 from claude_agent_sdk.types import StreamEvent
 
-from common.utils import clear_repo  # noqa: F401 - used via eval()
+import common.utils  # noqa: F401
 
 @dataclass
 class ClaudeConfig:

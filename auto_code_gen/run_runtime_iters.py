@@ -15,9 +15,9 @@ from common.utils import setup_logging
 from common.claude_utils import claude_run, PipelineStep
 
 from auto_code_gen.code_gen_configs import CodeGenConfig
+from auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase
 
 from auto_code_gen.code_gen_prompts import (
-    create_context_str,
     gen_IterationHistorySummaryPrompt,
     gen_FindSmallerModelPrompt,
     code_trace_filename,
@@ -94,7 +94,8 @@ def _find_latest_plan_file(output_dir, prefix):
 
 async def run_standalone_runtime_iterations(code_gen_config, claude_config, resume=False):
     output_dir = code_gen_config.output_dir
-    context = create_context_str(claude_config, code_gen_config)
+    use_case = LLMFrameworkUseCase()
+    context = use_case.create_context_str(claude_config, code_gen_config)
 
     # Verify target branch
     print("Verifying target framework branch...")
@@ -105,7 +106,7 @@ async def run_standalone_runtime_iterations(code_gen_config, claude_config, resu
         sys.exit(1)
 
     # Find code trace files
-    framework_code_trace_files = _find_code_trace_files(output_dir, code_gen_config)
+    code_trace_files = _find_code_trace_files(output_dir, code_gen_config)
 
     # Find the latest code port plan and test plan
     code_port_plan_file = _find_latest_plan_file(output_dir, "code_port_plan")
@@ -182,7 +183,7 @@ async def run_standalone_runtime_iterations(code_gen_config, claude_config, resu
             print("Finding smaller model for runtime iterations...")
             smaller_prompt = gen_FindSmallerModelPrompt(
                 context=context,
-                framework_code_trace_files=framework_code_trace_files,
+                code_trace_files=code_trace_files,
                 code_port_plan_file=code_port_plan_file,
             )
             steps_smaller = [
@@ -198,7 +199,7 @@ async def run_standalone_runtime_iterations(code_gen_config, claude_config, resu
 
     # Run the runtime iteration loop
     phase_results, runtime_timings = await run_runtime_iterations(
-        context, framework_code_trace_files, code_gen_config, claude_config,
+        context, code_trace_files, code_gen_config, claude_config,
         code_port_plan_file, test_plan_file,
         history_prompt.output_file,
         resume=resume, start_iteration=start_iteration,

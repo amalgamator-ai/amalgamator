@@ -104,7 +104,7 @@ def gen_prompts(args, code_gen_config, claude_config):
 
         investigate_issue_prompt = gen_InvestigateIssuePrompt(
             context=context,
-            framework_code_trace_files=args.framework_code_trace_files,
+            code_trace_files=args.code_trace_files,
             code_port_plan_file=args.code_port_plan_file,
             test_plan_file=args.test_plan_file,
             code_port_plan_review_evolution_file=args.code_port_plan_review_evolution_file,
@@ -132,7 +132,7 @@ def gen_prompts(args, code_gen_config, claude_config):
 
         review_investigated_issue_prompt = gen_ReviewInvestigatedIssuePrompt(
             context=context,
-            framework_code_trace_files=args.framework_code_trace_files,
+            code_trace_files=args.code_trace_files,
             code_port_plan_file=args.code_port_plan_file,
             test_plan_file=args.test_plan_file,
             code_port_plan_review_evolution_file=args.code_port_plan_review_evolution_file,

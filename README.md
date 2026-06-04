@@ -41,7 +41,7 @@ Worked examples with full analysis results:
 
 | Guide | Description |
 |-------|-------------|
-| [Bug Fix Porting Guide](auto_bug_fix/examples/bug_fix_porting_guide.md) | Port a bug fix from one branch to another — setup, configuration, pipeline walkthrough, and failure handling |
+| [auto_code_gen README](auto_code_gen/README.md) | Unified code gen pipeline — covers both LLM framework and bug fix use cases, with config examples for gcc, openssl, and curl |
 
 ## Project Structure
 
@@ -78,17 +78,19 @@ ai_auto_perf_analysis/
 │   ├── parse_run_config.py             #   Config parser and validator
 │   └── test_configs/                   #   JSON configs (infra, run, docker, GPUs)
 ├── auto_code_gen/                      # AI-based code generation pipeline
-│   ├── run_code_gen.py
-│   ├── run_fix_issue.py
+│   ├── run_code_gen.py                #   Pipeline orchestrator (all use cases)
+│   ├── code_gen_prompts.py            #   Shared prompt classes
+│   ├── code_gen_configs.py            #   PipelineConfig, CodeGenConfig, BugFixConfig
+│   ├── use_cases/                     #   Pluggable use case definitions
+│   │   ├── base.py                    #     UseCase ABC
+│   │   ├── llm_framework.py           #     LLM framework optimization porting
+│   │   └── bug_fix.py                 #     Bug fix branch porting
+│   ├── configs/                       #   Example JSON configs
+│   ├── run_runtime_iters.py           #   Standalone runtime iteration runner
 │   ├── run_investigate_issue.py
+│   ├── run_fix_issue.py
 │   ├── run_work_items.py
 │   └── run_summary.py
-├── auto_bug_fix/                       # AI-based bug fix porting pipeline
-│   ├── bug_fix_config.py              #   BugFixConfig dataclass — edit this before running
-│   ├── bug_fix_prompts.py             #   All prompt classes (incl. TestPortPrompt, RunAndFixPrompt)
-│   ├── run_bug_fix.py                 #   Pipeline entry point
-│   └── examples/
-│       └── bug_fix_porting_guide.md   #   Setup and usage guide
 ├── env.sh                              # Environment variables
 ├── run_all.sh                          # Full pipeline orchestrator
 └── run_all_scheduled.sh                # Scheduled pipeline execution
