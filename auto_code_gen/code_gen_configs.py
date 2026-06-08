@@ -447,6 +447,8 @@ class BugFixConfig(PipelineConfig):
     test_command: str = ""
     max_build_test_retries: int = 3
     use_combined_code_and_test_port_plan: bool = True
+    enable_test_port: bool = True
+    enable_baseline_diff: bool = False
 
     @classmethod
     def from_json(cls, path: str) -> "BugFixConfig":
@@ -492,6 +494,8 @@ class BugFixConfig(PipelineConfig):
         issue_id = data.get("issue_id", "")
         max_build_test_retries = data.get("max_build_test_retries", 3)
         use_combined_code_and_test_port_plan = data.get("use_combined_code_and_test_port_plan", True)
+        enable_test_port = data.get("enable_test_port", True)
+        enable_baseline_diff = data.get("enable_baseline_diff", False)
         disallowed_modules = data.get("disallowed_modules", [])
         thinking_mode = data.get("thinking-mode", "deep")
 
@@ -531,6 +535,8 @@ class BugFixConfig(PipelineConfig):
             test_command=test_command,
             max_build_test_retries=max_build_test_retries,
             use_combined_code_and_test_port_plan=use_combined_code_and_test_port_plan,
+            enable_test_port=enable_test_port,
+            enable_baseline_diff=enable_baseline_diff,
             code_port_plan_skip_review=code_port_plan_skip_review,
             test_plan_skip_review=test_plan_skip_review,
             code_gen_skip_review=code_gen_skip_review,

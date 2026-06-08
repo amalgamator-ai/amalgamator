@@ -44,6 +44,7 @@ class RunAndFixPrompt:
     build_dir: str
     max_build_test_retries: int
     output_failure_file: str
+    output_success_file: str
     prompt_template: ClassVar[str] = """
 
 {context}
@@ -64,6 +65,9 @@ class RunAndFixPrompt:
 <output_failure_file>
 {output_failure_file}
 </output_failure_file>
+<output_success_file>
+{output_success_file}
+</output_success_file>
 </definitions>
 
 <definition_explanations>
@@ -72,6 +76,7 @@ class RunAndFixPrompt:
 - <build_dir> is the working directory from which both commands are invoked.
 - <max_build_test_retries> is the maximum number of build-test-fix iterations before stopping.
 - <output_failure_file> is where to write the failure log if retries are exhausted.
+- <output_success_file> is where to write the success summary when all tests pass.
 </definition_explanations>
 
 <instructions>
@@ -85,7 +90,12 @@ The goal of this task is to autonomously drive a build-test-fix loop until both 
         - Do NOT do a full clean rebuild unless the error is explicitly caused by a stale artifact. Never do a speculative clean rebuild.
         - Retry the build.
 - On a successful build, run <test_command> from <build_dir>.
-    - If all tests pass, the loop is complete. Report success.
+    - If all tests pass, the loop is complete.
+        - Write a success summary to <output_dir>/{output_success_file} with:
+            Line 1: "SUCCESS"
+            Line 2: Number of retries used (e.g. "Retries: 1/5")
+            Remaining lines: full test output and a summary of any fixes applied during the loop.
+        - Stop.
     - If tests fail:
         - Inspect the test output carefully.
         - Identify the root cause -- may be in the fix code or in the ported tests.
@@ -99,8 +109,8 @@ The goal of this task is to autonomously drive a build-test-fix loop until both 
 </instructions>
 
 <output>
-- If successful: report that both build and tests are clean, with a summary of fixes applied.
-- If retries exhausted: write the failure summary to <output_dir>/{output_failure_file} and stop.
+- If successful: write the success summary to <output_dir>/{output_success_file}. First line must be "SUCCESS".
+- If retries exhausted: write the failure summary to <output_dir>/{output_failure_file}. Do not write the success file.
 </output>
 
 """
@@ -113,10 +123,377 @@ The goal of this task is to autonomously drive a build-test-fix loop until both 
             build_dir=self.build_dir,
             max_build_test_retries=self.max_build_test_retries,
             output_failure_file=self.output_failure_file,
+            output_success_file=self.output_success_file,
         )
 
 
 RUN_AND_FIX_FAILURE_FILE = "run_and_fix_failure.txt"
+RUN_AND_FIX_SUCCESS_FILE = "run_and_fix_success.txt"
+
+
+# ---------------------------------------------------------------------------
+# TestPortPrompt -- ports test files from source commit to target branch
+# (runs as a dedicated step BEFORE planning, restored from old pipeline)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TestPortPrompt:
+    context: str
+    source_fix_commit: str
+    target_branch: str
+    output_manifest_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<source_fix_commit>
+{source_fix_commit}
+</source_fix_commit>
+<target_branch>
+{target_branch}
+</target_branch>
+<output_manifest_file>
+{output_manifest_file}
+</output_manifest_file>
+</definitions>
+
+<definition_explanations>
+- <source_fix_commit> is the commit SHA on the source branch that introduced the bug fix.
+- <target_branch> is the branch that needs the fix ported to it.
+- <output_manifest_file> is the file where the paths of all ported test files will be recorded, one path per line.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to extract test cases added in <source_fix_commit> and port them to <target_branch>'s test infrastructure. Think hard and follow these guidelines:
+- Run `git show {source_fix_commit}` and analyze the complete diff.
+- Identify all test files added or modified in <source_fix_commit>. Look for files under directories named test/, tests/, testsuite/, t/, or similar. These are the highest-value tests because they were written specifically to catch the bug.
+- If NO test files are found in the commit diff, write "NO_TEST_FILES" to <cwd>/<output_manifest_file> and stop.
+- For each identified test file, inspect <target_branch>'s test infrastructure in detail:
+    - Understand the test harness (dejagnu, ctest, pytest, OpenSSL test runner, or other).
+    - Understand the suite directory layout, naming conventions, and registration patterns.
+    - Understand how new tests are compiled and run (e.g. build.info, CMakeLists.txt, Makefile).
+- Generate a ported version of each test file, adapted to <target_branch>'s test infrastructure:
+    - Preserve the test's intent and coverage exactly.
+    - Adapt harness-specific syntax, suite registration, file layout, and include paths.
+    - Make only the changes required for harness compatibility -- do not change test logic.
+- Write each ported test file to its correct location on <target_branch>.
+- Record the absolute path of every ported test file in <cwd>/<output_manifest_file>, one path per line.
+</instructions>
+
+<output>
+- Write ported test files to their correct locations on <target_branch>.
+- Write a manifest of all ported test file paths to <cwd>/{output_manifest_file}, one path per line.
+- If no test files exist in the commit, write "NO_TEST_FILES" to <cwd>/{output_manifest_file}.
+</output>
+
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            source_fix_commit=self.source_fix_commit,
+            target_branch=self.target_branch,
+            output_manifest_file=self.output_manifest_file,
+        )
+
+
+TEST_PORT_MANIFEST_FILE = "test_port_manifest.txt"
+
+
+def gen_TestPortPrompt(
+    context: str,
+    source_fix_commit: str,
+    target_branch: str,
+) -> TestPortPrompt:
+    return TestPortPrompt(
+        context=context,
+        source_fix_commit=source_fix_commit,
+        target_branch=target_branch,
+        output_manifest_file=TEST_PORT_MANIFEST_FILE,
+    )
+
+
+# ---------------------------------------------------------------------------
+# TestValidationPrompt -- red check: ported tests must FAIL without the fix
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TestValidationPrompt:
+    context: str
+    build_command: str
+    test_command: str
+    build_dir: str
+    test_port_manifest_file: str
+    output_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<build_command>
+{build_command}
+</build_command>
+<test_command>
+{test_command}
+</test_command>
+<build_dir>
+{build_dir}
+</build_dir>
+<test_port_manifest_file>
+{test_port_manifest_file}
+</test_port_manifest_file>
+<output_file>
+{output_file}
+</output_file>
+</definitions>
+
+<definition_explanations>
+- <build_command> is the shell command to compile the target branch. Run from <build_dir>.
+- <test_command> is the shell command to run the relevant test suite. Run from <build_dir>.
+- <build_dir> is the working directory from which both commands are invoked.
+- <test_port_manifest_file> lists the ported test files written to <target_branch> in the previous step.
+- <output_file> is where the validation result will be written.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to validate that the ported tests actually catch the bug -- i.e., they FAIL on the unpatched target branch. This is the "red" check in red-green testing. Think hard and follow these guidelines:
+
+- Read <cwd>/<test_port_manifest_file>. If it contains "NO_TEST_FILES", write "SKIPPED: no test files were ported" to <cwd>/<output_file> and stop.
+- Run <build_command> from <build_dir> to compile the target branch WITH the ported tests but WITHOUT any code fix applied yet.
+    - If the build fails, write "BUILD_FAILED: <error summary>" to <cwd>/<output_file> and stop. The ported tests may have a compilation issue that needs fixing.
+- On a successful build, run <test_command> from <build_dir>.
+- Analyse the test results:
+    - If the ported tests FAIL (expected): This confirms the tests are meaningful -- they catch the real bug.
+        - Write "RED_CHECK_PASSED" as the first line of <cwd>/<output_file>.
+        - Write a summary of which tests failed and the failure messages.
+    - If the ported tests PASS (unexpected): The tests are NOT catching the bug -- they are invalid or test the wrong thing.
+        - Write "RED_CHECK_FAILED: tests passed without the fix" as the first line of <cwd>/<output_file>.
+        - Write a diagnosis of why the tests may be passing despite the bug being present.
+- Do NOT apply any code fix. This step is read-only with respect to the source code fix.
+</instructions>
+
+<output>
+- Write the validation result to <cwd>/{output_file}.
+- First line must be one of: RED_CHECK_PASSED, RED_CHECK_FAILED, BUILD_FAILED, or SKIPPED.
+- Follow with a detailed summary of test output and diagnosis.
+</output>
+
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            build_command=self.build_command,
+            test_command=self.test_command,
+            build_dir=self.build_dir,
+            test_port_manifest_file=self.test_port_manifest_file,
+            output_file=self.output_file,
+        )
+
+
+TEST_VALIDATION_FILE = "test_validation_result.txt"
+
+
+def gen_TestValidationPrompt(
+    context: str,
+    build_command: str,
+    test_command: str,
+    build_dir: str,
+) -> TestValidationPrompt:
+    return TestValidationPrompt(
+        context=context,
+        build_command=build_command,
+        test_command=test_command,
+        build_dir=build_dir,
+        test_port_manifest_file=TEST_PORT_MANIFEST_FILE,
+        output_file=TEST_VALIDATION_FILE,
+    )
+
+
+# ---------------------------------------------------------------------------
+# BaselineTestPrompt -- captures full test results BEFORE patch is applied
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BaselineTestPrompt:
+    context: str
+    build_command: str
+    test_command: str
+    build_dir: str
+    output_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<build_command>
+{build_command}
+</build_command>
+<test_command>
+{test_command}
+</test_command>
+<build_dir>
+{build_dir}
+</build_dir>
+<output_file>
+{output_file}
+</output_file>
+</definitions>
+
+<definition_explanations>
+- <build_command> is the shell command to compile the target branch. Run from <build_dir>.
+- <test_command> is the shell command to run the full test suite. Run from <build_dir>.
+- <build_dir> is the working directory from which both commands are invoked.
+- <output_file> is where the baseline test results will be written.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to capture a baseline snapshot of the full test suite results on the target branch BEFORE any patch is applied. This snapshot will later be compared against the post-patch results to detect regressions. Think hard and follow these guidelines:
+
+- Ensure the target branch is in its original unpatched state (no fix applied yet).
+- Run <build_command> from <build_dir>. If the build fails, write "BASELINE_BUILD_FAILED: <error summary>" to <cwd>/<output_file> and stop.
+- On a successful build, run <test_command> from <build_dir>. Capture the FULL output.
+- Parse the test output and extract:
+    - Total number of tests run.
+    - Number of tests that passed.
+    - Number of tests that failed.
+    - The exact names/IDs of every test that failed, with their failure reasons.
+- Write the baseline results to <cwd>/<output_file> with this structure:
+    Line 1: "BASELINE_COMPLETE"
+    Line 2: "Total: <N> | Passed: <P> | Failed: <F>"
+    Remaining lines: one failed test per line as "FAIL: <test_name> | <reason>"
+</instructions>
+
+<output>
+- Write baseline test results to <cwd>/{output_file}.
+- First line must be "BASELINE_COMPLETE" or "BASELINE_BUILD_FAILED".
+</output>
+
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            build_command=self.build_command,
+            test_command=self.test_command,
+            build_dir=self.build_dir,
+            output_file=self.output_file,
+        )
+
+
+BASELINE_TEST_FILE = "baseline_test_results.txt"
+BASELINE_DIFF_FILE = "baseline_diff_report.txt"
+
+
+def gen_BaselineTestPrompt(
+    context: str,
+    build_command: str,
+    test_command: str,
+    build_dir: str,
+) -> BaselineTestPrompt:
+    return BaselineTestPrompt(
+        context=context,
+        build_command=build_command,
+        test_command=test_command,
+        build_dir=build_dir,
+        output_file=BASELINE_TEST_FILE,
+    )
+
+
+# ---------------------------------------------------------------------------
+# BaselineDiffPrompt -- compare post-patch results against baseline
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BaselineDiffPrompt:
+    context: str
+    build_command: str
+    test_command: str
+    build_dir: str
+    baseline_file: str
+    output_file: str
+    prompt_template: ClassVar[str] = """
+
+{context}
+
+<definitions>
+<build_command>
+{build_command}
+</build_command>
+<test_command>
+{test_command}
+</test_command>
+<build_dir>
+{build_dir}
+</build_dir>
+<baseline_file>
+{baseline_file}
+</baseline_file>
+<output_file>
+{output_file}
+</output_file>
+</definitions>
+
+<definition_explanations>
+- <build_command> is the shell command to compile the target branch. Run from <build_dir>.
+- <test_command> is the shell command to run the full test suite. Run from <build_dir>.
+- <build_dir> is the working directory from which both commands are invoked.
+- <baseline_file> is the pre-patch baseline test results captured before any changes.
+- <output_file> is where the diff report will be written.
+</definition_explanations>
+
+<instructions>
+The goal of this task is to run the full test suite AFTER the patch has been applied and compare results against the pre-patch baseline to detect regressions. Think hard and follow these guidelines:
+
+- Read <cwd>/<baseline_file> to understand the pre-patch test state. If it starts with "BASELINE_BUILD_FAILED" or "BASELINE_COMPLETE" is missing, note this and proceed anyway.
+- Run <build_command> from <build_dir>. If build fails, write "POST_PATCH_BUILD_FAILED: <summary>" to <cwd>/<output_file> and stop.
+- On a successful build, run <test_command> from <build_dir>. Capture the FULL output.
+- Parse the post-patch test results (same format as baseline).
+- Compare pre-patch vs post-patch results and categorize every difference:
+    - NEW FAILURES: tests that PASSED before but FAIL after the patch (regressions -- serious)
+    - FIXED TESTS: tests that FAILED before but PASS after the patch (improvements)
+    - UNCHANGED FAILURES: tests that failed both before and after (pre-existing, not our fault)
+    - UNCHANGED PASSES: tests that passed both before and after (no impact)
+- Write the diff report to <cwd>/<output_file> with this structure:
+    Line 1: "REGRESSION_FOUND" if any NEW FAILURES exist, else "NO_REGRESSION"
+    Line 2: "Pre-patch: Total <N> | Pass <P> | Fail <F>"
+    Line 3: "Post-patch: Total <N> | Pass <P> | Fail <F>"
+    Then sections for: NEW FAILURES, FIXED TESTS, UNCHANGED FAILURES.
+</instructions>
+
+<output>
+- Write the comparison report to <cwd>/{output_file}.
+- First line must be "REGRESSION_FOUND" or "NO_REGRESSION" or "POST_PATCH_BUILD_FAILED".
+</output>
+
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            build_command=self.build_command,
+            test_command=self.test_command,
+            build_dir=self.build_dir,
+            baseline_file=self.baseline_file,
+            output_file=self.output_file,
+        )
+
+
+def gen_BaselineDiffPrompt(
+    context: str,
+    build_command: str,
+    test_command: str,
+    build_dir: str,
+) -> BaselineDiffPrompt:
+    return BaselineDiffPrompt(
+        context=context,
+        build_command=build_command,
+        test_command=test_command,
+        build_dir=build_dir,
+        baseline_file=BASELINE_TEST_FILE,
+        output_file=BASELINE_DIFF_FILE,
+    )
 
 
 def gen_RunAndFixPrompt(
@@ -133,6 +510,7 @@ def gen_RunAndFixPrompt(
         build_dir=build_dir,
         max_build_test_retries=max_build_test_retries,
         output_failure_file=RUN_AND_FIX_FAILURE_FILE,
+        output_success_file=RUN_AND_FIX_SUCCESS_FILE,
     )
 
 
@@ -749,6 +1127,7 @@ class BugFixUseCase(UseCase):
             PipelineStep(
                 name="run_and_fix",
                 prompt=prompt.prompt(),
+                output_files=[prompt.output_success_file, prompt.output_failure_file],
             ),
         ]
         timings = await claude_run(claude_config, steps)
@@ -761,6 +1140,77 @@ class BugFixUseCase(UseCase):
             "duration": time.time() - phase_start,
         }]
         return phase_results, timings
+
+    # -- Phase 1.5: port tests (dedicated step, before planning) ---------------
+
+    def gen_test_port_steps(self, context, config):
+        prompt = gen_TestPortPrompt(
+            context=context,
+            source_fix_commit=config.source_fix_commit,
+            target_branch=config.target_branch,
+        )
+        steps = [
+            PipelineStep(
+                name="test_port",
+                prompt=prompt.prompt(),
+                output_files=[prompt.output_manifest_file],
+            ),
+        ]
+        return steps, prompt.output_manifest_file
+
+    # -- Phase 1.7: test validation (red check) --------------------------------
+
+    def gen_test_validation_steps(self, context, config):
+        prompt = gen_TestValidationPrompt(
+            context=context,
+            build_command=config.build_command,
+            test_command=config.test_command,
+            build_dir=config.build_dir,
+        )
+        steps = [
+            PipelineStep(
+                name="test_validation",
+                prompt=prompt.prompt(),
+                output_files=[prompt.output_file],
+            ),
+        ]
+        return steps, prompt.output_file
+
+    # -- Phase 0: baseline test snapshot (before patch) ------------------------
+
+    def gen_baseline_test_steps(self, context, config):
+        prompt = gen_BaselineTestPrompt(
+            context=context,
+            build_command=config.build_command,
+            test_command=config.test_command,
+            build_dir=config.build_dir,
+        )
+        steps = [
+            PipelineStep(
+                name="baseline_test",
+                prompt=prompt.prompt(),
+                output_files=[prompt.output_file],
+            ),
+        ]
+        return steps, prompt.output_file
+
+    # -- Post-runtime: baseline diff (compare before vs after) -----------------
+
+    def gen_baseline_diff_steps(self, context, config):
+        prompt = gen_BaselineDiffPrompt(
+            context=context,
+            build_command=config.build_command,
+            test_command=config.test_command,
+            build_dir=config.build_dir,
+        )
+        steps = [
+            PipelineStep(
+                name="baseline_diff",
+                prompt=prompt.prompt(),
+                output_files=[prompt.output_file],
+            ),
+        ]
+        return steps, prompt.output_file
 
     # -- Phase 1: code trace ---------------------------------------------------
 

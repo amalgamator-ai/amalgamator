@@ -12,6 +12,8 @@
     "test_command": "make check -j$(nproc)",
     "max_build_test_retries": 3,
     "use_combined_code_and_test_port_plan": true,
+    "enable_test_port": true,
+    "enable_baseline_diff": false,
     "disallowed_modules": ["gcc/config/arm/"],
     "num_code_port_plan_iterations": 4,
     "num_test_plan_iterations": 3,

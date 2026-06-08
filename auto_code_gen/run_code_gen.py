@@ -201,11 +201,15 @@ def _print_phase_summary(phase_results, all_step_timings, total_duration):
     for s in all_step_timings:
         name = s["name"]
         _PHASE_STEP_PREFIXES = {
-            "Code traces": ["code_trace_"],
+            "Code traces": ["code_trace_", "clear_target_repo"],
+            "Port Tests": ["test_port"],
+            "Test Validation": ["test_validation"],
+            "Baseline Test": ["baseline_test"],
             "Code port plan": ["code_port_plan"],
             "Test plan": ["test_plan"],
-            "Code gen": ["code_gen_V", "code_gen_review", "clear_target_dir_code_gen"],
-            "Runtime": ["apply_compile_", "run_log_", "investigate_runtime_", "clear_runtime_"],
+            "Code gen": ["code_gen_V", "code_gen_review", "clear_target_dir_code_gen", "clear_target_repo_code_gen"],
+            "Runtime": ["apply_compile_", "run_log_", "investigate_runtime_", "clear_runtime_", "run_and_fix"],
+            "Baseline Diff": ["baseline_diff"],
         }
         for phase_name, prefixes in _PHASE_STEP_PREFIXES.items():
             if any(name.startswith(p) for p in prefixes):
@@ -277,6 +281,31 @@ async def run_pipeline(config, claude_config, use_case, resume=False):
     phase_results = []
     all_step_timings = []
 
+    enable_test_port = getattr(config, "enable_test_port", False)
+    enable_baseline_diff = getattr(config, "enable_baseline_diff", False)
+
+    # Phase 0: Baseline test snapshot (before any patch — do-no-harm check)
+    if enable_baseline_diff and hasattr(use_case, "gen_baseline_test_steps"):
+        phase_start = time.time()
+        print("\n" + "=" * 80)
+        print("PHASE 0: BASELINE TEST SNAPSHOT")
+        print("=" * 80)
+        baseline_steps, baseline_file = use_case.gen_baseline_test_steps(
+            context, config
+        )
+        if resume and _all_steps_complete(baseline_steps, output_dir):
+            print("Resume: skipping completed phase 'Baseline Test'")
+        else:
+            timings = await claude_run(claude_config, baseline_steps)
+            all_step_timings.extend(timings)
+        phase_results.append({
+            "name": "Baseline Test",
+            "iterations": 1,
+            "max_iterations": 1,
+            "converged": False,
+            "duration": time.time() - phase_start,
+        })
+
     # Phase 1: Code traces
     phase_start = time.time()
     code_trace_steps, code_trace_files = use_case.gen_code_trace_steps(
@@ -294,6 +323,50 @@ async def run_pipeline(config, claude_config, use_case, resume=False):
         "converged": False,
         "duration": time.time() - phase_start,
     })
+
+    # Phase 1.5: Port tests (dedicated step before planning)
+    if enable_test_port and hasattr(use_case, "gen_test_port_steps"):
+        phase_start = time.time()
+        print("\n" + "=" * 80)
+        print("PHASE 1.5: PORT TESTS FROM SOURCE COMMIT")
+        print("=" * 80)
+        test_port_steps, test_port_manifest = use_case.gen_test_port_steps(
+            context, config
+        )
+        if resume and _all_steps_complete(test_port_steps, output_dir):
+            print("Resume: skipping completed phase 'Port Tests'")
+        else:
+            timings = await claude_run(claude_config, test_port_steps)
+            all_step_timings.extend(timings)
+        phase_results.append({
+            "name": "Port Tests",
+            "iterations": 1,
+            "max_iterations": 1,
+            "converged": False,
+            "duration": time.time() - phase_start,
+        })
+
+        # Phase 1.7: Test validation — red check (tests must FAIL without fix)
+        if hasattr(use_case, "gen_test_validation_steps"):
+            phase_start = time.time()
+            print("\n" + "=" * 80)
+            print("PHASE 1.7: TEST VALIDATION (RED CHECK)")
+            print("=" * 80)
+            test_val_steps, test_val_file = use_case.gen_test_validation_steps(
+                context, config
+            )
+            if resume and _all_steps_complete(test_val_steps, output_dir):
+                print("Resume: skipping completed phase 'Test Validation'")
+            else:
+                timings = await claude_run(claude_config, test_val_steps)
+                all_step_timings.extend(timings)
+            phase_results.append({
+                "name": "Test Validation",
+                "iterations": 1,
+                "max_iterations": 1,
+                "converged": False,
+                "duration": time.time() - phase_start,
+            })
 
     # Phase 2: Code port plan iterations
     phase_start = time.time()
@@ -469,6 +542,26 @@ async def run_pipeline(config, claude_config, use_case, resume=False):
     )
     phase_results.extend(runtime_phase_results)
     all_step_timings.extend(runtime_timings)
+
+    # Phase 6: Baseline diff — compare full test suite before vs after patch
+    if enable_baseline_diff and hasattr(use_case, "gen_baseline_diff_steps"):
+        phase_start = time.time()
+        print("\n" + "=" * 80)
+        print("PHASE 6: BASELINE DIFF (DO-NO-HARM CHECK)")
+        print("=" * 80)
+        diff_steps, diff_file = use_case.gen_baseline_diff_steps(context, config)
+        if resume and _all_steps_complete(diff_steps, output_dir):
+            print("Resume: skipping completed phase 'Baseline Diff'")
+        else:
+            timings = await claude_run(claude_config, diff_steps)
+            all_step_timings.extend(timings)
+        phase_results.append({
+            "name": "Baseline Diff",
+            "iterations": 1,
+            "max_iterations": 1,
+            "converged": False,
+            "duration": time.time() - phase_start,
+        })
 
     return phase_results, all_step_timings
 
