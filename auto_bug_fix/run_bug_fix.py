@@ -17,7 +17,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from common.utils import Tee
-from common.claude_utils import ClaudeConfig, claude_run
+from common.claude_utils import ClaudeConfig, claude_run as _claude_run
+
+
+async def _run_llm(claude_config, prompts, tracker=None):
+    """Compatibility wrapper: call claude_run with raw prompt strings."""
+    return await _claude_run(claude_config, prompts)
+
+
+claude_run = _run_llm
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.git_tools import (
