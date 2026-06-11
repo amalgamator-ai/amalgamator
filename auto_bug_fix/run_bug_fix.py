@@ -613,11 +613,15 @@ def phase_4b_external_pipeline(
 """
 
     ext_claude_config = ExtClaudeConfig(
-        model=claude_config.model,
+        model="claude-opus-4-6",
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
         cwd=config.repo_path,
+        thinking={"type": "adaptive"},
+        effort="max",
+        max_thinking_tokens=1048576,
     )
+    log.info("Phase 4b: escalating to Opus with deep thinking (last resort)")
 
     prompt = gen_RunAndFixPrompt(
         context=enriched_context,
