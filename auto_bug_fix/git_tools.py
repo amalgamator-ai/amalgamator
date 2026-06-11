@@ -36,12 +36,7 @@ def git_show_files(repo_path: str, commit: str) -> list[str]:
 
 def git_patch_id(repo_path: str, commit: str) -> str:
     """Compute stable patch-id for a commit. Returns empty string for merge commits."""
-    show = subprocess.run(
-        ["git", "show", commit],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    )
+    show = _run_git(repo_path, ["show", commit])
     pid = subprocess.run(
         ["git", "patch-id", "--stable"],
         cwd=repo_path,
@@ -51,7 +46,6 @@ def git_patch_id(repo_path: str, commit: str) -> str:
     )
     output = pid.stdout.strip()
     if not output:
-        # Merge commit or empty diff - no patch-id
         return ""
     return output.split()[0]
 
@@ -189,7 +183,10 @@ def git_log_commits(
 def git_merge_base(repo_path: str, a: str, b: str) -> str:
     """Return the best common ancestor (merge base) of two refs."""
     r = _run_git(repo_path, ["merge-base", a, b])
-    return r.stdout.strip()
+    sha = r.stdout.strip()
+    if not r.success or not sha:
+        raise RuntimeError(f"git merge-base failed for {a}..{b}: {r.stderr.strip()}")
+    return sha
 
 
 def git_commit(
@@ -207,7 +204,10 @@ def git_commit(
 def git_rev_parse(repo_path: str, ref: str) -> str:
     """Resolve a ref to its full SHA."""
     r = _run_git(repo_path, ["rev-parse", ref])
-    return r.stdout.strip()
+    sha = r.stdout.strip()
+    if not r.success or not sha:
+        raise RuntimeError(f"git rev-parse failed for {ref}: {r.stderr.strip()}")
+    return sha
 
 
 def git_log_count(repo_path: str, range_spec: str) -> int:

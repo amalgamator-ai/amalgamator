@@ -5,7 +5,6 @@ import subprocess
 from auto_bug_fix.patch_id import (
     compute_patch_id,
     forward_patch_id_check,
-    backward_patch_id_check,
 )
 
 

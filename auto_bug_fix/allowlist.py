@@ -5,7 +5,6 @@ from auto_bug_fix.git_tools import (
     git_cat_file_exists,
     git_diff_find_renames,
     git_diff_name_only,
-    git_log_follow_renames,
     git_show_files,
 )
 
@@ -36,20 +35,10 @@ def resolve_renames(
             resolved.append(path)
             continue
 
-        new_names: list[str] = []
-        follow_shas = git_log_follow_renames(
-            repo_path, path, fork_point, target_branch,
+        rename_pairs = git_diff_find_renames(
+            repo_path, fork_point, target_branch, path,
         )
-        if follow_shas:
-            rename_pairs = git_diff_find_renames(
-                repo_path, fork_point, target_branch, path,
-            )
-            new_names = [dest for _, dest in rename_pairs]
-        else:
-            rename_pairs = git_diff_find_renames(
-                repo_path, fork_point, target_branch, path,
-            )
-            new_names = [dest for _, dest in rename_pairs]
+        new_names = [dest for _, dest in rename_pairs]
 
         if len(new_names) > cap:
             escalated.extend(new_names)

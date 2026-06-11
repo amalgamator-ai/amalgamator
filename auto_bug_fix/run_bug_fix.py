@@ -88,6 +88,26 @@ class PipelineStop(Exception):
     pass
 
 
+_CONFLICT_PREFIXES = ("UU ", "AA ", "DU ", "UD ", "DD ", "AU ", "UA ")
+
+_DANGEROUS_SHELL_PATTERNS = (";", "&&", "||", "|", "`", "$(", "${", ">", "<", "\n")
+
+
+def _validate_shell_command(cmd: str) -> bool:
+    """Reject commands with shell metacharacters that could indicate injection."""
+    return not any(p in cmd for p in _DANGEROUS_SHELL_PATTERNS)
+
+
+def _conflicted_files(status_lines: list[str]) -> list[str]:
+    """Extract conflicted file paths from porcelain status output."""
+    return [l[3:] for l in status_lines if any(l.startswith(p) for p in _CONFLICT_PREFIXES)]
+
+
+def _has_conflicts(status_lines: list[str]) -> list[str]:
+    """Return status lines that represent merge conflicts."""
+    return [l for l in status_lines if any(l.startswith(p) for p in _CONFLICT_PREFIXES)]
+
+
 @dataclass
 class PipelineState:
     seed: list[str] = field(default_factory=list)
@@ -145,10 +165,11 @@ def phase_0_triage(
     return {"forward_patch_id": "not_found", "ancestry": ancestry_status}
 
 
-def _compute_fix_diff(config: BugFixConfig) -> str:
+def _compute_fix_diff(config: BugFixConfig, commit: str | None = None) -> str:
     """Compute the fix diff with truncation for large commits."""
+    sha = commit or config.source_fix_commit
     fix_diff = subprocess.run(
-        ["git", "show", config.source_fix_commit],
+        ["git", "show", sha],
         cwd=config.repo_path, capture_output=True, text=True,
     ).stdout
 
@@ -156,14 +177,14 @@ def _compute_fix_diff(config: BugFixConfig) -> str:
     if len(fix_diff) > MAX_DIFF_CHARS:
         log.warning("fix_diff too large (%d chars), using --stat + conflicted file diffs only", len(fix_diff))
         stat = subprocess.run(
-            ["git", "show", "--stat", config.source_fix_commit],
+            ["git", "show", "--stat", sha],
             cwd=config.repo_path, capture_output=True, text=True,
         ).stdout
         status_lines = git_status_porcelain(config.repo_path)
-        uu_paths = [l[3:] for l in status_lines if l.startswith("UU ") or l.startswith("AA ")]
+        uu_paths = _conflicted_files(status_lines)
         if uu_paths:
             partial_diff = subprocess.run(
-                ["git", "show", config.source_fix_commit, "--"] + uu_paths,
+                ["git", "show", sha, "--"] + uu_paths,
                 cwd=config.repo_path, capture_output=True, text=True,
             ).stdout
             fix_diff = stat + "\n\n--- Partial diff (conflicted files only) ---\n\n" + partial_diff
@@ -192,10 +213,16 @@ def phase_3b_regeneration(
 
     for cmd in regen_cmds:
         log.info("Phase 3b: running regeneration command: %s", cmd)
-        result = subprocess.run(
-            cmd, shell=True, cwd=config.repo_path,
-            capture_output=True, text=True, timeout=1800,
-        )
+        try:
+            result = subprocess.run(
+                cmd, shell=True, cwd=config.repo_path,
+                capture_output=True, text=True, timeout=1800,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("Phase 3b: regeneration timed out (30min): %s", cmd)
+            git_reset_hard(config.repo_path, safe_point)
+            state.dossier.add(f"Regeneration timed out: {cmd}", "Timed out after 30 minutes", "Phase 3b")
+            continue
 
         if result.returncode == 0:
             log.info("Phase 3b: regeneration succeeded: %s", cmd)
@@ -203,10 +230,15 @@ def phase_3b_regeneration(
         else:
             stderr_tail = result.stderr[-2000:] if result.stderr else ""
             log.warning("Phase 3b: regeneration exited %d: %s", result.returncode, cmd)
-            build_check = subprocess.run(
-                config.build_command, shell=True, cwd=config.build_dir,
-                capture_output=True, text=True, timeout=300,
-            )
+            try:
+                build_check = subprocess.run(
+                    config.build_command, shell=True, cwd=config.build_dir,
+                    capture_output=True, text=True, timeout=300,
+                )
+            except subprocess.TimeoutExpired:
+                log.warning("Phase 3b: build check timed out, rolling back")
+                git_reset_hard(config.repo_path, safe_point)
+                continue
             if build_check.returncode == 0:
                 log.info("Phase 3b: codegen exited non-zero but build still passes — keeping partial regeneration")
                 any_succeeded = True
@@ -413,7 +445,7 @@ def phase_2_cherry_pick(
 
         if result.success:
             status = git_status_porcelain(repo)
-            uu_files = [l for l in status if l.startswith("UU ") or l.startswith("AA ")]
+            uu_files = _has_conflicts(status)
             if not uu_files:
                 state.cherry_pick_path = "clean"
                 if state.dossier:
@@ -421,7 +453,7 @@ def phase_2_cherry_pick(
                 return "clean"
 
         status = git_status_porcelain(repo)
-        uu_files = [l for l in status if l.startswith("UU ") or l.startswith("AA ")]
+        uu_files = _has_conflicts(status)
 
         if uu_files:
             if state.dossier:
@@ -437,12 +469,12 @@ def phase_2_cherry_pick(
         git_cherry_pick_abort(repo)
 
     last_status = git_status_porcelain(repo)
-    uu_in_last = [l for l in last_status if l.startswith("UU ") or l.startswith("AA ")]
+    uu_in_last = _has_conflicts(last_status)
 
     git_cherry_pick(repo, fix, strategy=CHERRY_PICK_STRATEGIES[-1]["strategy"],
                     strategy_option=CHERRY_PICK_STRATEGIES[-1]["strategy_option"])
     status = git_status_porcelain(repo)
-    uu_files = [l for l in status if l.startswith("UU ") or l.startswith("AA ")]
+    uu_files = _has_conflicts(status)
 
     if uu_files:
         state.cherry_pick_path = "conflict"
@@ -678,7 +710,7 @@ def cherry_pick_and_resolve(
     commit = resolve_merge_commit(config.repo_path, commit)
     result = git_cherry_pick(config.repo_path, commit)
     status = git_status_porcelain(config.repo_path)
-    uu_files = [l[3:] for l in status if l.startswith("UU ") or l.startswith("AA ")]
+    uu_files = _conflicted_files(status)
 
     if result.success and not uu_files:
         log.info("%s: clean cherry-pick", label)
@@ -710,7 +742,7 @@ def cherry_pick_and_resolve(
         return "resolved"
 
     original_uu_files = list(uu_files)
-    fix_diff = _compute_fix_diff(config)
+    fix_diff = _compute_fix_diff(config, commit)
     context = create_context_str(claude_config, config)
     priority = state.priority_files if state.priority_files else state.allowed_modules
 
@@ -733,7 +765,7 @@ def cherry_pick_and_resolve(
         asyncio.run(claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker))
 
         remaining = git_status_porcelain(config.repo_path)
-        still_conflicted = [l for l in remaining if l.startswith("UU ") or l.startswith("AA ")]
+        still_conflicted = _has_conflicts(remaining)
         if not still_conflicted:
             conflict_summary_parts.append(
                 f"LLM resolved {len(original_uu_files)} source conflicts ({attempt} attempt(s))"
@@ -743,7 +775,7 @@ def cherry_pick_and_resolve(
             git_commit(config.repo_path, msg)
             return "resolved"
         log.warning("%s: attempt %d: %d conflicts remain", label, attempt, len(still_conflicted))
-        uu_files = [l[3:] for l in still_conflicted]
+        uu_files = _conflicted_files(still_conflicted)
 
     raise PipelineEscalation(f"{label}: failed after {config.max_resolution_retries} attempts")
 
@@ -853,6 +885,27 @@ def run_pipeline(
         bug_description=f"Porting fix for {config.issue_id}",
     )
 
+    try:
+        return _run_pipeline_phases(config, claude_config, state, tracker)
+    except (PipelineStop, PipelineEscalation) as e:
+        tracker.set_outcome(type(e).__name__.lower())
+        raise
+    except Exception as e:
+        tracker.set_outcome("error")
+        raise
+    finally:
+        run_path = tracker.save()
+        log.info("Run saved to %s", run_path)
+        print(tracker.summary())
+
+
+def _run_pipeline_phases(
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    tracker: Tracker,
+) -> tuple[Dossier, Tracker]:
+    """Execute all pipeline phases. Separated from run_pipeline for try/finally tracker saving."""
     with tracker.phase("Phase 0 — Triage"):
         triage_gates = phase_0_triage(config, claude_config, state)
         state.dossier.add("Triage result", str(triage_gates), "Phase 0")
@@ -935,24 +988,35 @@ def run_pipeline(
             phase_4_verify(config, state)
             tracker.record_gate("verify", "passed")
     except PipelineEscalation:
-        with tracker.phase("Phase 4a — Build error recovery"):
-            phase_4a_build_recovery(config, claude_config, state, tracker, fix_diff)
-            state.dossier.add("Build recovery", "Agent-assisted fix applied", "Phase 4a")
+        try:
+            with tracker.phase("Phase 4a — Build error recovery"):
+                phase_4a_build_recovery(config, claude_config, state, tracker, fix_diff)
+                state.dossier.add("Build recovery", "Agent-assisted fix applied", "Phase 4a")
 
-        with tracker.phase("Phase 4 — Verify (post-recovery)"):
-            phase_4_verify(config, state)
-            tracker.record_gate("verify", "passed")
+            with tracker.phase("Phase 4 — Verify (post-recovery)"):
+                phase_4_verify(config, state)
+                tracker.record_gate("verify", "passed")
+        except PipelineEscalation:
+            with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
+                phase_4b_external_pipeline(config, claude_config, state, tracker)
 
     verification_cmds = state.triage_assessment.get("verification_commands", [])
+    verification_cmds = [c for c in verification_cmds if _validate_shell_command(c)]
     if verification_cmds:
         ext_failures = []
         with tracker.phase("Phase 4.1 — Extended verification"):
             for vcmd in verification_cmds:
                 log.info("Phase 4.1: running verification command: %s", vcmd)
-                vresult = subprocess.run(
-                    vcmd, shell=True, cwd=config.build_dir,
-                    capture_output=True, text=True, timeout=600,
-                )
+                try:
+                    vresult = subprocess.run(
+                        vcmd, shell=True, cwd=config.build_dir,
+                        capture_output=True, text=True, timeout=600,
+                    )
+                except subprocess.TimeoutExpired:
+                    log.warning("Phase 4.1: verification timed out (10min): %s", vcmd)
+                    ext_failures.append({"cmd": vcmd, "output": "Timed out after 10 minutes"})
+                    state.dossier.add(f"Extended verification timed out: {vcmd}", "Timed out after 10 minutes", "Phase 4.1")
+                    continue
                 if vresult.returncode == 0:
                     log.info("Phase 4.1: verification passed: %s", vcmd)
                 else:
@@ -975,10 +1039,14 @@ def run_pipeline(
                 with tracker.phase("Phase 4.1 — Extended verification (post-recovery)"):
                     still_failing = []
                     for vcmd in verification_cmds:
-                        vresult = subprocess.run(
-                            vcmd, shell=True, cwd=config.build_dir,
-                            capture_output=True, text=True, timeout=600,
-                        )
+                        try:
+                            vresult = subprocess.run(
+                                vcmd, shell=True, cwd=config.build_dir,
+                                capture_output=True, text=True, timeout=600,
+                            )
+                        except subprocess.TimeoutExpired:
+                            still_failing.append(vcmd)
+                            continue
                         if vresult.returncode != 0:
                             still_failing.append(vcmd)
                     if still_failing:
@@ -1035,10 +1103,6 @@ def run_pipeline(
     )
 
     tracker.set_outcome("success")
-    run_path = tracker.save()
-    log.info("Run saved to %s", run_path)
-    print(tracker.summary())
-
     return state.dossier, tracker
 
 
