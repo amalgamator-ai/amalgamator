@@ -78,6 +78,24 @@ def test_load_config_invalid_extension():
     os.unlink(f.name)
 
 
+def test_load_config_empty_yaml():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write("")
+        f.flush()
+        with pytest.raises(ConfigError, match="must contain a YAML/JSON mapping"):
+            load_config_file(f.name)
+    os.unlink(f.name)
+
+
+def test_load_config_non_mapping_yaml():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write("- item1\n- item2\n")
+        f.flush()
+        with pytest.raises(ConfigError, match="must contain a YAML/JSON mapping"):
+            load_config_file(f.name)
+    os.unlink(f.name)
+
+
 def test_validate_config_missing_fields():
     config = {
         "issue_id": "CVE-2024-1234",

@@ -2,7 +2,7 @@
 
 A companion pipeline for backporting commits across branches using git cherry-pick as the primary mechanism, with LLM-powered conflict resolution, semantic triage, and automatic escalation to the main `auto_code_gen` pipeline when fixes require deeper iteration.
 
-**Location**: `../ai_auto_perf_analysis/auto_bug_fix/`  
+**Location**: `auto_bug_fix/`  
 **Entry point**: `python -m auto_bug_fix.run_bug_fix <config.yaml>`
 
 ---

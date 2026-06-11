@@ -1082,8 +1082,9 @@ if __name__ == "__main__":
             sys.exit(1)
         print(f"Worktree created successfully")
 
+        build_subdir = os.path.relpath(bug_fix_config.build_dir, bug_fix_config.repo_path)
         bug_fix_config.repo_path = worktree_path
-        bug_fix_config.build_dir = worktree_path
+        bug_fix_config.build_dir = os.path.join(worktree_path, build_subdir)
     else:
         from auto_bug_fix.bug_fix_config import claude_config, bug_fix_config
         run_dir = "runs"

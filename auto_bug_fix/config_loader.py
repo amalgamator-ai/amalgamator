@@ -38,15 +38,19 @@ def load_config_file(config_path: str) -> dict[str, Any]:
     try:
         with open(path) as f:
             if suffix in {".yaml", ".yml"}:
-                return yaml.safe_load(f)
+                data = yaml.safe_load(f)
             elif suffix == ".json":
-                return json.load(f)
+                data = json.load(f)
             else:
                 raise ConfigError(f"Unsupported config format: {suffix}. Use .yaml, .yml, or .json")
     except yaml.YAMLError as e:
         raise ConfigError(f"Invalid YAML in {config_path}: {e}")
     except json.JSONDecodeError as e:
         raise ConfigError(f"Invalid JSON in {config_path}: {e}")
+
+    if not isinstance(data, dict):
+        raise ConfigError(f"Config file must contain a YAML/JSON mapping, got {type(data).__name__}")
+    return data
 
 
 def validate_config(config: dict[str, Any]) -> None:

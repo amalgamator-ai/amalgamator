@@ -7,15 +7,17 @@ from typing import Literal
 
 
 def capture_output(cmd: list[str], cwd: str) -> tuple[int, str]:
-    """Run a shell command and return (exit_code, combined_stdout_stderr)."""
-    result = subprocess.run(
-        " ".join(cmd),
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        shell=True,
-    )
+    """Run a command and return (exit_code, combined_stdout_stderr)."""
+    if len(cmd) == 1:
+        result = subprocess.run(
+            cmd[0], cwd=cwd, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, shell=True,
+        )
+    else:
+        result = subprocess.run(
+            cmd, cwd=cwd, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True,
+        )
     return (result.returncode, result.stdout)
 
 
