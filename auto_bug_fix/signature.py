@@ -6,18 +6,24 @@ import subprocess
 from typing import Literal
 
 
-def capture_output(cmd: list[str], cwd: str) -> tuple[int, str]:
+def capture_output(cmd: list[str], cwd: str, timeout: int = 1800) -> tuple[int, str]:
     """Run a command and return (exit_code, combined_stdout_stderr)."""
-    if len(cmd) == 1:
-        result = subprocess.run(
-            cmd[0], cwd=cwd, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, shell=True,
-        )
-    else:
-        result = subprocess.run(
-            cmd, cwd=cwd, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True,
-        )
+    try:
+        if len(cmd) == 1:
+            result = subprocess.run(
+                cmd[0], cwd=cwd, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, shell=True,
+                timeout=timeout,
+            )
+        else:
+            result = subprocess.run(
+                cmd, cwd=cwd, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True,
+                timeout=timeout,
+            )
+    except subprocess.TimeoutExpired as e:
+        partial = e.stdout.decode() if e.stdout else ""
+        return (1, partial + f"\n[TIMED OUT after {timeout}s]")
     return (result.returncode, result.stdout)
 
 

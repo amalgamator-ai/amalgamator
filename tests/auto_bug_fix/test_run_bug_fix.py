@@ -3,7 +3,6 @@ from auto_bug_fix.run_bug_fix import (
     PipelineState,
     PipelineStop,
     PipelineEscalation,
-    CHERRY_PICK_STRATEGIES,
     identify_test_files,
 )
 
@@ -35,12 +34,6 @@ def test_pipeline_escalation_exception():
     except PipelineEscalation as exc:
         assert "human intervention required" in str(exc)
 
-
-def test_cherry_pick_strategies_order():
-    assert len(CHERRY_PICK_STRATEGIES) == 3
-    assert CHERRY_PICK_STRATEGIES[0]["name"] == "default"
-    assert CHERRY_PICK_STRATEGIES[1]["name"] == "patience"
-    assert CHERRY_PICK_STRATEGIES[2]["name"] == "ort"
 
 
 def test_identify_test_files_go():

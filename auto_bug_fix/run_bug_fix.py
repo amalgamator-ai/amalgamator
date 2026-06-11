@@ -126,7 +126,7 @@ def phase_0_triage(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
     state: PipelineState,
-) -> str:
+) -> dict[str, str]:
     """Run deterministic triage gates (patch-id, ancestry, seed files) and derive the allowlist."""
     repo = config.repo_path
     fix = config.source_fix_commit
@@ -425,65 +425,6 @@ def phase_1_5_failure_mode(
     return "skip"
 
 
-CHERRY_PICK_STRATEGIES = [
-    {"strategy": None, "strategy_option": None, "name": "default"},
-    {"strategy": None, "strategy_option": "patience", "name": "patience"},
-    {"strategy": "ort", "strategy_option": None, "name": "ort"},
-]
-
-
-def phase_2_cherry_pick(
-    config: BugFixConfig,
-    state: PipelineState,
-) -> str:
-    """Attempt cherry-pick with multiple strategies. Returns 'clean', 'conflict', or 'unmappable'."""
-    repo = config.repo_path
-    fix = config.source_fix_commit
-
-    for strat in CHERRY_PICK_STRATEGIES:
-        result = git_cherry_pick(repo, fix, strategy=strat["strategy"], strategy_option=strat["strategy_option"])
-
-        if result.success:
-            status = git_status_porcelain(repo)
-            uu_files = _has_conflicts(status)
-            if not uu_files:
-                state.cherry_pick_path = "clean"
-                if state.dossier:
-                    state.dossier.add_strategy(strat["name"], "clean")
-                return "clean"
-
-        status = git_status_porcelain(repo)
-        uu_files = _has_conflicts(status)
-
-        if uu_files:
-            if state.dossier:
-                state.dossier.add_strategy(
-                    strat["name"],
-                    f"conflict ({', '.join(l[3:] for l in uu_files)})",
-                )
-            git_cherry_pick_abort(repo)
-            continue
-
-        if state.dossier:
-            state.dossier.add_strategy(strat["name"], "unmappable")
-        git_cherry_pick_abort(repo)
-
-    last_status = git_status_porcelain(repo)
-    uu_in_last = _has_conflicts(last_status)
-
-    git_cherry_pick(repo, fix, strategy=CHERRY_PICK_STRATEGIES[-1]["strategy"],
-                    strategy_option=CHERRY_PICK_STRATEGIES[-1]["strategy_option"])
-    status = git_status_porcelain(repo)
-    uu_files = _has_conflicts(status)
-
-    if uu_files:
-        state.cherry_pick_path = "conflict"
-        return "conflict"
-
-    state.cherry_pick_path = "unmappable"
-    git_cherry_pick_abort(repo)
-    return "unmappable"
-
 
 MAX_ERROR_CHARS = 50_000
 
@@ -689,7 +630,21 @@ def phase_4b_external_pipeline(
     ]
 
     log.info("Phase 4b: handing off to external pipeline (build-test-fix loop)")
+    import time as _time
+    _4b_start = _time.time()
     timings = asyncio.run(ext_claude_run(ext_claude_config, steps))
+    _4b_end = _time.time()
+
+    if tracker and timings:
+        for st in timings:
+            dur = st.get("duration", _4b_end - _4b_start)
+            tracker.record_query(
+                prompt_name=st.get("name", "phase_4b"),
+                start_time=_4b_start,
+                end_time=_4b_start + dur,
+                input_tokens=st.get("input_tokens", 0),
+                output_tokens=st.get("output_tokens", 0),
+            )
 
     failure_file = os.path.join(config.repo_path, RUN_AND_FIX_FAILURE_FILE)
     if os.path.exists(failure_file):
@@ -1194,8 +1149,12 @@ if __name__ == "__main__":
 
     except PipelineStop as e:
         print(f"PIPELINE STOP: {e}")
+        exit_code = 1
     except PipelineEscalation as e:
         print(f"PIPELINE ESCALATION: {e}")
+        exit_code = 1
+    else:
+        exit_code = 0
     finally:
         duration = time.time() - start_time
         print(f"FINISHED: total_duration = {duration:.1f}s")
@@ -1203,3 +1162,5 @@ if __name__ == "__main__":
         if sys.stdout is not original_stdout:
             sys.stdout = original_stdout
         log_file.close()
+
+    sys.exit(exit_code)
