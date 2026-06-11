@@ -25,19 +25,19 @@ async def _run_llm(claude_config, prompts, tracker=None):
     import time
     batch_start = time.time()
     step_timings = await _claude_run(claude_config, prompts)
-    batch_end = time.time()
 
     if tracker and step_timings:
+        cursor = batch_start
         for st in step_timings:
-            st_start = st.get("start_time", batch_start)
-            st_end = st.get("end_time", batch_end)
+            dur = st.get("duration", 0)
             tracker.record_query(
                 prompt_name=st.get("name", "query"),
-                start_time=st_start,
-                end_time=st_end,
+                start_time=cursor,
+                end_time=cursor + dur,
                 input_tokens=st.get("input_tokens", 0),
                 output_tokens=st.get("output_tokens", 0),
             )
+            cursor += dur
 
     return step_timings
 
@@ -132,17 +132,17 @@ def phase_0_triage(
     bwd = backward_patch_id_check(repo, fix, target, config.forward_patch_id_lookback)
     is_ancestor = git_is_ancestor(repo, fix, target)
 
+    ancestry_status = "affected"
     if not is_ancestor and not bwd:
-        # Before stopping, check if any seed files exist on target branch.
-        # Branches may diverge but still share the vulnerable code.
         seed_exists_on_target = any(
             git_cat_file_exists(repo, target, f) for f in state.seed
         )
         if not seed_exists_on_target:
             raise PipelineStop("Target branch is not affected (no ancestry, no patch-id match, no seed files)")
+        ancestry_status = "seed_files_only"
         log.info("Ancestry/patch-id checks failed but seed files exist on target — proceeding with caution")
 
-    return "proceed"
+    return {"forward_patch_id": "not_found", "ancestry": ancestry_status}
 
 
 def _compute_fix_diff(config: BugFixConfig) -> str:
@@ -654,7 +654,7 @@ def phase_4b_external_pipeline(
         with open(failure_file) as f:
             failure_text = f.read()
         state.dossier.add("External pipeline failure", failure_text, "Phase 4b")
-        log.warning("Phase 4b: external pipeline exhausted retries")
+        raise PipelineEscalation("Phase 4b: external pipeline exhausted retries")
     else:
         state.dossier.add("External pipeline", "Build-test-fix loop succeeded", "Phase 4b")
         log.info("Phase 4b: external pipeline succeeded")
@@ -712,12 +712,7 @@ def cherry_pick_and_resolve(
     original_uu_files = list(uu_files)
     fix_diff = _compute_fix_diff(config)
     context = create_context_str(claude_config, config)
-    prompt = NarrowResolutionAgentPrompt(
-        fix_diff=fix_diff,
-        conflicted_files=uu_files,
-        context=context,
-        allowed_modules=state.priority_files if state.priority_files else state.allowed_modules,
-    )
+    priority = state.priority_files if state.priority_files else state.allowed_modules
 
     claude_config_resolve = ClaudeConfig(
         model=claude_config.model,
@@ -727,6 +722,12 @@ def cherry_pick_and_resolve(
     )
 
     for attempt in range(1, config.max_resolution_retries + 1):
+        prompt = NarrowResolutionAgentPrompt(
+            fix_diff=fix_diff,
+            conflicted_files=uu_files,
+            context=context,
+            allowed_modules=priority,
+        )
         log.info("%s attempt %d/%d — resolving %d conflicts",
                  label, attempt, config.max_resolution_retries, len(uu_files))
         asyncio.run(claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker))
@@ -853,10 +854,10 @@ def run_pipeline(
     )
 
     with tracker.phase("Phase 0 — Triage"):
-        triage_result = phase_0_triage(config, claude_config, state)
-        state.dossier.add("Triage result", triage_result, "Phase 0")
-        tracker.record_gate("forward_patch_id", "not_found")
-        tracker.record_gate("ancestry", "affected")
+        triage_gates = phase_0_triage(config, claude_config, state)
+        state.dossier.add("Triage result", str(triage_gates), "Phase 0")
+        tracker.record_gate("forward_patch_id", triage_gates["forward_patch_id"])
+        tracker.record_gate("ancestry", triage_gates["ancestry"])
 
     with tracker.phase("Phase 0.5 — Semantic triage"):
         import json as _json
@@ -966,9 +967,6 @@ def run_pipeline(
 
         if ext_failures:
             log.info("Phase 4.1: %d verification commands failed — triggering Phase 4a recovery", len(ext_failures))
-            combined_errors = "\n\n".join(
-                f"=== {f['cmd']} ===\n{f['output']}" for f in ext_failures
-            )
             try:
                 with tracker.phase("Phase 4a — Build error recovery (from 4.1)"):
                     phase_4a_build_recovery(config, claude_config, state, tracker, fix_diff)
@@ -991,16 +989,16 @@ def run_pipeline(
                             "\n".join(still_failing),
                             "Phase 4.1 (post-recovery)",
                         )
+                        raise PipelineEscalation(
+                            f"Extended verification still failing: {', '.join(still_failing)}"
+                        )
                     else:
                         log.info("Phase 4.1: all verification commands pass after recovery")
             except PipelineEscalation as e:
                 log.warning("Phase 4a recovery failed — escalating to external pipeline: %s", e)
 
-                try:
-                    with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
-                        phase_4b_external_pipeline(config, claude_config, state, tracker)
-                except Exception as ext_e:
-                    log.warning("Phase 4b external pipeline failed or not available: %s", ext_e)
+                with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
+                    phase_4b_external_pipeline(config, claude_config, state, tracker)
 
     with tracker.phase("Phase 4.5 — Semantic equivalence"):
         eq_result = phase_4_5_semantic_equivalence(config, state)
