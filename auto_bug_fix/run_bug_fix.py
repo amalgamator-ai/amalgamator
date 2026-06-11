@@ -718,16 +718,35 @@ def cherry_pick_and_resolve(
         cwd=config.repo_path,
     )
 
+    CHUNK_SIZE = 30
+    if len(fix_diff) > 100_000:
+        CHUNK_SIZE = 15
+
     for attempt in range(1, config.max_resolution_retries + 1):
-        prompt = NarrowResolutionAgentPrompt(
-            fix_diff=fix_diff,
-            conflicted_files=uu_files,
-            context=context,
-            allowed_modules=priority,
-        )
-        log.info("%s attempt %d/%d — resolving %d conflicts",
-                 label, attempt, config.max_resolution_retries, len(uu_files))
-        asyncio.run(claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker))
+        if len(uu_files) > CHUNK_SIZE:
+            log.info("%s attempt %d/%d — resolving %d conflicts in chunks of %d",
+                     label, attempt, config.max_resolution_retries, len(uu_files), CHUNK_SIZE)
+            for chunk_start in range(0, len(uu_files), CHUNK_SIZE):
+                chunk = uu_files[chunk_start:chunk_start + CHUNK_SIZE]
+                log.info("%s: chunk %d-%d of %d",
+                         label, chunk_start + 1, chunk_start + len(chunk), len(uu_files))
+                prompt = NarrowResolutionAgentPrompt(
+                    fix_diff=fix_diff,
+                    conflicted_files=chunk,
+                    context=context,
+                    allowed_modules=priority,
+                )
+                asyncio.run(claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker))
+        else:
+            prompt = NarrowResolutionAgentPrompt(
+                fix_diff=fix_diff,
+                conflicted_files=uu_files,
+                context=context,
+                allowed_modules=priority,
+            )
+            log.info("%s attempt %d/%d — resolving %d conflicts",
+                     label, attempt, config.max_resolution_retries, len(uu_files))
+            asyncio.run(claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker))
 
         remaining = git_status_porcelain(config.repo_path)
         still_conflicted = _has_conflicts(remaining)
