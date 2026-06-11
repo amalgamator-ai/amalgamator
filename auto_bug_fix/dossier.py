@@ -1,4 +1,4 @@
-"""Auditable dossier builder for Phase 5 human review."""
+"""Auditable dossier builder for human review."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -32,12 +32,6 @@ class Dossier:
     trailers: dict[str, str] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
-    # Bug-specific analysis (populated from triage)
-    # These fields work for both CVEs and regular bugs
-    vulnerability_analysis: str = ""  # Also used for non-security bugs as "bug_analysis"
-    impact_assessment: str = ""
-    fix_explanation: str = ""
-
     def add(self, label: str, content: str, source: str) -> None:
         """Append a labelled evidence item to the dossier."""
         self.items.append(DossierItem(label=label, content=content, source=source))
@@ -47,21 +41,6 @@ class Dossier:
         self.strategies.append(StrategyAttempt(
             strategy=strategy, outcome=outcome, commentary=commentary,
         ))
-
-    def set_vulnerability_analysis(self, analysis: str) -> None:
-        """Set the bug/vulnerability analysis from triage report.
-
-        Works for both CVEs (Vulnerability Analysis) and regular bugs (Bug Analysis).
-        """
-        self.vulnerability_analysis = analysis
-
-    def set_impact_assessment(self, assessment: str) -> None:
-        """Set the impact assessment from triage report."""
-        self.impact_assessment = assessment
-
-    def set_fix_explanation(self, explanation: str) -> None:
-        """Set the fix explanation from triage report."""
-        self.fix_explanation = explanation
 
 
 def build_trailers(
@@ -102,37 +81,6 @@ def format_dossier(dossier: Dossier) -> str:
         "",
     ]
 
-    # Executive summary sections from triage
-    if dossier.vulnerability_analysis:
-        # Auto-detect section title (Bug Analysis vs Vulnerability Analysis)
-        # based on whether description mentions "CVE"
-        is_cve = "CVE" in dossier.bug_description.upper()
-        section_title = "Vulnerability Analysis" if is_cve else "Bug Analysis"
-
-        lines.append(f"## {section_title}")
-        lines.append("")
-        lines.append(dossier.vulnerability_analysis)
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
-    if dossier.impact_assessment:
-        lines.append("## Impact Assessment")
-        lines.append("")
-        lines.append(dossier.impact_assessment)
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
-    if dossier.fix_explanation:
-        lines.append("## How the Fix Works")
-        lines.append("")
-        lines.append(dossier.fix_explanation)
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
-    # Technical details
     for item in dossier.items:
         lines.append(f"## {item.label}")
         lines.append("")

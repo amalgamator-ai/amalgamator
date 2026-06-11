@@ -134,7 +134,6 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         build_command=config["build"]["command"],
         test_command=config["build"]["test_command"],
         max_build_test_retries=advanced.get("max_build_test_retries", 3),
-        bisect_max_commits=advanced.get("bisect_max_commits", 50),
         forward_patch_id_lookback=advanced.get("forward_patch_id_lookback", "12 months"),
         allowlist_rename_expansion_cap=advanced.get("allowlist_rename_expansion_cap", 3),
     )
@@ -163,53 +162,16 @@ def parse_claude_config(config: dict[str, Any], output_dir: str) -> ClaudeConfig
     )
 
 
-def get_prebuild_commands(config: dict[str, Any]) -> list[str]:
-    """Extract prebuild commands from config.
-
-    Args:
-        config: Configuration dict from load_config_file()
-
-    Returns:
-        List of prebuild commands (e.g., ["./buildconf.sh", "./configure"])
-    """
-    return config.get("build", {}).get("prebuild_commands", [])
-
-
-def get_output_dir(config: dict[str, Any]) -> str:
-    """Get output directory from config.
-
-    Args:
-        config: Configuration dict from load_config_file()
-
-    Returns:
-        Expanded output directory path
-    """
-    return expand_path(config.get("output", {}).get("directory", "./runs"))
-
-
-def load_pipeline_config(config_path: str) -> tuple[BugFixConfig, ClaudeConfig, str, str, list[str], str]:
+def load_pipeline_config(config_path: str) -> tuple[BugFixConfig, ClaudeConfig, str, str]:
     """Load and parse full pipeline configuration.
 
-    Args:
-        config_path: Path to YAML/JSON config file
-
     Returns:
-        Tuple of:
-        - BugFixConfig: Main pipeline config
-        - ClaudeConfig: Claude agent config
-        - workdir: Working directory path
-        - source_path: Source repository path
-        - prebuild_commands: List of prebuild commands
-        - output_dir: Output directory path
-
-    Raises:
-        ConfigError: If config is invalid
+        Tuple of (BugFixConfig, ClaudeConfig, workdir, source_path)
     """
     config = load_config_file(config_path)
-    output_dir = get_output_dir(config)
+    output_dir = expand_path(config.get("output", {}).get("directory", "./runs"))
 
     bug_fix_config, workdir, source_path = parse_bug_fix_config(config)
     claude_config = parse_claude_config(config, output_dir)
-    prebuild_commands = get_prebuild_commands(config)
 
-    return bug_fix_config, claude_config, workdir, source_path, prebuild_commands, output_dir
+    return bug_fix_config, claude_config, workdir, source_path

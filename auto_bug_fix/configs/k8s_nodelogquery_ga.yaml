@@ -1,0 +1,21 @@
+---
+issue_id: "k8s-nodelogquery-ga-backport"
+
+bug_description: "Promote NodeLogQuery feature gate to GA and lock default"
+
+repository:
+  source_path: "/home/asangior/kubernetes"
+  workdir: "/tmp/bugfix-workdir"
+
+branches:
+  source: "origin/release-1.36"
+  target: "origin/release-1.35"
+
+fix:
+  commit: "e8a12773c9d"
+
+build:
+  command: "go build ./pkg/features/..."
+  test_command: "go test -count=1 -timeout=120s ./pkg/features/..."
+
+model: "claude-sonnet-4-6"

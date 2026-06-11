@@ -4,7 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-from auto_bug_fix.bug_fix_config import BugFixConfig, ClaudeConfig
+from auto_bug_fix.bug_fix_config import BugFixConfig
+from common.claude_utils import ClaudeConfig
 
 
 def create_context_str(claude_config: ClaudeConfig, config: BugFixConfig) -> str:

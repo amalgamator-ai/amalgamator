@@ -56,7 +56,7 @@ from auto_bug_fix.git_tools import (
     git_rev_parse,
 )
 from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
-from auto_bug_fix.signature import capture_output, normalize_signature, compare_signatures
+from auto_bug_fix.signature import capture_output, normalize_signature
 from auto_bug_fix.allowlist import derive_seed, resolve_renames, enforce_allowlist, enforce_test_file_veto
 from auto_bug_fix.baseline import capture_baseline, check_regression, run_test_suite
 from auto_bug_fix.range_diff import run_range_diff, parse_equivalence
@@ -90,12 +90,9 @@ class PipelineStop(Exception):
 class PipelineState:
     seed: list[str] = field(default_factory=list)
     allowed_modules: list[str] = field(default_factory=list)
-    escalated_paths: list[str] = field(default_factory=list)
     baseline: set[str] = field(default_factory=set)
-    fixture_cache: str = ""
     ported_test_files: list[str] = field(default_factory=list)
     s_target: str = ""
-    s_parent: str = ""
     bisect_sha: str | None = None
     cherry_pick_path: str = ""
     dossier: Dossier | None = None
@@ -116,12 +113,11 @@ def phase_0_triage(
     state.seed = derive_seed(repo, fix)
 
     fork_point = git_merge_base(repo, config.source_branch, target)
-    resolved, escalated = resolve_renames(
+    resolved, _ = resolve_renames(
         repo, state.seed, target, fork_point,
         cap=config.allowlist_rename_expansion_cap,
     )
     state.allowed_modules = resolved
-    state.escalated_paths = escalated
 
     if config.allowed_modules is not None:
         state.allowed_modules = config.allowed_modules
@@ -367,10 +363,13 @@ def phase_1_baseline_red_bisect(
     red_exit, red_output = capture_output(
         [config.test_command], config.build_dir,
     )
+    is_bugfix = state.triage_assessment.get("commit_type", "").lower() in ("bugfix", "bug_fix", "fix", "security")
     if red_exit == 0:
-        if state.ported_test_files:
+        if state.ported_test_files and is_bugfix:
             raise PipelineEscalation("RED check passed — target may already be fixed or test is inapplicable")
-        log.info("Baseline tests pass (no ported vulnerability test available) — proceeding")
+        log.info("Baseline tests pass — %s",
+                 "feature/refactor commit, RED check not applicable" if not is_bugfix
+                 else "no ported vulnerability test available — proceeding")
     else:
         state.s_target = normalize_signature(red_output)
 
@@ -383,11 +382,14 @@ def phase_1_5_failure_mode(
     claude_config: ClaudeConfig,
     state: PipelineState,
 ) -> str:
-    """Confirm the failure mode matches via signature comparison."""
-    if not state.s_target or not state.s_parent:
-        return "skip"
+    """Confirm the failure mode matches via signature comparison.
 
-    return compare_signatures(state.s_target, state.s_parent)
+    Currently always returns "skip" — requires a parent signature source
+    (e.g. from a reproducer or upstream test) to be wired in.
+    """
+    if not state.s_target:
+        return "skip"
+    return "skip"
 
 
 CHERRY_PICK_STRATEGIES = [
@@ -889,8 +891,7 @@ def run_pipeline(
             tracker.record_gate("bisect", state.bisect_sha)
 
     with tracker.phase("Phase 1.5 — Failure-mode confirmation"):
-        phase_1_5_failure_mode(config, claude_config, state)
-        sig_result = compare_signatures(state.s_target, state.s_parent) if state.s_target and state.s_parent else "skip"
+        sig_result = phase_1_5_failure_mode(config, claude_config, state)
         state.dossier.add("Signature comparison", sig_result, "Phase 1.5")
         tracker.record_gate("signature_comparison", sig_result)
 
@@ -918,6 +919,8 @@ def run_pipeline(
     if regen_cmds and files_skipped:
         with tracker.phase("Phase 3b — Regeneration"):
             phase_3b_regeneration(config, state, regen_cmds)
+
+    fix_diff = _compute_fix_diff(config)
 
     try:
         with tracker.phase("Phase 4 — Verify"):
@@ -1041,11 +1044,10 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
         from auto_bug_fix.config_loader import load_pipeline_config
-        from auto_bug_fix.worktree import setup_per_cve_worktree
         from datetime import datetime, timezone
         import shutil
 
-        bug_fix_config, claude_config, workdir, source_path, _, _ = load_pipeline_config(config_path)
+        bug_fix_config, claude_config, workdir, source_path = load_pipeline_config(config_path)
 
         # Create run directory: <yaml_basename>_<datetime>/
         yaml_basename = os.path.splitext(os.path.basename(config_path))[0]

@@ -55,35 +55,3 @@ def test_format_dossier():
     assert "Strategies Attempted" in output
     assert "default" in output
     assert "patience" in output
-
-
-def test_dossier_vulnerability_sections():
-    """Test the new bug-specific analysis sections."""
-    d = Dossier(
-        issue_id="CVE-2024-1234",
-        source_branch="main",
-        target_branch="v2.0",
-        fix_commit="abc123",
-        bug_description="CVE-2024-1234: Quadratic runtime DoS (CWE-407)",
-    )
-
-    d.set_vulnerability_analysis(
-        "The vulnerability allows attackers to cause quadratic runtime "
-        "through crafted attribute names that hash-collide."
-    )
-    d.set_impact_assessment(
-        "Target branch IS vulnerable. Vulnerable code introduced in commit deadbeef."
-    )
-    d.set_fix_explanation(
-        "The fix adds early collision detection before the O(n²) scan."
-    )
-
-    output = format_dossier(d)
-
-    # Check executive summary sections appear before technical details
-    assert "## Vulnerability Analysis" in output
-    assert "quadratic runtime" in output
-    assert "## Impact Assessment" in output
-    assert "Target branch IS vulnerable" in output
-    assert "## How the Fix Works" in output
-    assert "early collision detection" in output

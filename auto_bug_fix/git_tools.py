@@ -62,10 +62,6 @@ def git_is_ancestor(repo_path: str, commit: str, branch: str) -> bool:
     return r.success
 
 
-def git_grep(repo_path: str, pattern: str, ref: str) -> GitResult:
-    """Search for a whole-word pattern in the given ref."""
-    return _run_git(repo_path, ["grep", "-nw", pattern, ref])
-
 
 def git_cat_file_exists(repo_path: str, ref: str, path: str) -> bool:
     """Return True if path exists in the given ref."""
@@ -109,12 +105,6 @@ def git_diff_find_renames(
             pairs.append((parts[1], parts[2]))
     return pairs
 
-
-def git_blame_lines(
-    repo_path: str, file: str, start: int, end: int, ref: str = "HEAD"
-) -> GitResult:
-    """Run git blame on a line range of a file."""
-    return _run_git(repo_path, ["blame", f"-L{start},{end}", file, "--", ref])
 
 
 def git_cherry_pick(
@@ -166,22 +156,6 @@ def git_reset_hard(repo_path: str, ref: str = "HEAD") -> GitResult:
     return _run_git(repo_path, ["reset", "--hard", ref])
 
 
-def git_clean(
-    repo_path: str,
-    force: bool = True,
-    dirs: bool = True,
-    ignored: bool = False,
-) -> GitResult:
-    """Remove untracked files from the working tree."""
-    args = ["clean"]
-    if force:
-        args.append("-f")
-    if dirs:
-        args.append("-d")
-    if ignored:
-        args.append("-x")
-    return _run_git(repo_path, args)
-
 
 def git_worktree_add(repo_path: str, path: str, branch: str) -> GitResult:
     """Create a new git worktree at path checked out to branch."""
@@ -192,10 +166,6 @@ def git_worktree_remove(repo_path: str, path: str) -> GitResult:
     """Remove a git worktree."""
     return _run_git(repo_path, ["worktree", "remove", path])
 
-
-def git_checkout_files(repo_path: str, ref: str, paths: list[str]) -> GitResult:
-    """Check out specific files from a ref without switching branches."""
-    return _run_git(repo_path, ["checkout", ref, "--"] + paths)
 
 
 def git_log_commits(

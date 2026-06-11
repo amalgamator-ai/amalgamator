@@ -13,11 +13,8 @@ def test_pipeline_state_defaults():
     assert state.seed == []
     assert state.allowed_modules == []
     assert state.baseline == set()
-    assert state.escalated_paths == []
-    assert state.fixture_cache == ""
     assert state.ported_test_files == []
     assert state.s_target == ""
-    assert state.s_parent == ""
     assert state.bisect_sha is None
     assert state.cherry_pick_path == ""
     assert state.dossier is None

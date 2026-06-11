@@ -4,13 +4,12 @@ import tempfile
 import pytest
 from auto_bug_fix.config_loader import (
     load_config_file, validate_config, parse_bug_fix_config,
-    parse_claude_config, get_prebuild_commands, get_output_dir,
+    parse_claude_config,
     load_pipeline_config, ConfigError, expand_path,
 )
 
 
 def test_load_yaml_config():
-    """Test loading a valid YAML config."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write("""
 issue_id: CVE-2024-1234
@@ -38,7 +37,6 @@ build:
 
 
 def test_load_json_config():
-    """Test loading a valid JSON config."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         f.write("""{
   "issue_id": "CVE-2024-5678",
@@ -67,13 +65,11 @@ def test_load_json_config():
 
 
 def test_load_config_file_not_found():
-    """Test loading a non-existent config file."""
     with pytest.raises(ConfigError, match="not found"):
         load_config_file("/nonexistent/config.yaml")
 
 
 def test_load_config_invalid_extension():
-    """Test loading a config with invalid extension."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         f.write("issue_id: test")
         f.flush()
@@ -83,21 +79,18 @@ def test_load_config_invalid_extension():
 
 
 def test_validate_config_missing_fields():
-    """Test validation catches missing required fields."""
     config = {
         "issue_id": "CVE-2024-1234",
-        # Missing bug_description, repository, etc.
     }
     with pytest.raises(ConfigError, match="Missing required fields"):
         validate_config(config)
 
 
 def test_validate_config_missing_nested():
-    """Test validation catches missing nested fields."""
     config = {
         "issue_id": "CVE-2024-1234",
         "bug_description": "Test",
-        "repository": {},  # Missing source_path
+        "repository": {},
         "branches": {"source": "main", "target": "v1.0"},
         "fix": {"commit": "abc"},
         "build": {"command": "make", "test_command": "make test"},
@@ -107,14 +100,12 @@ def test_validate_config_missing_nested():
 
 
 def test_expand_path():
-    """Test path expansion (~ and env vars)."""
     os.environ["TEST_VAR"] = "/test/path"
     assert expand_path("~/foo") == os.path.expanduser("~/foo")
     assert expand_path("$TEST_VAR/bar") == "/test/path/bar"
 
 
 def test_parse_bug_fix_config():
-    """Test parsing config dict into BugFixConfig."""
     config = {
         "issue_id": "CVE-2024-1234",
         "bug_description": "Test CVE: buffer overflow",
@@ -136,7 +127,6 @@ def test_parse_bug_fix_config():
         },
         "advanced": {
             "max_build_test_retries": 5,
-            "bisect_max_commits": 100,
         },
     }
 
@@ -150,7 +140,6 @@ def test_parse_bug_fix_config():
     assert bug_fix_config.build_command == "make -j4"
     assert bug_fix_config.test_command == "make test"
     assert bug_fix_config.max_build_test_retries == 5
-    assert bug_fix_config.bisect_max_commits == 100
     assert workdir == "/tmp/workdir"
     assert source_path == "/tmp/test-repo"
     assert bug_fix_config.repo_path == "/tmp/workdir/test-repo"
@@ -158,7 +147,6 @@ def test_parse_bug_fix_config():
 
 
 def test_parse_claude_config():
-    """Test parsing Claude configuration."""
     config = {
         "claude": {
             "model": "claude-opus-4-7",
@@ -176,8 +164,7 @@ def test_parse_claude_config():
 
 
 def test_parse_claude_config_defaults():
-    """Test Claude config falls back to defaults."""
-    config = {}  # No claude section
+    config = {}
 
     claude_config = parse_claude_config(config, "/tmp/output")
 
@@ -186,31 +173,7 @@ def test_parse_claude_config_defaults():
     assert claude_config.perm_mode == "acceptEdits"
 
 
-def test_get_prebuild_commands():
-    """Test extracting prebuild commands."""
-    config = {
-        "build": {
-            "prebuild_commands": ["./autogen.sh", "./configure --enable-debug"],
-        },
-    }
-
-    commands = get_prebuild_commands(config)
-    assert commands == ["./autogen.sh", "./configure --enable-debug"]
-
-
-def test_get_prebuild_commands_empty():
-    """Test prebuild commands defaults to empty list."""
-    config = {"build": {}}
-    assert get_prebuild_commands(config) == []
-
-
-def test_get_output_dir():
-    """Test getting output directory."""
-    config = {"output": {"directory": "/custom/output"}}
-    assert get_output_dir(config) == "/custom/output"
-
-
-def test_get_output_dir_default():
-    """Test output directory defaults to ./runs."""
-    config = {}
-    assert get_output_dir(config) == "./runs"
+def test_parse_claude_config_top_level_model():
+    config = {"model": "claude-opus-4-6"}
+    claude_config = parse_claude_config(config, "/tmp/output")
+    assert claude_config.model == "claude-opus-4-6"
