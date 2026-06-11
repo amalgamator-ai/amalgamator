@@ -36,8 +36,8 @@ def normalize_signature(raw: str) -> str:
     s = re.sub(r"PID \d+", "PID PID", s)
     s = re.sub(r"process \d+", "process PID", s)
 
-    # ISO 8601 timestamps
-    s = re.sub(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", "TIMESTAMP", s)
+    # ISO 8601 timestamps (with optional fractional seconds and timezone)
+    s = re.sub(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?", "TIMESTAMP", s)
 
     # Unix timestamps (10-digit integers)
     s = re.sub(r"\b\d{10}\b", "TIMESTAMP", s)

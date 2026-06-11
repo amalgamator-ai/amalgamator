@@ -5,11 +5,15 @@ import re
 import subprocess
 
 
-def run_test_suite(test_command: str, cwd: str) -> tuple[int, str, str]:
+def run_test_suite(test_command: str, cwd: str, timeout: int = 1800) -> tuple[int, str, str]:
     """Run a shell test command and return (exit_code, stdout, stderr)."""
-    result = subprocess.run(
-        test_command, shell=True, cwd=cwd, capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            test_command, shell=True, cwd=cwd, capture_output=True, text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return (1, "", f"Command timed out after {timeout}s: {test_command}")
     return (result.returncode, result.stdout, result.stderr)
 
 

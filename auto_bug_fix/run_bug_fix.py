@@ -964,6 +964,7 @@ def _run_pipeline_phases(
             label=f"main commit ({config.issue_id})",
             files_to_skip=files_to_skip,
         )
+        state.cherry_pick_path = cp_result
         state.dossier.cherry_pick_path = cp_result
         tracker.record_gate("cherry_pick", cp_result)
 
@@ -975,7 +976,7 @@ def _run_pipeline_phases(
                 "Phase 0.5 semantic triage",
             )
 
-    regen_cmds = state.triage_assessment.get("regeneration_commands", [])
+    regen_cmds = [c for c in state.triage_assessment.get("regeneration_commands", []) if _validate_shell_command(c)]
     files_skipped = state.triage_assessment.get("files_to_skip", [])
     if regen_cmds and files_skipped:
         with tracker.phase("Phase 3b — Regeneration"):
