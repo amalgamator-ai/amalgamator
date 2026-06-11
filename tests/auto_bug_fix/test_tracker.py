@@ -26,7 +26,7 @@ def tracker(tmp_path):
 
 def test_compute_cost_opus():
     cost = compute_cost("claude-opus-4-6", input_tokens=1000, output_tokens=500)
-    expected = (1000 * 15.0 + 500 * 75.0) / 1_000_000
+    expected = (1000 * 5.0 + 500 * 25.0) / 1_000_000
     assert abs(cost - expected) < 1e-9
 
 
@@ -98,7 +98,7 @@ def test_query_cost_calculation(tracker):
             input_tokens=1_000_000,
             output_tokens=100_000,
         )
-    expected = (1_000_000 * 15.0 + 100_000 * 75.0) / 1_000_000
+    expected = (1_000_000 * 5.0 + 100_000 * 25.0) / 1_000_000
     assert abs(record.cost_usd - expected) < 0.01
 
 

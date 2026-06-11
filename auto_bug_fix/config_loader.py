@@ -59,23 +59,23 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError(f"Missing required fields: {', '.join(missing)}")
 
     repo = _require_mapping(config, "repository")
-    if not repo.get("source_path"):
+    if repo.get("source_path") is None:
         raise ConfigError("repository.source_path is required")
 
     branches = _require_mapping(config, "branches")
-    if not branches.get("source"):
+    if branches.get("source") is None:
         raise ConfigError("branches.source is required")
-    if not branches.get("target"):
+    if branches.get("target") is None:
         raise ConfigError("branches.target is required")
 
     fix = _require_mapping(config, "fix")
-    if not fix.get("commit"):
+    if fix.get("commit") is None:
         raise ConfigError("fix.commit is required")
 
     build = _require_mapping(config, "build")
-    if not build.get("command"):
+    if build.get("command") is None:
         raise ConfigError("build.command is required")
-    if not build.get("test_command"):
+    if build.get("test_command") is None:
         raise ConfigError("build.test_command is required")
 
 

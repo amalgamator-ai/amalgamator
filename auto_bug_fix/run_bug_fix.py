@@ -592,6 +592,16 @@ def phase_4a_build_recovery(
                 "Phase 4a: agent made no changes — likely CANNOT_FIX"
             )
 
+    build_exit, _, _ = run_test_suite(config.build_command, config.build_dir)
+    if build_exit == 0:
+        _, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
+        from auto_bug_fix.baseline import parse_test_failures
+        failures = parse_test_failures(test_stdout, test_stderr)
+        final_passed, _ = check_regression(failures, state.baseline)
+        if final_passed:
+            log.info("Phase 4a: build+test passed after final attempt")
+            return
+
     raise PipelineEscalation(
         f"Phase 4a: build/test still failing after {config.max_build_test_retries} recovery attempts"
     )
