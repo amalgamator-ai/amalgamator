@@ -1033,19 +1033,28 @@ def run_pipeline(
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    log_file = open(LOG_FILE, "w")
-    original_stdout = sys.stdout
-    sys.stdout = Tee(original_stdout, log_file)
-
     # Load config from YAML if provided, otherwise use defaults
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
         from auto_bug_fix.config_loader import load_pipeline_config
         from auto_bug_fix.worktree import setup_per_cve_worktree
-        import os
+        from datetime import datetime, timezone
         import shutil
 
         bug_fix_config, claude_config, workdir, source_path, _, _ = load_pipeline_config(config_path)
+
+        # Create run directory: <yaml_basename>_<datetime>/
+        yaml_basename = os.path.splitext(os.path.basename(config_path))[0]
+        run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join("runs", f"{yaml_basename}_{run_timestamp}")
+        os.makedirs(run_dir, exist_ok=True)
+
+        # Redirect stdout to run log
+        log_path = os.path.join(run_dir, "run_log.txt")
+        log_file = open(log_path, "w")
+        original_stdout = sys.stdout
+        sys.stdout = Tee(original_stdout, log_file)
+        print(f"Run directory: {run_dir}")
 
         # Set up worktree for this CVE (avoids copying multi-GB repos)
         os.makedirs(workdir, exist_ok=True)
@@ -1071,14 +1080,31 @@ if __name__ == "__main__":
         bug_fix_config.build_dir = worktree_path
     else:
         from auto_bug_fix.bug_fix_config import claude_config, bug_fix_config
+        run_dir = "runs"
+        os.makedirs(run_dir, exist_ok=True)
+        log_path = os.path.join(run_dir, "run_log.txt")
+        log_file = open(log_path, "w")
+        original_stdout = sys.stdout
+        sys.stdout = Tee(original_stdout, log_file)
 
+    # Override tracker output_dir to use run_dir
     start_time = time.time()
     try:
-        dossier, tracker = run_pipeline(bug_fix_config, claude_config)
+        dossier, tracker = run_pipeline(bug_fix_config, claude_config, output_dir=run_dir)
+
+        # Save dossier to run directory
         dossier_text = format_dossier(dossier)
-        with open(DOSSIER_FILE, "w") as f:
+        dossier_path = os.path.join(run_dir, DOSSIER_FILE)
+        with open(dossier_path, "w") as f:
             f.write(dossier_text)
-        print(f"Dossier written to {DOSSIER_FILE}")
+        print(f"Dossier written to {dossier_path}")
+
+        # Copy semantic triage if it exists
+        triage_src = os.path.join(bug_fix_config.repo_path, "semantic_triage.json")
+        if os.path.exists(triage_src):
+            import shutil
+            shutil.copy2(triage_src, os.path.join(run_dir, "semantic_triage.json"))
+
     except PipelineStop as e:
         print(f"PIPELINE STOP: {e}")
     except PipelineEscalation as e:
@@ -1086,3 +1112,4 @@ if __name__ == "__main__":
     finally:
         duration = time.time() - start_time
         print(f"FINISHED: total_duration = {duration:.1f}s")
+        print(f"All outputs in: {run_dir}")
