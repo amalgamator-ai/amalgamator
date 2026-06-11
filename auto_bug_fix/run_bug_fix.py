@@ -742,6 +742,8 @@ def cherry_pick_and_resolve(
         log.warning("%s: attempt %d: %d conflicts remain", label, attempt, len(still_conflicted))
         uu_files = _conflicted_files(still_conflicted)
 
+    from auto_bug_fix.git_tools import git_cherry_pick_abort as _abort
+    _abort(config.repo_path)
     raise PipelineEscalation(f"{label}: failed after {config.max_resolution_retries} attempts")
 
 
@@ -805,18 +807,16 @@ def phase_4_5_semantic_equivalence(
     """Run range-diff to classify the port as identical, modified, or unmatched."""
     repo = config.repo_path
     try:
+        target_base = git_merge_base(repo, config.target_branch, "HEAD")
         rd_output = run_range_diff(
             repo,
             f"{config.source_fix_commit}^..{config.source_fix_commit}",
-            "HEAD^..HEAD",
+            f"{target_base}..HEAD",
         )
     except Exception:
         return "unmatched"
 
     equivalence = parse_equivalence(rd_output)
-    if equivalence == "identical":
-        return "identical"
-
     return equivalence
 
 
@@ -1152,6 +1152,9 @@ if __name__ == "__main__":
         exit_code = 1
     except PipelineEscalation as e:
         print(f"PIPELINE ESCALATION: {e}")
+        exit_code = 1
+    except Exception as e:
+        print(f"PIPELINE ERROR: {type(e).__name__}: {e}")
         exit_code = 1
     else:
         exit_code = 0
