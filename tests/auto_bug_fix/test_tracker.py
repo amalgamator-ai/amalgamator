@@ -44,8 +44,8 @@ def test_compute_cost_unknown_model_defaults_to_opus():
 
 def test_phase_timing(tracker):
     with tracker.phase("Phase 0 — Triage") as phase:
-        time.sleep(0.01)
-    assert phase.duration_s >= 0.01
+        time.sleep(0.05)
+    assert phase.duration_s >= 0.04
     assert phase.outcome == "proceed"
 
 

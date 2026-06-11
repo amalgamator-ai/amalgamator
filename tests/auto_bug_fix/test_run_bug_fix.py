@@ -81,3 +81,9 @@ def test_identify_test_files_spec():
     result = identify_test_files(files)
     assert "spec/models/user_spec.rb" in result
     assert len(result) == 1
+
+
+def test_identify_test_files_no_false_positives():
+    files = ["latest/foo.c", "contest.md", "lib/attestation.go", "pkg/protesting.h"]
+    result = identify_test_files(files)
+    assert result == []

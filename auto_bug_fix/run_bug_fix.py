@@ -290,7 +290,7 @@ def phase_0_5_semantic_triage(
     return assessment
 
 
-_TEST_PATTERNS = ("test", "_test.", "test_", "tests/", "testing/", "spec/", "_spec.")
+_TEST_PATTERNS = ("_test.", "test_", "tests/", "/test/", "testing/", "spec/", "_spec.", "testdata/")
 
 
 def identify_test_files(seed_files: list[str]) -> list[str]:
@@ -298,7 +298,8 @@ def identify_test_files(seed_files: list[str]) -> list[str]:
     test_files = []
     for f in seed_files:
         lower = f.lower()
-        if any(p in lower for p in _TEST_PATTERNS):
+        basename = lower.rsplit("/", 1)[-1]
+        if any(p in lower for p in _TEST_PATTERNS) or basename.startswith("test_"):
             test_files.append(f)
     return test_files
 
@@ -354,15 +355,14 @@ def phase_1_baseline_red_bisect(
     claude_config: ClaudeConfig,
     state: PipelineState,
 ) -> None:
-    """Capture test baseline, run RED check, and optionally bisect for the introducing commit."""
+    """Capture test baseline and run RED check in a single test suite invocation."""
     repo = config.repo_path
-
-    _, baseline_stdout, baseline_stderr = run_test_suite(config.test_command, config.build_dir)
-    state.baseline = capture_baseline(config.test_command, config.build_dir)
 
     red_exit, red_output = capture_output(
         [config.test_command], config.build_dir,
     )
+    from auto_bug_fix.baseline import parse_test_failures
+    state.baseline = parse_test_failures(red_output, "")
     is_bugfix = state.triage_assessment.get("commit_type", "").lower() in ("bugfix", "bug_fix", "fix", "security")
     if red_exit == 0:
         if state.ported_test_files and is_bugfix:
@@ -457,8 +457,10 @@ MAX_ERROR_CHARS = 50_000
 
 def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[bool, str, str, str, str]:
     """Run build and test commands, return (passed, build_out, build_err, test_out, test_err)."""
-    _, build_stdout, build_stderr = run_test_suite(config.build_command, config.build_dir)
-    _, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
+    build_exit, build_stdout, build_stderr = run_test_suite(config.build_command, config.build_dir)
+    if build_exit != 0:
+        return False, build_stdout, build_stderr, "", ""
+    test_exit, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
     from auto_bug_fix.baseline import parse_test_failures
     failures = parse_test_failures(test_stdout, test_stderr)
     passed, _ = check_regression(failures, state.baseline)
@@ -505,14 +507,17 @@ def phase_4a_build_recovery(
     )
 
     for attempt in range(1, config.max_build_test_retries + 1):
-        _, build_stdout, build_stderr = run_test_suite(config.build_command, config.build_dir)
-        _, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
-        from auto_bug_fix.baseline import parse_test_failures
-        failures = parse_test_failures(test_stdout, test_stderr)
-        build_test_passed, _ = check_regression(failures, state.baseline)
-        if build_test_passed:
-            log.info("Phase 4a: build+test passed on attempt %d", attempt)
-            return
+        build_exit, build_stdout, build_stderr = run_test_suite(config.build_command, config.build_dir)
+        if build_exit == 0:
+            test_exit, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
+            from auto_bug_fix.baseline import parse_test_failures
+            failures = parse_test_failures(test_stdout, test_stderr)
+            build_test_passed, _ = check_regression(failures, state.baseline)
+            if build_test_passed:
+                log.info("Phase 4a: build+test passed on attempt %d", attempt)
+                return
+        else:
+            test_stdout, test_stderr = "", ""
 
         build_errors = (build_stdout + "\n" + build_stderr).strip()
         test_errors = (test_stdout + "\n" + test_stderr).strip()
@@ -769,8 +774,8 @@ def port_prerequisite_chain(
             "Phase 0.5 prerequisite chain",
         )
 
+        old_commit = config.source_fix_commit
         try:
-            old_commit = config.source_fix_commit
             config.source_fix_commit = sha
             result = cherry_pick_and_resolve(
                 config, claude_config, state, tracker,
@@ -778,17 +783,17 @@ def port_prerequisite_chain(
                 label=label,
                 files_to_skip=state.triage_assessment.get("files_to_skip", []),
             )
-            config.source_fix_commit = old_commit
             ported.append({"sha": sha, "symbol": symbol, "result": result})
             log.info("Prerequisite %s ported: %s", symbol, result)
         except PipelineEscalation as e:
-            config.source_fix_commit = old_commit
             log.warning("Prerequisite %s failed: %s — continuing without it", symbol, e)
             state.dossier.add(
                 f"Prerequisite failed: {symbol}",
                 str(e),
                 "Phase 0.5 prerequisite chain",
             )
+        finally:
+            config.source_fix_commit = old_commit
 
     return ported
 
@@ -1120,3 +1125,6 @@ if __name__ == "__main__":
         duration = time.time() - start_time
         print(f"FINISHED: total_duration = {duration:.1f}s")
         print(f"All outputs in: {run_dir}")
+        if sys.stdout is not original_stdout:
+            sys.stdout = original_stdout
+        log_file.close()
