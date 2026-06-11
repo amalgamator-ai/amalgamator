@@ -21,8 +21,23 @@ from common.claude_utils import ClaudeConfig, claude_run as _claude_run
 
 
 async def _run_llm(claude_config, prompts, tracker=None):
-    """Compatibility wrapper: call claude_run with raw prompt strings."""
-    return await _claude_run(claude_config, prompts)
+    """Compatibility wrapper: call claude_run and feed timings into tracker."""
+    import time
+    start = time.time()
+    step_timings = await _claude_run(claude_config, prompts)
+    end = time.time()
+
+    if tracker and step_timings:
+        for st in step_timings:
+            tracker.record_query(
+                prompt_name=st.get("name", "query"),
+                start_time=start,
+                end_time=end,
+                input_tokens=st.get("input_tokens", 0),
+                output_tokens=st.get("output_tokens", 0),
+            )
+
+    return step_timings
 
 
 claude_run = _run_llm
