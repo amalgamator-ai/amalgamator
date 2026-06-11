@@ -113,7 +113,7 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
     validate_config(config)
 
     # Paths
-    source_path = expand_path(config["repository"]["source_path"])
+    source_path = os.path.normpath(expand_path(config["repository"]["source_path"]))
     workdir = expand_path(config["repository"].get("workdir", "/tmp/bugfix-workdir"))
     repo_name = os.path.basename(source_path)
     repo_path = os.path.join(workdir, repo_name)

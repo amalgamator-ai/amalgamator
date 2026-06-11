@@ -4,7 +4,7 @@ issue_id: "k8s-nodelogquery-ga-backport"
 bug_description: "Promote NodeLogQuery feature gate to GA and lock default"
 
 repository:
-  source_path: "/home/asangior/kubernetes"
+  source_path: "/path/to/kubernetes"
   workdir: "/tmp/bugfix-workdir"
 
 branches:

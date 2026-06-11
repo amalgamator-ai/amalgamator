@@ -9,7 +9,7 @@ from auto_bug_fix.git_tools import (
     git_show_files,
 )
 
-_DEFAULT_TEST_PATTERNS: list[str] = ["test", "tests", "testing", "test_", "spec"]
+_DEFAULT_TEST_PATTERNS: list[str] = ["tests", "testing", "test_", "testdata", "spec", "_test."]
 
 
 def derive_seed(repo_path: str, fix_commit: str) -> list[str]:
@@ -91,8 +91,8 @@ def enforce_test_file_veto(
     for f in changed:
         if f in allowed_seed:
             continue
-        parts = f.split("/")
-        if any(pattern in part for part in parts for pattern in patterns):
+        lower = f.lower()
+        if any(p in lower for p in patterns):
             vetoed.append(f)
 
     return (len(vetoed) == 0, vetoed)

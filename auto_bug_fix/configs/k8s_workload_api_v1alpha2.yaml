@@ -4,7 +4,7 @@ issue_id: "k8s-workload-api-v1alpha2-backport"
 bug_description: "Create Workload API v1alpha2 — introduces new API group with 248 files"
 
 repository:
-  source_path: "/home/asangior/kubernetes"
+  source_path: "/path/to/kubernetes"
   workdir: "/tmp/bugfix-workdir"
 
 branches:

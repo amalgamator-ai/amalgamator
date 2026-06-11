@@ -23,16 +23,18 @@ from common.claude_utils import ClaudeConfig, claude_run as _claude_run
 async def _run_llm(claude_config, prompts, tracker=None):
     """Compatibility wrapper: call claude_run and feed timings into tracker."""
     import time
-    start = time.time()
+    batch_start = time.time()
     step_timings = await _claude_run(claude_config, prompts)
-    end = time.time()
+    batch_end = time.time()
 
     if tracker and step_timings:
         for st in step_timings:
+            st_start = st.get("start_time", batch_start)
+            st_end = st.get("end_time", batch_end)
             tracker.record_query(
                 prompt_name=st.get("name", "query"),
-                start_time=start,
-                end_time=end,
+                start_time=st_start,
+                end_time=st_end,
                 input_tokens=st.get("input_tokens", 0),
                 output_tokens=st.get("output_tokens", 0),
             )
@@ -127,7 +129,6 @@ def phase_0_triage(
         raise PipelineStop(f"Fix already present on target as {fwd}")
 
     from auto_bug_fix.git_tools import git_is_ancestor, git_cat_file_exists
-    blame_candidate = None
     bwd = backward_patch_id_check(repo, fix, target, config.forward_patch_id_lookback)
     is_ancestor = git_is_ancestor(repo, fix, target)
 
@@ -672,8 +673,9 @@ def cherry_pick_and_resolve(
     files_to_skip: list[str] | None = None,
 ) -> str:
     """Cherry-pick a single commit and resolve conflicts. Returns 'clean', 'resolved', or raises."""
-    from auto_bug_fix.git_tools import git_cherry_pick, git_cherry_pick_abort
+    from auto_bug_fix.git_tools import git_cherry_pick, git_cherry_pick_abort, resolve_merge_commit
 
+    commit = resolve_merge_commit(config.repo_path, commit)
     result = git_cherry_pick(config.repo_path, commit)
     status = git_status_porcelain(config.repo_path)
     uu_files = [l[3:] for l in status if l.startswith("UU ") or l.startswith("AA ")]
