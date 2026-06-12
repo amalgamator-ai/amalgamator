@@ -988,12 +988,45 @@ def _run_pipeline_phases(
         cherry_pick_succeeded = True
 
     except (PipelineEscalation, Exception) as e:
-        log.warning("Cherry-pick resolution failed (%s: %s) — resetting worktree and escalating to Phase 4b",
+        log.warning("Cherry-pick resolution failed (%s: %s) — force-resolving and escalating to Phase 4b",
                      type(e).__name__, str(e)[:200])
         state.dossier.add("Cherry-pick resolution failed", f"{type(e).__name__}: {e}", "Phase 2+3a")
-        git_reset_hard(config.repo_path, config.target_branch)
-        subprocess.run(["git", "cherry-pick", "--abort"], cwd=config.repo_path,
-                        capture_output=True, text=True)
+
+        status = git_status_porcelain(config.repo_path)
+        remaining_conflicts = _conflicted_files(status)
+        if remaining_conflicts:
+            log.info("Force-resolving %d remaining conflicts with --theirs before Phase 4b", len(remaining_conflicts))
+            for f in remaining_conflicts:
+                subprocess.run(["git", "checkout", "--theirs", "--", f],
+                               cwd=config.repo_path, capture_output=True)
+                subprocess.run(["git", "add", "--", f],
+                               cwd=config.repo_path, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+            git_commit(config.repo_path,
+                       f"Port {config.issue_id} (partial — force-resolved for Phase 4b)\n\n"
+                       f"[ {len(remaining_conflicts)} conflicts force-resolved with --theirs ]")
+        else:
+            cherry_pick_in_progress = subprocess.run(
+                ["git", "rev-parse", "--verify", "CHERRY_PICK_HEAD"],
+                cwd=config.repo_path, capture_output=True).returncode == 0
+            if cherry_pick_in_progress:
+                subprocess.run(["git", "cherry-pick", "--abort"], cwd=config.repo_path,
+                                capture_output=True)
+            git_reset_hard(config.repo_path, config.target_branch)
+            result = git_cherry_pick(config.repo_path, config.source_fix_commit)
+            status = git_status_porcelain(config.repo_path)
+            force_conflicts = _conflicted_files(status)
+            if force_conflicts:
+                log.info("Re-applied cherry-pick, force-resolving %d conflicts with --theirs", len(force_conflicts))
+                for f in force_conflicts:
+                    subprocess.run(["git", "checkout", "--theirs", "--", f],
+                                   cwd=config.repo_path, capture_output=True)
+                    subprocess.run(["git", "add", "--", f],
+                                   cwd=config.repo_path, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+            git_commit(config.repo_path,
+                       f"Port {config.issue_id} (force-resolved for Phase 4b)\n\n"
+                       f"[ All conflicts force-resolved with --theirs ]")
 
         with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
             phase_4b_external_pipeline(config, claude_config, state, tracker)
