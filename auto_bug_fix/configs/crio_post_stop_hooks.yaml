@@ -1,0 +1,26 @@
+---
+issue_id: "crio-post-stop-hooks-9613"
+
+bug_description: >
+  Fix race condition in post-stop hook ordering. ContainerStateToDisk calls
+  UpdateContainerStatus which updates the container state to stopped, allowing
+  kubelet to act before post-stop hooks finish. Reorders operations so hooks
+  execute before status update. Also prevents duplicate IRQ balance re-enabling
+  via per-container tracking. PR #9613, related to OCPBUGS-63713.
+
+repository:
+  source_path: "/path/to/cri-o"
+  workdir: "/tmp/bugfix-workdir"
+
+branches:
+  source: "origin/main"
+  target: "origin/release-1.33"
+
+fix:
+  commit: "92c18a2e2673764cd10f89b1a5061e2b26f44209"
+
+build:
+  command: "go build ./..."
+  test_command: "go test -count=1 -timeout=300s ./server/... ./internal/oci/... ./internal/runtimehandlerhooks/..."
+
+model: "claude-sonnet-4-6"

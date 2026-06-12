@@ -134,11 +134,20 @@ def phase_0_triage(
     state: PipelineState,
 ) -> dict[str, str]:
     """Run deterministic triage gates (patch-id, ancestry, seed files) and derive the allowlist."""
+    from auto_bug_fix.git_tools import resolve_merge_commit
     repo = config.repo_path
-    fix = config.source_fix_commit
+    fix = resolve_merge_commit(repo, config.source_fix_commit)
     target = config.target_branch
 
     state.seed = derive_seed(repo, fix)
+    if not state.seed:
+        seed_from_diff = subprocess.run(
+            ["git", "diff", "--name-only", f"{fix}^..{fix}"],
+            cwd=repo, capture_output=True, text=True,
+        ).stdout.strip().splitlines()
+        state.seed = [f for f in seed_from_diff if f.strip()]
+        if state.seed:
+            log.info("Seed derived from diff range (%d files)", len(state.seed))
 
     fork_point = git_merge_base(repo, config.source_branch, target)
     resolved, _ = resolve_renames(
