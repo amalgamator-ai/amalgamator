@@ -715,6 +715,9 @@ def cherry_pick_and_resolve(
         status = git_status_porcelain(config.repo_path)
         uu_files = _conflicted_files(status)
 
+        log.info("%s: strategy %s: exit=%d, conflicts=%d, success=%s",
+                 label, strat["name"], result.exit_code, len(uu_files), result.success)
+
         if result.success and not uu_files:
             log.info("%s: clean cherry-pick (strategy: %s)", label, strat["name"])
             if state.dossier:
@@ -726,6 +729,9 @@ def cherry_pick_and_resolve(
                 best_strategy = {"strat": strat, "count": len(uu_files)}
             if state.dossier:
                 state.dossier.add_strategy(strat["name"], f"conflict ({len(uu_files)} files)")
+        else:
+            log.warning("%s: strategy %s: no conflicts but exit=%d, stderr=%s",
+                        label, strat["name"], result.exit_code, result.stderr[:200])
 
         git_cherry_pick_abort(config.repo_path)
 
