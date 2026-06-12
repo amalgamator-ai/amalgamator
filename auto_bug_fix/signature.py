@@ -22,7 +22,7 @@ def capture_output(cmd: list[str], cwd: str, timeout: int = 1800) -> tuple[int, 
                 timeout=timeout,
             )
     except subprocess.TimeoutExpired as e:
-        partial = e.stdout.decode() if e.stdout else ""
+        partial = (e.stdout or "") if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
         return (1, partial + f"\n[TIMED OUT after {timeout}s]")
     return (result.returncode, result.stdout)
 

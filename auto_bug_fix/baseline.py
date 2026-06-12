@@ -13,8 +13,8 @@ def run_test_suite(test_command: str, cwd: str, timeout: int = 1800) -> tuple[in
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:
-        partial_out = e.stdout.decode() if e.stdout else ""
-        partial_err = e.stderr.decode() if e.stderr else ""
+        partial_out = (e.stdout or "") if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
+        partial_err = (e.stderr or "") if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")
         return (1, partial_out, partial_err + f"\nCommand timed out after {timeout}s: {test_command}")
     return (result.returncode, result.stdout, result.stderr)
 

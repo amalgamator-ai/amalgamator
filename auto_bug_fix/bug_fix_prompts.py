@@ -251,9 +251,8 @@ You may modify any file needed to make the build and tests pass. If you need to 
 missing types, feature gates, or adapt API patterns for the target branch, do so.
 
 After resolving all conflicts:
-- Run `git diff --name-only HEAD` and verify every changed file is in the allowlist.
-- If any file is outside the allowlist, undo that change and re-resolve.
-- Stage and commit with the cherry-pick message plus structured trailers.
+- Run `git diff --name-only HEAD` and list any files you modified that are NOT in the priority list above.
+- Stage all resolved files and commit with the cherry-pick message.
 """
 
     def prompt(self) -> str:

@@ -235,6 +235,7 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
          │  1. default           │
          │  2. patience          │
          │  3. ort               │
+         │  Pick fewest conflicts│
          └──────────┬───────────┘
                     │
              ┌──────┴────────┐
@@ -242,7 +243,7 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
              │               │
              ▼               ▼
        ┌──────────┐  ┌──────────────────────┐
-       │  Done!    │  │ Re-apply last strat   │
+       │  Done!    │  │ Re-apply best strat   │
        │  Commit   │  │ (keep conflicts open) │
        └──────────┘  └──────────┬───────────┘
                                 │

@@ -689,21 +689,54 @@ def cherry_pick_and_resolve(
     label: str,
     files_to_skip: list[str] | None = None,
 ) -> str:
-    """Cherry-pick a single commit and resolve conflicts. Returns 'clean', 'resolved', or raises."""
+    """Cherry-pick a single commit trying multiple strategies. Returns 'clean', 'resolved', or raises."""
     from auto_bug_fix.git_tools import git_cherry_pick, git_cherry_pick_abort, resolve_merge_commit
 
     commit = resolve_merge_commit(config.repo_path, commit)
-    result = git_cherry_pick(config.repo_path, commit)
+
+    strategies = [
+        {"strategy": None, "strategy_option": None, "name": "default"},
+        {"strategy": None, "strategy_option": "patience", "name": "patience"},
+        {"strategy": "ort", "strategy_option": None, "name": "ort"},
+    ]
+
+    best_strategy = None
+    for strat in strategies:
+        result = git_cherry_pick(config.repo_path, commit,
+                                 strategy=strat["strategy"],
+                                 strategy_option=strat["strategy_option"])
+        status = git_status_porcelain(config.repo_path)
+        uu_files = _conflicted_files(status)
+
+        if result.success and not uu_files:
+            log.info("%s: clean cherry-pick (strategy: %s)", label, strat["name"])
+            if state.dossier:
+                state.dossier.add_strategy(strat["name"], "clean")
+            return "clean"
+
+        if uu_files:
+            if best_strategy is None or len(uu_files) < best_strategy["count"]:
+                best_strategy = {"strat": strat, "count": len(uu_files)}
+            if state.dossier:
+                state.dossier.add_strategy(strat["name"], f"conflict ({len(uu_files)} files)")
+
+        git_cherry_pick_abort(config.repo_path)
+
+    if best_strategy is None:
+        raise PipelineEscalation(f"{label}: unmappable cherry-pick (all strategies failed)")
+
+    log.info("%s: using strategy %s (%d conflicts, fewest)",
+             label, best_strategy["strat"]["name"], best_strategy["count"])
+    strat = best_strategy["strat"]
+    git_cherry_pick(config.repo_path, commit,
+                    strategy=strat["strategy"],
+                    strategy_option=strat["strategy_option"])
     status = git_status_porcelain(config.repo_path)
     uu_files = _conflicted_files(status)
 
-    if result.success and not uu_files:
-        log.info("%s: clean cherry-pick", label)
-        return "clean"
-
     if not uu_files:
-        git_cherry_pick_abort(config.repo_path)
-        raise PipelineEscalation(f"{label}: unmappable cherry-pick")
+        log.info("%s: clean cherry-pick on retry (strategy: %s)", label, strat["name"])
+        return "clean"
 
     conflict_summary_parts = []
     skip_set = set(files_to_skip or [])
@@ -995,7 +1028,7 @@ def _run_pipeline_phases(
 
         cherry_pick_succeeded = True
 
-    except (PipelineEscalation, Exception) as e:
+    except (PipelineEscalation, RuntimeError, OSError, subprocess.SubprocessError) as e:
         log.warning("Cherry-pick resolution failed (%s: %s) — force-resolving and escalating to Phase 4b",
                      type(e).__name__, str(e)[:200])
         state.dossier.add("Cherry-pick resolution failed", f"{type(e).__name__}: {e}", "Phase 2+3a")
