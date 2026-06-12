@@ -113,10 +113,16 @@ class Tracker:
         output_tokens: int = 0,
         cache_read_tokens: int = 0,
         is_error: bool = False,
+        sdk_cost_usd: float | None = None,
     ) -> QueryRecord:
-        """Record an LLM query with timing, token usage, and cost."""
+        """Record an LLM query with timing, token usage, and cost.
+
+        When sdk_cost_usd is provided (from the SDK's total_cost_usd which
+        includes sub-agent costs), it is used directly. Otherwise cost is
+        computed from token counts using MODEL_PRICING.
+        """
         duration_s = round(end_time - start_time, 3)
-        cost = compute_cost(self._model, input_tokens, output_tokens)
+        cost = sdk_cost_usd if sdk_cost_usd is not None else compute_cost(self._model, input_tokens, output_tokens)
 
         record = QueryRecord(
             phase=self._current_phase.phase if self._current_phase else "unknown",

@@ -30,12 +30,14 @@ async def _run_llm(claude_config, prompts, tracker=None):
         cursor = batch_start
         for st in step_timings:
             dur = st.get("duration", 0)
+            sdk_cost = st.get("cost_usd")
             tracker.record_query(
                 prompt_name=st.get("name", "query"),
                 start_time=cursor,
                 end_time=cursor + dur,
                 input_tokens=st.get("input_tokens", 0),
                 output_tokens=st.get("output_tokens", 0),
+                sdk_cost_usd=sdk_cost if sdk_cost else None,
             )
             cursor += dur
 
@@ -650,12 +652,14 @@ def phase_4b_external_pipeline(
     if tracker and timings:
         for st in timings:
             dur = st.get("duration", _4b_end - _4b_start)
+            sdk_cost = st.get("cost_usd")
             tracker.record_query(
                 prompt_name=st.get("name", "phase_4b"),
                 start_time=_4b_start,
                 end_time=_4b_start + dur,
                 input_tokens=st.get("input_tokens", 0),
                 output_tokens=st.get("output_tokens", 0),
+                sdk_cost_usd=sdk_cost if sdk_cost else None,
             )
 
     failure_file = os.path.join(config.repo_path, RUN_AND_FIX_FAILURE_FILE)
