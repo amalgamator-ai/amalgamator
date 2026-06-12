@@ -313,9 +313,13 @@ def phase_0_5_semantic_triage(
 
     asyncio.run(claude_run(claude_config_triage, [prompt.prompt()], tracker=tracker))
 
-    triage_path = os.path.join(config.repo_path, SEMANTIC_TRIAGE_FILE)
+    triage_candidates = [
+        os.path.join(config.repo_path, SEMANTIC_TRIAGE_FILE),
+        os.path.join(config.repo_path, "runs", SEMANTIC_TRIAGE_FILE),
+    ]
+    triage_path = next((p for p in triage_candidates if os.path.exists(p)), None)
     assessment = {}
-    if os.path.exists(triage_path):
+    if triage_path:
         try:
             with open(triage_path) as f:
                 assessment = _json.load(f)
