@@ -920,68 +920,87 @@ def _run_pipeline_phases(
         tracker.record_gate("difficulty", assessment.get("estimated_difficulty", "unknown"))
         tracker.record_gate("recommendation", assessment.get("recommendation", "unknown"))
 
-    prereqs = state.triage_assessment.get("prerequisites", [])
-    portable_prereqs = [p for p in prereqs if p.get("portable", False) and p.get("introduced_by")]
-    if portable_prereqs:
-        with tracker.phase("Phase 0.5b — Prerequisite chain"):
-            ported = port_prerequisite_chain(config, claude_config, state, tracker)
-            state.dossier.add(
-                "Prerequisites ported",
-                _json.dumps(ported, indent=2) if ported else "none",
-                "Phase 0.5b",
+    cherry_pick_succeeded = False
+    try:
+        prereqs = state.triage_assessment.get("prerequisites", [])
+        portable_prereqs = [p for p in prereqs if p.get("portable", False) and p.get("introduced_by")]
+        if portable_prereqs:
+            with tracker.phase("Phase 0.5b — Prerequisite chain"):
+                ported = port_prerequisite_chain(config, claude_config, state, tracker)
+                state.dossier.add(
+                    "Prerequisites ported",
+                    _json.dumps(ported, indent=2) if ported else "none",
+                    "Phase 0.5b",
+                )
+                tracker.record_gate("prerequisites_ported", str(len(ported)))
+
+        test_files_in_commit = identify_test_files(state.seed)
+        if test_files_in_commit:
+            with tracker.phase("Phase 0.5c — Test port"):
+                ported_tests = phase_0_5c_test_port(config, claude_config, state, tracker)
+                state.dossier.add(
+                    "Test port",
+                    "\n".join(ported_tests) if ported_tests else "no tests ported",
+                    "Phase 0.5c",
+                )
+                tracker.record_gate("test_files_ported", str(len(ported_tests)))
+                if ported_tests:
+                    subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+                    git_commit(config.repo_path, f"Port test files for {config.issue_id} (Phase 0.5c)\n\nPorted before fix to enable RED/GREEN checking")
+
+        with tracker.phase("Phase 1 — Baseline + RED + Bisect"):
+            phase_1_baseline_red_bisect(config, claude_config, state)
+            if state.bisect_sha:
+                state.dossier.add("Bisect result", state.bisect_sha, "Phase 1 git bisect")
+                tracker.record_gate("bisect", state.bisect_sha)
+
+        with tracker.phase("Phase 1.5 — Failure-mode confirmation"):
+            sig_result = phase_1_5_failure_mode(config, claude_config, state)
+            state.dossier.add("Signature comparison", sig_result, "Phase 1.5")
+            tracker.record_gate("signature_comparison", sig_result)
+
+        with tracker.phase("Phase 2+3a — Cherry-pick and resolve"):
+            files_to_skip = state.triage_assessment.get("files_to_skip", [])
+            cp_result = cherry_pick_and_resolve(
+                config, claude_config, state, tracker,
+                commit=config.source_fix_commit,
+                label=f"main commit ({config.issue_id})",
+                files_to_skip=files_to_skip,
             )
-            tracker.record_gate("prerequisites_ported", str(len(ported)))
+            state.cherry_pick_path = cp_result
+            state.dossier.cherry_pick_path = cp_result
+            tracker.record_gate("cherry_pick", cp_result)
 
-    test_files_in_commit = identify_test_files(state.seed)
-    if test_files_in_commit:
-        with tracker.phase("Phase 0.5c — Test port"):
-            ported_tests = phase_0_5c_test_port(config, claude_config, state, tracker)
-            state.dossier.add(
-                "Test port",
-                "\n".join(ported_tests) if ported_tests else "no tests ported",
-                "Phase 0.5c",
-            )
-            tracker.record_gate("test_files_ported", str(len(ported_tests)))
-            if ported_tests:
-                subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
-                git_commit(config.repo_path, f"Port test files for {config.issue_id} (Phase 0.5c)\n\nPorted before fix to enable RED/GREEN checking")
+            regen_cmds = state.triage_assessment.get("regeneration_commands", [])
+            if regen_cmds and files_to_skip:
+                state.dossier.add(
+                    "Regeneration commands needed",
+                    "\n".join(regen_cmds),
+                    "Phase 0.5 semantic triage",
+                )
 
-    with tracker.phase("Phase 1 — Baseline + RED + Bisect"):
-        phase_1_baseline_red_bisect(config, claude_config, state)
-        if state.bisect_sha:
-            state.dossier.add("Bisect result", state.bisect_sha, "Phase 1 git bisect")
-            tracker.record_gate("bisect", state.bisect_sha)
+        regen_cmds = [c for c in state.triage_assessment.get("regeneration_commands", []) if _validate_shell_command(c)]
+        files_skipped = state.triage_assessment.get("files_to_skip", [])
+        if regen_cmds and files_skipped:
+            with tracker.phase("Phase 3b — Regeneration"):
+                phase_3b_regeneration(config, state, regen_cmds)
 
-    with tracker.phase("Phase 1.5 — Failure-mode confirmation"):
-        sig_result = phase_1_5_failure_mode(config, claude_config, state)
-        state.dossier.add("Signature comparison", sig_result, "Phase 1.5")
-        tracker.record_gate("signature_comparison", sig_result)
+        cherry_pick_succeeded = True
 
-    with tracker.phase("Phase 2+3a — Cherry-pick and resolve"):
-        files_to_skip = state.triage_assessment.get("files_to_skip", [])
-        cp_result = cherry_pick_and_resolve(
-            config, claude_config, state, tracker,
-            commit=config.source_fix_commit,
-            label=f"main commit ({config.issue_id})",
-            files_to_skip=files_to_skip,
-        )
-        state.cherry_pick_path = cp_result
-        state.dossier.cherry_pick_path = cp_result
-        tracker.record_gate("cherry_pick", cp_result)
+    except (PipelineEscalation, Exception) as e:
+        log.warning("Cherry-pick resolution failed (%s: %s) — resetting worktree and escalating to Phase 4b",
+                     type(e).__name__, str(e)[:200])
+        state.dossier.add("Cherry-pick resolution failed", f"{type(e).__name__}: {e}", "Phase 2+3a")
+        git_reset_hard(config.repo_path, config.target_branch)
+        subprocess.run(["git", "cherry-pick", "--abort"], cwd=config.repo_path,
+                        capture_output=True, text=True)
 
-        regen_cmds = state.triage_assessment.get("regeneration_commands", [])
-        if regen_cmds and files_to_skip:
-            state.dossier.add(
-                "Regeneration commands needed",
-                "\n".join(regen_cmds),
-                "Phase 0.5 semantic triage",
-            )
+        with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
+            phase_4b_external_pipeline(config, claude_config, state, tracker)
+        cherry_pick_succeeded = True
 
-    regen_cmds = [c for c in state.triage_assessment.get("regeneration_commands", []) if _validate_shell_command(c)]
-    files_skipped = state.triage_assessment.get("files_to_skip", [])
-    if regen_cmds and files_skipped:
-        with tracker.phase("Phase 3b — Regeneration"):
-            phase_3b_regeneration(config, state, regen_cmds)
+    if not cherry_pick_succeeded:
+        return state.dossier, tracker
 
     fix_diff = _compute_fix_diff(config)
 
