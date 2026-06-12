@@ -21,6 +21,21 @@ Read and analyze in-detail <prev_output_file> and <prev_output_summary_file> whi
 
 
 def create_context_str(claude_config: ClaudeConfig, code_gen_config: CodeGenConfig):
+    # Extract branch names if available (for BugFixConfig)
+    source_branch = getattr(code_gen_config, 'source_branch', None)
+    target_branch = getattr(code_gen_config, 'target_branch', None)
+
+    branch_section = ""
+    if source_branch and target_branch:
+        branch_section = """
+<source_branch>
+{source_branch}
+</source_branch>
+<target_branch>
+{target_branch}
+</target_branch>
+""".format(source_branch=source_branch, target_branch=target_branch)
+
     return """
 <context>
 
@@ -85,6 +100,7 @@ Execution of model <model> on <gpu_type> GPU with ISL <isl>, OSL <osl> and batch
 {target_source_code_dir}
 </target_source_code_dir>
 
+{branch_section}
 </context>
 
 <definitions>
@@ -108,6 +124,8 @@ code-paths, code-pieces, and their associated call-chains
 
 - The file <plan_file> has a sequence of improvement steps for <slower_framework> based on the comparison between frameworks running <tested_execution>.
 - The improvement plan step <plan_step> from <plan_file> is what we want to implement for <slower_framework>
+
+- If <source_branch> and <target_branch> are provided: ONLY analyze code from these specific branches. Do NOT look at other branches, commits, or git history outside of these branches. When using git commands or examining source code, restrict all operations to the specified branches.
 </context_explanations>
 
 """.format(
@@ -128,6 +146,7 @@ code-paths, code-pieces, and their associated call-chains
         plan_step=code_gen_config.plan_step,
         slower_framework=code_gen_config.target_framework,
         target_source_code_dir=code_gen_config.source_code_dir,
+        branch_section=branch_section,
     )
 
 
@@ -613,9 +632,12 @@ class ApplyCodeAndCompilePrompt:
 <instructions>
 The goal of this task is to apply the code patch <patch_file> to the "target" framework source code in <target_source_code_dir> and perform incremental compilation (runtime iteration {iteration}).
 
+IMPORTANT: If <target_branch> is provided in the context, ensure you are on that branch before proceeding. Do NOT examine or use code from other branches.
+
 Follow these steps precisely:
 
-Step 1: Verify Clean Repository State
+Step 1: Verify Clean Repository State and Correct Branch
+- If <target_branch> is provided, verify you are on that branch: `git -C <target_source_code_dir> branch --show-current`. If not on <target_branch>, print a clear ERROR and STOP.
 - Run `git -C <target_source_code_dir> status --porcelain` to check for any modifications or uncommitted changes.
 - If the repository has ANY modifications (staged or unstaged tracked files):
     - Print a clear WARNING message: "WARNING: Repository at <target_source_code_dir> is not clean. Cannot apply patch."
@@ -1114,6 +1136,8 @@ class InvestigateRuntimeOutputAndFixCodePrompt:
 <instructions>
 The goal of this task is to analyze the runtime benchmark output from iteration {iteration} of <tested_execution> and determine whether the execution succeeded or failed. Think hard and be extremely thorough.
 
+IMPORTANT: If <target_branch> is provided, ensure all code analysis and modifications are restricted to that branch. Do NOT examine or reference code from other branches.
+
 Step 1: Analyze Previous History
 - Read <iteration_history_summary_file> from <output_dir> to get full context of all previous code generation phases and runtime iterations.
 - Read the previous/latest code patch from <output_dir>/<prev_patch_file> to understand the current state of the code changes.
@@ -1177,7 +1201,7 @@ Step 3A: If SUCCEEDED (both benchmark AND lm_eval passed)
 Step 3B: If FAILED
 - Detect ALL errors and issues in the runtime output. Be extremely thorough and precise:
     - Analyze every error traceback line by line
-    - Identify the root cause by tracing through the source code in both <target_source_code_dir> and the framework code traces
+    - Identify the root cause by tracing through the source code in <target_source_code_dir> (ON THE SPECIFIED BRANCH ONLY if <target_branch> is provided) and the framework code traces
     - Look for: CUDA errors, shape mismatches, type errors, missing attributes, import errors, memory errors, assertion failures, timeout issues, incorrect kernel invocations, wrong tensor dtypes/devices, and any other runtime errors
     - Cross-reference errors with the applied code patch to understand what in the patch caused each error
     - If an error is recurring from a previous iteration (visible in previous runtime summaries in <output_dir>), understand why the previous fix was insufficient and fix the root cause properly this time
@@ -1484,6 +1508,9 @@ class InvestigateIssuePrompt:
 
 <instructions>
 The goal of this task is to investigate the issue described in <issue_desc_file> that arises after the <code_pr_file> is applied to <target_framework>. Do the following and think hard:
+
+IMPORTANT: If <source_branch> and <target_branch> are provided, ONLY examine code from these specific branches. Do NOT look at other branches or git history outside of these branches.
+
 - If <issue_fix_previous_attempt_file> is provided and is an existing real file, then read and analyze in-detail this contents to get all of the information about the previous attempt to generate a fix to the issue described here. Use all of the learnings and details from the previous attempt to improve the current attempt. Note that the current attempt is still done from scratch, but it can use the learnings from the previous attempt.
 - If <issue_fix_previous_attempt_review_evolution_file> is provided and is an existing real file, then read and analyze in-detail this contents to get all of the information about the previous attempt to generate a fix to the issue described here. Use all of the learnings and details from the previous attempt to improve the current attempt. Note that the current attempt is still done from scratch, but it can use the learnings from the previous attempt.
 - Read, analyze and understand in-detail all previous issues that were reported and are in the <output_dir>. These are may be relevant to avoid repeating mistakes, bugs or misleading information. Take all of the learning of previous issues into account while working on this issue from scratch.
@@ -1493,7 +1520,7 @@ The goal of this task is to investigate the issue described in <issue_desc_file>
     - Analyze and understand in-detail the code gen => review iteration evolution that is described in <code_pr_review_evolution_file> that lead to the final <code_pr_file>.
 - Detect and analyze in-detail the root causes that make issue <issue_desc_file> to appear in <target_framework>.
 - Detect and analyze in-detail the root causes that make issue <issue_desc_file> to NOT appear in <source_framework>.
-- Dive deep into the source code of both frameworks, and their related third party libraries, to get full picture of the source code end-to-end as it related to the <code_trace> of both frameworks. 
+- Dive deep into the source code of both frameworks (ON THE SPECIFIED BRANCHES ONLY), and their related third party libraries, to get full picture of the source code end-to-end as it related to the <code_trace> of both frameworks. 
     - For example, if an external kernel is used, then find/fetch the source code of this kernel and trace all of the wrappers till this kernel is invoked. Make sure to find the actual full source code of the kernel. This is important.
 - Analyze and read any necessary extra information to get deeper understanding of the issue, including:
     - run logs

@@ -146,7 +146,7 @@ def _format_tokens(count):
     return str(count)
 
 
-def _print_detailed_table(all_step_timings, total_duration):
+def _print_detailed_table(all_step_timings, total_duration, output_dir=None):
     total_input = sum(s["input_tokens"] for s in all_step_timings)
     total_output = sum(s["output_tokens"] for s in all_step_timings)
     total_cost = sum(s["cost_usd"] for s in all_step_timings)
@@ -176,27 +176,38 @@ def _print_detailed_table(all_step_timings, total_duration):
     max_out_len = max(len(r["output"]) for r in rows)
     w = 120
 
-    print("\n" + "=" * w)
-    print("DETAILED STEP TIMINGS")
-    print("=" * w)
-    print("{:<35s} {:<25s} {:<12s} {:<12s} {}".format(
+    lines = []
+    lines.append("\n" + "=" * w)
+    lines.append("DETAILED STEP TIMINGS")
+    lines.append("=" * w)
+    lines.append("{:<35s} {:<25s} {:<12s} {:<12s} {}".format(
         "Step", "Duration", "In Tokens", "Out Tokens", "Cost"
     ))
-    print("-" * w)
+    lines.append("-" * w)
 
     for i, r in enumerate(rows):
         if i == len(rows) - 1:
-            print("-" * w)
+            lines.append("-" * w)
         dur_str = "{:<{}}  ({})".format(r["dur_raw"], max_dur_len, r["dur_human"])
-        print("{:<35s} {:<25s} {:<12s} {:<12s} {}".format(
+        lines.append("{:<35s} {:<25s} {:<12s} {:<12s} {}".format(
             r["name"], dur_str,
             r["input"], r["output"], r["cost"],
         ))
 
-    print("=" * w)
+    lines.append("=" * w)
+
+    # Print to stdout
+    for line in lines:
+        print(line)
+
+    # Write to file if output_dir is provided
+    if output_dir:
+        output_file = os.path.join(output_dir, "output.txt")
+        with open(output_file, "w") as f:
+            f.write("\n".join(lines) + "\n")
 
 
-def _print_phase_summary(phase_results, all_step_timings, total_duration):
+def _print_phase_summary(phase_results, all_step_timings, total_duration, output_dir=None):
     phase_usage = {}
     for s in all_step_timings:
         name = s["name"]
@@ -255,24 +266,35 @@ def _print_phase_summary(phase_results, all_step_timings, total_duration):
     max_dur_len = max(len(r["dur_raw"]) for r in rows)
     w = 120
 
-    print("\n" + "=" * w)
-    print("PHASE SUMMARY")
-    print("=" * w)
-    print("{:<20s} {:<10s} {:<14s} {:<25s} {:<12s} {:<12s} {}".format(
+    lines = []
+    lines.append("\n" + "=" * w)
+    lines.append("PHASE SUMMARY")
+    lines.append("=" * w)
+    lines.append("{:<20s} {:<10s} {:<14s} {:<25s} {:<12s} {:<12s} {}".format(
         "Phase", "Iters", "Converged", "Duration", "In Tokens", "Out Tokens", "Cost"
     ))
-    print("-" * w)
+    lines.append("-" * w)
 
     for i, r in enumerate(rows):
         if i == len(rows) - 1:
-            print("-" * w)
+            lines.append("-" * w)
         dur_str = "{:<{}}  ({})".format(r["dur_raw"], max_dur_len, r["dur_human"])
-        print("{:<20s} {:<10s} {:<14s} {:<25s} {:<12s} {:<12s} {}".format(
+        lines.append("{:<20s} {:<10s} {:<14s} {:<25s} {:<12s} {:<12s} {}".format(
             r["name"], r["iters"], r["conv"], dur_str,
             r["input"], r["output"], r["cost"],
         ))
 
-    print("=" * w)
+    lines.append("=" * w)
+
+    # Print to stdout
+    for line in lines:
+        print(line)
+
+    # Append to file if output_dir is provided
+    if output_dir:
+        output_file = os.path.join(output_dir, "output.txt")
+        with open(output_file, "a") as f:
+            f.write("\n".join(lines) + "\n")
 
 
 async def run_pipeline(config, claude_config, use_case, resume=False):
@@ -821,5 +843,22 @@ if __name__ == "__main__":
     ))
     total_duration = time.time() - start_time
 
-    _print_detailed_table(all_step_timings, total_duration)
-    _print_phase_summary(phase_results, all_step_timings, total_duration)
+    _print_detailed_table(all_step_timings, total_duration, config.output_dir)
+    _print_phase_summary(phase_results, all_step_timings, total_duration, config.output_dir)
+
+    # Save git diff to changes.diff
+    import subprocess
+    try:
+        diff_output = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=config.source_code_dir if hasattr(config, 'source_code_dir') else None,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        changes_file = os.path.join(config.output_dir, "changes.diff")
+        with open(changes_file, "w") as f:
+            f.write(diff_output.stdout)
+        print("\nGit diff saved to: {}".format(changes_file))
+    except Exception as e:
+        print("\nWarning: Could not save git diff: {}".format(e))
