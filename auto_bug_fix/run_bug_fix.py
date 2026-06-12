@@ -165,9 +165,29 @@ def phase_0_triage(
     return {"forward_patch_id": "not_found", "ancestry": ancestry_status}
 
 
-def _compute_fix_diff(config: BugFixConfig, commit: str | None = None) -> str:
-    """Compute the fix diff with truncation for large commits."""
+def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files: list[str] | None = None) -> str:
+    """Compute the fix diff with truncation for large commits.
+
+    When for_files is provided, only include diffs for those specific files
+    (used during chunked resolution to keep prompt size manageable).
+    """
     sha = commit or config.source_fix_commit
+
+    if for_files:
+        stat = subprocess.run(
+            ["git", "show", "--stat", sha],
+            cwd=config.repo_path, capture_output=True, text=True,
+        ).stdout
+        partial_diff = subprocess.run(
+            ["git", "show", sha, "--"] + for_files,
+            cwd=config.repo_path, capture_output=True, text=True,
+        ).stdout
+        fix_diff = stat + "\n\n--- Diff for chunk files ---\n\n" + partial_diff
+        MAX_CHUNK_CHARS = 100_000
+        if len(fix_diff) > MAX_CHUNK_CHARS:
+            fix_diff = stat + "\n\n[Chunk diffs too large — stat only. Agent must read files directly.]"
+        return fix_diff
+
     fix_diff = subprocess.run(
         ["git", "show", sha],
         cwd=config.repo_path, capture_output=True, text=True,
@@ -175,23 +195,11 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None) -> str:
 
     MAX_DIFF_CHARS = 200_000
     if len(fix_diff) > MAX_DIFF_CHARS:
-        log.warning("fix_diff too large (%d chars), using --stat + conflicted file diffs only", len(fix_diff))
-        stat = subprocess.run(
+        log.warning("fix_diff too large (%d chars), using --stat only", len(fix_diff))
+        fix_diff = subprocess.run(
             ["git", "show", "--stat", sha],
             cwd=config.repo_path, capture_output=True, text=True,
         ).stdout
-        status_lines = git_status_porcelain(config.repo_path)
-        uu_paths = _conflicted_files(status_lines)
-        if uu_paths:
-            partial_diff = subprocess.run(
-                ["git", "show", sha, "--"] + uu_paths,
-                cwd=config.repo_path, capture_output=True, text=True,
-            ).stdout
-            fix_diff = stat + "\n\n--- Partial diff (conflicted files only) ---\n\n" + partial_diff
-        else:
-            fix_diff = stat
-        if len(fix_diff) > MAX_DIFF_CHARS:
-            fix_diff = fix_diff[:MAX_DIFF_CHARS] + "\n\n[TRUNCATED — diff too large]"
 
     return fix_diff
 
@@ -719,19 +727,23 @@ def cherry_pick_and_resolve(
     )
 
     CHUNK_SIZE = 30
-    if len(fix_diff) > 100_000:
-        CHUNK_SIZE = 15
+    is_large_diff = len(fix_diff) > 50_000
 
     for attempt in range(1, config.max_resolution_retries + 1):
         if len(uu_files) > CHUNK_SIZE:
+            if is_large_diff:
+                chunk_size = 15
+            else:
+                chunk_size = CHUNK_SIZE
             log.info("%s attempt %d/%d — resolving %d conflicts in chunks of %d",
-                     label, attempt, config.max_resolution_retries, len(uu_files), CHUNK_SIZE)
-            for chunk_start in range(0, len(uu_files), CHUNK_SIZE):
-                chunk = uu_files[chunk_start:chunk_start + CHUNK_SIZE]
+                     label, attempt, config.max_resolution_retries, len(uu_files), chunk_size)
+            for chunk_start in range(0, len(uu_files), chunk_size):
+                chunk = uu_files[chunk_start:chunk_start + chunk_size]
                 log.info("%s: chunk %d-%d of %d",
                          label, chunk_start + 1, chunk_start + len(chunk), len(uu_files))
+                chunk_diff = _compute_fix_diff(config, commit, for_files=chunk)
                 prompt = NarrowResolutionAgentPrompt(
-                    fix_diff=fix_diff,
+                    fix_diff=chunk_diff,
                     conflicted_files=chunk,
                     context=context,
                     allowed_modules=priority,
