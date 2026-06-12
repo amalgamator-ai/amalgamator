@@ -39,6 +39,10 @@ async def _run_llm(claude_config, prompts, tracker=None):
                 output_tokens=st.get("output_tokens", 0),
                 sdk_cost_usd=sdk_cost if sdk_cost else None,
             )
+            log.info("LLM query %s: duration=%.1fs, tokens=%d/%d, cost=$%.4f (sdk=$%s)",
+                     st.get("name", "query"), dur,
+                     st.get("input_tokens", 0), st.get("output_tokens", 0),
+                     sdk_cost or 0, sdk_cost)
             cursor += dur
 
     return step_timings
