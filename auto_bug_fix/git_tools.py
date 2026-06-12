@@ -101,14 +101,31 @@ def git_diff_find_renames(
 
 
 
+def _is_merge_commit(repo_path: str, commit: str) -> bool:
+    """Return True if commit has more than one parent (is a merge)."""
+    r = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{commit}^2"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    return r.returncode == 0
+
+
 def git_cherry_pick(
     repo_path: str,
     commit: str,
     strategy: str | None = None,
     strategy_option: str | None = None,
 ) -> GitResult:
-    """Cherry-pick a commit with optional merge strategy."""
-    args = ["cherry-pick", "-x", commit]
+    """Cherry-pick a commit with optional merge strategy.
+
+    For merge commits, uses -m 1 to apply the combined diff relative
+    to the first parent (the mainline), which captures all changes
+    from the entire topic branch.
+    """
+    args = ["cherry-pick", "-x"]
+    if _is_merge_commit(repo_path, commit):
+        args.append("-m1")
+    args.append(commit)
     if strategy is not None:
         args.append(f"--strategy={strategy}")
     if strategy_option is not None:

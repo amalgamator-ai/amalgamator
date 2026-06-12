@@ -699,9 +699,7 @@ def cherry_pick_and_resolve(
     files_to_skip: list[str] | None = None,
 ) -> str:
     """Cherry-pick a single commit trying multiple strategies. Returns 'clean', 'resolved', or raises."""
-    from auto_bug_fix.git_tools import git_cherry_pick, git_cherry_pick_abort, resolve_merge_commit
-
-    commit = resolve_merge_commit(config.repo_path, commit)
+    from auto_bug_fix.git_tools import git_cherry_pick, git_cherry_pick_abort
 
     strategies = [
         {"strategy": None, "strategy_option": None, "name": "default"},
