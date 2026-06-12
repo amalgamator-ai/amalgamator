@@ -183,7 +183,7 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
             cwd=config.repo_path, capture_output=True, text=True,
         ).stdout
         fix_diff = stat + "\n\n--- Diff for chunk files ---\n\n" + partial_diff
-        MAX_CHUNK_CHARS = 100_000
+        MAX_CHUNK_CHARS = 50_000
         if len(fix_diff) > MAX_CHUNK_CHARS:
             fix_diff = stat + "\n\n[Chunk diffs too large — stat only. Agent must read files directly.]"
         return fix_diff
@@ -731,11 +731,12 @@ def cherry_pick_and_resolve(
     )
 
     CHUNK_SIZE = 30
-    is_large_diff = len(fix_diff) > 50_000
 
     for attempt in range(1, config.max_resolution_retries + 1):
         if len(uu_files) > CHUNK_SIZE:
-            if is_large_diff:
+            if len(uu_files) > 100:
+                chunk_size = 10
+            elif len(fix_diff) > 50_000:
                 chunk_size = 15
             else:
                 chunk_size = CHUNK_SIZE
