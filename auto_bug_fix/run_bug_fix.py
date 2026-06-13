@@ -1013,6 +1013,11 @@ def _run_pipeline_phases(
             state.dossier.add("Signature comparison", sig_result, "Phase 1.5")
             tracker.record_gate("signature_comparison", sig_result)
 
+        subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+        status = git_status_porcelain(config.repo_path)
+        if status:
+            git_commit(config.repo_path, f"Pre-cherry-pick cleanup for {config.issue_id}")
+
         with tracker.phase("Phase 2+3a — Cherry-pick and resolve"):
             files_to_skip = state.triage_assessment.get("files_to_skip", [])
             cp_result = cherry_pick_and_resolve(
