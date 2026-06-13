@@ -1017,8 +1017,7 @@ def _run_pipeline_phases(
         status = git_status_porcelain(config.repo_path)
         if status:
             git_commit(config.repo_path, f"Pre-cherry-pick cleanup for {config.issue_id}")
-        subprocess.run(["git", "checkout", "--", "."], cwd=config.repo_path, capture_output=True)
-        subprocess.run(["git", "clean", "-fd"], cwd=config.repo_path, capture_output=True)
+        git_reset_hard(config.repo_path, "HEAD")
 
         with tracker.phase("Phase 2+3a — Cherry-pick and resolve"):
             files_to_skip = state.triage_assessment.get("files_to_skip", [])
