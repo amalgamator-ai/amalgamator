@@ -731,7 +731,7 @@ def cherry_pick_and_resolve(
                 state.dossier.add_strategy(strat["name"], f"conflict ({len(uu_files)} files)")
         else:
             log.warning("%s: strategy %s: no conflicts but exit=%d, stderr=%s",
-                        label, strat["name"], result.exit_code, result.stderr[:200])
+                        label, strat["name"], result.exit_code, result.stderr[:500])
 
         git_cherry_pick_abort(config.repo_path)
 
@@ -1017,6 +1017,8 @@ def _run_pipeline_phases(
         status = git_status_porcelain(config.repo_path)
         if status:
             git_commit(config.repo_path, f"Pre-cherry-pick cleanup for {config.issue_id}")
+        subprocess.run(["git", "checkout", "--", "."], cwd=config.repo_path, capture_output=True)
+        subprocess.run(["git", "clean", "-fd"], cwd=config.repo_path, capture_output=True)
 
         with tracker.phase("Phase 2+3a — Cherry-pick and resolve"):
             files_to_skip = state.triage_assessment.get("files_to_skip", [])
