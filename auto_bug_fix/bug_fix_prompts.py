@@ -101,8 +101,18 @@ identified as prerequisites.
 These are the hand-written source files most critical to the fix's functionality. \
 Exclude generated code, binary files, and test fixtures from this list.
 
-10. **Discover verification commands**: What test commands should be run to verify the backport \
-beyond the basic build+vet? Look for:
+10. **Discover lint/vet commands**: Identify the project's static analysis tool so the pipeline \
+can catch unused imports, dead code, and style issues after conflict resolution. Check:
+   - Go projects: `go vet ./...` (always available), also check for `golangci-lint` in Makefile or CI
+   - Python projects: look for `ruff`, `flake8`, `pylint`, `mypy` in `pyproject.toml`, `setup.cfg`, CI configs
+   - Rust projects: `cargo clippy`
+   - C/C++ projects: look for `clang-tidy`, `cppcheck` in Makefile or CMakeLists.txt
+   - JavaScript/TypeScript: look for `eslint` in `package.json`
+   Report the single best lint command for the project. This catches unused parameters, dead \
+imports, and unreachable code that the LLM resolution agent may introduce from the upstream diff.
+
+11. **Discover verification commands**: What test commands should be run to verify the backport \
+beyond the basic build+test? Look for:
    - Roundtrip tests for API types: e.g. `go test ./staging/src/k8s.io/api/... -run TestRoundTrip`
    - Unit tests for the packages touched: e.g. `go test ./pkg/apis/scheduling/...`
    - Integration tests if they exist in the commit's scope
@@ -134,6 +144,7 @@ Write a JSON file to `{output_file}` with this exact structure:
   "binary_files_in_diff": false,
   "files_to_skip": ["generated and binary files that should be auto-resolved, not sent to LLM"],
   "regeneration_commands": ["commands to regenerate the skipped files, e.g. make generate"],
+  "lint_commands": ["project lint/vet command, e.g. go vet ./..., cargo clippy, ruff check ."],
   "verification_commands": ["additional test commands beyond basic build, e.g. go test ./staging/src/k8s.io/api/... -run TestRoundTrip"],
   "estimated_difficulty": "EASY | MEDIUM | HARD | EXTREME",
   "recommendation": "PROCEED | PROCEED_WITH_CAUTION | MANUAL_REVIEW",
