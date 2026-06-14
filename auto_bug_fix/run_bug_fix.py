@@ -188,33 +188,57 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
     """
     sha = commit or config.source_fix_commit
 
+    from auto_bug_fix.git_tools import _is_merge_commit
     if for_files:
-        stat = subprocess.run(
-            ["git", "show", "--stat", sha],
-            cwd=config.repo_path, capture_output=True, text=True,
-        ).stdout
-        partial_diff = subprocess.run(
-            ["git", "show", sha, "--"] + for_files,
-            cwd=config.repo_path, capture_output=True, text=True,
-        ).stdout
+        if _is_merge_commit(config.repo_path, sha):
+            stat = subprocess.run(
+                ["git", "diff", "--stat", f"{sha}^1..{sha}"],
+                cwd=config.repo_path, capture_output=True, text=True,
+            ).stdout
+            partial_diff = subprocess.run(
+                ["git", "diff", f"{sha}^1..{sha}", "--"] + for_files,
+                cwd=config.repo_path, capture_output=True, text=True,
+            ).stdout
+        else:
+            stat = subprocess.run(
+                ["git", "show", "--stat", sha],
+                cwd=config.repo_path, capture_output=True, text=True,
+            ).stdout
+            partial_diff = subprocess.run(
+                ["git", "show", sha, "--"] + for_files,
+                cwd=config.repo_path, capture_output=True, text=True,
+            ).stdout
         fix_diff = stat + "\n\n--- Diff for chunk files ---\n\n" + partial_diff
         MAX_CHUNK_CHARS = 50_000
         if len(fix_diff) > MAX_CHUNK_CHARS:
             fix_diff = stat + "\n\n[Chunk diffs too large — stat only. Agent must read files directly.]"
         return fix_diff
 
-    fix_diff = subprocess.run(
-        ["git", "show", sha],
-        cwd=config.repo_path, capture_output=True, text=True,
-    ).stdout
+    from auto_bug_fix.git_tools import _is_merge_commit
+    if _is_merge_commit(config.repo_path, sha):
+        fix_diff = subprocess.run(
+            ["git", "diff", f"{sha}^1..{sha}"],
+            cwd=config.repo_path, capture_output=True, text=True,
+        ).stdout
+    else:
+        fix_diff = subprocess.run(
+            ["git", "show", sha],
+            cwd=config.repo_path, capture_output=True, text=True,
+        ).stdout
 
     MAX_DIFF_CHARS = 200_000
     if len(fix_diff) > MAX_DIFF_CHARS:
         log.warning("fix_diff too large (%d chars), using --stat only", len(fix_diff))
-        fix_diff = subprocess.run(
-            ["git", "show", "--stat", sha],
-            cwd=config.repo_path, capture_output=True, text=True,
-        ).stdout
+        if _is_merge_commit(config.repo_path, sha):
+            fix_diff = subprocess.run(
+                ["git", "diff", "--stat", f"{sha}^1..{sha}"],
+                cwd=config.repo_path, capture_output=True, text=True,
+            ).stdout
+        else:
+            fix_diff = subprocess.run(
+                ["git", "show", "--stat", sha],
+                cwd=config.repo_path, capture_output=True, text=True,
+            ).stdout
 
     return fix_diff
 
@@ -305,10 +329,18 @@ def phase_0_5_semantic_triage(
     """LLM-powered analysis of the commit before cherry-pick."""
     import json as _json
 
-    fix_diff = subprocess.run(
-        ["git", "show", "--stat", config.source_fix_commit],
-        cwd=config.repo_path, capture_output=True, text=True,
-    ).stdout
+    from auto_bug_fix.git_tools import _is_merge_commit
+    sha = config.source_fix_commit
+    if _is_merge_commit(config.repo_path, sha):
+        fix_diff = subprocess.run(
+            ["git", "diff", "--stat", f"{sha}^1..{sha}"],
+            cwd=config.repo_path, capture_output=True, text=True,
+        ).stdout
+    else:
+        fix_diff = subprocess.run(
+            ["git", "show", "--stat", sha],
+            cwd=config.repo_path, capture_output=True, text=True,
+        ).stdout
 
     context = create_context_str(claude_config, config)
     prompt = SemanticTriagePrompt(
