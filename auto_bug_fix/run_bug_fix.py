@@ -688,10 +688,47 @@ def phase_4b_external_pipeline(
         ),
     ]
 
+    phase_4b_json_path = None
+    if tracker:
+        phase_4b_data = {
+            "output_dir": tracker._output_dir,
+            "repo_path": config.repo_path,
+            "build_dir": config.build_dir,
+            "source_branch": config.source_branch,
+            "target_branch": config.target_branch,
+            "source_fix_commit": config.source_fix_commit,
+            "issue_id": config.issue_id,
+            "build_command": config.build_command,
+            "test_command": config.test_command,
+            "max_build_test_retries": config.max_build_test_retries,
+            "model": ext_claude_config.model,
+            "dossier": dossier_text,
+            "semantic_triage": state.triage_assessment if state.triage_assessment else {},
+        }
+        phase_4b_json_path = os.path.join(tracker._output_dir, "phase_4b_input.json")
+        with open(phase_4b_json_path, "w") as f:
+            _json.dump(phase_4b_data, f, indent=2)
+        log.info("Phase 4b input written to %s", phase_4b_json_path)
+
     log.info("Phase 4b: handing off to external pipeline (build-test-fix loop)")
     import time as _time
     _4b_start = _time.time()
-    timings = asyncio.run(ext_claude_run(ext_claude_config, steps))
+
+    phase_4b_log_path = os.path.join(tracker._output_dir, "phase_4b_log.txt") if tracker else None
+    if phase_4b_log_path:
+        import sys as _sys
+        _4b_log_file = open(phase_4b_log_path, "w")
+        _prev_stdout = _sys.stdout
+        _sys.stdout = Tee(_prev_stdout, _4b_log_file)
+
+    try:
+        timings = asyncio.run(ext_claude_run(ext_claude_config, steps))
+    finally:
+        if phase_4b_log_path:
+            _sys.stdout = _prev_stdout
+            _4b_log_file.close()
+            log.info("Phase 4b log written to %s", phase_4b_log_path)
+
     _4b_end = _time.time()
 
     if tracker and timings:
@@ -708,6 +745,28 @@ def phase_4b_external_pipeline(
             )
 
     failure_file = os.path.join(config.repo_path, RUN_AND_FIX_FAILURE_FILE)
+    success_file = os.path.join(config.repo_path, "run_and_fix_success.txt")
+
+    if tracker and phase_4b_json_path:
+        phase_4b_data["duration_seconds"] = _4b_end - _4b_start
+        if timings:
+            phase_4b_data["cost_usd"] = sum(st.get("cost_usd", 0) for st in timings)
+            phase_4b_data["input_tokens"] = sum(st.get("input_tokens", 0) for st in timings)
+            phase_4b_data["output_tokens"] = sum(st.get("output_tokens", 0) for st in timings)
+        import shutil as _shutil
+        for result_file in (success_file, failure_file):
+            if os.path.exists(result_file):
+                dest = os.path.join(tracker._output_dir, os.path.basename(result_file))
+                _shutil.copy2(result_file, dest)
+                log.info("Phase 4b result copied to %s", dest)
+                with open(result_file) as f:
+                    phase_4b_data["outcome"] = "success" if result_file == success_file else "failure"
+                    phase_4b_data["result_summary"] = f.read()
+                break
+        with open(phase_4b_json_path, "w") as f:
+            _json.dump(phase_4b_data, f, indent=2)
+        log.info("Phase 4b JSON updated with results: %s", phase_4b_json_path)
+
     if os.path.exists(failure_file):
         with open(failure_file) as f:
             failure_text = f.read()
