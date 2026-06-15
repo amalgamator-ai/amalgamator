@@ -1,0 +1,28 @@
+---
+# Example: backport a bug fix from one branch to another
+# Copy this file and fill in your project-specific values.
+
+issue_id: "example-fix-id"
+
+bug_description: "Brief description of the bug and how the fix addresses it"
+
+repository:
+  source_path: "/path/to/your/repo"
+  workdir: "/path/to/worktree/directory"
+
+branches:
+  source: "origin/main"        # branch that has the fix
+  target: "origin/release-1.0" # branch that needs the fix
+
+fix:
+  commit: "abc123def456"       # commit SHA of the fix on the source branch
+
+build:
+  command: "make -j$(nproc)"                    # build command
+  test_command: "make check -j$(nproc)"         # test command
+
+model: "claude-sonnet-4-6"     # or claude-opus-4-6 for harder backports
+
+# Optional:
+# output:
+#   directory: "runs/my-backport"

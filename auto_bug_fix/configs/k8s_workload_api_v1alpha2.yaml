@@ -1,0 +1,21 @@
+---
+issue_id: "k8s-workload-api-v1alpha2-backport"
+
+bug_description: "Create Workload API v1alpha2 — introduces new API group with 248 files"
+
+repository:
+  source_path: "/path/to/kubernetes"
+  workdir: "/tmp/bugfix-workdir"
+
+branches:
+  source: "origin/release-1.36"
+  target: "origin/release-1.34"
+
+fix:
+  commit: "3f094dc2283"
+
+build:
+  command: "go build ./staging/src/k8s.io/api/... ./pkg/apis/... ./pkg/registry/..."
+  test_command: "go test -count=1 -timeout=300s ./staging/src/k8s.io/api/core/... ./pkg/apis/core/..."
+
+model: "claude-opus-4-6"
