@@ -95,6 +95,16 @@ define itself, check if it exists on the target branch. If it doesn't:
    - **Important**: Also check auto-resolved files (taken from --theirs) for imports that reference \
 packages not present on the target branch. These stale imports will break regeneration and must be \
 identified as prerequisites.
+   - **Critical — portable means the fix NEEDS the prerequisite's behavior**: Mark `portable: true` \
+ONLY when the fix depends on the prerequisite's actual behavior or semantics (e.g., a new type that \
+the fix stores data in, a new function whose return value the fix uses). Mark `portable: false` when \
+the prerequisite only changes a calling convention (extra parameter, renamed function, moved package) \
+that the conflict resolution agent can adapt at the call site by dropping/adding an argument or \
+changing an import path. Porting an entire refactor or feature just to match a function signature is \
+wasteful — the agent should adapt the call site to the target branch's existing API instead. \
+Example: if `nri.stopContainer()` gained a 4th `updateState bool` parameter on main but the fix \
+only calls it (doesn't depend on the updateState behavior), mark it `portable: false` and note \
+"agent should call with 3 args to match target signature".
    List the prerequisites with their introducing commits and portability assessment.
 
 9. **Determine priority files**: Which files should the conflict resolution agent focus on first? \
