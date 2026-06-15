@@ -440,7 +440,7 @@ class BugFixConfig(PipelineConfig):
     build_dir: str = ""
     source_branch: str = ""
     target_branch: str = ""
-    source_fix_commit: str = ""
+    source_fix_commit: list[str] = field(default_factory=list)  # Can be single commit or list
     bug_description: str = ""
     issue_id: str = ""
     build_command: str = ""
@@ -472,9 +472,20 @@ class BugFixConfig(PipelineConfig):
         if not target_branch:
             errors.append('"target_branch" is required.')
 
-        source_fix_commit = data.get("source_fix_commit", "")
-        if not source_fix_commit:
+        source_fix_commit_raw = data.get("source_fix_commit", "")
+        if not source_fix_commit_raw:
             errors.append('"source_fix_commit" is required.')
+
+        # Normalize to list: accept either string or list of strings
+        if isinstance(source_fix_commit_raw, str):
+            source_fix_commit = [source_fix_commit_raw]
+        elif isinstance(source_fix_commit_raw, list):
+            if not all(isinstance(c, str) for c in source_fix_commit_raw):
+                errors.append('"source_fix_commit" list must contain only strings.')
+            source_fix_commit = source_fix_commit_raw
+        else:
+            errors.append('"source_fix_commit" must be a string or a list of strings.')
+            source_fix_commit = []
 
         output_dir = data.get("output_dir", "")
         if not output_dir:

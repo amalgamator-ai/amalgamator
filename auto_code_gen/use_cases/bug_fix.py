@@ -81,12 +81,15 @@ class RunAndFixPrompt:
 
 <instructions>
 The goal of this task is to autonomously drive a build-test-fix loop until both the build and tests are clean. Think hard and follow these guidelines:
+
+IMPORTANT: If <target_branch> is provided in the context, ALL code analysis, reading, and modifications MUST be restricted to that branch only. Do NOT examine or reference code from other branches. Before starting, verify you are on <target_branch> by running `git -C <target_source_code_dir> branch --show-current`.
+
 - Run <build_command> from <build_dir>.
     - Use all available CPUs (the command already specifies this).
     - If the build succeeds, proceed to running the tests.
     - If the build fails:
         - Inspect the compiler/linker output carefully to identify the root cause.
-        - Apply a targeted fix to the source code.
+        - Apply a targeted fix to the source code (ON THE TARGET BRANCH ONLY).
         - Do NOT do a full clean rebuild unless the error is explicitly caused by a stale artifact. Never do a speculative clean rebuild.
         - Retry the build.
 - On a successful build, run <test_command> from <build_dir>.
@@ -139,7 +142,7 @@ RUN_AND_FIX_SUCCESS_FILE = "run_and_fix_success.txt"
 @dataclass
 class TestPortPrompt:
     context: str
-    source_fix_commit: str
+    source_fix_commit: list[str]  # Can contain one or more commits
     target_branch: str
     output_manifest_file: str
     prompt_template: ClassVar[str] = """
@@ -159,17 +162,20 @@ class TestPortPrompt:
 </definitions>
 
 <definition_explanations>
-- <source_fix_commit> is the commit SHA on the source branch that introduced the bug fix.
+- <source_fix_commit> is one or more commit SHAs on the source branch that introduced the bug fix. If multiple commits are listed, analyze all of them.
 - <target_branch> is the branch that needs the fix ported to it.
 - <output_manifest_file> is the file where the paths of all ported test files will be recorded, one path per line.
 </definition_explanations>
 
 <instructions>
 The goal of this task is to extract test cases added in <source_fix_commit> and port them to <target_branch>'s test infrastructure. Think hard and follow these guidelines:
-- Run `git show {source_fix_commit}` and analyze the complete diff.
-- Identify all test files added or modified in <source_fix_commit>. Look for files under directories named test/, tests/, testsuite/, t/, or similar. These are the highest-value tests because they were written specifically to catch the bug.
+
+IMPORTANT: Only analyze code from <source_branch> (when examining <source_fix_commit>) and <target_branch> (when porting tests). Do NOT look at other branches.
+
+- For each commit in <source_fix_commit>, run `git show <commit>` (on <source_branch>) and analyze the complete diff.
+- Identify all test files added or modified across all commits in <source_fix_commit>. Look for files under directories named test/, tests/, testsuite/, t/, or similar. These are the highest-value tests because they were written specifically to catch the bug.
 - If NO test files are found in the commit diff, write "NO_TEST_FILES" to <cwd>/<output_manifest_file> and stop.
-- For each identified test file, inspect <target_branch>'s test infrastructure in detail:
+- For each identified test file, inspect <target_branch>'s test infrastructure in detail (ONLY ON <target_branch>):
     - Understand the test harness (dejagnu, ctest, pytest, OpenSSL test runner, or other).
     - Understand the suite directory layout, naming conventions, and registration patterns.
     - Understand how new tests are compiled and run (e.g. build.info, CMakeLists.txt, Makefile).
@@ -190,9 +196,15 @@ The goal of this task is to extract test cases added in <source_fix_commit> and 
 """
 
     def prompt(self) -> str:
+        # Format commit list for display
+        if len(self.source_fix_commit) == 1:
+            commit_str = self.source_fix_commit[0]
+        else:
+            commit_str = "\n".join(f"  - {c}" for c in self.source_fix_commit)
+
         return self.prompt_template.format(
             context=self.context,
-            source_fix_commit=self.source_fix_commit,
+            source_fix_commit=commit_str,
             target_branch=self.target_branch,
             output_manifest_file=self.output_manifest_file,
         )
@@ -203,7 +215,7 @@ TEST_PORT_MANIFEST_FILE = "test_port_manifest.txt"
 
 def gen_TestPortPrompt(
     context: str,
-    source_fix_commit: str,
+    source_fix_commit: list[str],
     target_branch: str,
 ) -> TestPortPrompt:
     return TestPortPrompt(
@@ -259,8 +271,10 @@ class TestValidationPrompt:
 <instructions>
 The goal of this task is to validate that the ported tests actually catch the bug -- i.e., they FAIL on the unpatched target branch. This is the "red" check in red-green testing. Think hard and follow these guidelines:
 
+IMPORTANT: If <target_branch> is provided in the context, ensure all operations are restricted to that branch. Verify you are on <target_branch> before building and testing.
+
 - Read <cwd>/<test_port_manifest_file>. If it contains "NO_TEST_FILES", write "SKIPPED: no test files were ported" to <cwd>/<output_file> and stop.
-- Run <build_command> from <build_dir> to compile the target branch WITH the ported tests but WITHOUT any code fix applied yet.
+- Run <build_command> from <build_dir> to compile the target branch WITH the ported tests but WITHOUT any code fix applied yet (ALL ON <target_branch> ONLY).
     - If the build fails, write "BUILD_FAILED: <error summary>" to <cwd>/<output_file> and stop. The ported tests may have a compilation issue that needs fixing.
 - On a successful build, run <test_command> from <build_dir>.
 - Analyse the test results:
@@ -351,7 +365,9 @@ class BaselineTestPrompt:
 <instructions>
 The goal of this task is to capture a baseline snapshot of the full test suite results on the target branch BEFORE any patch is applied. This snapshot will later be compared against the post-patch results to detect regressions. Think hard and follow these guidelines:
 
-- Ensure the target branch is in its original unpatched state (no fix applied yet).
+IMPORTANT: If <target_branch> is provided in the context, ensure you are on that branch and all operations are restricted to it. Verify with `git -C <target_source_code_dir> branch --show-current`.
+
+- Ensure the target branch is in its original unpatched state (no fix applied yet) (ON <target_branch> ONLY).
 - Run <build_command> from <build_dir>. If the build fails, write "BASELINE_BUILD_FAILED: <error summary>" to <cwd>/<output_file> and stop.
 - On a successful build, run <test_command> from <build_dir>. Capture the FULL output.
 - Parse the test output and extract:
@@ -446,8 +462,10 @@ class BaselineDiffPrompt:
 <instructions>
 The goal of this task is to run the full test suite AFTER the patch has been applied and compare results against the pre-patch baseline to detect regressions. Think hard and follow these guidelines:
 
+IMPORTANT: If <target_branch> is provided in the context, ensure you are on that branch with the patch applied. All operations must be restricted to <target_branch> only.
+
 - Read <cwd>/<baseline_file> to understand the pre-patch test state. If it starts with "BASELINE_BUILD_FAILED" or "BASELINE_COMPLETE" is missing, note this and proceed anyway.
-- Run <build_command> from <build_dir>. If build fails, write "POST_PATCH_BUILD_FAILED: <summary>" to <cwd>/<output_file> and stop.
+- Run <build_command> from <build_dir> (ON <target_branch> WITH PATCH APPLIED). If build fails, write "POST_PATCH_BUILD_FAILED: <summary>" to <cwd>/<output_file> and stop.
 - On a successful build, run <test_command> from <build_dir>. Capture the FULL output.
 - Parse the post-patch test results (same format as baseline).
 - Compare pre-patch vs post-patch results and categorize every difference:
@@ -526,7 +544,7 @@ BUGFIX_CODE_TRACE_TEMPLATE = """
 The goal of this task is to produce a complete code trace of the bug fix and a comparison against <target_branch>. The fix in <source_fix_commit> on <source_branch> will be ported to <target_branch>. Think hard and follow these guidelines:
 
 Part 1 — Full code trace of the fix on <source_branch>:
-- Run `git show <source_fix_commit>` on <source_branch> and analyze the complete diff.
+- For each commit in <source_fix_commit>, run `git show <commit>` on <source_branch> and analyze the complete diff.
 - Analyze and understand in detail what the fix does: which files it modifies, which functions it changes, and why.
 - Trace the <code_trace> of the changed code on <source_branch>: follow call chains from the highest-level entry point down to the lowest-level functions affected.
     - Go deep into C/C++ source if the fix touches compiled code.
@@ -690,7 +708,7 @@ Part 1 — Code porting plan:
     - Provide a risk analysis and list of sensitive breaking points.
 
 Part 2 — Test plan:
-- Run `git show <source_fix_commit>` and identify all test files added or modified in the fix commit. Look for files under directories named test/, tests/, testsuite/, t/, or similar.
+- For each commit in <source_fix_commit>, run `git show <commit>` and identify all test files added or modified. Look for files under directories named test/, tests/, testsuite/, t/, or similar. Collect tests from all commits.
 - For each identified test, inspect <target_branch>'s test infrastructure in detail:
     - Understand the test harness (dejagnu, ctest, pytest, OpenSSL test runner, or other).
     - Understand the suite directory layout, naming conventions, and registration patterns.
@@ -793,8 +811,8 @@ BUGFIX_TEST_PLAN_TEMPLATE = """
 <instructions>
 The goal of this task is to plan the tests for the fix being ported from <source_branch> to <target_branch> (iteration {iteration}). Think hard and do the following:
 
-Step 1 — Port existing tests from the fix commit:
-- Run `git show <source_fix_commit>` and identify all test files added or modified in the fix commit. Look for files under directories named test/, tests/, testsuite/, t/, or similar.
+Step 1 — Port existing tests from the fix commit(s):
+- For each commit in <source_fix_commit>, run `git show <commit>` and identify all test files added or modified. Look for files under directories named test/, tests/, testsuite/, t/, or similar. Collect tests from all commits.
 - For each identified test, inspect <target_branch>'s test infrastructure in detail:
     - Understand the test harness (dejagnu, ctest, pytest, OpenSSL test runner, or other).
     - Understand the suite directory layout, naming conventions, and registration patterns.
@@ -909,11 +927,11 @@ BUGFIX_CODE_GEN_TEMPLATE = """
 <instructions>
 The goal of this task is to generate a code patch for <target_branch> that implements the coding plan in <code_port_plan_file> and the testing plan in <test_plan_file> (iteration {iteration}). Do the following and think hard:
 - Analyze and understand in detail the coding plan in <code_port_plan_file>.
-- Analyze and understand in detail the testing plan in <test_plan_file>. The test plan includes both tests ported from <source_fix_commit> and supplemental tests.
+- Analyze and understand in detail the testing plan in <test_plan_file>. The test plan includes both tests ported from the fix commit(s) in <source_fix_commit> and supplemental tests.
 - Implement the plans in <code_port_plan_file> and <test_plan_file> EXACTLY as described:
     - Follow strictly the code and test plans as described, DO NOT DIVERGE.
     - Implement the fix code as described in <code_port_plan_file>.
-    - Port the tests from <source_fix_commit> as described in <test_plan_file>: adapt them to <target_branch>'s test infrastructure (harness syntax, directory layout, registration patterns, include paths) while preserving test intent and coverage exactly.
+    - Port the tests from the fix commit(s) as described in <test_plan_file>: adapt them to <target_branch>'s test infrastructure (harness syntax, directory layout, registration patterns, include paths) while preserving test intent and coverage exactly.
     - Implement any supplemental tests described in <test_plan_file>.
     - After applying the fix and tests, compile <target_branch> using <build_command> from <build_dir>.
     - Use all available CPUs.
@@ -1005,6 +1023,12 @@ The goal of this task is to perform a critical, in-depth review of the code patc
 # ---------------------------------------------------------------------------
 
 def _create_bug_fix_context_str(claude_config, config) -> str:
+    # Format commit list for display
+    if len(config.source_fix_commit) == 1:
+        commit_str = config.source_fix_commit[0]
+    else:
+        commit_str = "\n".join(f"  - {c}" for c in config.source_fix_commit)
+
     return """
 <context>
 
@@ -1064,7 +1088,7 @@ code-paths, code-pieces, and their associated call-chains
 - <build_dir> is the working directory from which <build_command> and <test_command> are invoked.
 - <source_branch> is the branch that contains the bug fix to be ported.
 - <target_branch> is the branch that needs the fix applied.
-- <source_fix_commit> is the specific commit SHA on <source_branch> that introduced the fix.
+- <source_fix_commit> is one or more commit SHAs on <source_branch> that introduced the fix. If multiple commits are listed, analyze all of them together as a complete fix.
 - <bug_description> describes the bug and the fix.
 - <issue_id> is the tracker identifier (CVE, GitHub issue, etc.).
 - <build_command> is the incremental build command for <target_branch>. Always use all available CPUs.
@@ -1079,7 +1103,7 @@ code-paths, code-pieces, and their associated call-chains
         build_dir=config.build_dir,
         source_branch=config.source_branch,
         target_branch=config.target_branch,
-        source_fix_commit=config.source_fix_commit,
+        source_fix_commit=commit_str,
         bug_description=config.bug_description,
         issue_id=config.issue_id,
         build_command=config.build_command,

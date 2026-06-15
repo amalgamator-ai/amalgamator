@@ -23,7 +23,7 @@ class TestBugFixConfigConstruction:
     def test_branch_fields(self, bug_fix_cfg):
         assert bug_fix_cfg.source_branch == "gcc-14-branch"
         assert bug_fix_cfg.target_branch == "gcc-13-branch"
-        assert bug_fix_cfg.source_fix_commit == "abc1234"
+        assert bug_fix_cfg.source_fix_commit == ["abc1234"]
 
     def test_build_fields(self, bug_fix_cfg):
         assert bug_fix_cfg.build_command == "make -j$(nproc)"
@@ -68,7 +68,7 @@ class TestBugFixConfigFromJson:
         config = BugFixConfig.from_json(path)
         assert config.source_branch == "gcc-14-branch"
         assert config.target_branch == "gcc-13-branch"
-        assert config.source_fix_commit == "abc1234"
+        assert config.source_fix_commit == ["abc1234"]
         assert config.num_code_port_plan_iterations == 2
         assert config.thinking_mode == "deep"
         assert "gcc/config/arm/" in config.disallowed_modules
