@@ -30,7 +30,7 @@ def bug_fix_cfg():
         build_dir="/path/to/gcc/build",
         source_branch="gcc-14-branch",
         target_branch="gcc-13-branch",
-        source_fix_commit="abc1234",
+        source_fix_commit=["abc1234"],
         bug_description="CVE-2024-1234: buffer overflow in fold_convert()",
         issue_id="CVE-2024-1234",
         build_command="make -j$(nproc)",

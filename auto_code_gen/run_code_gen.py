@@ -7,6 +7,7 @@ if _project_root not in _sys.path:
 
 import os
 import re
+import subprocess
 import sys
 import time
 import argparse
@@ -847,7 +848,6 @@ if __name__ == "__main__":
     _print_phase_summary(phase_results, all_step_timings, total_duration, config.output_dir)
 
     # Save git diff to changes.diff
-    import subprocess
     try:
         diff_output = subprocess.run(
             ["git", "diff", "HEAD"],
