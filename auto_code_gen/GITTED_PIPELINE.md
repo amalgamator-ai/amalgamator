@@ -596,7 +596,6 @@ After the SDK call returns, Phase 4b checks for the failure file. If it exists �
 - `phase_4b_input.json` is updated with post-run results:
   - `outcome`: "success" or "failure"
   - `duration_seconds`: wall-clock time
-  - `cost_usd`: SDK-reported cost
   - `input_tokens` / `output_tokens`: token counts
   - `result_summary`: full content of the success/failure file
 - `run_and_fix_success.txt` or `run_and_fix_failure.txt` is copied from the worktree to the run directory
@@ -619,27 +618,12 @@ After the SDK call returns, Phase 4b checks for the failure file. If it exists �
   "dossier": "# Bug-Fix Porting Dossier: ...",
   "semantic_triage": { ... },
   "duration_seconds": 192.0,
-  "cost_usd": 0.7395,
   "input_tokens": 319,
   "output_tokens": 7847,
   "outcome": "success",
   "result_summary": "SUCCESS\nRetries: 0/3\n\nBuild: PASSED ..."
 }
 ```
-
-### Cost profile
-
-Phase 4b uses Opus with deep thinking, which is more expensive than Sonnet:
-- Typical cost: $0.50–$2.50 per invocation
-- Typical duration: 1–8 minutes
-- Typical retries: 0–1 (Opus usually fixes on first attempt)
-
-In the CRI-O backport tests, Phase 4b was triggered when:
-- `golangci-lint` wasn't installed (environmental, not code issue) — $0.74
-- Pre-existing `//go:build test` failures needed investigation — $0.55
-- Cherry-pick introduced wrong vendor import path — $2.08
-
-After adding comprehensive Phase 1 baseline and pre-existing failure filtering, Phase 4b is triggered less frequently — only for genuine NEW failures introduced by the backport.
 
 **No changes to `auto_code_gen` are required** — the gitted pipeline imports and calls the existing `gen_RunAndFixPrompt` function.
 
@@ -707,8 +691,6 @@ Files identified by the triage as irrelevant (e.g., lint changes depending on un
 | Aspect | auto_code_gen | Gitted pipeline |
 |--------|---------------|-----------------|
 | Primary mechanism | LLM generates patch from scratch | `git cherry-pick` + LLM conflict resolution |
-| Cost for clean cherry-picks | ~$3-10 (full LLM pipeline) | $0 (no LLM needed) |
-| Cost for conflicts | ~$5-15 | $0.50-5 (conflict resolution only) |
 | Generated file handling | LLM writes them | Auto-resolve with `--theirs` + run codegen |
 | Prerequisite detection | Manual | Automatic (git log -S + LLM analysis) |
 | Test porting | Combined with code plan | Separate Phase 0.5c before fix |
@@ -723,23 +705,23 @@ Files identified by the triage as irrelevant (e.g., lint changes depending on un
 
 ### CRI-O Post-Stop Hooks (PR #9613)
 
-| Target | Conflicts | Model | Cost | Duration | Match vs Human |
-|--------|-----------|-------|------|----------|---------------|
-| release-1.34 | 1 | Sonnet + Opus 4b | $7.12 | 28 min | 7/7 files identical (PR #9699) |
-| release-1.33 | 5 | Sonnet | $6.82 | 26 min | 6/7 identical, 1 cosmetic (PR #9741) |
+| Target | Conflicts | Model | Duration | Match vs Human |
+|--------|-----------|-------|----------|---------------|
+| release-1.34 | 1 | Sonnet + Opus 4b | 28 min | 7/7 files identical (PR #9699) |
+| release-1.33 | 5 | Sonnet | 26 min | 6/7 identical, 1 cosmetic (PR #9741) |
 
 ### Kubernetes
 
-| Commit | Files | Conflicts | Model | Cost | Outcome |
-|--------|-------|-----------|-------|------|---------|
-| ReplicaSet availability | 6 | 3 | Opus | $3.44 | Success |
-| CRI gogo-protobuf removal | 28 | 5 | Sonnet | $2.20 | Success |
-| KEP-5229 scheduler dispatcher | 34 | 11 | Sonnet | $10.85 | Success (Phase 4a) |
-| PreFilterPreBind | 13 | 6 | Sonnet | $2.49 | Success |
-| Workload scheduling cycle | 24 | 6 | Opus | $14.08 | Success |
-| Workload API v1alpha2 | 248 | 106→44 | Sonnet | $3.43 | Partial (regen fails) |
-| Cloud provider cleanup | 28 | 0 | — | $0.00 | Clean cherry-pick |
-| Build tags removal | 412 | 0 | — | $0.16 | Clean cherry-pick |
+| Commit | Files | Conflicts | Model | Outcome |
+|--------|-------|-----------|-------|---------|
+| ReplicaSet availability | 6 | 3 | Opus | Success |
+| CRI gogo-protobuf removal | 28 | 5 | Sonnet | Success |
+| KEP-5229 scheduler dispatcher | 34 | 11 | Sonnet | Success (Phase 4a) |
+| PreFilterPreBind | 13 | 6 | Sonnet | Success |
+| Workload scheduling cycle | 24 | 6 | Opus | Success |
+| Workload API v1alpha2 | 248 | 106→44 | Sonnet | Partial (regen fails) |
+| Cloud provider cleanup | 28 | 0 | — | Clean cherry-pick |
+| Build tags removal | 412 | 0 | — | Clean cherry-pick |
 
 ---
 
