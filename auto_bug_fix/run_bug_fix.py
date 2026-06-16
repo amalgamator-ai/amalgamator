@@ -1424,6 +1424,14 @@ if __name__ == "__main__":
             sys.exit(1)
         print(f"Worktree created successfully")
 
+        gitignore_path = os.path.join(worktree_path, ".gitignore")
+        if not os.path.exists(gitignore_path):
+            with open(gitignore_path, "w") as f:
+                f.write("semantic_triage.json\ntest_port_manifest.txt\nruns/\n")
+        else:
+            with open(gitignore_path, "a") as f:
+                f.write("\nsemantic_triage.json\ntest_port_manifest.txt\nruns/\n")
+
         build_subdir = os.path.relpath(bug_fix_config.build_dir, bug_fix_config.repo_path)
         bug_fix_config.repo_path = worktree_path
         bug_fix_config.build_dir = os.path.join(worktree_path, build_subdir)
