@@ -477,37 +477,171 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
 
 ---
 
-## Integration Point: Phase 4b
+## Phase 4b — External Pipeline in Detail
 
-When the gitted pipeline exhausts its own recovery (Phase 4a), it imports `auto_code_gen`'s `RunAndFixPrompt` and calls it with enriched context:
+Phase 4b is the last-resort escalation. It fires when the gitted pipeline's own recovery mechanisms (Phase 4a) cannot fix build or test failures. Instead of giving up, it hands the broken worktree to a more powerful LLM (Opus with deep thinking) running an autonomous build-test-fix loop.
+
+### When it triggers
+
+Phase 4b fires in three scenarios:
+
+1. **Cherry-pick resolution crashes** — the Sonnet agent fails to resolve all conflicts. The pipeline force-resolves remaining conflicts with `--theirs` (keeps target version), commits the broken state, then hands off to 4b.
+2. **Phase 4a exhausts retries** — the build error recovery agent couldn't fix compile/test errors within `max_resolution_retries` iterations.
+3. **Phase 4.1 extended verification fails** — lint or additional test commands produce NEW failures (not pre-existing) that Phase 4a can't fix.
+
+### What gets passed to the Opus agent
+
+The pipeline builds an **enriched context** that bundles everything it has learned:
+
+```xml
+<context>
+  <output_dir>/tmp/bugfix-workdir/issue-id</output_dir>
+  <repo_path>/tmp/bugfix-workdir/issue-id</repo_path>
+  <build_dir>/tmp/bugfix-workdir/issue-id/.</build_dir>
+  <source_branch>origin/main</source_branch>
+  <target_branch>b9ac8350f</target_branch>
+  <source_fix_commit>92c18a2e26...</source_fix_commit>
+  <bug_description>...</bug_description>
+  <build_command>go build ...</build_command>
+  <test_command>go vet ...</test_command>
+  <max_build_test_retries>3</max_build_test_retries>
+</context>
+
+<pipeline_dossier>
+  Full audit trail from all prior phases:
+  - Phase 0 triage gates
+  - Phase 0.5 semantic triage assessment
+  - Cherry-pick conflict resolution details
+  - Build/test errors encountered
+  - Phase 4a recovery attempts
+</pipeline_dossier>
+
+<semantic_triage>
+  The Phase 0.5 JSON assessment:
+  - Difficulty classification
+  - Priority files
+  - Prerequisites and their portability
+  - Lint/verification commands
+  - Files to skip
+</semantic_triage>
+```
+
+### How the Opus agent runs
+
+1. Creates an **Opus ClaudeConfig** with deep thinking enabled:
+   - Model: `claude-opus-4-6`
+   - Thinking: `{"type": "adaptive"}`
+   - Effort: `max`
+   - Max thinking tokens: 1,048,576 (1M)
+
+2. Generates a `RunAndFixPrompt` from `auto_code_gen.use_cases.bug_fix` — a self-contained autonomous loop prompt:
 
 ```python
 from auto_code_gen.use_cases.bug_fix import gen_RunAndFixPrompt
-from common.claude_utils import claude_run, PipelineStep, ClaudeConfig
 
 prompt = gen_RunAndFixPrompt(
-    context=enriched_context,  # includes dossier + triage + repo info
+    context=enriched_context,
     build_command=config.build_command,
     test_command=config.test_command,
     build_dir=config.build_dir,
     max_build_test_retries=config.max_build_test_retries,
 )
-
-steps = [PipelineStep(name="phase_4b_external_fix", prompt=prompt.prompt())]
-timings = await claude_run(claude_config, steps)
 ```
 
-The enriched context includes:
-- Full pipeline dossier (every phase's results, conflicts, resolutions)
-- Semantic triage assessment (difficulty, prerequisites, priority files)
-- Repository context (branches, build/test commands, fix description)
+3. Runs it as a **single SDK call** via `claude_run` — one Opus conversation that gets full shell access to the repo.
 
-**Phase 4b artifacts** saved to the run directory:
-- `phase_4b_input.json` — full input context (config, dossier, triage) + post-run results (outcome, duration, cost, result summary)
-- `phase_4b_log.txt` — complete Opus conversation log (tool calls, thinking, results)
-- `run_and_fix_success.txt` or `run_and_fix_failure.txt` — copied from worktree
+### What the Opus agent does autonomously
 
-**No changes to `auto_code_gen` are required** — the gitted pipeline imports and calls the existing functions.
+The agent runs a **build-test-fix loop**:
+
+```
+1. Run build_command from build_dir
+2. If build fails:
+   ├─ Inspect compiler/linker output
+   ├─ Apply targeted fix to source code
+   └─ Retry build (incremental, no clean rebuild)
+3. If build passes → run test_command
+4. If tests fail:
+   ├─ Inspect test output
+   ├─ Identify root cause (fix code or ported tests)
+   ├─ Apply targeted fix
+   ├─ Recompile (incremental)
+   └─ Rerun tests
+5. Count each build+test attempt as one retry
+6. Repeat until clean or max_build_test_retries exhausted
+```
+
+The agent has the full dossier context so it knows:
+- What the triage found (API divergences, files to skip, prerequisites)
+- What the resolution agent already tried
+- Which errors are pre-existing vs introduced by the backport
+
+### How we know if it succeeded
+
+The agent writes one of two sentinel files:
+- **`run_and_fix_success.txt`** — first line is "SUCCESS", includes retry count, fixes applied, and full test output
+- **`run_and_fix_failure.txt`** — failure log with all attempted fixes and final errors
+
+After the SDK call returns, Phase 4b checks for the failure file. If it exists → `PipelineEscalation` (pipeline fails). If not → success, pipeline continues to Phase 4.5.
+
+### Logging and artifacts
+
+**Before the run**:
+- `phase_4b_input.json` is written to the run directory with the full input context (config, dossier, semantic triage)
+
+**During the run**:
+- stdout is tee'd to `phase_4b_log.txt` in the run directory — captures the complete Opus conversation including all tool calls, thinking blocks, and results
+
+**After the run**:
+- `phase_4b_input.json` is updated with post-run results:
+  - `outcome`: "success" or "failure"
+  - `duration_seconds`: wall-clock time
+  - `cost_usd`: SDK-reported cost
+  - `input_tokens` / `output_tokens`: token counts
+  - `result_summary`: full content of the success/failure file
+- `run_and_fix_success.txt` or `run_and_fix_failure.txt` is copied from the worktree to the run directory
+
+### Example phase_4b_input.json (after completion)
+
+```json
+{
+  "output_dir": "runs/crio_1.34_backport_20260615_171314",
+  "repo_path": "/tmp/bugfix-workdir/crio-post-stop-hooks-9613-to-1.34",
+  "build_dir": "/tmp/bugfix-workdir/crio-post-stop-hooks-9613-to-1.34/.",
+  "source_branch": "origin/main",
+  "target_branch": "cc8e8609e",
+  "source_fix_commit": "92c18a2e2673764cd10f89b1a5061e2b26f44209",
+  "issue_id": "crio-post-stop-hooks-9613-to-1.34",
+  "build_command": "go build $(go list ./... | grep -v /test | grep -v nsmgr/test)",
+  "test_command": "go vet $(go list ./... | grep -v /test | grep -v nsmgr/test)",
+  "max_build_test_retries": 3,
+  "model": "claude-opus-4-6",
+  "dossier": "# Bug-Fix Porting Dossier: ...",
+  "semantic_triage": { ... },
+  "duration_seconds": 192.0,
+  "cost_usd": 0.7395,
+  "input_tokens": 319,
+  "output_tokens": 7847,
+  "outcome": "success",
+  "result_summary": "SUCCESS\nRetries: 0/3\n\nBuild: PASSED ..."
+}
+```
+
+### Cost profile
+
+Phase 4b uses Opus with deep thinking, which is more expensive than Sonnet:
+- Typical cost: $0.50–$2.50 per invocation
+- Typical duration: 1–8 minutes
+- Typical retries: 0–1 (Opus usually fixes on first attempt)
+
+In the CRI-O backport tests, Phase 4b was triggered when:
+- `golangci-lint` wasn't installed (environmental, not code issue) — $0.74
+- Pre-existing `//go:build test` failures needed investigation — $0.55
+- Cherry-pick introduced wrong vendor import path — $2.08
+
+After adding comprehensive Phase 1 baseline and pre-existing failure filtering, Phase 4b is triggered less frequently — only for genuine NEW failures introduced by the backport.
+
+**No changes to `auto_code_gen` are required** — the gitted pipeline imports and calls the existing `gen_RunAndFixPrompt` function.
 
 ---
 
