@@ -2,3 +2,4 @@ __pycache__/
 __run_log_bug_fix.txt
 dossier.md
 runs/
+auto_bug_fix/configs/*.yaml
