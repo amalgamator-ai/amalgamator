@@ -60,7 +60,7 @@ from auto_bug_fix.git_tools import (
     git_format_patch,
     git_merge_base,
     git_reset_hard,
-    git_commit,
+    git_commit as _git_commit_raw,
     git_rev_parse,
 )
 from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
@@ -82,8 +82,24 @@ from auto_bug_fix.bug_fix_prompts import (
 
 LOG_FILE = "__run_log_bug_fix.txt"
 DOSSIER_FILE = "dossier.md"
+_PIPELINE_ARTIFACTS = (SEMANTIC_TRIAGE_FILE, TEST_PORT_MANIFEST_FILE)
 
 log = logging.getLogger(__name__)
+
+
+def _unstage_pipeline_artifacts(repo_path: str) -> None:
+    """Remove pipeline artifact files from the git index so they don't end up in commits."""
+    for artifact in _PIPELINE_ARTIFACTS:
+        subprocess.run(
+            ["git", "rm", "--cached", "--ignore-unmatch", "-f", artifact],
+            cwd=repo_path, capture_output=True,
+        )
+
+
+def git_commit(repo_path: str, message: str) -> None:
+    """Wrapper around git_commit that unstages pipeline artifacts first."""
+    _unstage_pipeline_artifacts(repo_path)
+    _git_commit_raw(repo_path, message)
 
 
 class PipelineEscalation(Exception):
@@ -373,7 +389,6 @@ def phase_0_5_semantic_triage(
         try:
             with open(triage_path) as f:
                 assessment = _json.load(f)
-            os.remove(triage_path)
             log.info("Semantic triage: difficulty=%s, recommendation=%s",
                      assessment.get("estimated_difficulty", "?"),
                      assessment.get("recommendation", "?"))
@@ -439,7 +454,6 @@ def phase_0_5c_test_port(
     if os.path.exists(manifest_abs):
         with open(manifest_abs) as f:
             ported = [line.strip() for line in f if line.strip()]
-        os.remove(manifest_abs)
         log.info("Phase 0.5c: ported %d test files: %s", len(ported), ", ".join(ported))
     else:
         log.warning("Phase 0.5c: no manifest file produced — test port may have failed")
