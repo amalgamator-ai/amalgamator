@@ -701,27 +701,23 @@ Files identified by the triage as irrelevant (e.g., lint changes depending on un
 
 ---
 
-## Tested Backports
+## Example Run — CRI-O Post-Stop Hooks to release-1.34
 
-### CRI-O Post-Stop Hooks (PR #9613)
+Backport of [PR #9613](https://github.com/cri-o/cri-o/pull/9613) to `release-1.34`, compared against human backport [PR #9699](https://github.com/cri-o/cri-o/pull/9699).
 
-| Target | Conflicts | Model | Duration | Match vs Human |
-|--------|-----------|-------|----------|---------------|
-| release-1.34 | 1 | Sonnet + Opus 4b | 28 min | 7/7 files identical (PR #9699) |
-| release-1.33 | 5 | Sonnet | 26 min | 6/7 identical, 1 cosmetic (PR #9741) |
+| Phase | Duration | Detail |
+|-------|----------|--------|
+| Phase 0 — Triage | 3s | 9 seed files, not already on target |
+| Phase 0.5 — Semantic triage | 5 min | MEDIUM difficulty, 3 prerequisites (all `portable: false`), 2 files to skip |
+| Phase 0.5c — Test port | 10 min | 2 test files ported |
+| Phase 1 — Baseline | 10s | Build PASSED, `go vet` PASSED, `go test ./server/...` FAILED (pre-existing) |
+| Phase 2+3a — Cherry-pick + resolve | 5 min | 2 conflicts resolved by Sonnet, skip files reverted to target |
+| Phase 4 — Verify | 4s | Build + test PASSED |
+| Phase 4.1 — Extended verification | 2s | `golangci-lint` failed → **pre-existing** (not installed), skipped |
+| Phase 4b — External pipeline | 3 min | Opus confirmed all failures are pre-existing, no code changes needed |
+| Phase 4.5 — Semantic equivalence | 0s | `unmatched` (expected — API adaptations) |
 
-### Kubernetes
-
-| Commit | Files | Conflicts | Model | Outcome |
-|--------|-------|-----------|-------|---------|
-| ReplicaSet availability | 6 | 3 | Opus | Success |
-| CRI gogo-protobuf removal | 28 | 5 | Sonnet | Success |
-| KEP-5229 scheduler dispatcher | 34 | 11 | Sonnet | Success (Phase 4a) |
-| PreFilterPreBind | 13 | 6 | Sonnet | Success |
-| Workload scheduling cycle | 24 | 6 | Opus | Success |
-| Workload API v1alpha2 | 248 | 106→44 | Sonnet | Partial (regen fails) |
-| Cloud provider cleanup | 28 | 0 | — | Clean cherry-pick |
-| Build tags removal | 412 | 0 | — | Clean cherry-pick |
+**Result**: All 7 production files byte-for-byte identical to human backport PR #9699. Phase 4b was triggered by `golangci-lint` not being installed — an environmental issue, not a code problem. The Opus agent verified build and `go vet` pass cleanly and wrote `run_and_fix_success.txt`.
 
 ---
 
