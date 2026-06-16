@@ -126,6 +126,9 @@ class PipelineState:
     dossier: Dossier | None = None
     triage_assessment: dict = field(default_factory=dict)
     priority_files: list[str] = field(default_factory=list)
+    baseline_build_exit: int = 0
+    baseline_build_output: str = ""
+    baseline_verification: list[dict] = field(default_factory=list)
 
 
 def phase_0_triage(
@@ -403,7 +406,8 @@ def phase_0_5c_test_port(
     tracker,
 ) -> list[str]:
     """Identify test files in the fix commit and port them to the target branch."""
-    test_files = identify_test_files(state.seed)
+    files_to_skip = set(state.triage_assessment.get("files_to_skip", []))
+    test_files = [f for f in identify_test_files(state.seed) if f not in files_to_skip]
     if not test_files:
         log.info("Phase 0.5c: no test files found in fix commit — skipping test port")
         return []
@@ -447,9 +451,23 @@ def phase_1_baseline_red_bisect(
     claude_config: ClaudeConfig,
     state: PipelineState,
 ) -> None:
-    """Capture test baseline and run RED check in a single test suite invocation."""
-    repo = config.repo_path
+    """Capture comprehensive baseline on the clean target branch before any changes.
 
+    Runs build, test, and all lint/verification commands discovered by triage.
+    Stores results so Phase 4+ can distinguish regressions from pre-existing failures.
+    """
+    # Step 1: Build baseline
+    build_exit, build_output = capture_output(
+        [config.build_command], config.build_dir,
+    )
+    state.baseline_build_exit = build_exit
+    state.baseline_build_output = build_output
+    if build_exit == 0:
+        log.info("Baseline build: PASSED")
+    else:
+        log.warning("Baseline build: FAILED (exit %d) — target branch has pre-existing build issues", build_exit)
+
+    # Step 2: Test baseline (existing logic)
     red_exit, red_output = capture_output(
         [config.test_command], config.build_dir,
     )
@@ -465,8 +483,25 @@ def phase_1_baseline_red_bisect(
     else:
         state.s_target = normalize_signature(red_output)
 
-    # Positive control and bisect are documented in UNUSED_PIPELINE_CODE.md.
-    # They require fixture_cache which is not yet wired to Phase 0.5c test port.
+    # Step 3: Extended verification baseline (lint + verification commands from triage)
+    lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
+    verification_cmds = state.triage_assessment.get("verification_commands", [])
+    verification_cmds = lint_cmds + [c for c in verification_cmds if _validate_shell_command(c)]
+    state.baseline_verification = []
+    for vcmd in verification_cmds:
+        try:
+            vresult = subprocess.run(
+                vcmd, shell=True, cwd=config.build_dir,
+                capture_output=True, text=True, timeout=600,
+            )
+            entry = {"cmd": vcmd, "exit_code": vresult.returncode, "output": (vresult.stdout + "\n" + vresult.stderr)[-3000:]}
+        except subprocess.TimeoutExpired:
+            entry = {"cmd": vcmd, "exit_code": -1, "output": "Timed out after 10 minutes"}
+        state.baseline_verification.append(entry)
+        if entry["exit_code"] == 0:
+            log.info("Baseline verification passed: %s", vcmd)
+        else:
+            log.info("Baseline verification failed (exit %d, pre-existing): %s", entry["exit_code"], vcmd)
 
 
 def phase_1_5_failure_mode(
@@ -845,6 +880,18 @@ def cherry_pick_and_resolve(
     conflict_summary_parts = []
     skip_set = set(files_to_skip or [])
     if skip_set:
+        # Reset ALL skip files to target version — both conflicting and cleanly-applied
+        all_changed = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            cwd=config.repo_path, capture_output=True, text=True,
+        ).stdout.strip().splitlines()
+        skip_applied_clean = [f for f in all_changed if f in skip_set and f not in uu_files]
+        if skip_applied_clean:
+            log.info("%s: reverting %d skip files that applied cleanly", label, len(skip_applied_clean))
+            for f in skip_applied_clean:
+                subprocess.run(["git", "checkout", "HEAD", "--", f],
+                               cwd=config.repo_path, capture_output=True)
+
         auto_resolved = [f for f in uu_files if f in skip_set]
         if auto_resolved:
             log.info("%s: auto-resolving %d generated/binary files", label, len(auto_resolved))
@@ -853,8 +900,11 @@ def cherry_pick_and_resolve(
                                cwd=config.repo_path, capture_output=True)
                 subprocess.run(["git", "add", "--", f],
                                cwd=config.repo_path, capture_output=True)
+
+        total_skipped = len(skip_applied_clean) + len(auto_resolved)
+        if total_skipped:
             conflict_summary_parts.append(
-                f"Auto-resolved {len(auto_resolved)} generated/binary files (--theirs)"
+                f"Reverted {total_skipped} files to target version (files_to_skip)"
             )
             uu_files = [f for f in uu_files if f not in skip_set]
 
@@ -1099,6 +1149,13 @@ def _run_pipeline_phases(
                 state.dossier.add("Bisect result", state.bisect_sha, "Phase 1 git bisect")
                 tracker.record_gate("bisect", state.bisect_sha)
 
+            baseline_summary = f"Build: {'PASSED' if state.baseline_build_exit == 0 else 'FAILED (exit ' + str(state.baseline_build_exit) + ')'}"
+            baseline_summary += f"\nTest ({config.test_command}): {'PASSED' if not state.baseline else str(len(state.baseline)) + ' pre-existing failures'}"
+            for entry in state.baseline_verification:
+                status = "PASSED" if entry["exit_code"] == 0 else f"FAILED (exit {entry['exit_code']}, pre-existing)"
+                baseline_summary += f"\n{entry['cmd']}: {status}"
+            state.dossier.add("Baseline (clean target branch)", baseline_summary, "Phase 1")
+
         with tracker.phase("Phase 1.5 — Failure-mode confirmation"):
             sig_result = phase_1_5_failure_mode(config, claude_config, state)
             state.dossier.add("Signature comparison", sig_result, "Phase 1.5")
@@ -1208,6 +1265,9 @@ def _run_pipeline_phases(
     lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
     verification_cmds = state.triage_assessment.get("verification_commands", [])
     verification_cmds = lint_cmds + [c for c in verification_cmds if _validate_shell_command(c)]
+
+    baseline_failures = {e["cmd"]: e["exit_code"] for e in state.baseline_verification if e["exit_code"] != 0}
+
     if verification_cmds:
         ext_failures = []
         with tracker.phase("Phase 4.1 — Extended verification"):
@@ -1219,15 +1279,20 @@ def _run_pipeline_phases(
                         capture_output=True, text=True, timeout=600,
                     )
                 except subprocess.TimeoutExpired:
-                    log.warning("Phase 4.1: verification timed out (10min): %s", vcmd)
-                    ext_failures.append({"cmd": vcmd, "output": "Timed out after 10 minutes"})
-                    state.dossier.add(f"Extended verification timed out: {vcmd}", "Timed out after 10 minutes", "Phase 4.1")
+                    if vcmd in baseline_failures:
+                        log.info("Phase 4.1: verification timed out (pre-existing): %s", vcmd)
+                    else:
+                        log.warning("Phase 4.1: verification timed out (10min): %s", vcmd)
+                        ext_failures.append({"cmd": vcmd, "output": "Timed out after 10 minutes"})
+                        state.dossier.add(f"Extended verification timed out: {vcmd}", "Timed out after 10 minutes", "Phase 4.1")
                     continue
                 if vresult.returncode == 0:
                     log.info("Phase 4.1: verification passed: %s", vcmd)
+                elif vcmd in baseline_failures:
+                    log.info("Phase 4.1: verification failed (pre-existing, exit %d): %s", vresult.returncode, vcmd)
                 else:
                     output = (vresult.stdout + "\n" + vresult.stderr)[-3000:]
-                    log.warning("Phase 4.1: verification failed (exit %d): %s", vresult.returncode, vcmd)
+                    log.warning("Phase 4.1: verification failed (NEW, exit %d): %s", vresult.returncode, vcmd)
                     ext_failures.append({"cmd": vcmd, "output": output})
                     state.dossier.add(
                         f"Extended verification failed: {vcmd}",
@@ -1251,9 +1316,10 @@ def _run_pipeline_phases(
                                 capture_output=True, text=True, timeout=600,
                             )
                         except subprocess.TimeoutExpired:
-                            still_failing.append(vcmd)
+                            if vcmd not in baseline_failures:
+                                still_failing.append(vcmd)
                             continue
-                        if vresult.returncode != 0:
+                        if vresult.returncode != 0 and vcmd not in baseline_failures:
                             still_failing.append(vcmd)
                     if still_failing:
                         log.warning("Phase 4.1: %d commands still failing after recovery: %s",
