@@ -82,7 +82,11 @@ from auto_bug_fix.bug_fix_prompts import (
 
 LOG_FILE = "__run_log_bug_fix.txt"
 DOSSIER_FILE = "dossier.md"
-_PIPELINE_ARTIFACTS = (SEMANTIC_TRIAGE_FILE, TEST_PORT_MANIFEST_FILE)
+_PIPELINE_ARTIFACTS = (
+    SEMANTIC_TRIAGE_FILE,
+    TEST_PORT_MANIFEST_FILE,
+    os.path.join("runs", SEMANTIC_TRIAGE_FILE),
+)
 
 log = logging.getLogger(__name__)
 
