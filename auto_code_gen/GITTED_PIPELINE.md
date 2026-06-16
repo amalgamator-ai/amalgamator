@@ -52,427 +52,127 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
 
 ## Detailed Flowchart
 
-```
-                            ┌─────────────────────┐
-                            │   YAML Config File   │
-                            │  (issue, repo, fix,  │
-                            │   branches, build)   │
-                            └─────────┬───────────┘
-                                      │
-                                      ▼
-                         ┌────────────────────────┐
-                         │  Create Git Worktree    │
-                         │  on target branch       │
-                         └────────────┬───────────┘
-                                      │
-          ╔═══════════════════════════════════════════════════════╗
-          ║                  PHASE 0 — TRIAGE                    ║
-          ╚═══════════════════════════════════════════════════════╝
-                                      │
-                                      ▼
-                         ┌────────────────────────┐
-                         │  Derive seed files      │
-                         │  from fix commit         │
-                         │  (git diff ^1..merge     │
-                         │   for merge commits)     │
-                         └────────────┬───────────┘
-                                      │
-                                      ▼
-                         ┌────────────────────────┐
-                         │  Forward patch-ID check │◄── Is fix already on target?
-                         └────────────┬───────────┘
-                              │              │
-                           found          not found
-                              │              │
-                              ▼              ▼
-                         ┌────────┐   ┌──────────────────┐
-                         │  STOP  │   │ Backward patch-ID │
-                         │ (dup)  │   │ + ancestry check  │
-                         └────────┘   └────────┬─────────┘
-                                               │
-                                        ┌──────┴──────┐
-                                    affected      not affected
-                                        │              │
-                                        │              ▼
-                                        │     ┌─────────────────┐
-                                        │     │ Seed files exist │
-                                        │     │  on target?      │
-                                        │     └───────┬─────────┘
-                                        │        yes  │   no
-                                        │         │   │    │
-                                        │         │   │    ▼
-                                        │         │   │  ┌──────┐
-                                        │         │   │  │ STOP │
-                                        │         │   │  └──────┘
-                                        ▼         ▼   │
-                         ┌────────────────────────┐   │
-                         │  Resolve renames        │◄──┘
-                         │  (fork point → target)  │
-                         │  Build allowlist         │
-                         └────────────┬───────────┘
-                                      │
-          ╔═══════════════════════════════════════════════════════╗
-          ║             PHASE 0.5 — SEMANTIC TRIAGE              ║
-          ║                    (LLM Agent)                        ║
-          ╚═══════════════════════════════════════════════════════╝
-                                      │
-                                      ▼
-                         ┌────────────────────────────────┐
-                         │  LLM analyzes fix commit:       │
-                         │  • commit_type (bugfix/feature)  │
-                         │  • new packages, types           │
-                         │  • dependency depth              │
-                         │  • generated/binary files        │
-                         │  • files_to_skip                 │
-                         │  • estimated difficulty           │
-                         │  • prerequisite commits          │
-                         │    (portable = fix NEEDS the     │
-                         │     behavior, not just calling   │
-                         │     convention)                   │
-                         │  • regeneration commands          │
-                         │  • lint commands                  │
-                         │  • verification commands          │
-                         │  • priority files                 │
-                         └────────────┬───────────────────┘
-                                      │
-                                      ▼
-                         ┌────────────────────────┐
-                         │  Writes assessment to   │
-                         │  semantic_triage.json    │
-                         └────────────┬───────────┘
-                                      │
-                              ┌───────┴────────┐
-                      portable               no portable
-                    prerequisites?          prerequisites
-                              │                     │
-                              ▼                     │
-          ╔═══════════════════════════╗              │
-          ║  PHASE 0.5b — PREREQ     ║              │
-          ║  CHAIN PORTING           ║              │
-          ╚═══════════════════════════╝              │
-                              │                     │
-                              ▼                     │
-                   ┌──────────────────────┐         │
-                   │  For each prerequisite│         │
-                   │  marked portable=true │         │
-                   │  (max 5 depth):       │         │
-                   │  cherry_pick_and_     │         │
-                   │  resolve(prereq_sha)  │         │
-                   └──────────┬───────────┘         │
-                              │                     │
-                   NOTE: portable=false means       │
-                   adapt at call site instead.       │
-                   Example: drop extra arg,          │
-                   change import path.               │
-                              │                     │
-                              ◄─────────────────────┘
-                              │
-                              ▼
-                    ┌──────────────────┐
-                    │ Test files in     │
-                    │ fix commit?       │
-                    │ (filtered by      │
-                    │  files_to_skip)   │
-                    └────────┬─────────┘
-                        yes  │    no
-                         │   │     │
-                         ▼   │     │
-          ╔══════════════════════╗  │
-          ║  PHASE 0.5c — TEST  ║  │
-          ║  PORT (LLM Agent)   ║  │
-          ╚══════════════════════╝  │
-                         │         │
-                         ▼         │
-              ┌────────────────┐   │
-              │ LLM ports test │   │
-              │ files to target│   │
-              │ branch (commit)│   │
-              └──────┬─────────┘   │
-                     │             │
-                     ◄─────────────┘
-                     │
-          ╔═══════════════════════════════════════════════════════╗
-          ║   PHASE 1 — COMPREHENSIVE BASELINE + RED CHECK       ║
-          ╚═══════════════════════════════════════════════════════╝
-                     │
-                     ▼
-              ┌──────────────────────┐
-              │ 1. Run build command │
-              │    (capture exit +   │
-              │     output)          │
-              │ 2. Run test command  │
-              │    (capture baseline │
-              │     failures)        │
-              │ 3. Run ALL lint +    │
-              │    verification cmds │
-              │    from triage       │
-              │    (capture each     │
-              │     exit + output)   │
-              └──────────┬───────────┘
-                         │
-                         ▼
-              ┌──────────────────────┐
-              │ Store baseline:       │
-              │ • baseline_build_exit │
-              │ • baseline (test set) │
-              │ • baseline_           │
-              │   verification[]     │
-              │ Record in dossier    │
-              └──────────┬───────────┘
-                         │
-                         ▼
-              ┌──────────────────────┐
-              │ RED check (bugfix    │
-              │ + ported tests):     │
-              │ Tests pass → STOP   │
-              │ (already fixed)      │
-              └──────────┬───────────┘
-                         │
-          ╔═══════════════════════════════════════════════════════╗
-          ║    PHASE 1.5 — FAILURE-MODE CONFIRMATION             ║
-          ╚═══════════════════════════════════════════════════════╝
-                │
-                ▼
-         ┌──────────────┐
-         │  Signature   │  (currently skips — needs parent
-         │  comparison  │   signature source to be wired)
-         └──────┬───────┘
-                │
-          ╔═══════════════════════════════════════════════════════╗
-          ║   PHASE 2+3a — CHERRY-PICK + CONFLICT RESOLUTION     ║
-          ╚═══════════════════════════════════════════════════════╝
-                │
-                ▼
-         ┌──────────────────────┐
-         │  Try 3 strategies:   │
-         │  1. default           │
-         │  2. patience          │
-         │  3. ort               │
-         │  Pick fewest conflicts│
-         └──────────┬───────────┘
-                    │
-             ┌──────┴────────┐
-           clean         conflicts
-             │               │
-             ▼               ▼
-       ┌──────────┐  ┌──────────────────────┐
-       │  Done!    │  │ Re-apply best strat   │
-       │  Commit   │  │ (keep conflicts open) │
-       └──────────┘  └──────────┬───────────┘
-                                │
-                                ▼
-                     ┌──────────────────────┐
-                     │  files_to_skip        │
-                     │  processing:          │
-                     │  1. Revert cleanly-   │
-                     │     applied skip files│
-                     │     to target version │
-                     │  2. Auto-resolve      │
-                     │     conflicting skip  │
-                     │     files (--theirs)  │
-                     └──────────┬───────────┘
-                                │
-                                ▼
-                     ┌──────────────────────┐
-                     │  Source conflicts     │
-                     │  remain?              │
-                     └──────────┬───────────┘
-                           no   │   yes
-                            │   │    │
-                            ▼   │    ▼
-                     ┌────────┐ │ ┌──────────────────────┐
-                     │ Commit │ │ │  LLM Resolution Agent │
-                     └────────┘ │ │  (NarrowResolution     │
-                                │ │   AgentPrompt)         │
-                                │ └──────────┬────────────┘
-                                │            │
-                                │    ┌───────┴────────┐
-                                │  resolved      still conflicts
-                                │    │               │
-                                │    ▼               ▼
-                                │ ┌────────┐  ┌──────────────┐
-                                │ │ Commit │  │ Retry (up to │
-                                │ │ with   │  │ max_retries) │
-                                │ │summary │  └──────┬───────┘
-                                │ └────────┘         │
-                                │              exhausted
-                                │                │
-                                │                ▼
-                                │          ┌───────────┐
-                                │          │  ESCALATE  │
-                                │          └───────────┘
-                                │
-          ╔═══════════════════════════════════════════════════════╗
-          ║  PHASE 3b — REGENERATION (conditional)               ║
-          ╚═══════════════════════════════════════════════════════╝
-                                │
-                     ┌──────────┴───────────┐
-                  regen cmds           no regen cmds
-                  + skipped files         │
-                     │                    │
-                     ▼                    │
-              ┌──────────────────┐        │
-              │ Save safe point  │        │
-              │ (git rev-parse)  │        │
-              └──────┬───────────┘        │
-                     │                    │
-                     ▼                    │
-              ┌──────────────────┐        │
-              │ For each command:│        │
-              │ run codegen      │        │
-              │ (e.g. hack/      │        │
-              │  update-codegen) │        │
-              └──────┬───────────┘        │
-                     │                    │
-              ┌──────┴──────┐             │
-           success       failure          │
-              │              │            │
-              ▼              ▼            │
-        ┌──────────┐  ┌──────────────┐    │
-        │  Keep    │  │ Build still  │    │
-        │  changes │  │ passes?      │    │
-        └──────────┘  └──────┬───────┘    │
-                        yes  │   no       │
-                         │   │    │       │
-                         ▼   │    ▼       │
-                   ┌────────┐│┌─────────┐ │
-                   │  Keep  │││Rollback │ │
-                   │partial │││to safe  │ │
-                   └────────┘││point    │ │
-                             │└─────────┘ │
-                             │            │
-              ┌──────────────┴────────┐   │
-              │ Commit regenerated    │   │
-              │ files (if any changed)│   │
-              └───────────┬───────────┘   │
-                          │               │
-                          ◄───────────────┘
-                          │
-          ╔═══════════════════════════════════════════════════════╗
-          ║            PHASE 4 — VERIFY                          ║
-          ╚═══════════════════════════════════════════════════════╝
-                          │
-                          ▼
-               ┌───────────────────┐
-               │  Run build_command │
-               │  Run test_command  │
-               │  Check regression  │
-               │  (vs baseline)     │
-               └─────────┬─────────┘
-                    │           │
-                  pass        fail
-                    │           │
-                    │           ▼
-                    │  ╔══════════════════════════════════╗
-                    │  ║  PHASE 4a — BUILD ERROR RECOVERY ║
-                    │  ║         (LLM Agent)               ║
-                    │  ╚══════════════════════════════════╝
-                    │           │
-                    │           ▼
-                    │  ┌────────────────────────┐
-                    │  │ LLM diagnoses errors   │
-                    │  │ and edits source files  │
-                    │  │ (up to max_retries)     │
-                    │  └────────────┬───────────┘
-                    │         │           │
-                    │       fixed     still failing
-                    │         │           │
-                    │         ▼           ▼
-                    │  ┌──────────┐  ┌───────────┐
-                    │  │  Re-run  │  │  ESCALATE  │
-                    │  │  Phase 4 │  └───────────┘
-                    │  │  verify  │
-                    │  └──────────┘
-                    │
-                    ▼
-          ╔═══════════════════════════════════════════════════════╗
-          ║  PHASE 4.1 — EXTENDED VERIFICATION (conditional)     ║
-          ║  Uses Phase 1 baseline to filter pre-existing fails  ║
-          ╚═══════════════════════════════════════════════════════╝
-                    │
-             ┌──────┴──────┐
-          commands      no commands
-          from 0.5         │
-             │             │
-             ▼             │
-      ┌──────────────────┐ │
-      │ Run each         │ │
-      │ verification cmd │ │
-      │                  │ │
-      │ For each result: │ │
-      │ • If cmd failed  │ │
-      │   in baseline →  │ │
-      │   log as         │ │
-      │   "pre-existing" │ │
-      │   and SKIP       │ │
-      │ • If cmd is NEW  │ │
-      │   failure →      │ │
-      │   escalate       │ │
-      └──────┬───────────┘ │
-        │          │       │
-      all pass   NEW       │
-      or pre-    failures  │
-      existing     │       │
-        │          ▼       │
-        │   ┌────────────────────────┐
-        │   │  Phase 4a recovery     │
-        │   │  (LLM fixes errors)    │
-        │   └────────┬───────────────┘
-        │       │           │
-        │     fixed     still failing
-        │       │           │
-        │       ▼           ▼
-        │ ┌──────────┐  ╔══════════════════════════╗
-        │ │ Re-run   │  ║  PHASE 4b — EXTERNAL     ║
-        │ │ ext.     │  ║  PIPELINE HANDOFF         ║
-        │ │ verify   │  ║  (Opus + deep thinking)   ║
-        │ └──────────┘  ╚═════════════╤════════════╝
-        │                             │
-        │                             ▼
-        │                 ┌────────────────────────┐
-        │                 │ Saves to run directory: │
-        │                 │ • phase_4b_input.json   │
-        │                 │   (full context)        │
-        │                 │ • phase_4b_log.txt      │
-        │                 │   (conversation log)    │
-        │                 │ • run_and_fix_*.txt     │
-        │                 │   (success/failure)     │
-        │                 │                         │
-        │                 │ auto_code_gen's          │
-        │                 │ RunAndFixPrompt          │
-        │                 │ (autonomous build-test-  │
-        │                 │  fix loop with full      │
-        │                 │  dossier context)        │
-        │                 └────────────┬───────────┘
-        │                              │
-        ◄──────────────────────────────┘
-        │
-          ╔═══════════════════════════════════════════════════════╗
-          ║      PHASE 4.5 — SEMANTIC EQUIVALENCE                ║
-          ╚═══════════════════════════════════════════════════════╝
-        │
-        ▼
- ┌──────────────────────┐
- │  git range-diff       │
- │  (upstream vs port)   │
- │  → identical /        │
- │    modified /          │
- │    unmatched           │
- └──────────┬───────────┘
-            │
-            ▼
- ┌──────────────────────┐
- │  PHASE 5 — OUTPUTS   │
- │                       │
- │  • dossier.md         │
- │  • tracker.json       │
- │  • run_log.txt        │
- │  • phase_4b_input.json│
- │  • phase_4b_log.txt   │
- │  • semantic_triage.json│
- │  • git format-patch   │
- │  • commit trailers    │
- └──────────────────────┘
+```mermaid
+flowchart TD
+    CONFIG[YAML Config File] --> WORKTREE[Create Git Worktree on target branch]
+
+    WORKTREE --> P0{{"PHASE 0 — TRIAGE"}}
+    P0 --> SEED[Derive seed files from fix commit]
+    SEED --> FWD{Forward patch-ID check}
+    FWD -->|found| STOP_DUP([STOP — duplicate])
+    FWD -->|not found| BWD{Backward patch-ID + ancestry}
+    BWD -->|affected| RENAME[Resolve renames + build allowlist]
+    BWD -->|not affected| SEED_EXISTS{Seed files exist on target?}
+    SEED_EXISTS -->|yes| RENAME
+    SEED_EXISTS -->|no| STOP_NA([STOP — not affected])
+
+    RENAME --> P05{{"PHASE 0.5 — SEMANTIC TRIAGE (LLM)"}}
+    P05 --> TRIAGE_OUT["LLM analyzes fix commit:\n• commit type, difficulty\n• prerequisites (portable vs call-convention)\n• files_to_skip\n• lint + verification commands\n• priority files\n→ writes semantic_triage.json"]
+
+    TRIAGE_OUT --> PREREQ{Portable prerequisites?}
+    PREREQ -->|yes| P05B{{"PHASE 0.5b — PREREQ CHAIN"}}
+    P05B --> PREREQ_CP["Cherry-pick each portable prerequisite\n(max 5 depth)\n\nportable=false → adapt at call site"]
+    PREREQ_CP --> TEST_CHECK
+    PREREQ -->|no| TEST_CHECK
+
+    TEST_CHECK{Test files in commit?\nfiltered by files_to_skip} -->|yes| P05C{{"PHASE 0.5c — TEST PORT (LLM)"}}
+    P05C --> TEST_PORT[LLM ports test files to target branch]
+    TEST_PORT --> P1
+    TEST_CHECK -->|no| P1
+
+    P1{{"PHASE 1 — COMPREHENSIVE BASELINE"}}
+    P1 --> BASELINE["1. Run build command\n2. Run test command\n3. Run ALL lint + verification commands\n\nStore baseline_build_exit,\nbaseline failures, baseline_verification\nRecord in dossier"]
+    BASELINE --> RED{RED check\nbugfix + ported tests?}
+    RED -->|tests pass| STOP_FIXED([STOP — already fixed])
+    RED -->|tests fail or N/A| P15
+
+    P15{{"PHASE 1.5 — FAILURE-MODE CONFIRMATION"}}
+    P15 --> CLEANUP[Pre-cherry-pick cleanup\ngit reset --hard HEAD]
+
+    CLEANUP --> P23{{"PHASE 2+3a — CHERRY-PICK + RESOLVE"}}
+    P23 --> STRAT["Try 3 strategies:\ndefault / patience / ort\nPick fewest conflicts"]
+    STRAT --> CP_RESULT{Cherry-pick result}
+    CP_RESULT -->|clean| COMMIT_CLEAN[Commit]
+    CP_RESULT -->|conflicts| SKIP_FILES["files_to_skip processing:\n1. Revert cleanly-applied skip files\n2. Auto-resolve conflicting skip files --theirs"]
+
+    SKIP_FILES --> REMAIN{Source conflicts remain?}
+    REMAIN -->|no| COMMIT_SKIP[Commit]
+    REMAIN -->|yes| LLM_RESOLVE["LLM Resolution Agent\n(NarrowResolutionAgentPrompt)"]
+    LLM_RESOLVE --> RESOLVE_RESULT{Resolved?}
+    RESOLVE_RESULT -->|yes| COMMIT_RESOLVED[Commit with summary]
+    RESOLVE_RESULT -->|no| RETRY{Retry < max?}
+    RETRY -->|yes| LLM_RESOLVE
+    RETRY -->|no| ESCALATE_CP["Force-resolve --theirs\nCommit broken state"]
+    ESCALATE_CP --> P4B
+
+    COMMIT_CLEAN --> REGEN_CHECK
+    COMMIT_SKIP --> REGEN_CHECK
+    COMMIT_RESOLVED --> REGEN_CHECK
+
+    REGEN_CHECK{Regen commands + skipped files?}
+    REGEN_CHECK -->|yes| P3B{{"PHASE 3b — REGENERATION"}}
+    P3B --> REGEN["Save safe point\nRun codegen commands\nRollback on failure"]
+    REGEN --> P4
+    REGEN_CHECK -->|no| P4
+
+    P4{{"PHASE 4 — VERIFY"}}
+    P4 --> VERIFY["Run build_command\nRun test_command\nCheck regression vs baseline"]
+    VERIFY --> V_RESULT{Pass?}
+    V_RESULT -->|yes| P41_CHECK
+    V_RESULT -->|no| P4A
+
+    P4A{{"PHASE 4a — BUILD ERROR RECOVERY (LLM)"}}
+    P4A --> RECOVERY["LLM diagnoses errors\nEdits source files\n(up to max_retries)"]
+    RECOVERY --> REC_RESULT{Fixed?}
+    REC_RESULT -->|yes| P4_REVERIFY["Re-run Phase 4 verify"]
+    P4_REVERIFY --> P41_CHECK
+    REC_RESULT -->|no| P4B
+
+    P41_CHECK{Verification commands from triage?}
+    P41_CHECK -->|no| P45
+    P41_CHECK -->|yes| P41
+
+    P41{{"PHASE 4.1 — EXTENDED VERIFICATION"}}
+    P41 --> EXT_VERIFY["Run each lint/verification command\n\n• Failed in baseline → pre-existing, SKIP\n• NEW failure → escalate"]
+    EXT_VERIFY --> EXT_RESULT{New failures?}
+    EXT_RESULT -->|none| P45
+    EXT_RESULT -->|yes| P4A_EXT["Phase 4a recovery"]
+    P4A_EXT --> P4A_EXT_RESULT{Fixed?}
+    P4A_EXT_RESULT -->|yes| P41_RERUN["Re-run extended verify"]
+    P41_RERUN --> P45
+    P4A_EXT_RESULT -->|no| P4B
+
+    P4B{{"PHASE 4b — EXTERNAL PIPELINE (Opus)"}}
+    P4B --> P4B_SAVE["Save phase_4b_input.json"]
+    P4B_SAVE --> P4B_RUN["Opus + deep thinking\nautonomous build-test-fix loop\nwith full dossier context\n\nLogs to phase_4b_log.txt"]
+    P4B_RUN --> P4B_RESULT{"run_and_fix_success.txt\nor failure.txt?"}
+    P4B_RESULT -->|success| P4B_OK["Update JSON with results\nCopy output to run dir"]
+    P4B_RESULT -->|failure| P4B_FAIL([PIPELINE FAILED])
+    P4B_OK --> P45
+
+    P45{{"PHASE 4.5 — SEMANTIC EQUIVALENCE"}}
+    P45 --> RANGEDIFF["git range-diff\nupstream vs backport\n→ identical / modified / unmatched"]
+
+    RANGEDIFF --> OUTPUT["PHASE 5 — OUTPUTS\n\n• dossier.md\n• tracker.json\n• run_log.txt\n• semantic_triage.json\n• phase_4b_input.json\n• phase_4b_log.txt\n• commit trailers"]
+
+    style P0 fill:#4a90d9,color:#fff
+    style P05 fill:#4a90d9,color:#fff
+    style P05B fill:#4a90d9,color:#fff
+    style P05C fill:#4a90d9,color:#fff
+    style P1 fill:#4a90d9,color:#fff
+    style P15 fill:#4a90d9,color:#fff
+    style P23 fill:#4a90d9,color:#fff
+    style P3B fill:#4a90d9,color:#fff
+    style P4 fill:#4a90d9,color:#fff
+    style P4A fill:#e8a838,color:#fff
+    style P41 fill:#4a90d9,color:#fff
+    style P4B fill:#d94a4a,color:#fff
+    style P45 fill:#4a90d9,color:#fff
+    style STOP_DUP fill:#888,color:#fff
+    style STOP_NA fill:#888,color:#fff
+    style STOP_FIXED fill:#888,color:#fff
+    style P4B_FAIL fill:#d94a4a,color:#fff
+    style OUTPUT fill:#2d8659,color:#fff
 ```
 
 ---
