@@ -1119,7 +1119,8 @@ def _run_pipeline_phases(
     try:
         prereqs = state.triage_assessment.get("prerequisites", [])
         portable_prereqs = [p for p in prereqs if p.get("portable", False) and p.get("introduced_by")]
-        if portable_prereqs:
+        is_bugfix = state.triage_assessment.get("commit_type", "").lower() in ("bugfix", "bug-fix", "bug_fix", "fix", "security")
+        if portable_prereqs and not is_bugfix:
             with tracker.phase("Phase 0.5b — Prerequisite chain"):
                 ported = port_prerequisite_chain(config, claude_config, state, tracker)
                 state.dossier.add(
