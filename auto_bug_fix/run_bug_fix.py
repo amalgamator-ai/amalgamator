@@ -373,6 +373,7 @@ def phase_0_5_semantic_triage(
         try:
             with open(triage_path) as f:
                 assessment = _json.load(f)
+            os.remove(triage_path)
             log.info("Semantic triage: difficulty=%s, recommendation=%s",
                      assessment.get("estimated_difficulty", "?"),
                      assessment.get("recommendation", "?"))
@@ -438,6 +439,7 @@ def phase_0_5c_test_port(
     if os.path.exists(manifest_abs):
         with open(manifest_abs) as f:
             ported = [line.strip() for line in f if line.strip()]
+        os.remove(manifest_abs)
         log.info("Phase 0.5c: ported %d test files: %s", len(ported), ", ".join(ported))
     else:
         log.warning("Phase 0.5c: no manifest file produced — test port may have failed")
@@ -1114,6 +1116,10 @@ def _run_pipeline_phases(
         state.dossier.add("Semantic triage", _json.dumps(assessment, indent=2) if assessment else "no assessment", "Phase 0.5")
         tracker.record_gate("difficulty", assessment.get("estimated_difficulty", "unknown"))
         tracker.record_gate("recommendation", assessment.get("recommendation", "unknown"))
+        if assessment:
+            triage_dest = os.path.join(tracker._output_dir, "semantic_triage.json")
+            with open(triage_dest, "w") as f:
+                _json.dump(assessment, f, indent=2)
 
     cherry_pick_succeeded = False
     try:
@@ -1424,14 +1430,6 @@ if __name__ == "__main__":
             sys.exit(1)
         print(f"Worktree created successfully")
 
-        gitignore_path = os.path.join(worktree_path, ".gitignore")
-        if not os.path.exists(gitignore_path):
-            with open(gitignore_path, "w") as f:
-                f.write("semantic_triage.json\ntest_port_manifest.txt\nruns/\n")
-        else:
-            with open(gitignore_path, "a") as f:
-                f.write("\nsemantic_triage.json\ntest_port_manifest.txt\nruns/\n")
-
         build_subdir = os.path.relpath(bug_fix_config.build_dir, bug_fix_config.repo_path)
         bug_fix_config.repo_path = worktree_path
         bug_fix_config.build_dir = os.path.join(worktree_path, build_subdir)
@@ -1456,11 +1454,6 @@ if __name__ == "__main__":
             f.write(dossier_text)
         print(f"Dossier written to {dossier_path}")
 
-        # Copy semantic triage if it exists
-        triage_src = os.path.join(bug_fix_config.repo_path, "semantic_triage.json")
-        if os.path.exists(triage_src):
-            import shutil
-            shutil.copy2(triage_src, os.path.join(run_dir, "semantic_triage.json"))
 
     except PipelineStop as e:
         print(f"PIPELINE STOP: {e}")
