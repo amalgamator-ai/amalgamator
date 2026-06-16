@@ -22,20 +22,29 @@ The **gitted pipeline** takes a different approach: **try `git cherry-pick` firs
 ```
 Phase 0    ─ Deterministic triage (patch-ID, ancestry, seed files)
 Phase 0.5  ─ Semantic triage (LLM: difficulty, prerequisites, generated files,
-              regeneration commands, verification commands)
-Phase 0.5b ─ Port prerequisite commits (if portable prerequisites found)
-Phase 0.5c ─ Port test files from fix commit (for RED/GREEN checking)
-Phase 1    ─ Baseline + RED check (run ported tests before fix — should fail)
+              regeneration commands, verification commands, lint commands)
+Phase 0.5b ─ Port prerequisite commits (only if fix NEEDS the prerequisite's
+              behavior — call-convention-only changes are adapted at call site)
+Phase 0.5c ─ Port test files from fix commit (filtered by files_to_skip)
+Phase 1    ─ Comprehensive baseline on clean target branch:
+              ├─ Build command
+              ├─ Test command (+ RED check for bugfixes)
+              └─ All lint/verification commands from triage
 Phase 1.5  ─ Failure-mode confirmation (signature comparison)
 Phase 2+3a ─ Cherry-pick + conflict resolution
-              ├─ Auto-resolve generated/binary files (--theirs)
+              ├─ Revert files_to_skip to target version (both conflicting
+              │   and cleanly-applied)
               └─ LLM resolves remaining source conflicts
 Phase 3b   ─ Regeneration (run project codegen commands, rollback on failure)
 Phase 4    ─ Verify (build + test from YAML config)
 Phase 4a   ─ Build error recovery (LLM single-shot fix)
 Phase 4.1  ─ Extended verification (commands discovered by Phase 0.5)
-              └─ If fails → Phase 4a → if still fails → Phase 4b
+              ├─ Filters pre-existing failures using Phase 1 baseline
+              └─ Only escalates for NEW failures introduced by the backport
 Phase 4b   ─ Handoff to auto_code_gen RunAndFixPrompt (autonomous loop)
+              ├─ Saves phase_4b_input.json (full context)
+              ├─ Saves phase_4b_log.txt (conversation log)
+              └─ Copies run_and_fix_success/failure.txt to run directory
 Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
 ```
 
@@ -64,7 +73,8 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
                          ┌────────────────────────┐
                          │  Derive seed files      │
                          │  from fix commit         │
-                         │  (git show --name-only)  │
+                         │  (git diff ^1..merge     │
+                         │   for merge commits)     │
                          └────────────┬───────────┘
                                       │
                                       ▼
@@ -113,9 +123,14 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
                          │  • new packages, types           │
                          │  • dependency depth              │
                          │  • generated/binary files        │
+                         │  • files_to_skip                 │
                          │  • estimated difficulty           │
                          │  • prerequisite commits          │
+                         │    (portable = fix NEEDS the     │
+                         │     behavior, not just calling   │
+                         │     convention)                   │
                          │  • regeneration commands          │
+                         │  • lint commands                  │
                          │  • verification commands          │
                          │  • priority files                 │
                          └────────────┬───────────────────┘
@@ -127,7 +142,8 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
                          └────────────┬───────────┘
                                       │
                               ┌───────┴────────┐
-                         prerequisites?     no prerequisites
+                      portable               no portable
+                    prerequisites?          prerequisites
                               │                     │
                               ▼                     │
           ╔═══════════════════════════╗              │
@@ -138,16 +154,16 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
                               ▼                     │
                    ┌──────────────────────┐         │
                    │  For each prerequisite│         │
+                   │  marked portable=true │         │
                    │  (max 5 depth):       │         │
                    │  cherry_pick_and_     │         │
                    │  resolve(prereq_sha)  │         │
                    └──────────┬───────────┘         │
                               │                     │
-                              ▼                     │
-                   ┌──────────────────────┐         │
-                   │  Failed? Log warning  │         │
-                   │  and continue without │         │
-                   └──────────┬───────────┘         │
+                   NOTE: portable=false means       │
+                   adapt at call site instead.       │
+                   Example: drop extra arg,          │
+                   change import path.               │
                               │                     │
                               ◄─────────────────────┘
                               │
@@ -155,6 +171,8 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
                     ┌──────────────────┐
                     │ Test files in     │
                     │ fix commit?       │
+                    │ (filtered by      │
+                    │  files_to_skip)   │
                     └────────┬─────────┘
                         yes  │    no
                          │   │     │
@@ -174,47 +192,42 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
                      ◄─────────────┘
                      │
           ╔═══════════════════════════════════════════════════════╗
-          ║       PHASE 1 — BASELINE + RED CHECK                 ║
+          ║   PHASE 1 — COMPREHENSIVE BASELINE + RED CHECK       ║
           ╚═══════════════════════════════════════════════════════╝
                      │
                      ▼
               ┌──────────────────────┐
-              │ Run test suite       │
-              │ (capture baseline)   │
+              │ 1. Run build command │
+              │    (capture exit +   │
+              │     output)          │
+              │ 2. Run test command  │
+              │    (capture baseline │
+              │     failures)        │
+              │ 3. Run ALL lint +    │
+              │    verification cmds │
+              │    from triage       │
+              │    (capture each     │
+              │     exit + output)   │
               └──────────┬───────────┘
                          │
                          ▼
               ┌──────────────────────┐
-              │ Tests pass?          │
+              │ Store baseline:       │
+              │ • baseline_build_exit │
+              │ • baseline (test set) │
+              │ • baseline_           │
+              │   verification[]     │
+              │ Record in dossier    │
               └──────────┬───────────┘
-                    │           │
-                  pass        fail
-                    │           │
-                    ▼           ▼
-         ┌──────────────┐  ┌──────────────────┐
-         │ commit_type   │  │ Capture failure  │
-         │ is bugfix?    │  │ signature        │
-         └──────┬───────┘  │ (s_target)       │
-           yes  │   no     └────────┬─────────┘
-            │   │    │              │
-            ▼   │    │              │
-     ┌──────────┐    │              │
-     │ Ported   │    │              │
-     │ tests?   │    │              │
-     └────┬─────┘    │              │
-      yes │  no      │              │
-       │  │   │      │              │
-       ▼  │   │      │              │
-   ┌───────┐  │      │              │
-   │ESCALATE│  │     │              │
-   │(already│  │     │              │
-   │ fixed) │  │     │              │
-   └───────┘  │      │              │
-              ▼      ▼              │
-         ┌──────────────┐           │
-         │  Continue    │◄──────────┘
-         └──────┬───────┘
-                │
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │ RED check (bugfix    │
+              │ + ported tests):     │
+              │ Tests pass → STOP   │
+              │ (already fixed)      │
+              └──────────┬───────────┘
+                         │
           ╔═══════════════════════════════════════════════════════╗
           ║    PHASE 1.5 — FAILURE-MODE CONFIRMATION             ║
           ╚═══════════════════════════════════════════════════════╝
@@ -249,23 +262,17 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
                                 │
                                 ▼
                      ┌──────────────────────┐
-                     │  Generated/binary     │
-                     │  files in conflicts?  │
-                     │  (from Phase 0.5      │
-                     │   files_to_skip)      │
+                     │  files_to_skip        │
+                     │  processing:          │
+                     │  1. Revert cleanly-   │
+                     │     applied skip files│
+                     │     to target version │
+                     │  2. Auto-resolve      │
+                     │     conflicting skip  │
+                     │     files (--theirs)  │
                      └──────────┬───────────┘
-                           yes  │   no
-                            │   │    │
-                            ▼   │    │
-                     ┌──────────────┐│
-                     │ Auto-resolve ││
-                     │ with --theirs││
-                     │ + git add    ││
-                     └──────┬──────┘│
-                            │       │
-                            ◄───────┘
-                            │
-                            ▼
+                                │
+                                ▼
                      ┌──────────────────────┐
                      │  Source conflicts     │
                      │  remain?              │
@@ -380,6 +387,7 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
                     ▼
           ╔═══════════════════════════════════════════════════════╗
           ║  PHASE 4.1 — EXTENDED VERIFICATION (conditional)     ║
+          ║  Uses Phase 1 baseline to filter pre-existing fails  ║
           ╚═══════════════════════════════════════════════════════╝
                     │
              ┌──────┴──────┐
@@ -387,14 +395,24 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
           from 0.5         │
              │             │
              ▼             │
-      ┌──────────────┐     │
-      │ Run each     │     │
-      │ verification │     │
-      │ command      │     │
-      └──────┬───────┘     │
+      ┌──────────────────┐ │
+      │ Run each         │ │
+      │ verification cmd │ │
+      │                  │ │
+      │ For each result: │ │
+      │ • If cmd failed  │ │
+      │   in baseline →  │ │
+      │   log as         │ │
+      │   "pre-existing" │ │
+      │   and SKIP       │ │
+      │ • If cmd is NEW  │ │
+      │   failure →      │ │
+      │   escalate       │ │
+      └──────┬───────────┘ │
         │          │       │
-      all pass   failures  │
-        │          │       │
+      all pass   NEW       │
+      or pre-    failures  │
+      existing     │       │
         │          ▼       │
         │   ┌────────────────────────┐
         │   │  Phase 4a recovery     │
@@ -412,7 +430,15 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
         │                             │
         │                             ▼
         │                 ┌────────────────────────┐
-        │                 │ auto_code_gen's         │
+        │                 │ Saves to run directory: │
+        │                 │ • phase_4b_input.json   │
+        │                 │   (full context)        │
+        │                 │ • phase_4b_log.txt      │
+        │                 │   (conversation log)    │
+        │                 │ • run_and_fix_*.txt     │
+        │                 │   (success/failure)     │
+        │                 │                         │
+        │                 │ auto_code_gen's          │
         │                 │ RunAndFixPrompt          │
         │                 │ (autonomous build-test-  │
         │                 │  fix loop with full      │
@@ -441,6 +467,9 @@ Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
  │  • dossier.md         │
  │  • tracker.json       │
  │  • run_log.txt        │
+ │  • phase_4b_input.json│
+ │  • phase_4b_log.txt   │
+ │  • semantic_triage.json│
  │  • git format-patch   │
  │  • commit trailers    │
  └──────────────────────┘
@@ -473,6 +502,11 @@ The enriched context includes:
 - Semantic triage assessment (difficulty, prerequisites, priority files)
 - Repository context (branches, build/test commands, fix description)
 
+**Phase 4b artifacts** saved to the run directory:
+- `phase_4b_input.json` — full input context (config, dossier, triage) + post-run results (outcome, duration, cost, result summary)
+- `phase_4b_log.txt` — complete Opus conversation log (tool calls, thinking, results)
+- `run_and_fix_success.txt` or `run_and_fix_failure.txt` — copied from worktree
+
 **No changes to `auto_code_gen` are required** — the gitted pipeline imports and calls the existing functions.
 
 ---
@@ -480,28 +514,57 @@ The enriched context includes:
 ## YAML Config Format
 
 ```yaml
-issue_id: "k8s-replicaset-availability-backport"
+issue_id: "crio-post-stop-hooks-9613-to-1.33"
 
-bug_description: "ReplicaSet controller schedules pod availability
-  checks at the wrong time"
+bug_description: "Fix race condition in post-stop hook ordering..."
 
 repository:
-  source_path: "/path/to/kubernetes"
-  workdir: "/path/to/worktree-dir"
+  source_path: "/path/to/cri-o"
+  workdir: "/tmp/bugfix-workdir"
 
 branches:
-  source: "origin/release-1.34"
-  target: "origin/release-1.33"
+  source: "origin/main"
+  target: "b9ac8350f"  # commit or branch name
 
 fix:
-  commit: "2cb48f77f0f4"
+  commit: "92c18a2e2673764cd10f89b1a5061e2b26f44209"
 
 build:
-  command: "go build ./pkg/controller/..."
-  test_command: "go test -count=1 -timeout=300s ./pkg/controller/..."
+  command: "go build $(go list ./... | grep -v /test)"
+  test_command: "go vet $(go list ./... | grep -v /test)"
 
 model: "claude-sonnet-4-6"
 ```
+
+Config files should be placed in `auto_bug_fix/configs/` and are gitignored.
+
+---
+
+## Key Design Decisions
+
+### Prerequisite portability
+
+The triage prompt distinguishes between two kinds of prerequisites:
+
+- **`portable: true`** — The fix depends on the prerequisite's actual behavior (e.g., a new type the fix stores data in). These are cherry-picked before the main fix.
+- **`portable: false`** — The prerequisite only changes a calling convention (extra parameter, renamed function, moved package). The resolution agent adapts the call site to match the target branch's existing API instead of porting the entire refactor.
+
+This prevents porting unnecessary refactors that bloat the diff without adding fix-relevant behavior.
+
+### Comprehensive baseline (Phase 1)
+
+Phase 1 runs build, test, and all lint/verification commands on the **clean target branch** before any changes. This baseline data is used by Phase 4.1 to distinguish regressions from pre-existing failures:
+
+- If a verification command already failed on the clean branch → logged as "pre-existing" and skipped
+- Only NEW failures introduced by the backport trigger Phase 4a/4b escalation
+
+This eliminates false Phase 4b escalations for issues like missing lint tools or `//go:build test`-gated test failures.
+
+### files_to_skip handling
+
+Files identified by the triage as irrelevant (e.g., lint changes depending on unported refactors) are:
+1. **Excluded from test port** (Phase 0.5c) — won't be ported as test files
+2. **Reverted after cherry-pick** (Phase 2+3a) — both conflicting AND cleanly-applied skip files are reset to the target branch version
 
 ---
 
@@ -515,12 +578,23 @@ model: "claude-sonnet-4-6"
 | Generated file handling | LLM writes them | Auto-resolve with `--theirs` + run codegen |
 | Prerequisite detection | Manual | Automatic (git log -S + LLM analysis) |
 | Test porting | Combined with code plan | Separate Phase 0.5c before fix |
+| Baseline verification | None | Build + test + lint on clean branch |
+| Pre-existing failure filtering | None | Phase 4.1 skips baseline failures |
 | Escalation path | N/A | Falls back to auto_code_gen's RunAndFixPrompt |
-| Language support | C/systems (gcc, openssl) | Any (tested on Go/Kubernetes, C/OpenSSL) |
+| Language support | C/systems (gcc, openssl) | Any (tested on Go/CRI-O, Go/Kubernetes, C/OpenSSL) |
 
 ---
 
-## Tested Backports (Kubernetes)
+## Tested Backports
+
+### CRI-O Post-Stop Hooks (PR #9613)
+
+| Target | Conflicts | Model | Cost | Duration | Match vs Human |
+|--------|-----------|-------|------|----------|---------------|
+| release-1.34 | 1 | Sonnet + Opus 4b | $7.12 | 28 min | 7/7 files identical (PR #9699) |
+| release-1.33 | 5 | Sonnet | $6.82 | 26 min | 6/7 identical, 1 cosmetic (PR #9741) |
+
+### Kubernetes
 
 | Commit | Files | Conflicts | Model | Cost | Outcome |
 |--------|-------|-----------|-------|------|---------|
@@ -538,12 +612,16 @@ model: "claude-sonnet-4-6"
 ## Running
 
 ```bash
-# From the ai_auto_perf_analysis directory
-python -m auto_bug_fix.run_bug_fix configs/your_config.yaml
+# From the new_ai_auto_analyze directory
+python -m auto_bug_fix.run_bug_fix auto_bug_fix/configs/your_config.yaml
 ```
 
-Output:
+Output (in `runs/<issue_id>_<timestamp>/`):
+- `run_log.txt` — full pipeline log
 - `dossier.md` — full audit trail
-- `runs/<issue_id>_<timestamp>.json` — machine-readable run record
-- `semantic_triage.json` — Phase 0.5 assessment (in worktree)
-- Patch file via `git format-patch` on the worktree
+- `semantic_triage.json` — Phase 0.5 assessment
+- `<issue_id>_<timestamp>.json` — machine-readable run metrics
+- `phase_4b_input.json` — Phase 4b context (if triggered)
+- `phase_4b_log.txt` — Phase 4b conversation (if triggered)
+- `run_and_fix_success.txt` / `run_and_fix_failure.txt` — Phase 4b result (if triggered)
+- `pipeline.diff` / `human_backport_*.diff` — comparison diffs (if generated)
