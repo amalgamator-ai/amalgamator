@@ -143,12 +143,26 @@ flowchart TD
     P4A_EXT_RESULT -->|no| P4B
 
     P4B{{"PHASE 4b — EXTERNAL PIPELINE (Opus)"}}
-    P4B --> P4B_SAVE["Save phase_4b_input.json"]
-    P4B_SAVE --> P4B_RUN["Opus + deep thinking\nautonomous build-test-fix loop\nwith full dossier context\n\nLogs to phase_4b_log.txt"]
-    P4B_RUN --> P4B_RESULT{"run_and_fix_success.txt\nor failure.txt?"}
-    P4B_RESULT -->|success| P4B_OK["Update JSON with results\nCopy output to run dir"]
-    P4B_RESULT -->|failure| P4B_FAIL([PIPELINE FAILED])
-    P4B_OK --> P45
+
+    P4B --> P4B_CTX["Build enriched context:\n• Full pipeline dossier\n• Semantic triage JSON\n• Repo config + commands"]
+    P4B_CTX --> P4B_JSON["Write phase_4b_input.json\nto run directory\n(output_dir, config, dossier, triage)"]
+    P4B_JSON --> P4B_CFG["Configure Opus agent:\n• model: claude-opus-4-6\n• thinking: adaptive\n• effort: max\n• max_thinking_tokens: 1M"]
+    P4B_CFG --> P4B_PROMPT["Generate RunAndFixPrompt\nfrom auto_code_gen\n(build cmd, test cmd, max retries)"]
+    P4B_PROMPT --> P4B_TEE["Redirect stdout → phase_4b_log.txt\n(tee: terminal + file)"]
+    P4B_TEE --> P4B_SDK["Single SDK call: claude_run\nOpus gets full shell access to repo"]
+
+    P4B_SDK --> P4B_LOOP["Autonomous build-test-fix loop:\n1. Run build_command\n2. Build fails → inspect errors, fix code, retry\n3. Build passes → run test_command\n4. Tests fail → inspect output, fix code, rebuild\n5. Repeat until clean or retries exhausted"]
+
+    P4B_LOOP --> P4B_WRITE{Agent writes sentinel file}
+    P4B_WRITE -->|"run_and_fix_success.txt\n(SUCCESS + retries + fixes)"| P4B_OK
+    P4B_WRITE -->|"run_and_fix_failure.txt\n(errors + attempted fixes)"| P4B_FAIL
+
+    P4B_OK["Update phase_4b_input.json:\n• outcome: success\n• duration_seconds\n• input/output tokens\n• result_summary\n\nCopy success file to run dir"]
+    P4B_OK --> P4B_RESTORE["Restore stdout\nRecord in dossier + tracker"]
+    P4B_RESTORE --> P45
+
+    P4B_FAIL["Update phase_4b_input.json:\n• outcome: failure\n• result_summary\n\nCopy failure file to run dir"]
+    P4B_FAIL --> P4B_ESC([PIPELINE FAILED — PipelineEscalation])
 
     P45{{"PHASE 4.5 — SEMANTIC EQUIVALENCE"}}
     P45 --> RANGEDIFF["git range-diff\nupstream vs backport\n→ identical / modified / unmatched"]
@@ -167,11 +181,13 @@ flowchart TD
     style P4A fill:#e8a838,color:#fff
     style P41 fill:#4a90d9,color:#fff
     style P4B fill:#d94a4a,color:#fff
+    style P4B_LOOP fill:#d94a4a,color:#fff
+    style P4B_SDK fill:#d94a4a,color:#fff
     style P45 fill:#4a90d9,color:#fff
     style STOP_DUP fill:#888,color:#fff
     style STOP_NA fill:#888,color:#fff
     style STOP_FIXED fill:#888,color:#fff
-    style P4B_FAIL fill:#d94a4a,color:#fff
+    style P4B_ESC fill:#d94a4a,color:#fff
     style OUTPUT fill:#2d8659,color:#fff
 ```
 
