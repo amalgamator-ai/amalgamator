@@ -7,10 +7,9 @@
             "frameworks": [
                 {"name": "vllm", "mode": "vllm_deepseek_v4_tp_b200.sh", "enable_trace": true},
                 {"name": "sgl", "mode": "sgl_deepseek_v4_tp_b200.sh", "enable_trace": true}
-                
             ]
         }
     ],
-    "concurrencies": [1]
+    "concurrencies": [64]
 }
 
