@@ -60,7 +60,7 @@ from auto_bug_fix.git_tools import (
     git_format_patch,
     git_merge_base,
     git_reset_hard,
-    git_commit,
+    git_commit as _git_commit_raw,
     git_rev_parse,
 )
 from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
@@ -82,8 +82,28 @@ from auto_bug_fix.bug_fix_prompts import (
 
 LOG_FILE = "__run_log_bug_fix.txt"
 DOSSIER_FILE = "dossier.md"
+_PIPELINE_ARTIFACTS = (
+    SEMANTIC_TRIAGE_FILE,
+    TEST_PORT_MANIFEST_FILE,
+    os.path.join("runs", SEMANTIC_TRIAGE_FILE),
+)
 
 log = logging.getLogger(__name__)
+
+
+def _unstage_pipeline_artifacts(repo_path: str) -> None:
+    """Remove pipeline artifact files from the git index so they don't end up in commits."""
+    for artifact in _PIPELINE_ARTIFACTS:
+        subprocess.run(
+            ["git", "rm", "--cached", "--ignore-unmatch", "-f", artifact],
+            cwd=repo_path, capture_output=True,
+        )
+
+
+def git_commit(repo_path: str, message: str) -> None:
+    """Wrapper around git_commit that unstages pipeline artifacts first."""
+    _unstage_pipeline_artifacts(repo_path)
+    _git_commit_raw(repo_path, message)
 
 
 class PipelineEscalation(Exception):
@@ -1114,12 +1134,17 @@ def _run_pipeline_phases(
         state.dossier.add("Semantic triage", _json.dumps(assessment, indent=2) if assessment else "no assessment", "Phase 0.5")
         tracker.record_gate("difficulty", assessment.get("estimated_difficulty", "unknown"))
         tracker.record_gate("recommendation", assessment.get("recommendation", "unknown"))
+        if assessment:
+            triage_dest = os.path.join(tracker._output_dir, "semantic_triage.json")
+            with open(triage_dest, "w") as f:
+                _json.dump(assessment, f, indent=2)
 
     cherry_pick_succeeded = False
     try:
         prereqs = state.triage_assessment.get("prerequisites", [])
         portable_prereqs = [p for p in prereqs if p.get("portable", False) and p.get("introduced_by")]
-        if portable_prereqs:
+        is_bugfix = state.triage_assessment.get("commit_type", "").lower() in ("bugfix", "bug-fix", "bug_fix", "fix", "security")
+        if portable_prereqs and not is_bugfix:
             with tracker.phase("Phase 0.5b — Prerequisite chain"):
                 ported = port_prerequisite_chain(config, claude_config, state, tracker)
                 state.dossier.add(
@@ -1447,11 +1472,6 @@ if __name__ == "__main__":
             f.write(dossier_text)
         print(f"Dossier written to {dossier_path}")
 
-        # Copy semantic triage if it exists
-        triage_src = os.path.join(bug_fix_config.repo_path, "semantic_triage.json")
-        if os.path.exists(triage_src):
-            import shutil
-            shutil.copy2(triage_src, os.path.join(run_dir, "semantic_triage.json"))
 
     except PipelineStop as e:
         print(f"PIPELINE STOP: {e}")
