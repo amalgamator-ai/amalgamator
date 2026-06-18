@@ -25,6 +25,7 @@ class BugFixConfig:
     # Build & test
     build_command: str = "make -j$(nproc)"
     test_command: str = "make check -j$(nproc)"
+    lint_command: str = ""
     max_build_test_retries: int = 3
     max_resolution_retries: int = 3
 
