@@ -1,52 +1,77 @@
-# Gitted Bug Fix Pipeline — Git-First Backporting with LLM Fallback
+# Bug Fix Porting — Git-First Backporting with LLM Fallback
 
-A companion pipeline for backporting commits across branches using git cherry-pick as the primary mechanism, with LLM-powered conflict resolution, semantic triage, and automatic escalation to the main `auto_code_gen` pipeline when fixes require deeper iteration.
+Port a bug fix from one branch to another using Claude as the AI engine. The pipeline tries `git cherry-pick` first, resolves conflicts with an LLM, and falls back to a full LLM-powered autonomous build-test-fix loop when needed.
 
-**Location**: `auto_bug_fix/`  
+**Location**: `auto_bug_fix/`
 **Entry point**: `python -m auto_bug_fix.run_bug_fix <config.yaml>`
 
----
+## Prerequisites
 
-## How It Relates to auto_code_gen
+- Python 3.10+
+- [Claude Agent Python SDK](https://pypi.org/project/claude-agent-sdk/) (`pip install claude-agent-sdk`)
+- A cloned git repository with both the source branch (has the fix) and target branch (needs the fix)
+- Shell-invokable build and test commands for the project
 
-The main `auto_code_gen` bug fix pipeline (Phase 1–5: code trace → plan → code gen → runtime) starts from scratch — it analyzes the fix, plans the port, generates code, then iterates. This works well for C/systems projects where the fix must be substantially rewritten.
+## Quick Start
 
-The **gitted pipeline** takes a different approach: **try `git cherry-pick` first**, resolve conflicts with an LLM, and only fall back to the full LLM pipeline when that fails. This is faster and cheaper for commits that cherry-pick cleanly or with minor conflicts, which empirically covers ~70% of backports.
+### 1. Create a YAML config
 
-**When the gitted pipeline's Phase 4a can't fix remaining build/test failures, it escalates to `auto_code_gen`'s `RunAndFixPrompt`** — the autonomous build-test-fix loop — passing ALL accumulated context (dossier, triage, prerequisite analysis) so the LLM has the full picture.
+```yaml
+issue_id: "crio-post-stop-hooks-9613-to-1.33"
 
----
+bug_description: "Fix race condition in post-stop hook ordering..."
+
+repository:
+  source_path: "/path/to/cri-o"
+  workdir: "/tmp/bugfix-workdir"
+
+branches:
+  source: "origin/main"
+  target: "b9ac8350f"  # commit or branch name
+
+fix:
+  commit: "92c18a2e2673764cd10f89b1a5061e2b26f44209"
+
+build:
+  command: "go build $(go list ./... | grep -v /test)"
+  test_command: "go vet $(go list ./... | grep -v /test)"
+
+model: "claude-sonnet-4-6"
+```
+
+Config files should be placed in `auto_bug_fix/configs/` and are gitignored.
+
+### 2. Run
+
+```bash
+python -m auto_bug_fix.run_bug_fix auto_bug_fix/configs/your_config.yaml
+```
+
+Output is written to `runs/<issue_id>_<timestamp>/`.
+
+## How It Works
+
+The pipeline takes a **git-first** approach: try `git cherry-pick` first, resolve conflicts with an LLM, and only fall back to the full LLM pipeline when that fails. This is faster and cheaper for commits that cherry-pick cleanly or with minor conflicts, which empirically covers ~70% of backports.
+
+When the pipeline's own conflict resolution and build-error recovery can't fix remaining failures, it escalates to `auto_code_gen`'s `RunAndFixPrompt` — an autonomous build-test-fix loop powered by Opus with deep thinking — passing ALL accumulated context (dossier, triage, prerequisite analysis) so the LLM has the full picture.
 
 ## Pipeline Phases
 
-```
-Phase 0    ─ Deterministic triage (patch-ID, ancestry, seed files)
-Phase 0.5  ─ Semantic triage (LLM: difficulty, prerequisites, generated files,
-              regeneration commands, verification commands, lint commands)
-Phase 0.5b ─ Port prerequisite commits (only if fix NEEDS the prerequisite's
-              behavior — call-convention-only changes are adapted at call site)
-Phase 0.5c ─ Port test files from fix commit (filtered by files_to_skip)
-Phase 1    ─ Comprehensive baseline on clean target branch:
-              ├─ Build command
-              ├─ Test command (+ RED check for bugfixes)
-              └─ All lint/verification commands from triage
-Phase 1.5  ─ Failure-mode confirmation (signature comparison)
-Phase 2+3a ─ Cherry-pick + conflict resolution
-              ├─ Revert files_to_skip to target version (both conflicting
-              │   and cleanly-applied)
-              └─ LLM resolves remaining source conflicts
-Phase 3b   ─ Regeneration (run project codegen commands, rollback on failure)
-Phase 4    ─ Verify (build + test from YAML config)
-Phase 4a   ─ Build error recovery (LLM single-shot fix)
-Phase 4.1  ─ Extended verification (commands discovered by Phase 0.5)
-              ├─ Filters pre-existing failures using Phase 1 baseline
-              └─ Only escalates for NEW failures introduced by the backport
-Phase 4b   ─ Handoff to auto_code_gen RunAndFixPrompt (autonomous loop)
-              ├─ Saves phase_4b_input.json (full context)
-              ├─ Saves phase_4b_log.txt (conversation log)
-              └─ Copies run_and_fix_success/failure.txt to run directory
-Phase 4.5  ─ Semantic equivalence (range-diff in dossier)
-```
+| Phase | Name | Description |
+|-------|------|-------------|
+| **0** | **Deterministic Triage** | Derives seed files from the fix commit, checks whether the fix is already present on the target branch (forward patch-ID), whether the target branch is affected (backward patch-ID + ancestry), and resolves any file renames between branches. Stops early if the fix is a duplicate or the target is not affected. |
+| **0.5** | **Semantic Triage** | An LLM analyzes the fix commit to classify difficulty, identify prerequisite commits (and whether each is portable or call-convention-only), discover generated files and their regeneration commands, find lint/verification commands, flag files to skip, and rank priority files. Writes `semantic_triage.json`. |
+| **0.5b** | **Prerequisite Porting** | Cherry-picks prerequisite commits that the fix depends on for actual behavior (`portable: true`). Prerequisites that only change calling conventions (`portable: false`) are skipped — the resolution agent adapts the call site to match the target branch's existing API instead. Max depth of 5. |
+| **0.5c** | **Test Porting** | An LLM ports test files from the fix commit to the target branch's test infrastructure, filtered by `files_to_skip`. Ensures the ported tests exist before the baseline phase so the RED check can detect if the bug is already fixed. |
+| **1** | **Comprehensive Baseline** | Runs the build command, test command, and all lint/verification commands discovered by Phase 0.5 on the **clean target branch** before any changes. Records all results as the baseline. Also performs a RED check — if the ported tests already pass, the bug is already fixed and the pipeline stops. |
+| **1.5** | **Failure-Mode Confirmation** | Compares failure signatures to confirm the target branch exhibits the expected bug behavior. Cleans the worktree (`git reset --hard HEAD`) in preparation for the cherry-pick. |
+| **2+3a** | **Cherry-Pick + Conflict Resolution** | Attempts `git cherry-pick` using three merge strategies (default, patience, ort) and picks the one with fewest conflicts. Reverts `files_to_skip` to the target branch version (both conflicting and cleanly-applied). An LLM resolution agent resolves any remaining source conflicts. If the agent can't resolve after retries, conflicts are force-resolved with `--theirs` and the broken state is committed for Phase 4b. |
+| **3b** | **Regeneration** | Runs project-specific code generation commands (e.g., `go generate`, `make proto`) discovered by Phase 0.5 to regenerate auto-generated files. Saves a safe point first and rolls back on failure. |
+| **4** | **Verify** | Runs the build and test commands from the YAML config. Checks for regressions against the Phase 1 baseline. |
+| **4a** | **Build Error Recovery** | When Phase 4 fails, an LLM diagnoses compiler/linker/test errors, edits source files to fix them, and re-runs verification — up to `max_resolution_retries` attempts. |
+| **4.1** | **Extended Verification** | Runs all additional lint and verification commands discovered by Phase 0.5. Filters results against the Phase 1 baseline — pre-existing failures are logged and skipped, only NEW failures introduced by the backport trigger escalation to Phase 4a/4b. |
+| **4b** | **auto_code_gen Escalation** | Last-resort handoff to the [auto_code_gen pipeline](auto_code_gen/README.md). Bundles the full dossier, semantic triage, and repo config into an enriched context, then launches an Opus agent (deep thinking, max effort) running an autonomous build-test-fix loop (`RunAndFixPrompt`). The agent has full shell access and iterates up to `max_build_test_retries` times. Writes `run_and_fix_success.txt` or `run_and_fix_failure.txt`. See [Phase 4b details](#phase-4b--auto_code_gen-escalation) below. |
+| **4.5** | **Semantic Equivalence** | Runs `git range-diff` comparing the upstream fix to the backported commits. Classifies each commit as identical, modified, or unmatched — recorded in the dossier for review. |
 
 ---
 
@@ -193,7 +218,7 @@ flowchart TD
 
 ---
 
-## Phase 4b — External Pipeline in Detail
+## Phase 4b — auto_code_gen Escalation
 
 Phase 4b is the last-resort escalation. It fires when the gitted pipeline's own recovery mechanisms (Phase 4a) cannot fix build or test failures. Instead of giving up, it hands the broken worktree to a more powerful LLM (Opus with deep thinking) running an autonomous build-test-fix loop.
 
@@ -332,7 +357,7 @@ After the SDK call returns, Phase 4b checks for the failure file. If it exists �
   "max_build_test_retries": 3,
   "model": "claude-opus-4-6",
   "dossier": "# Bug-Fix Porting Dossier: ...",
-  "semantic_triage": { ... },
+  "semantic_triage": { "..." : "..." },
   "duration_seconds": 192.0,
   "input_tokens": 319,
   "output_tokens": 7847,
@@ -340,37 +365,6 @@ After the SDK call returns, Phase 4b checks for the failure file. If it exists �
   "result_summary": "SUCCESS\nRetries: 0/3\n\nBuild: PASSED ..."
 }
 ```
-
-**No changes to `auto_code_gen` are required** — the gitted pipeline imports and calls the existing `gen_RunAndFixPrompt` function.
-
----
-
-## YAML Config Format
-
-```yaml
-issue_id: "crio-post-stop-hooks-9613-to-1.33"
-
-bug_description: "Fix race condition in post-stop hook ordering..."
-
-repository:
-  source_path: "/path/to/cri-o"
-  workdir: "/tmp/bugfix-workdir"
-
-branches:
-  source: "origin/main"
-  target: "b9ac8350f"  # commit or branch name
-
-fix:
-  commit: "92c18a2e2673764cd10f89b1a5061e2b26f44209"
-
-build:
-  command: "go build $(go list ./... | grep -v /test)"
-  test_command: "go vet $(go list ./... | grep -v /test)"
-
-model: "claude-sonnet-4-6"
-```
-
-Config files should be placed in `auto_bug_fix/configs/` and are gitignored.
 
 ---
 
@@ -402,21 +396,6 @@ Files identified by the triage as irrelevant (e.g., lint changes depending on un
 
 ---
 
-## Key Differences from auto_code_gen Bug Fix
-
-| Aspect | auto_code_gen | Gitted pipeline |
-|--------|---------------|-----------------|
-| Primary mechanism | LLM generates patch from scratch | `git cherry-pick` + LLM conflict resolution |
-| Generated file handling | LLM writes them | Auto-resolve with `--theirs` + run codegen |
-| Prerequisite detection | Manual | Automatic (git log -S + LLM analysis) |
-| Test porting | Combined with code plan | Separate Phase 0.5c before fix |
-| Baseline verification | None | Build + test + lint on clean branch |
-| Pre-existing failure filtering | None | Phase 4.1 skips baseline failures |
-| Escalation path | N/A | Falls back to auto_code_gen's RunAndFixPrompt |
-| Language support | C/systems (gcc, openssl) | Any (tested on Go/CRI-O, Go/Kubernetes, C/OpenSSL) |
-
----
-
 ## Example Run — CRI-O Post-Stop Hooks to release-1.34
 
 Backport of [PR #9613](https://github.com/cri-o/cri-o/pull/9613) to `release-1.34`, compared against human backport [PR #9699](https://github.com/cri-o/cri-o/pull/9699).
@@ -437,19 +416,105 @@ Backport of [PR #9613](https://github.com/cri-o/cri-o/pull/9613) to `release-1.3
 
 ---
 
-## Running
+## Config Examples
 
-```bash
-# From the new_ai_auto_analyze directory
-python -m auto_bug_fix.run_bug_fix auto_bug_fix/configs/your_config.yaml
+### gcc CVE
+
+```json
+{
+    "use_case": "bug_fix",
+    "repo_path": "/home/user/gcc",
+    "build_dir": "/home/user/gcc/build",
+    "source_branch": "gcc-14-branch",
+    "target_branch": "gcc-13-branch",
+    "source_fix_commit": "abc1234",
+    "bug_description": "CVE-2024-XXXX: buffer overflow in fold_convert()",
+    "issue_id": "CVE-2024-XXXX",
+    "output_dir": "/tmp/gcc_cve_output",
+    "build_command": "make -j$(nproc)",
+    "test_command": "make check RUNTESTFLAGS='gcc.dg/CVE-2024-XXXX.c' -j$(nproc)",
+    "disallowed_modules": ["gcc/config/arm/"],
+    "max_build_test_retries": 3
+}
 ```
 
-Output (in `runs/<issue_id>_<timestamp>/`):
-- `run_log.txt` — full pipeline log
-- `dossier.md` — full audit trail
-- `semantic_triage.json` — Phase 0.5 assessment
-- `<issue_id>_<timestamp>.json` — machine-readable run metrics
-- `phase_4b_input.json` — Phase 4b context (if triggered)
-- `phase_4b_log.txt` — Phase 4b conversation (if triggered)
-- `run_and_fix_success.txt` / `run_and_fix_failure.txt` — Phase 4b result (if triggered)
-- `pipeline.diff` / `human_backport_*.diff` — comparison diffs (if generated)
+### openssl CVE
+
+```json
+{
+    "use_case": "bug_fix",
+    "repo_path": "/home/user/openssl",
+    "source_branch": "openssl-3.2",
+    "target_branch": "openssl-3.1",
+    "source_fix_commit": "def5678",
+    "bug_description": "CVE-2024-YYYY: use-after-free in SSL_free()",
+    "issue_id": "CVE-2024-YYYY",
+    "output_dir": "/tmp/openssl_fix",
+    "build_command": "make -j$(nproc)",
+    "test_command": "make test TESTS=test_ssl_old -j$(nproc)",
+    "disallowed_modules": ["apps/", "doc/"]
+}
+```
+
+### curl (cmake, macOS)
+
+```json
+{
+    "use_case": "bug_fix",
+    "repo_path": "/path/to/curl",
+    "build_dir": "/path/to/curl/build",
+    "source_branch": "curl-8_19_0",
+    "target_branch": "curl-8_18_0",
+    "source_fix_commit": "b35e58b24c",
+    "bug_description": "openssl: fix potential OOB read in debug/verbose logging",
+    "issue_id": "20656",
+    "output_dir": "/tmp/curl_fix",
+    "build_command": "cmake --build /path/to/curl/build -j$(sysctl -n hw.logicalcpu)",
+    "test_command": "ctest --test-dir /path/to/curl/build -j$(sysctl -n hw.logicalcpu)",
+    "disallowed_modules": [],
+    "code_port_plan_skip_review": true,
+    "code_gen_skip_review": true
+}
+```
+
+### Build Command Guidelines
+
+- Always use incremental compilation. Claude never does a speculative clean rebuild.
+- Use `-j$(nproc)` on Linux, `-j$(sysctl -n hw.logicalcpu)` on macOS.
+- For cmake projects, configure the build directory once before running (`cmake ..`).
+- Scope `test_command` to the relevant test file/suite when possible to reduce cycle time.
+
+---
+
+## Output Files
+
+All output is written to `runs/<issue_id>_<timestamp>/`:
+
+| File | Description |
+|------|-------------|
+| `run_log.txt` | Full pipeline log |
+| `dossier.md` | Full audit trail |
+| `semantic_triage.json` | Phase 0.5 assessment |
+| `<issue_id>_<timestamp>.json` | Machine-readable run metrics |
+| `phase_4b_input.json` | Phase 4b context (if triggered) |
+| `phase_4b_log.txt` | Phase 4b conversation (if triggered) |
+| `run_and_fix_success.txt` / `run_and_fix_failure.txt` | Phase 4b result (if triggered) |
+| `pipeline.diff` / `human_backport_*.diff` | Comparison diffs (if generated) |
+
+---
+
+## On Failure
+
+If the runtime phase exhausts its retries, it writes a failure log (`run_and_fix_failure.txt`) and exits.
+
+Manual escalation:
+
+```bash
+# Deeper investigation of a specific issue
+python -m auto_code_gen.run_investigate_issue --config <config.json> ...
+
+# Direct fix attempt
+python -m auto_code_gen.run_fix_issue --config <config.json> ...
+```
+
+Or increase `max_build_test_retries` and re-run.
