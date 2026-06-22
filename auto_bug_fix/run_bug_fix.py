@@ -503,8 +503,10 @@ def phase_1_baseline_red_bisect(
     else:
         state.s_target = normalize_signature(red_output)
 
-    # Step 3: Extended verification baseline (lint + verification commands from triage)
+    # Step 3: Extended verification baseline (YAML lint + triage lint + verification commands)
     lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
+    if config.lint_command and config.lint_command not in lint_cmds:
+        lint_cmds.insert(0, config.lint_command)
     verification_cmds = state.triage_assessment.get("verification_commands", [])
     verification_cmds = lint_cmds + [c for c in verification_cmds if _validate_shell_command(c)]
     state.baseline_verification = []
@@ -543,8 +545,24 @@ def phase_1_5_failure_mode(
 MAX_ERROR_CHARS = 50_000
 
 
+def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
+    """Return the lint command: YAML field takes priority, then triage-discovered.
+
+    Returns empty string if the lint command is identical to the test command
+    (already runs as part of the test step).
+    """
+    if config.lint_command:
+        cmd = config.lint_command
+    else:
+        triage_lints = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
+        cmd = triage_lints[0] if triage_lints else ""
+    if cmd and cmd == config.test_command:
+        return ""
+    return cmd
+
+
 def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[bool, str, str, str, str]:
-    """Run build and test commands, return (passed, build_out, build_err, test_out, test_err)."""
+    """Run build, test, and lint commands. Return (passed, build_out, build_err, test_out, test_err)."""
     build_exit, build_stdout, build_stderr = run_test_suite(config.build_command, config.build_dir)
     if build_exit != 0:
         return False, build_stdout, build_stderr, "", ""
@@ -553,17 +571,31 @@ def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[boo
     failures = parse_test_failures(test_stdout, test_stderr)
     passed, _ = check_regression(failures, state.baseline)
 
-    if passed:
-        repo = config.repo_path
-        ok, extra_files = enforce_allowlist(repo, state.allowed_modules, config.disallowed_modules)
-        if not ok:
-            log.info("Files modified outside priority list (advisory): %s", extra_files)
-        test_ok, vetoed = enforce_test_file_veto(repo, state.seed)
-        if not test_ok:
-            log.info("Test files modified outside seed (advisory): %s", vetoed)
-        return True, build_stdout, build_stderr, test_stdout, test_stderr
+    if not passed:
+        return False, build_stdout, build_stderr, test_stdout, test_stderr
 
-    return False, build_stdout, build_stderr, test_stdout, test_stderr
+    lint_cmd = _resolve_lint_command(config, state)
+    if lint_cmd:
+        lint_exit, lint_stdout, lint_stderr = run_test_suite(lint_cmd, config.build_dir)
+        if lint_exit != 0:
+            baseline_lint_failed = any(
+                e["cmd"] == lint_cmd and e["exit_code"] != 0
+                for e in state.baseline_verification
+            )
+            if baseline_lint_failed:
+                log.info("Lint failed but pre-existing on baseline: %s", lint_cmd)
+            else:
+                log.warning("Lint failed (NEW): %s", lint_cmd)
+                return False, build_stdout, build_stderr, lint_stdout, lint_stderr
+
+    repo = config.repo_path
+    ok, extra_files = enforce_allowlist(repo, state.allowed_modules, config.disallowed_modules)
+    if not ok:
+        log.info("Files modified outside priority list (advisory): %s", extra_files)
+    test_ok, vetoed = enforce_test_file_veto(repo, state.seed)
+    if not test_ok:
+        log.info("Test files modified outside seed (advisory): %s", vetoed)
+    return True, build_stdout, build_stderr, test_stdout, test_stderr
 
 
 def phase_4_verify(
@@ -1287,7 +1319,8 @@ def _run_pipeline_phases(
             with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
                 phase_4b_external_pipeline(config, claude_config, state, tracker)
 
-    lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
+    phase4_lint = _resolve_lint_command(config, state)
+    lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c) and c != phase4_lint]
     verification_cmds = state.triage_assessment.get("verification_commands", [])
     verification_cmds = lint_cmds + [c for c in verification_cmds if _validate_shell_command(c)]
 
