@@ -477,31 +477,37 @@ def phase_1_baseline_red_bisect(
     Stores results so Phase 4+ can distinguish regressions from pre-existing failures.
     """
     # Step 1: Build baseline
-    build_exit, build_output = capture_output(
-        [config.build_command], config.build_dir,
-    )
-    state.baseline_build_exit = build_exit
-    state.baseline_build_output = build_output
-    if build_exit == 0:
-        log.info("Baseline build: PASSED")
+    if config.build_command:
+        build_exit, build_output = capture_output(
+            [config.build_command], config.build_dir,
+        )
+        state.baseline_build_exit = build_exit
+        state.baseline_build_output = build_output
+        if build_exit == 0:
+            log.info("Baseline build: PASSED")
+        else:
+            log.warning("Baseline build: FAILED (exit %d) — target branch has pre-existing build issues", build_exit)
     else:
-        log.warning("Baseline build: FAILED (exit %d) — target branch has pre-existing build issues", build_exit)
+        log.info("Baseline build: skipped (no build command)")
 
     # Step 2: Test baseline (existing logic)
-    red_exit, red_output = capture_output(
-        [config.test_command], config.build_dir,
-    )
-    from auto_bug_fix.baseline import parse_test_failures
-    state.baseline = parse_test_failures(red_output, "")
-    is_bugfix = state.triage_assessment.get("commit_type", "").lower() in ("bugfix", "bug_fix", "fix", "security")
-    if red_exit == 0:
-        if state.ported_test_files and is_bugfix:
-            raise PipelineEscalation("RED check passed — target may already be fixed or test is inapplicable")
-        log.info("Baseline tests pass — %s",
-                 "feature/refactor commit, RED check not applicable" if not is_bugfix
-                 else "no ported vulnerability test available — proceeding")
+    if config.test_command:
+        red_exit, red_output = capture_output(
+            [config.test_command], config.build_dir,
+        )
+        from auto_bug_fix.baseline import parse_test_failures
+        state.baseline = parse_test_failures(red_output, "")
+        is_bugfix = state.triage_assessment.get("commit_type", "").lower() in ("bugfix", "bug_fix", "fix", "security")
+        if red_exit == 0:
+            if state.ported_test_files and is_bugfix:
+                raise PipelineEscalation("RED check passed — target may already be fixed or test is inapplicable")
+            log.info("Baseline tests pass — %s",
+                     "feature/refactor commit, RED check not applicable" if not is_bugfix
+                     else "no ported vulnerability test available — proceeding")
+        else:
+            state.s_target = normalize_signature(red_output)
     else:
-        state.s_target = normalize_signature(red_output)
+        log.info("Baseline test: skipped (no test command)")
 
     # Step 3: Extended verification baseline (YAML lint + triage lint + verification commands)
     lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
@@ -562,14 +568,24 @@ def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
 
 
 def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[bool, str, str, str, str]:
-    """Run build, test, and lint commands. Return (passed, build_out, build_err, test_out, test_err)."""
-    build_exit, build_stdout, build_stderr = run_test_suite(config.build_command, config.build_dir)
-    if build_exit != 0:
-        return False, build_stdout, build_stderr, "", ""
-    test_exit, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
-    from auto_bug_fix.baseline import parse_test_failures
-    failures = parse_test_failures(test_stdout, test_stderr)
-    passed, _ = check_regression(failures, state.baseline)
+    """Run build, test, and lint commands. Return (passed, build_out, build_err, test_out, test_err).
+
+    Empty build/test commands are skipped (for interpreted languages).
+    """
+    build_stdout = build_stderr = ""
+    if config.build_command:
+        build_exit, build_stdout, build_stderr = run_test_suite(config.build_command, config.build_dir)
+        if build_exit != 0:
+            return False, build_stdout, build_stderr, "", ""
+
+    test_stdout = test_stderr = ""
+    if config.test_command:
+        test_exit, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
+        from auto_bug_fix.baseline import parse_test_failures
+        failures = parse_test_failures(test_stdout, test_stderr)
+        passed, _ = check_regression(failures, state.baseline)
+    else:
+        passed = True
 
     if not passed:
         return False, build_stdout, build_stderr, test_stdout, test_stderr

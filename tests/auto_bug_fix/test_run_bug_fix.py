@@ -95,6 +95,8 @@ def _make_config(**overrides):
         source_fix_commit="abc123",
         bug_description="test",
         issue_id="test-1",
+        build_command="make",
+        test_command="make test",
     )
     defaults.update(overrides)
     return BugFixConfig(**defaults)

@@ -73,10 +73,6 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("fix.commit is required")
 
     build = _require_mapping(config, "build")
-    if build.get("command") is None:
-        raise ConfigError("build.command is required")
-    if build.get("test_command") is None:
-        raise ConfigError("build.test_command is required")
 
 
 def expand_path(path: str | None, default: str = "") -> str:
@@ -113,8 +109,8 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         source_fix_commit=str(config["fix"]["commit"]),
         bug_description=str(config["bug_description"]),
         issue_id=str(config["issue_id"]),
-        build_command=config["build"]["command"],
-        test_command=config["build"]["test_command"],
+        build_command=config["build"].get("command", ""),
+        test_command=config["build"].get("test_command", ""),
         lint_command=config["build"].get("lint_command", ""),
         max_build_test_retries=advanced.get("max_build_test_retries", 3),
         max_resolution_retries=advanced.get("max_resolution_retries", 3),
