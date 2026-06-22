@@ -1311,7 +1311,8 @@ def _run_pipeline_phases(
             with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
                 phase_4b_external_pipeline(config, claude_config, state, tracker)
 
-    lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
+    phase4_lint = _resolve_lint_command(config, state)
+    lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c) and c != phase4_lint]
     verification_cmds = state.triage_assessment.get("verification_commands", [])
     verification_cmds = lint_cmds + [c for c in verification_cmds if _validate_shell_command(c)]
 
