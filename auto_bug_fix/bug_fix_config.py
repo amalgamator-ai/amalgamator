@@ -22,9 +22,9 @@ class BugFixConfig:
     allowed_modules: list[str] | None = None
     disallowed_modules: list[str] = field(default_factory=list)
 
-    # Build & test
-    build_command: str = "make -j$(nproc)"
-    test_command: str = "make check -j$(nproc)"
+    # Build & test (empty = skip, not specified in YAML = autodetect)
+    build_command: str = ""
+    test_command: str = ""
     lint_command: str = ""
     max_build_test_retries: int = 3
     max_resolution_retries: int = 3
