@@ -546,11 +546,19 @@ MAX_ERROR_CHARS = 50_000
 
 
 def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
-    """Return the lint command: YAML field takes priority, then triage-discovered."""
+    """Return the lint command: YAML field takes priority, then triage-discovered.
+
+    Returns empty string if the lint command is identical to the test command
+    (already runs as part of the test step).
+    """
     if config.lint_command:
-        return config.lint_command
-    triage_lints = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
-    return triage_lints[0] if triage_lints else ""
+        cmd = config.lint_command
+    else:
+        triage_lints = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
+        cmd = triage_lints[0] if triage_lints else ""
+    if cmd and cmd == config.test_command:
+        return ""
+    return cmd
 
 
 def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[bool, str, str, str, str]:

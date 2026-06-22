@@ -130,6 +130,13 @@ def test_resolve_lint_skips_dangerous_triage_commands():
     assert _resolve_lint_command(config, state) == ""
 
 
+def test_resolve_lint_skips_if_same_as_test_command():
+    config = _make_config(lint_command="", test_command="go vet ./...")
+    state = PipelineState()
+    state.triage_assessment = {"lint_commands": ["go vet ./..."]}
+    assert _resolve_lint_command(config, state) == ""
+
+
 # --- _run_build_and_test lint integration tests ---
 
 @patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
