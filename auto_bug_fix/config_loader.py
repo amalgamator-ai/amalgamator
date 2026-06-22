@@ -115,6 +115,7 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         issue_id=str(config["issue_id"]),
         build_command=config["build"]["command"],
         test_command=config["build"]["test_command"],
+        lint_command=config["build"].get("lint_command", ""),
         max_build_test_retries=advanced.get("max_build_test_retries", 3),
         max_resolution_retries=advanced.get("max_resolution_retries", 3),
         forward_patch_id_lookback=advanced.get("forward_patch_id_lookback", "12 months"),

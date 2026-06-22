@@ -1,9 +1,13 @@
 """Tests for auto_bug_fix.run_bug_fix — pipeline state, strategies, and helpers."""
+from unittest.mock import patch, MagicMock
+from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.run_bug_fix import (
     PipelineState,
     PipelineStop,
     PipelineEscalation,
     identify_test_files,
+    _resolve_lint_command,
+    _run_build_and_test,
 )
 
 
@@ -80,3 +84,119 @@ def test_identify_test_files_no_false_positives():
     files = ["latest/foo.c", "contest.md", "lib/attestation.go", "pkg/protesting.h"]
     result = identify_test_files(files)
     assert result == []
+
+
+def _make_config(**overrides):
+    defaults = dict(
+        repo_path="/tmp/repo",
+        build_dir="/tmp/repo",
+        source_branch="main",
+        target_branch="target",
+        source_fix_commit="abc123",
+        bug_description="test",
+        issue_id="test-1",
+    )
+    defaults.update(overrides)
+    return BugFixConfig(**defaults)
+
+
+# --- _resolve_lint_command tests ---
+
+def test_resolve_lint_yaml_takes_priority():
+    config = _make_config(lint_command="make lint")
+    state = PipelineState()
+    state.triage_assessment = {"lint_commands": ["go vet ./..."]}
+    assert _resolve_lint_command(config, state) == "make lint"
+
+
+def test_resolve_lint_falls_back_to_triage():
+    config = _make_config(lint_command="")
+    state = PipelineState()
+    state.triage_assessment = {"lint_commands": ["go vet ./..."]}
+    assert _resolve_lint_command(config, state) == "go vet ./..."
+
+
+def test_resolve_lint_empty_when_neither():
+    config = _make_config(lint_command="")
+    state = PipelineState()
+    state.triage_assessment = {}
+    assert _resolve_lint_command(config, state) == ""
+
+
+def test_resolve_lint_skips_dangerous_triage_commands():
+    config = _make_config(lint_command="")
+    state = PipelineState()
+    state.triage_assessment = {"lint_commands": ["go vet ./... && rm -rf /"]}
+    assert _resolve_lint_command(config, state) == ""
+
+
+def test_resolve_lint_skips_if_same_as_test_command():
+    config = _make_config(lint_command="", test_command="go vet ./...")
+    state = PipelineState()
+    state.triage_assessment = {"lint_commands": ["go vet ./..."]}
+    assert _resolve_lint_command(config, state) == ""
+
+
+# --- _run_build_and_test lint integration tests ---
+
+@patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.run_test_suite")
+def test_lint_pass_means_verify_pass(mock_run, mock_allow, mock_veto):
+    mock_run.side_effect = [
+        (0, "", ""),       # build
+        (0, "", ""),       # test
+        (0, "", ""),       # lint
+    ]
+    config = _make_config(lint_command="go vet ./...")
+    state = PipelineState()
+    passed, _, _, _, _ = _run_build_and_test(config, state)
+    assert passed is True
+    assert mock_run.call_count == 3
+
+
+@patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.run_test_suite")
+def test_lint_fail_means_verify_fail(mock_run, mock_allow, mock_veto):
+    mock_run.side_effect = [
+        (0, "", ""),                          # build
+        (0, "", ""),                          # test
+        (1, "unused import", "lint error"),   # lint fails
+    ]
+    config = _make_config(lint_command="go vet ./...")
+    state = PipelineState()
+    passed, _, _, test_out, test_err = _run_build_and_test(config, state)
+    assert passed is False
+    assert "unused import" in test_out
+
+
+@patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.run_test_suite")
+def test_lint_fail_preexisting_means_verify_pass(mock_run, mock_allow, mock_veto):
+    mock_run.side_effect = [
+        (0, "", ""),                          # build
+        (0, "", ""),                          # test
+        (1, "unused import", "lint error"),   # lint fails
+    ]
+    config = _make_config(lint_command="go vet ./...")
+    state = PipelineState()
+    state.baseline_verification = [{"cmd": "go vet ./...", "exit_code": 1, "output": "same error"}]
+    passed, _, _, _, _ = _run_build_and_test(config, state)
+    assert passed is True
+
+
+@patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.run_test_suite")
+def test_no_lint_command_skips_lint(mock_run, mock_allow, mock_veto):
+    mock_run.side_effect = [
+        (0, "", ""),   # build
+        (0, "", ""),   # test
+    ]
+    config = _make_config(lint_command="")
+    state = PipelineState()
+    passed, _, _, _, _ = _run_build_and_test(config, state)
+    assert passed is True
+    assert mock_run.call_count == 2
