@@ -96,6 +96,13 @@ define itself, check if it exists on the target branch. If it doesn't:
    - **Important**: Also check auto-resolved files (taken from --theirs) for imports that reference \
 packages not present on the target branch. These stale imports will break regeneration and must be \
 identified as prerequisites.
+   - **Critical — do NOT list sub-commits of the fix as prerequisites**: If the fix commit is a \
+merge commit, the cherry-pick with `-m1` applies ALL sub-commits' changes in one shot. Symbols \
+introduced by sub-commits inside the merge (e.g., `postStopCleanup` from commit `a96dfe16a` inside \
+merge `92c18a2e26`) are part of the fix, not prerequisites. To check: run \
+`git merge-base --is-ancestor <introducing_commit> <fix_commit>` — if it returns 0, the \
+commit is inside the merge and should NOT be listed as a prerequisite. Only list commits that are \
+**outside** the fix merge as prerequisites.
    - **Critical — portable means the fix NEEDS the prerequisite's behavior**: Mark `portable: true` \
 ONLY when the fix depends on the prerequisite's actual behavior or semantics (e.g., a new type that \
 the fix stores data in, a new function whose return value the fix uses). Mark `portable: false` when \
