@@ -1488,6 +1488,9 @@ if __name__ == "__main__":
             if os.path.exists(worktree_path):
                 shutil.rmtree(worktree_path)
 
+        print(f"Fetching latest refs from origin...")
+        subprocess.run(["git", "fetch", "--all", "--quiet"], cwd=source_path, capture_output=True)
+
         target_branch = bug_fix_config.target_branch
         print(f"Creating worktree at {worktree_path} on {target_branch}...")
         from auto_bug_fix.git_tools import git_worktree_add
