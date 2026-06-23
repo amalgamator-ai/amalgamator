@@ -63,17 +63,18 @@ Analyze this commit and produce a structured assessment. For each step, use the 
 2. **Identify new packages**: Does the diff create any new directories/packages that don't exist on \
 the target branch? Use `ls` or `git ls-tree {target_branch} -- <path>` to check.
 
-3. **Identify new types and interfaces**: List any new struct types, interfaces, or exported functions \
-introduced by the commit. For each one, check if it exists on the target branch: \
-`git grep <TypeName> {target_branch} -- '*.go'`
+3. **Identify new types and interfaces**: List any new types, classes, structs, interfaces, or \
+exported functions introduced by the commit. For each one, check if it exists on the target branch: \
+`git grep <TypeName> {target_branch}` (adjust the file glob for the project's language).
 
 4. **Assess dependency depth**: How many layers of new types reference each other? \
 For example, if TypeA references TypeB which references TypeC, depth is 3.
 
 5. **Identify generated and binary files**: For each file in the diff, check if it is:
-   - A generated file: look for `// Code generated`, `// DO NOT EDIT`, `zz_generated.*`, \
-`generated.pb.go`, `generated.proto`, `*_swagger_doc_generated.go` patterns in the file or filename
-   - A binary file: `.pb` (protobuf binary), `.png`, `.jpg`, `.wasm`, or any non-text file
+   - A generated file: look for `Code generated`, `DO NOT EDIT`, `AUTO-GENERATED`, \
+`zz_generated.*`, `generated.pb.go`, `*.pb.go`, `*_swagger_doc_generated.go`, \
+`package-lock.json`, `yarn.lock`, `Cargo.lock`, `poetry.lock` patterns in the file or filename
+   - A binary file: `.pb` (protobuf binary), `.png`, `.jpg`, `.wasm`, `.pyc`, or any non-text file
    List these files in `files_to_skip` — the pipeline will auto-resolve them instead of \
 sending them to the LLM agent (which cannot meaningfully edit generated or binary content).
 
@@ -89,7 +90,7 @@ the target branch? Use `git grep` to verify.
 
 8. **Trace prerequisite commits**: For each key symbol/type/import that the commit uses but doesn't \
 define itself, check if it exists on the target branch. If it doesn't:
-   - Find the commit that introduced it: `git log --oneline -1 -S '<SymbolName>' {source_branch} -- '*.go'`
+   - Find the commit that introduced it: `git log --oneline -1 -S '<SymbolName>' {source_branch}`
    - Check the size of that prerequisite commit: `git show --stat <sha> | tail -1`
    - Assess whether it's a small addition (easily portable) or a large feature (its own backport problem)
    - **Important**: Also check auto-resolved files (taken from --theirs) for imports that reference \
