@@ -723,8 +723,7 @@ def phase_4b_external_pipeline(
     drives an LLM-heavy iterative fix loop.
     """
     import json as _json
-    ext_pipeline_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "new_ai_auto_analyze")
-    ext_pipeline_root = os.path.abspath(ext_pipeline_root)
+    ext_pipeline_root = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
     if not os.path.isdir(ext_pipeline_root):
         raise FileNotFoundError(f"External pipeline not found at {ext_pipeline_root}")
