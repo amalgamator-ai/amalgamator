@@ -12,10 +12,9 @@ def test_build_trailers_optional_fields():
     trailers = build_trailers(
         phase="1",
         model="claude-opus-4-7",
-        bisect_sha="deadbeef",
+        resolved_hunks="3",
     )
-    assert "AutoBugFix-Triage-Bisect-SHA" in trailers
-    assert trailers["AutoBugFix-Triage-Bisect-SHA"] == "deadbeef"
+    assert trailers["AutoBugFix-Resolved-Hunks"] == "3"
 
 
 def test_dossier_add_items():
