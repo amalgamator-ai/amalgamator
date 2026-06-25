@@ -19,34 +19,42 @@ def run_test_suite(test_command: str, cwd: str, timeout: int = 1800) -> tuple[in
     return (result.returncode, result.stdout, result.stderr)
 
 
+_FAILURE_PATTERNS = [
+    # Go per-test: --- FAIL: TestName (0.01s)
+    re.compile(r"^---\s+FAIL:\s+(\S+)"),
+    # Go package: FAIL\tgithub.com/org/repo/pkg
+    re.compile(r"^\s*FAIL\t(\S+)"),
+    # Go package (spaces): FAIL  github.com/org/repo/pkg
+    re.compile(r"^\s*FAIL\s{2,}(\S+)"),
+    # Generic: FAIL: test_name
+    re.compile(r"^\s*FAIL:\s+(\S+)"),
+    # pytest: FAILED path/test.py::test_name
+    re.compile(r"^\s*FAILED\s+(\S+)"),
+    # Rust: test name ... FAILED
+    re.compile(r"^test\s+(\S+)\s+\.\.\.\s+FAILED"),
+    # JUnit/Maven: <<< FAILURE! - in org.package.TestClass
+    re.compile(r"<<<\s+FAILURE!\s+-\s+in\s+(\S+)"),
+    # Ginkgo: [FAIL] Description
+    re.compile(r"^\s*\[FAIL\]\s+(.+)$"),
+    # TAP: not ok 1 - test_name
+    re.compile(r"^\s*not ok\s+\d+\s+-\s+(\S+)"),
+    # Jest/Mocha: FAIL src/path/test.js
+    re.compile(r"^\s*FAIL\s+((?:\S+\.(?:js|ts|jsx|tsx))\S*)"),
+    # RSpec: rspec ./spec/path_spec.rb:42
+    re.compile(r"^\s*rspec\s+(\S+)"),
+]
+
+
 def parse_test_failures(stdout: str, stderr: str) -> set[str]:
     """Extract failed test names from combined stdout/stderr using common test-output patterns."""
     failures: set[str] = set()
     combined = stdout + "\n" + stderr
     for line in combined.splitlines():
-        # FAIL: test_name or FAILED test_name
-        m = re.match(r"^\s*FAIL:\s+(\S+)", line)
-        if m:
-            failures.add(m.group(1))
-            continue
-        m = re.match(r"^\s*FAILED\s+(\S+)", line)
-        if m:
-            failures.add(m.group(1))
-            continue
-        # Go style: FAIL  test_name (with two or more spaces or a tab)
-        m = re.match(r"^\s*FAIL\s{2,}(\S+)", line)
-        if m:
-            failures.add(m.group(1))
-            continue
-        m = re.match(r"^\s*FAIL\t(\S+)", line)
-        if m:
-            failures.add(m.group(1))
-            continue
-        # TAP format: not ok \d+ - test_name
-        m = re.match(r"^\s*not ok\s+\d+\s+-\s+(\S+)", line)
-        if m:
-            failures.add(m.group(1))
-            continue
+        for pattern in _FAILURE_PATTERNS:
+            m = pattern.match(line)
+            if m:
+                failures.add(m.group(1))
+                break
     return failures
 
 
