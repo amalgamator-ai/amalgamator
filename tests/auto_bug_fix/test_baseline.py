@@ -1,5 +1,5 @@
 """Tests for auto_bug_fix.baseline — test failure parsing and regression detection."""
-from auto_bug_fix.baseline import parse_test_failures, check_regression
+from auto_bug_fix.baseline import parse_test_failures, check_regression, run_test_suite, TIMEOUT_EXIT_CODE
 
 
 def test_parse_test_failures_fail_colon():
@@ -80,3 +80,20 @@ def test_parse_jest_fail():
     stdout = "FAIL src/components/Button.test.js\nPASS src/components/Input.test.js"
     failures = parse_test_failures(stdout, "")
     assert "src/components/Button.test.js" in failures
+
+
+# --- timeout handling ---
+
+def test_run_test_suite_timeout_returns_sentinel():
+    exit_code, _, _ = run_test_suite("sleep 3", "/tmp", timeout=1)
+    assert exit_code == TIMEOUT_EXIT_CODE
+
+
+def test_run_test_suite_completes_within_timeout():
+    exit_code, _, _ = run_test_suite("true", "/tmp", timeout=30)
+    assert exit_code == 0
+
+
+def test_run_test_suite_no_timeout_by_default():
+    exit_code, _, _ = run_test_suite("true", "/tmp")
+    assert exit_code == 0

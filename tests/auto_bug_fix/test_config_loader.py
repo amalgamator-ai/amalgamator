@@ -195,3 +195,42 @@ def test_parse_claude_config_top_level_model():
     config = {"model": "claude-opus-4-6"}
     claude_config = parse_claude_config(config, "/tmp/output")
     assert claude_config.model == "claude-opus-4-6"
+
+
+# --- timeout_minutes -> command_timeout (seconds) ---
+
+def _timeout_config(advanced):
+    return {
+        "issue_id": "CVE-2024-0000",
+        "bug_description": "Test",
+        "repository": {"source_path": "/tmp/test-repo", "workdir": "/tmp/workdir"},
+        "branches": {"source": "main", "target": "v1.0"},
+        "fix": {"commit": "abc123"},
+        "build": {"command": "make", "test_command": "make test"},
+        "advanced": advanced,
+    }
+
+
+def test_timeout_minutes_unset_means_no_limit():
+    cfg, _, _ = parse_bug_fix_config(_timeout_config({}))
+    assert cfg.command_timeout is None
+
+
+def test_timeout_minutes_zero_means_no_limit():
+    cfg, _, _ = parse_bug_fix_config(_timeout_config({"timeout_minutes": 0}))
+    assert cfg.command_timeout is None
+
+
+def test_timeout_minutes_positive_to_seconds():
+    cfg, _, _ = parse_bug_fix_config(_timeout_config({"timeout_minutes": 5}))
+    assert cfg.command_timeout == 300
+
+
+def test_timeout_minutes_fractional():
+    cfg, _, _ = parse_bug_fix_config(_timeout_config({"timeout_minutes": 1.5}))
+    assert cfg.command_timeout == 90
+
+
+def test_timeout_minutes_negative_means_no_limit():
+    cfg, _, _ = parse_bug_fix_config(_timeout_config({"timeout_minutes": -3}))
+    assert cfg.command_timeout is None

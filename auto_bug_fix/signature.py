@@ -5,9 +5,15 @@ import re
 import subprocess
 from typing import Literal
 
+from auto_bug_fix.baseline import TIMEOUT_EXIT_CODE
 
-def capture_output(cmd: list[str], cwd: str, timeout: int = 1800) -> tuple[int, str]:
-    """Run a command and return (exit_code, combined_stdout_stderr)."""
+
+def capture_output(cmd: list[str], cwd: str, timeout: int | None = None) -> tuple[int, str]:
+    """Run a command and return (exit_code, combined_stdout_stderr).
+
+    ``timeout`` is in seconds; ``None`` (the default) means no limit. A command
+    that exceeds the timeout returns ``TIMEOUT_EXIT_CODE``.
+    """
     try:
         if len(cmd) == 1:
             result = subprocess.run(
@@ -23,7 +29,7 @@ def capture_output(cmd: list[str], cwd: str, timeout: int = 1800) -> tuple[int, 
             )
     except subprocess.TimeoutExpired as e:
         partial = (e.stdout or "") if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
-        return (1, partial + f"\n[TIMED OUT after {timeout}s]")
+        return (TIMEOUT_EXIT_CODE, partial + f"\n[TIMED OUT after {timeout}s]")
     return (result.returncode, result.stdout)
 
 
