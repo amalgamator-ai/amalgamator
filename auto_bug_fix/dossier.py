@@ -48,7 +48,6 @@ def build_trailers(
     model: str,
     resolved_hunks: str | None = None,
     strategies_tried: str | None = None,
-    bisect_sha: str | None = None,
 ) -> dict[str, str]:
     """Build git commit trailer dict for the ported fix commit."""
     trailers = {
@@ -59,8 +58,6 @@ def build_trailers(
         trailers["AutoBugFix-Resolved-Hunks"] = resolved_hunks
     if strategies_tried:
         trailers["AutoBugFix-Strategies-Tried"] = strategies_tried
-    if bisect_sha:
-        trailers["AutoBugFix-Triage-Bisect-SHA"] = bisect_sha
     return trailers
 
 
