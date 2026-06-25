@@ -7,13 +7,16 @@ Usage:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from typing import Any
 
 from common.utils import Tee
@@ -22,7 +25,6 @@ from common.claude_utils import ClaudeConfig, claude_run as _claude_run
 
 async def _run_llm(claude_config, prompts, tracker=None):
     """Compatibility wrapper: call claude_run and feed timings into tracker."""
-    import time
     batch_start = time.time()
     step_timings = await _claude_run(claude_config, prompts)
 
@@ -62,11 +64,18 @@ from auto_bug_fix.git_tools import (
     git_reset_hard,
     git_commit as _git_commit_raw,
     git_rev_parse,
+    resolve_merge_commit,
+    git_is_ancestor,
+    git_cat_file_exists,
+    _is_merge_commit,
+    git_worktree_add,
 )
 from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
 from auto_bug_fix.signature import capture_output
 from auto_bug_fix.allowlist import derive_seed, resolve_renames, enforce_allowlist, enforce_test_file_veto
-from auto_bug_fix.baseline import capture_baseline, check_regression, run_test_suite
+from auto_bug_fix.baseline import capture_baseline, check_regression, run_test_suite, parse_test_failures
+from auto_bug_fix.worktree import cleanup_worktree
+from auto_bug_fix.config_loader import load_pipeline_config
 from auto_bug_fix.range_diff import run_range_diff, parse_equivalence
 from auto_bug_fix.dossier import Dossier, build_trailers, format_dossier
 from auto_bug_fix.tracker import Tracker
@@ -157,7 +166,6 @@ def phase_0_triage(
     state: PipelineState,
 ) -> dict[str, str]:
     """Run deterministic triage gates (patch-id, ancestry, seed files) and derive the allowlist."""
-    from auto_bug_fix.git_tools import resolve_merge_commit
     repo = config.repo_path
     fix = resolve_merge_commit(repo, config.source_fix_commit)
     target = config.target_branch
@@ -186,7 +194,6 @@ def phase_0_triage(
     if fwd:
         raise PipelineStop(f"Fix already present on target as {fwd}")
 
-    from auto_bug_fix.git_tools import git_is_ancestor, git_cat_file_exists
     bwd = backward_patch_id_check(repo, fix, target, config.forward_patch_id_lookback)
     is_ancestor = git_is_ancestor(repo, fix, target)
 
@@ -211,7 +218,7 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
     """
     sha = commit or config.source_fix_commit
 
-    from auto_bug_fix.git_tools import _is_merge_commit
+
     if for_files:
         if _is_merge_commit(config.repo_path, sha):
             stat = subprocess.run(
@@ -237,7 +244,7 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
             fix_diff = stat + "\n\n[Chunk diffs too large — stat only. Agent must read files directly.]"
         return fix_diff
 
-    from auto_bug_fix.git_tools import _is_merge_commit
+
     if _is_merge_commit(config.repo_path, sha):
         fix_diff = subprocess.run(
             ["git", "diff", f"{sha}^1..{sha}"],
@@ -350,9 +357,9 @@ def phase_0_5_semantic_triage(
     tracker,
 ) -> dict:
     """LLM-powered analysis of the commit before cherry-pick."""
-    import json as _json
 
-    from auto_bug_fix.git_tools import _is_merge_commit
+
+
     sha = config.source_fix_commit
     if _is_merge_commit(config.repo_path, sha):
         fix_diff = subprocess.run(
@@ -392,11 +399,11 @@ def phase_0_5_semantic_triage(
     if triage_path:
         try:
             with open(triage_path) as f:
-                assessment = _json.load(f)
+                assessment = json.load(f)
             log.info("Semantic triage: difficulty=%s, recommendation=%s",
                      assessment.get("estimated_difficulty", "?"),
                      assessment.get("recommendation", "?"))
-        except (_json.JSONDecodeError, OSError) as e:
+        except (json.JSONDecodeError, OSError) as e:
             log.warning("Failed to parse semantic triage output: %s", e)
 
     state.triage_assessment = assessment
@@ -495,7 +502,7 @@ def phase_1_baseline_and_red(
         red_exit, red_output = capture_output(
             [config.test_command], config.build_dir,
         )
-        from auto_bug_fix.baseline import parse_test_failures
+
         state.baseline = parse_test_failures(red_output, "")
         is_bugfix = state.triage_assessment.get("commit_type", "").lower() in _BUGFIX_TYPES
         if red_exit == 0:
@@ -563,7 +570,7 @@ def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[boo
     test_stdout = test_stderr = ""
     if config.test_command:
         test_exit, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
-        from auto_bug_fix.baseline import parse_test_failures
+
         failures = parse_test_failures(test_stdout, test_stderr)
         passed, _ = check_regression(failures, state.baseline)
     else:
@@ -628,7 +635,7 @@ def phase_4a_build_recovery(
         build_exit, build_stdout, build_stderr = run_test_suite(config.build_command, config.build_dir)
         if build_exit == 0:
             test_exit, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
-            from auto_bug_fix.baseline import parse_test_failures
+    
             failures = parse_test_failures(test_stdout, test_stderr)
             build_test_passed, _ = check_regression(failures, state.baseline)
             if build_test_passed:
@@ -680,7 +687,7 @@ def phase_4a_build_recovery(
     build_exit, _, _ = run_test_suite(config.build_command, config.build_dir)
     if build_exit == 0:
         _, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
-        from auto_bug_fix.baseline import parse_test_failures
+
         failures = parse_test_failures(test_stdout, test_stderr)
         final_passed, _ = check_regression(failures, state.baseline)
         if final_passed:
@@ -704,13 +711,12 @@ def phase_4b_external_pipeline(
     prerequisite analysis) then calls the external pipeline's RunAndFixPrompt which
     drives an LLM-heavy iterative fix loop.
     """
-    import json as _json
+
     ext_pipeline_root = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
     if not os.path.isdir(ext_pipeline_root):
         raise FileNotFoundError(f"External pipeline not found at {ext_pipeline_root}")
 
-    import sys
     if ext_pipeline_root not in sys.path:
         sys.path.insert(0, ext_pipeline_root)
 
@@ -720,7 +726,7 @@ def phase_4b_external_pipeline(
     from common.claude_utils import ClaudeConfig as ExtClaudeConfig
 
     dossier_text = format_dossier(state.dossier) if state.dossier else ""
-    triage_json = _json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "{}"
+    triage_json = json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "{}"
 
     enriched_context = f"""
 <context>
@@ -791,29 +797,29 @@ def phase_4b_external_pipeline(
         }
         phase_4b_json_path = os.path.join(tracker._output_dir, "phase_4b_input.json")
         with open(phase_4b_json_path, "w") as f:
-            _json.dump(phase_4b_data, f, indent=2)
+            json.dump(phase_4b_data, f, indent=2)
         log.info("Phase 4b input written to %s", phase_4b_json_path)
 
     log.info("Phase 4b: handing off to external pipeline (build-test-fix loop)")
-    import time as _time
-    _4b_start = _time.time()
+
+    _4b_start = time.time()
 
     phase_4b_log_path = os.path.join(tracker._output_dir, "phase_4b_log.txt") if tracker else None
     if phase_4b_log_path:
-        import sys as _sys
+
         _4b_log_file = open(phase_4b_log_path, "w")
-        _prev_stdout = _sys.stdout
-        _sys.stdout = Tee(_prev_stdout, _4b_log_file)
+        _prev_stdout = sys.stdout
+        sys.stdout = Tee(_prev_stdout, _4b_log_file)
 
     try:
         timings = asyncio.run(ext_claude_run(ext_claude_config, steps))
     finally:
         if phase_4b_log_path:
-            _sys.stdout = _prev_stdout
+            sys.stdout = _prev_stdout
             _4b_log_file.close()
             log.info("Phase 4b log written to %s", phase_4b_log_path)
 
-    _4b_end = _time.time()
+    _4b_end = time.time()
 
     if tracker and timings:
         for st in timings:
@@ -837,18 +843,18 @@ def phase_4b_external_pipeline(
             phase_4b_data["cost_usd"] = sum(st.get("cost_usd", 0) for st in timings)
             phase_4b_data["input_tokens"] = sum(st.get("input_tokens", 0) for st in timings)
             phase_4b_data["output_tokens"] = sum(st.get("output_tokens", 0) for st in timings)
-        import shutil as _shutil
+
         for result_file in (success_file, failure_file):
             if os.path.exists(result_file):
                 dest = os.path.join(tracker._output_dir, os.path.basename(result_file))
-                _shutil.copy2(result_file, dest)
+                shutil.copy2(result_file, dest)
                 log.info("Phase 4b result copied to %s", dest)
                 with open(result_file) as f:
                     phase_4b_data["outcome"] = "success" if result_file == success_file else "failure"
                     phase_4b_data["result_summary"] = f.read()
                 break
         with open(phase_4b_json_path, "w") as f:
-            _json.dump(phase_4b_data, f, indent=2)
+            json.dump(phase_4b_data, f, indent=2)
         log.info("Phase 4b JSON updated with results: %s", phase_4b_json_path)
 
     if os.path.exists(failure_file):
@@ -874,7 +880,7 @@ def cherry_pick_and_resolve(
     files_to_skip: list[str] | None = None,
 ) -> str:
     """Cherry-pick a single commit trying multiple strategies. Returns 'clean', 'resolved', or raises."""
-    from auto_bug_fix.git_tools import git_cherry_pick, git_cherry_pick_abort
+
 
     strategies = [
         {"strategy": None, "strategy_option": None, "name": "default"},
@@ -1022,8 +1028,7 @@ def cherry_pick_and_resolve(
         log.warning("%s: attempt %d: %d conflicts remain", label, attempt, len(still_conflicted))
         uu_files = _conflicted_files(still_conflicted)
 
-    from auto_bug_fix.git_tools import git_cherry_pick_abort as _abort
-    _abort(config.repo_path)
+    git_cherry_pick_abort(config.repo_path)
     raise PipelineEscalation(f"{label}: failed after {config.max_resolution_retries} attempts")
 
 
@@ -1113,7 +1118,6 @@ def run_pipeline(
         from auto_bug_fix.bug_fix_config import claude_config as _default
         claude_config = _default
 
-    from dataclasses import asdict
     tracker = Tracker(
         issue_id=config.issue_id,
         config_dict=asdict(config),
@@ -1158,15 +1162,15 @@ def _run_pipeline_phases(
         tracker.record_gate("ancestry", triage_gates["ancestry"])
 
     with tracker.phase("Phase 0.5 — Semantic triage"):
-        import json as _json
+    
         assessment = phase_0_5_semantic_triage(config, claude_config, state, tracker)
-        state.dossier.add("Semantic triage", _json.dumps(assessment, indent=2) if assessment else "no assessment", "Phase 0.5")
+        state.dossier.add("Semantic triage", json.dumps(assessment, indent=2) if assessment else "no assessment", "Phase 0.5")
         tracker.record_gate("difficulty", assessment.get("estimated_difficulty", "unknown"))
         tracker.record_gate("recommendation", assessment.get("recommendation", "unknown"))
         if assessment:
             triage_dest = os.path.join(tracker._output_dir, "semantic_triage.json")
             with open(triage_dest, "w") as f:
-                _json.dump(assessment, f, indent=2)
+                json.dump(assessment, f, indent=2)
 
     cherry_pick_succeeded = False
     try:
@@ -1178,7 +1182,7 @@ def _run_pipeline_phases(
                 ported = port_prerequisite_chain(config, claude_config, state, tracker)
                 state.dossier.add(
                     "Prerequisites ported",
-                    _json.dumps(ported, indent=2) if ported else "none",
+                    json.dumps(ported, indent=2) if ported else "none",
                     "Phase 0.5b",
                 )
                 tracker.record_gate("prerequisites_ported", str(len(ported)))
@@ -1430,9 +1434,6 @@ if __name__ == "__main__":
     # Load config from YAML if provided, otherwise use defaults
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
-        from auto_bug_fix.config_loader import load_pipeline_config
-        from datetime import datetime, timezone
-        import shutil
 
         bug_fix_config, claude_config, workdir, source_path = load_pipeline_config(config_path)
 
@@ -1455,7 +1456,6 @@ if __name__ == "__main__":
 
         if os.path.exists(worktree_path):
             print(f"Worktree already exists at {worktree_path}, removing...")
-            from auto_bug_fix.worktree import cleanup_worktree
             cleanup_worktree(source_path, worktree_path)
             if os.path.exists(worktree_path):
                 shutil.rmtree(worktree_path)
@@ -1465,7 +1465,6 @@ if __name__ == "__main__":
 
         target_branch = bug_fix_config.target_branch
         print(f"Creating worktree at {worktree_path} on {target_branch}...")
-        from auto_bug_fix.git_tools import git_worktree_add
         result = git_worktree_add(source_path, worktree_path, target_branch)
         if not result.success:
             print(f"ERROR: git worktree add failed: {result.stderr}")
