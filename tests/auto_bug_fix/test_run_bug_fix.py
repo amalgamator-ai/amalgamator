@@ -17,8 +17,6 @@ def test_pipeline_state_defaults():
     assert state.allowed_modules == []
     assert state.baseline == set()
     assert state.ported_test_files == []
-    assert state.s_target == ""
-    assert state.bisect_sha is None
     assert state.cherry_pick_path == ""
     assert state.dossier is None
     assert state.triage_assessment == {}

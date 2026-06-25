@@ -64,7 +64,7 @@ from auto_bug_fix.git_tools import (
     git_rev_parse,
 )
 from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
-from auto_bug_fix.signature import capture_output, normalize_signature
+from auto_bug_fix.signature import capture_output
 from auto_bug_fix.allowlist import derive_seed, resolve_renames, enforce_allowlist, enforce_test_file_veto
 from auto_bug_fix.baseline import capture_baseline, check_regression, run_test_suite
 from auto_bug_fix.range_diff import run_range_diff, parse_equivalence
@@ -142,8 +142,6 @@ class PipelineState:
     allowed_modules: list[str] = field(default_factory=list)
     baseline: set[str] = field(default_factory=set)
     ported_test_files: list[str] = field(default_factory=list)
-    s_target: str = ""
-    bisect_sha: str | None = None
     cherry_pick_path: str = ""
     dossier: Dossier | None = None
     triage_assessment: dict = field(default_factory=dict)
@@ -468,7 +466,7 @@ def phase_0_5c_test_port(
     return ported
 
 
-def phase_1_baseline_red_bisect(
+def phase_1_baseline_and_red(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
     state: PipelineState,
@@ -506,8 +504,6 @@ def phase_1_baseline_red_bisect(
             log.info("Baseline tests pass — %s",
                      "feature/refactor commit, RED check not applicable" if not is_bugfix
                      else "no ported vulnerability test available — proceeding")
-        else:
-            state.s_target = normalize_signature(red_output)
     else:
         log.info("Baseline test: skipped (no test command)")
 
@@ -532,22 +528,6 @@ def phase_1_baseline_red_bisect(
             log.info("Baseline verification passed: %s", vcmd)
         else:
             log.info("Baseline verification failed (exit %d, pre-existing): %s", entry["exit_code"], vcmd)
-
-
-def phase_1_5_failure_mode(
-    config: BugFixConfig,
-    claude_config: ClaudeConfig,
-    state: PipelineState,
-) -> str:
-    """Confirm the failure mode matches via signature comparison.
-
-    Currently always returns "skip" — requires a parent signature source
-    (e.g. from a reproducer or upstream test) to be wired in.
-    """
-    if not state.s_target:
-        return "skip"
-    return "skip"
-
 
 
 MAX_ERROR_CHARS = 50_000
@@ -1217,11 +1197,8 @@ def _run_pipeline_phases(
                     subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
                     git_commit(config.repo_path, f"Port test files for {config.issue_id} (Phase 0.5c)\n\nPorted before fix to enable RED/GREEN checking")
 
-        with tracker.phase("Phase 1 — Baseline + RED + Bisect"):
-            phase_1_baseline_red_bisect(config, claude_config, state)
-            if state.bisect_sha:
-                state.dossier.add("Bisect result", state.bisect_sha, "Phase 1 git bisect")
-                tracker.record_gate("bisect", state.bisect_sha)
+        with tracker.phase("Phase 1 — Baseline + RED"):
+            phase_1_baseline_and_red(config, claude_config, state)
 
             baseline_summary = f"Build: {'PASSED' if state.baseline_build_exit == 0 else 'FAILED (exit ' + str(state.baseline_build_exit) + ')'}"
             baseline_summary += f"\nTest ({config.test_command}): {'PASSED' if not state.baseline else str(len(state.baseline)) + ' pre-existing failures'}"
@@ -1229,11 +1206,6 @@ def _run_pipeline_phases(
                 status = "PASSED" if entry["exit_code"] == 0 else f"FAILED (exit {entry['exit_code']}, pre-existing)"
                 baseline_summary += f"\n{entry['cmd']}: {status}"
             state.dossier.add("Baseline (clean target branch)", baseline_summary, "Phase 1")
-
-        with tracker.phase("Phase 1.5 — Failure-mode confirmation"):
-            sig_result = phase_1_5_failure_mode(config, claude_config, state)
-            state.dossier.add("Signature comparison", sig_result, "Phase 1.5")
-            tracker.record_gate("signature_comparison", sig_result)
 
         subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
         status = git_status_porcelain(config.repo_path)
@@ -1438,7 +1410,6 @@ def _run_pipeline_phases(
     state.dossier.trailers = build_trailers(
         phase=state.cherry_pick_path,
         model=claude_config.model,
-        bisect_sha=state.bisect_sha,
     )
 
     log.info("Phase 5 — Dossier ready for human review")
