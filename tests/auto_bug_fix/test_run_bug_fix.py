@@ -9,6 +9,7 @@ from auto_bug_fix.run_bug_fix import (
     _resolve_lint_command,
     _run_build_and_test,
 )
+from auto_bug_fix.baseline import TIMEOUT_EXIT_CODE
 
 
 def test_pipeline_state_defaults():
@@ -200,3 +201,43 @@ def test_no_lint_command_skips_lint(mock_run, mock_allow, mock_veto):
     passed, _, _, _, _ = _run_build_and_test(config, state)
     assert passed is True
     assert mock_run.call_count == 2
+
+
+# --- timeout-as-hard-failure tests ---
+
+@patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.run_test_suite")
+def test_test_timeout_means_verify_fail(mock_run, mock_allow, mock_veto):
+    # A test command that times out must fail verification, never be masked as
+    # "no FAIL lines parsed -> pass".
+    mock_run.side_effect = [
+        (0, "", ""),                                   # build
+        (TIMEOUT_EXIT_CODE, "partial", "timed out"),   # test times out
+    ]
+    config = _make_config()
+    state = PipelineState()
+    passed, _, _, _, _ = _run_build_and_test(config, state)
+    assert passed is False
+    assert mock_run.call_count == 2  # returns at the test step; lint not reached
+
+
+@patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.run_test_suite")
+def test_lint_timeout_not_masked_as_preexisting(mock_run, mock_allow, mock_veto):
+    # Regression guard for the false-success class: a lint command that times
+    # out must fail even when the same command also timed out on the baseline.
+    # A timeout is never treated as a pre-existing failure.
+    mock_run.side_effect = [
+        (0, "", ""),                            # build
+        (0, "", ""),                            # test
+        (TIMEOUT_EXIT_CODE, "", "timed out"),   # lint times out
+    ]
+    config = _make_config(lint_command="go vet ./...")
+    state = PipelineState()
+    state.baseline_verification = [
+        {"cmd": "go vet ./...", "exit_code": TIMEOUT_EXIT_CODE, "output": "also timed out"}
+    ]
+    passed, _, _, _, _ = _run_build_and_test(config, state)
+    assert passed is False
