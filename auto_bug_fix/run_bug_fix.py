@@ -118,6 +118,8 @@ _CONFLICT_PREFIXES = ("UU ", "AA ", "DU ", "UD ", "DD ", "AU ", "UA ")
 
 _DANGEROUS_SHELL_PATTERNS = (";", "&&", "||", "|", "`", "$(", "${", ">", "<", "\n")
 
+_BUGFIX_TYPES = ("bugfix", "bug-fix", "bug_fix", "fix", "security")
+
 
 def _validate_shell_command(cmd: str) -> bool:
     """Reject commands with shell metacharacters that could indicate injection."""
@@ -497,7 +499,7 @@ def phase_1_baseline_red_bisect(
         )
         from auto_bug_fix.baseline import parse_test_failures
         state.baseline = parse_test_failures(red_output, "")
-        is_bugfix = state.triage_assessment.get("commit_type", "").lower() in ("bugfix", "bug_fix", "fix", "security")
+        is_bugfix = state.triage_assessment.get("commit_type", "").lower() in _BUGFIX_TYPES
         if red_exit == 0:
             if state.ported_test_files and is_bugfix:
                 raise PipelineEscalation("RED check passed — target may already be fixed or test is inapplicable")
@@ -1190,7 +1192,7 @@ def _run_pipeline_phases(
     try:
         prereqs = state.triage_assessment.get("prerequisites", [])
         portable_prereqs = [p for p in prereqs if p.get("portable", False) and p.get("introduced_by")]
-        is_bugfix = state.triage_assessment.get("commit_type", "").lower() in ("bugfix", "bug-fix", "bug_fix", "fix", "security")
+        is_bugfix = state.triage_assessment.get("commit_type", "").lower() in _BUGFIX_TYPES
         if portable_prereqs and not is_bugfix:
             with tracker.phase("Phase 0.5b — Prerequisite chain"):
                 ported = port_prerequisite_chain(config, claude_config, state, tracker)
