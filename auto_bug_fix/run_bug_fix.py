@@ -963,9 +963,9 @@ def cherry_pick_and_resolve(
 
         auto_resolved = [f for f in uu_files if f in skip_set]
         if auto_resolved:
-            log.info("%s: auto-resolving %d generated/binary files", label, len(auto_resolved))
+            log.info("%s: reverting %d conflicting skip files to target version", label, len(auto_resolved))
             for f in auto_resolved:
-                subprocess.run(["git", "checkout", "--theirs", "--", f],
+                subprocess.run(["git", "checkout", "HEAD", "--", f],
                                cwd=config.repo_path, capture_output=True)
                 subprocess.run(["git", "add", "--", f],
                                cwd=config.repo_path, capture_output=True)
