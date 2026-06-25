@@ -9,6 +9,7 @@ from auto_bug_fix.run_bug_fix import (
     _resolve_lint_command,
     _run_build_and_test,
 )
+from auto_bug_fix.baseline import TIMEOUT_EXIT_CODE
 
 
 def test_pipeline_state_defaults():
@@ -242,3 +243,38 @@ def test_auto_discover_true_includes_verification_commands():
 def test_auto_discover_default_is_false():
     config = _make_config()
     assert config.auto_discover_tests is False
+
+
+# --- timeout-as-hard-failure tests ---
+
+@patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.run_test_suite")
+def test_test_timeout_means_verify_fail(mock_run, mock_allow, mock_veto):
+    mock_run.side_effect = [
+        (0, "", ""),                                   # build
+        (TIMEOUT_EXIT_CODE, "partial", "timed out"),   # test times out
+    ]
+    config = _make_config()
+    state = PipelineState()
+    passed, _, _, _, _ = _run_build_and_test(config, state)
+    assert passed is False
+    assert mock_run.call_count == 2
+
+
+@patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.run_test_suite")
+def test_lint_timeout_not_masked_as_preexisting(mock_run, mock_allow, mock_veto):
+    mock_run.side_effect = [
+        (0, "", ""),                            # build
+        (0, "", ""),                            # test
+        (TIMEOUT_EXIT_CODE, "", "timed out"),   # lint times out
+    ]
+    config = _make_config(lint_command="go vet ./...")
+    state = PipelineState()
+    state.baseline_verification = [
+        {"cmd": "go vet ./...", "exit_code": TIMEOUT_EXIT_CODE, "output": "also timed out"}
+    ]
+    passed, _, _, _, _ = _run_build_and_test(config, state)
+    assert passed is False
