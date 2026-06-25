@@ -200,3 +200,45 @@ def test_no_lint_command_skips_lint(mock_run, mock_allow, mock_veto):
     passed, _, _, _, _ = _run_build_and_test(config, state)
     assert passed is True
     assert mock_run.call_count == 2
+
+
+# --- auto_discover_tests tests ---
+
+def test_auto_discover_false_excludes_verification_commands():
+    config = _make_config(auto_discover_tests=False)
+    state = PipelineState()
+    state.triage_assessment = {
+        "lint_commands": ["go vet ./..."],
+        "verification_commands": ["go test ./server/...", "go test ./pkg/..."],
+    }
+    from auto_bug_fix.run_bug_fix import _validate_shell_command
+    lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
+    verification_cmds = list(lint_cmds)
+    if config.auto_discover_tests:
+        for c in state.triage_assessment.get("verification_commands", []):
+            if _validate_shell_command(c):
+                verification_cmds.append(c)
+    assert verification_cmds == ["go vet ./..."]
+    assert "go test ./server/..." not in verification_cmds
+
+
+def test_auto_discover_true_includes_verification_commands():
+    config = _make_config(auto_discover_tests=True)
+    state = PipelineState()
+    state.triage_assessment = {
+        "lint_commands": ["go vet ./..."],
+        "verification_commands": ["go test ./server/...", "go test ./pkg/..."],
+    }
+    from auto_bug_fix.run_bug_fix import _validate_shell_command
+    lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
+    verification_cmds = list(lint_cmds)
+    if config.auto_discover_tests:
+        for c in state.triage_assessment.get("verification_commands", []):
+            if _validate_shell_command(c):
+                verification_cmds.append(c)
+    assert verification_cmds == ["go vet ./...", "go test ./server/...", "go test ./pkg/..."]
+
+
+def test_auto_discover_default_is_false():
+    config = _make_config()
+    assert config.auto_discover_tests is False
