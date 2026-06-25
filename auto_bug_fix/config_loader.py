@@ -101,6 +101,14 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
     if not isinstance(advanced, dict):
         advanced = {}
 
+    # Timeout is specified in minutes in the YAML; 0/unset/negative = no limit.
+    timeout_minutes = advanced.get("timeout_minutes")
+    command_timeout = (
+        int(timeout_minutes * 60)
+        if isinstance(timeout_minutes, (int, float)) and timeout_minutes > 0
+        else None
+    )
+
     bug_fix_config = BugFixConfig(
         repo_path=repo_path,
         build_dir=build_dir,
@@ -116,6 +124,7 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         max_resolution_retries=advanced.get("max_resolution_retries", 3),
         forward_patch_id_lookback=advanced.get("forward_patch_id_lookback", "12 months"),
         allowlist_rename_expansion_cap=advanced.get("allowlist_rename_expansion_cap", 3),
+        command_timeout=command_timeout,
     )
 
     return bug_fix_config, workdir, source_path
