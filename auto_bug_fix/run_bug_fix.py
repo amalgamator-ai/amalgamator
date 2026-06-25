@@ -73,7 +73,7 @@ from auto_bug_fix.git_tools import (
 from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
 from auto_bug_fix.signature import capture_output
 from auto_bug_fix.allowlist import derive_seed, resolve_renames, enforce_allowlist, enforce_test_file_veto
-from auto_bug_fix.baseline import capture_baseline, check_regression, run_test_suite, parse_test_failures
+from auto_bug_fix.baseline import capture_baseline, check_regression, run_test_suite, parse_test_failures, TIMEOUT_EXIT_CODE
 from auto_bug_fix.worktree import cleanup_worktree
 from auto_bug_fix.config_loader import load_pipeline_config
 from auto_bug_fix.range_diff import run_range_diff, parse_equivalence
@@ -293,7 +293,7 @@ def phase_3b_regeneration(
         try:
             result = subprocess.run(
                 cmd, shell=True, cwd=config.repo_path,
-                capture_output=True, text=True, timeout=1800,
+                capture_output=True, text=True, timeout=config.command_timeout,
             )
         except subprocess.TimeoutExpired:
             log.warning("Phase 3b: regeneration timed out (30min): %s", cmd)
@@ -310,7 +310,7 @@ def phase_3b_regeneration(
             try:
                 build_check = subprocess.run(
                     config.build_command, shell=True, cwd=config.build_dir,
-                    capture_output=True, text=True, timeout=300,
+                    capture_output=True, text=True, timeout=config.command_timeout,
                 )
             except subprocess.TimeoutExpired:
                 log.warning("Phase 3b: build check timed out, rolling back")
@@ -486,7 +486,7 @@ def phase_1_baseline_and_red(
     # Step 1: Build baseline
     if config.build_command:
         build_exit, build_output = capture_output(
-            [config.build_command], config.build_dir,
+            [config.build_command], config.build_dir, timeout=config.command_timeout,
         )
         state.baseline_build_exit = build_exit
         state.baseline_build_output = build_output
@@ -500,7 +500,7 @@ def phase_1_baseline_and_red(
     # Step 2: Test baseline (existing logic)
     if config.test_command:
         red_exit, red_output = capture_output(
-            [config.test_command], config.build_dir,
+            [config.test_command], config.build_dir, timeout=config.command_timeout,
         )
 
         state.baseline = parse_test_failures(red_output, "")
@@ -528,11 +528,11 @@ def phase_1_baseline_and_red(
         try:
             vresult = subprocess.run(
                 vcmd, shell=True, cwd=config.build_dir,
-                capture_output=True, text=True, timeout=600,
+                capture_output=True, text=True, timeout=config.command_timeout,
             )
             entry = {"cmd": vcmd, "exit_code": vresult.returncode, "output": (vresult.stdout + "\n" + vresult.stderr)[-3000:]}
         except subprocess.TimeoutExpired:
-            entry = {"cmd": vcmd, "exit_code": -1, "output": "Timed out after 10 minutes"}
+            entry = {"cmd": vcmd, "exit_code": TIMEOUT_EXIT_CODE, "output": f"Timed out after {config.command_timeout}s"}
         state.baseline_verification.append(entry)
         if entry["exit_code"] == 0:
             log.info("Baseline verification passed: %s", vcmd)
@@ -566,14 +566,18 @@ def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[boo
     """
     build_stdout = build_stderr = ""
     if config.build_command:
-        build_exit, build_stdout, build_stderr = run_test_suite(config.build_command, config.build_dir)
+        build_exit, build_stdout, build_stderr = run_test_suite(
+            config.build_command, config.build_dir, timeout=config.command_timeout)
         if build_exit != 0:
             return False, build_stdout, build_stderr, "", ""
 
     test_stdout = test_stderr = ""
     if config.test_command:
-        test_exit, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
-
+        test_exit, test_stdout, test_stderr = run_test_suite(
+            config.test_command, config.build_dir, timeout=config.command_timeout)
+        if test_exit == TIMEOUT_EXIT_CODE:
+            log.warning("Test command timed out — treating as verification failure: %s", config.test_command)
+            return False, build_stdout, build_stderr, test_stdout, test_stderr
         failures = parse_test_failures(test_stdout, test_stderr)
         passed, _ = check_regression(failures, state.baseline)
     else:
@@ -584,7 +588,11 @@ def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[boo
 
     lint_cmd = _resolve_lint_command(config, state)
     if lint_cmd:
-        lint_exit, lint_stdout, lint_stderr = run_test_suite(lint_cmd, config.build_dir)
+        lint_exit, lint_stdout, lint_stderr = run_test_suite(
+            lint_cmd, config.build_dir, timeout=config.command_timeout)
+        if lint_exit == TIMEOUT_EXIT_CODE:
+            log.warning("Lint command timed out — treating as failure: %s", lint_cmd)
+            return False, build_stdout, build_stderr, lint_stdout, lint_stderr
         if lint_exit != 0:
             baseline_lint_failed = any(
                 e["cmd"] == lint_cmd and e["exit_code"] != 0
@@ -635,13 +643,15 @@ def phase_4a_build_recovery(
     )
 
     for attempt in range(1, config.max_build_test_retries + 1):
-        build_exit, build_stdout, build_stderr = run_test_suite(config.build_command, config.build_dir)
+        build_exit, build_stdout, build_stderr = run_test_suite(
+            config.build_command, config.build_dir, timeout=config.command_timeout)
         if build_exit == 0:
-            test_exit, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
-    
+            test_exit, test_stdout, test_stderr = run_test_suite(
+                config.test_command, config.build_dir, timeout=config.command_timeout)
+
             failures = parse_test_failures(test_stdout, test_stderr)
-            build_test_passed, _ = check_regression(failures, state.baseline)
-            if build_test_passed:
+            no_regression, _ = check_regression(failures, state.baseline)
+            if test_exit != TIMEOUT_EXIT_CODE and no_regression:
                 log.info("Phase 4a: build+test passed on attempt %d", attempt)
                 return
         else:
@@ -687,13 +697,15 @@ def phase_4a_build_recovery(
                 "Phase 4a: agent made no changes — likely CANNOT_FIX"
             )
 
-    build_exit, _, _ = run_test_suite(config.build_command, config.build_dir)
+    build_exit, _, _ = run_test_suite(
+        config.build_command, config.build_dir, timeout=config.command_timeout)
     if build_exit == 0:
-        _, test_stdout, test_stderr = run_test_suite(config.test_command, config.build_dir)
+        test_exit, test_stdout, test_stderr = run_test_suite(
+            config.test_command, config.build_dir, timeout=config.command_timeout)
 
         failures = parse_test_failures(test_stdout, test_stderr)
-        final_passed, _ = check_regression(failures, state.baseline)
-        if final_passed:
+        no_regression, _ = check_regression(failures, state.baseline)
+        if test_exit != TIMEOUT_EXIT_CODE and no_regression:
             log.info("Phase 4a: build+test passed after final attempt")
             return
 
@@ -1333,15 +1345,14 @@ def _run_pipeline_phases(
                 try:
                     vresult = subprocess.run(
                         vcmd, shell=True, cwd=config.build_dir,
-                        capture_output=True, text=True, timeout=600,
+                        capture_output=True, text=True, timeout=config.command_timeout,
                     )
                 except subprocess.TimeoutExpired:
-                    if vcmd in baseline_failures:
-                        log.info("Phase 4.1: verification timed out (pre-existing): %s", vcmd)
-                    else:
-                        log.warning("Phase 4.1: verification timed out (10min): %s", vcmd)
-                        ext_failures.append({"cmd": vcmd, "output": "Timed out after 10 minutes"})
-                        state.dossier.add(f"Extended verification timed out: {vcmd}", "Timed out after 10 minutes", "Phase 4.1")
+                    # A timeout is never treated as a pre-existing failure — we
+                    # cannot conclude anything from a command that didn't finish.
+                    log.warning("Phase 4.1: verification timed out — treating as failure: %s", vcmd)
+                    ext_failures.append({"cmd": vcmd, "output": f"Timed out after {config.command_timeout}s"})
+                    state.dossier.add(f"Extended verification timed out: {vcmd}", f"Timed out after {config.command_timeout}s", "Phase 4.1")
                     continue
                 if vresult.returncode == 0:
                     log.info("Phase 4.1: verification passed: %s", vcmd)
@@ -1370,11 +1381,10 @@ def _run_pipeline_phases(
                         try:
                             vresult = subprocess.run(
                                 vcmd, shell=True, cwd=config.build_dir,
-                                capture_output=True, text=True, timeout=600,
+                                capture_output=True, text=True, timeout=config.command_timeout,
                             )
                         except subprocess.TimeoutExpired:
-                            if vcmd not in baseline_failures:
-                                still_failing.append(vcmd)
+                            still_failing.append(vcmd)
                             continue
                         if vresult.returncode != 0 and vcmd not in baseline_failures:
                             still_failing.append(vcmd)
