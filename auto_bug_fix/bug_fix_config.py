@@ -26,6 +26,7 @@ class BugFixConfig:
     build_command: str = ""
     test_command: str = ""
     lint_command: str = ""
+    auto_discover_tests: bool = False
     max_build_test_retries: int = 3
     max_resolution_retries: int = 3
 
