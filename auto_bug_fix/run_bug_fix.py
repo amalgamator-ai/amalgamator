@@ -1454,11 +1454,9 @@ if __name__ == "__main__":
         os.makedirs(workdir, exist_ok=True)
         worktree_path = os.path.join(workdir, bug_fix_config.issue_id)
 
+        cleanup_worktree(source_path, worktree_path)
         if os.path.exists(worktree_path):
-            print(f"Worktree already exists at {worktree_path}, removing...")
-            cleanup_worktree(source_path, worktree_path)
-            if os.path.exists(worktree_path):
-                shutil.rmtree(worktree_path)
+            shutil.rmtree(worktree_path)
 
         print(f"Fetching latest refs from origin...")
         subprocess.run(["git", "fetch", "--all", "--quiet"], cwd=source_path, capture_output=True)
