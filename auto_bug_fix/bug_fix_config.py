@@ -26,8 +26,14 @@ class BugFixConfig:
     build_command: str = ""
     test_command: str = ""
     lint_command: str = ""
+    auto_discover_tests: bool = False
     max_build_test_retries: int = 3
     max_resolution_retries: int = 3
+
+    # Per-command timeout in seconds (None = no limit). Set via YAML
+    # advanced.timeout_minutes. Builds/tests can legitimately run for hours, so
+    # the default is unbounded; a fired timeout is treated as a hard failure.
+    command_timeout: int | None = None
 
     # Patch-ID
     forward_patch_id_lookback: str = "12 months"
