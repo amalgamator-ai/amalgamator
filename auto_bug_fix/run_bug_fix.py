@@ -514,12 +514,15 @@ def phase_1_baseline_and_red(
     else:
         log.info("Baseline test: skipped (no test command)")
 
-    # Step 3: Extended verification baseline (YAML lint + triage lint + verification commands)
+    # Step 3: Extended verification baseline (lint + optionally triage-discovered tests)
     lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
     if config.lint_command and config.lint_command not in lint_cmds:
         lint_cmds.insert(0, config.lint_command)
-    verification_cmds = state.triage_assessment.get("verification_commands", [])
-    verification_cmds = lint_cmds + [c for c in verification_cmds if _validate_shell_command(c)]
+    verification_cmds = list(lint_cmds)
+    if config.auto_discover_tests:
+        for c in state.triage_assessment.get("verification_commands", []):
+            if _validate_shell_command(c):
+                verification_cmds.append(c)
     state.baseline_verification = []
     for vcmd in verification_cmds:
         try:
@@ -1314,8 +1317,11 @@ def _run_pipeline_phases(
 
     phase4_lint = _resolve_lint_command(config, state)
     lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c) and c != phase4_lint]
-    verification_cmds = state.triage_assessment.get("verification_commands", [])
-    verification_cmds = lint_cmds + [c for c in verification_cmds if _validate_shell_command(c)]
+    verification_cmds = list(lint_cmds)
+    if config.auto_discover_tests:
+        for c in state.triage_assessment.get("verification_commands", []):
+            if _validate_shell_command(c):
+                verification_cmds.append(c)
 
     baseline_failures = {e["cmd"]: e["exit_code"] for e in state.baseline_verification if e["exit_code"] != 0}
 
