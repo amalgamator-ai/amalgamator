@@ -4,9 +4,18 @@ from __future__ import annotations
 import re
 import subprocess
 
+# Exit code marking a command that exceeded its timeout. Kept distinct from a
+# normal non-zero exit so the verify path can treat a timeout as a hard failure
+# rather than masking it as "no failures parsed" or "pre-existing on baseline".
+TIMEOUT_EXIT_CODE = 124
 
-def run_test_suite(test_command: str, cwd: str, timeout: int = 1800) -> tuple[int, str, str]:
-    """Run a shell test command and return (exit_code, stdout, stderr)."""
+
+def run_test_suite(test_command: str, cwd: str, timeout: int | None = None) -> tuple[int, str, str]:
+    """Run a shell test command and return (exit_code, stdout, stderr).
+
+    ``timeout`` is in seconds; ``None`` (the default) means no limit. A command
+    that exceeds the timeout returns ``TIMEOUT_EXIT_CODE``.
+    """
     try:
         result = subprocess.run(
             test_command, shell=True, cwd=cwd, capture_output=True, text=True,
@@ -15,7 +24,7 @@ def run_test_suite(test_command: str, cwd: str, timeout: int = 1800) -> tuple[in
     except subprocess.TimeoutExpired as e:
         partial_out = (e.stdout or "") if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
         partial_err = (e.stderr or "") if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")
-        return (1, partial_out, partial_err + f"\nCommand timed out after {timeout}s: {test_command}")
+        return (TIMEOUT_EXIT_CODE, partial_out, partial_err + f"\nCommand timed out after {timeout}s: {test_command}")
     return (result.returncode, result.stdout, result.stderr)
 
 
