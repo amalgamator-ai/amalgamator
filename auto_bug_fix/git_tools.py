@@ -169,8 +169,8 @@ def git_reset_hard(repo_path: str, ref: str = "HEAD") -> GitResult:
 
 
 def git_worktree_add(repo_path: str, path: str, branch: str) -> GitResult:
-    """Create a new git worktree at path checked out to branch."""
-    return _run_git(repo_path, ["worktree", "add", path, branch])
+    """Create a new git worktree at path, detached at the given branch/commit."""
+    return _run_git(repo_path, ["worktree", "add", "--detach", path, branch])
 
 
 def git_worktree_remove(repo_path: str, path: str) -> GitResult:
