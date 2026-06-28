@@ -1,0 +1,158 @@
+================================================================================
+TEST PLAN SUMMARY V1: Iteration Budget & Agent Loop Safety
+================================================================================
+
+Feature:  Per-agent iteration budget with consume/refund semantics,
+          budget-exhaustion forced summary, and configuration.
+Porting:  Hermes Agent (Python) -> OpenClaw (TypeScript)
+Plan Ref: code_port_plan_review_V3.txt (corrected)
+
+================================================================================
+1. EXPLANATION OF THE TEST PLAN
+================================================================================
+
+The test plan covers all 16 implementation steps from the corrected V3 code
+port plan, organized into 6 test files plus 2 supporting infrastructure files
+(harness + fixtures). The plan targets an estimated 77-92 individual test
+cases across unit and integration test levels.
+
+--- Design Decisions ---
+
+A) TEST ARCHITECTURE: LAYERED, MIRRORING THE PORT PLAN
+
+  The tests follow the same 6-layer architecture as the port plan:
+
+    Layer 1 (Core Module):     IterationBudget unit tests
+    Layer 2 (Configuration):   Zod schema + config resolution tests
+    Layer 3 (Agent-Core):      onBeforeToolCallingRound callback tests
+    Layer 4 (Runner):          Run loop integration tests
+    Layer 5 (Defaults):        Covered by config schema defaults tests
+    Layer 6 (Testing):         The tests themselves
+
+  This alignment ensures every implementation step has traceable test
+  coverage, and tests can be written incrementally as each layer is built.
+
+B) TESTING FRAMEWORK: VITEST (OpenClaw's standard)
+
+  All tests use Vitest 4.1.8 with OpenClaw's established conventions:
+    - *.test.ts colocated with source files
+    - import { describe, it, expect, vi } from "vitest"
+    - vi.fn() / vi.mock() / vi.doMock() for mocking
+    - expect().toBe() / toEqual() / toHaveLength() assertions
+    - beforeEach() for per-test isolation
+    - Helper functions (not fixtures) for test data construction
+
+C) HERMES TEST PORTING STRATEGY
+
+  Hermes has 5 unit tests for IterationBudget and 22 tests for guardrails.
+  The ported tests are adapted as follows:
+
+    Ported directly:
+      - consume-returns-false-when-exhausted (Hermes -> OpenClaw)
+      - refund-restores-consume (Hermes -> OpenClaw)
+      - used-reflects-consume-and-refund (Hermes -> OpenClaw)
+      - remaining (Hermes -> OpenClaw)
+
+    Dropped (not applicable):
+      - Thread-safety test (Node.js is single-threaded)
+
+    Added (OpenClaw-specific):
+      - Zero-budget edge case (maxTotal=0)
+      - Zod schema validation (OpenClaw uses Zod, Hermes uses YAML)
+      - Config resolution with per-agent overrides (OpenClaw pattern)
+      - Integration with run.ts retry mechanisms
+      - Budget metadata in EmbeddedAgentRunResult
+      - Regression scenarios from V3 review corrections (FIX #1-6)
+
+D) INTEGRATION TEST STRATEGY
+
+  The run.iteration-budget.test.ts file uses OpenClaw's established harness
+  pattern (modeled on run.overflow-compaction.harness.ts). This pattern:
+    - Uses vi.doMock() to replace ~40 module dependencies
+    - Provides mockedRunEmbeddedAttempt for LLM attempt simulation
+    - Uses makeAttemptResult() fixtures for standardized test responses
+    - Queues multiple attempt results with .mockImplementationOnce()
+
+  This allows testing the full budget lifecycle (creation -> consumption ->
+  exhaustion -> summary -> result) without any real LLM calls or I/O.
+
+E) COVERAGE OF V3 REVIEW CORRECTIONS
+
+  Each correction from the V3 review has dedicated test coverage:
+
+    FIX #1 (Harness property access):
+      -> FILE 6: CoreAgentHarness.createLoopConfig maps its own property
+
+    FIX #2 (!timedOut guard):
+      -> FILE 4: "does NOT trigger budget exhaustion when attempt timed out"
+
+    FIX #3 (!emptyAssistantReplyIsSilent, !yieldDetected):
+      -> FILE 4: Two dedicated tests for silent completion and yield
+
+    FIX #4 (Stale instruction cleanup):
+      -> FILE 4: "clears stale retry instructions before summary attempt"
+
+    FIX #5 (Fresh budget on failover):
+      -> FILE 4: "fresh budget on failover model retry" (regression R3)
+
+    FIX #6 (Harness instance access in attempt.ts):
+      -> FILE 4: "passes budget-aware callback to attempt params"
+
+--- Test File Inventory ---
+
+  #  | File Path                                                       | Type        | Tests
+  ---+-----------------------------------------------------------------+-------------+------
+  1  | src/agents/iteration-budget.test.ts                            | Unit        | ~17
+  2  | src/config/zod-schema.iteration-budget.test.ts                 | Unit        | ~16
+  3  | src/agents/embedded-agent-runner/run/helpers.test.ts (extend)  | Unit        | ~8
+  4  | src/agents/embedded-agent-runner/run.iteration-budget.test.ts  | Integration | ~28
+  5  | src/agents/embedded-agent-runner/run/budget-exhaustion.test.ts | Unit        | ~8
+  6  | packages/agent-core/src/agent-loop.iteration-budget.test.ts   | Unit        | ~8
+  ---+-----------------------------------------------------------------+-------------+------
+                                                        TOTAL:          ~85 tests
+
+  Supporting files:
+  - src/agents/embedded-agent-runner/run.iteration-budget.harness.ts
+  - src/agents/embedded-agent-runner/run.iteration-budget.fixture.ts
+
+
+================================================================================
+2. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+--- Iteration 1 (This Iteration) ---
+
+  Scope: Full test plan for the ported feature.
+
+  Inputs consumed:
+    - code_port_plan_review_V3.txt (corrected 16-step implementation plan)
+    - hermes_code_trace.txt (source feature architecture)
+    - openclaw_code_trace.txt (target codebase analysis)
+    - Hermes test files (5 IterationBudget tests, 13 guardrail tests,
+      9 runtime integration tests)
+    - OpenClaw test files (tool-loop-detection.test.ts, post-compaction-
+      loop-guard.test.ts, run.compaction-loop-guard.test.ts,
+      zod-schema.agent-defaults.test.ts, helpers.test.ts)
+    - OpenClaw test infrastructure (vitest.config.ts, harness pattern,
+      fixture pattern, mock conventions)
+
+  Key findings that shaped the plan:
+    1. OpenClaw uses Vitest 4.1.8 with colocated *.test.ts files
+    2. Integration tests use a harness pattern (vi.doMock + async loader)
+    3. Config tests use Zod .safeParse() with expectSchemaSuccess helpers
+    4. No thread-safety needed (Node.js single-threaded vs Python threads)
+    5. The run.ts loop has ~10 distinct retry/continue paths; budget
+       exhaustion must avoid conflicting with all of them (7 negative tests)
+    6. V3 review corrections (FIX #1-6) each need dedicated regression tests
+
+  Outputs produced:
+    - test_plan_V1.txt: 6 test files, ~85 tests, 2 support files,
+      6 regression scenarios, full coverage matrix
+    - test_plan_summary_V1.txt: This file
+
+  No prior iterations exist. This is the initial test plan.
+
+
+================================================================================
+END OF SUMMARY
+================================================================================

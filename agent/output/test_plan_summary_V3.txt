@@ -1,0 +1,219 @@
+================================================================================
+TEST PLAN SUMMARY V3
+Iteration Budget & Agent Loop Safety -- Hermes -> OpenClaw
+================================================================================
+
+
+================================================================================
+1. V3 TEST PLAN EXPLANATION
+================================================================================
+
+The V3 test plan is a from-scratch rewrite that incorporates all lessons
+learned across four previous iterations (V1, V1 Review, V2, V2 Review).
+All prior corrections are incorporated as baseline — no FIX markers remain
+because every issue from prior iterations has been absorbed into the plan's
+foundation.
+
+--- What V3 tests cover ---
+
+7 test files (~81 tests total) across 3 NEW files and 4 EXTENDED files:
+
+  FILE 1 (14 tests): IterationBudget class unit tests
+    - Constructor, consume(), refund(), used/remaining properties
+    - Edge cases: maxTotal=0, maxTotal=1, refund below 0
+    - Complex interleaved consume/refund sequences
+    - No thread-safety tests (Node.js single-threaded — intentional omission)
+
+  FILE 2 (12 tests): Zod schema validation for iterationBudget config
+    - Valid configurations (all fields, partial, empty, per-agent entries)
+    - Boundary values (min=1, max=500, rejects 0/negative/non-integer)
+    - Invalid inputs (wrong types, unknown properties)
+    - Tests BOTH AgentDefaultsSchema AND AgentEntrySchema
+
+  FILE 3 (11 tests): Config resolution / merge logic
+    - Default value application (90/50/true/false)
+    - Missing config handling (undefined, unknown agent)
+    - Per-agent override + merge semantics (override replaces, unset inherits)
+    - Case-insensitive agent ID resolution
+
+  FILE 4 (32 tests): Integration tests for budget in run.ts main loop
+    - Budget creation (enabled/disabled/absent)
+    - Budget consumption per productive attempt
+    - Budget exhaustion detection with 9-guard condition
+    - Forced summary on exhaustion (with/without, refund, failure, stale instruction clearing)
+    - Budget refund on compaction restart
+    - Budget metadata in successful/exhaustion/disabled results
+    - onBeforeToolCallingRound callback threading
+    - Error kind extension (budget_exhausted in union type)
+    - Interaction with existing retry mechanisms
+    - Failover behavior (fresh budget on model failover)
+    - Regression: runaway loop termination
+
+  FILE 5 (7 tests): Budget-exhaustion result builder and instruction
+    - Summary instruction content validation
+    - Result builder output shape, metadata, summary/fallback payloads
+
+  FILE 6 (4 tests): onBeforeToolCallingRound in agent-core inner loop
+    - Callback invoked before tool-calling rounds
+    - Callback return false stops execution
+    - Undefined callback = no interference
+    - Incrementing round number passed to callback
+
+  FILE 7 (1 test): Tool loop detection default enabled change
+    - Verifies DEFAULT_LOOP_DETECTION_CONFIG.enabled flipped to true
+
+--- What is new in V3 vs V2 ---
+
+V3 adds 7 new tests and refines 2 existing tests in FILE 4, driven by
+the V3 port plan's corrected budget exhaustion condition:
+
+  1. !timedOut guard test (4.3.7): Verifies budget exhaustion does NOT
+     fire when the attempt timed out. Timeout handling takes priority.
+
+  2. !emptyAssistantReplyIsSilent guard test (4.3.8): Verifies silent
+     successful completions are NOT misclassified as budget failures.
+
+  3. !attempt.yieldDetected guard test (4.3.9): Verifies voluntary
+     agent yield is NOT overridden by budget exhaustion.
+
+  4. Positive-path guard test (4.3.10): Confirms budget exhaustion
+     DOES fire when all 9 exclusion guards are false.
+
+  5. Stale instruction clearing test (4.4.5): Verifies that reasoning-only
+     retry instructions are cleared before the summary attempt, preventing
+     conflicting prompt content.
+
+  6. Failover fresh budget test (4.10.1): Verifies budget resets to a
+     fresh instance after FailoverError (not carried over from failed model).
+
+  7. Failover metadata test (4.10.2): Verifies result metadata reflects
+     only the successful post-failover budget usage.
+
+All 7 new tests address specific scenarios identified in the V3 port plan
+review (FIX #2 through FIX #5) that were NOT covered by V2.
+
+
+================================================================================
+2. ITERATION EVOLUTION
+================================================================================
+
+--- Iteration 0 -> Iteration 1 (V1) ---
+
+  INITIAL CREATION. 6 test files, ~85 tests, 2 support files.
+  First pass at test coverage for the iteration budget feature.
+  Several incorrect assumptions about OpenClaw internals:
+    - Wrong schema semantics (.default() vs .optional())
+    - Wrong module ownership
+    - Infeasible API endpoint tests
+    - Separate harness files proposed (unnecessary)
+
+--- Iteration 1 (V1) -> Iteration 1 Review (V1 Rev) ---
+
+  Deep review found 20 issues (8 critical, 7 moderate, 5 minor).
+  Key fixes: schema semantics, file locations, removed infeasible
+  API tests, consolidated harness into existing infrastructure.
+  Result: 7 test files, ~78 tests, 0 support files.
+
+--- Iteration 1 Review -> Iteration 2 (V2) ---
+
+  From-scratch rewrite incorporating all 20 V1 fixes plus deeper code
+  exploration. Added awareness of:
+    - Error kind union type for EmbeddedAgentRunMeta
+    - payloadCount check in exhaustion condition
+    - makeAttemptResult factory builder
+    - 5+ existing retry mechanisms in run.ts
+    - Exact config shape nesting conventions
+  Result: 7 test files, ~74 tests, 0 support files.
+
+--- Iteration 2 (V2) -> Iteration 2 Review (V2 Rev) ---
+
+  Targeted verification against actual source code revealed 8 issues:
+    3 Critical, 2 Moderate, 3 Minor
+
+  Root causes of remaining issues:
+    A) INCOMPLETE FILE DISCOVERY: Searched for wrong file name
+       (agent-scope-config.test.ts vs agent-scope.test.ts)
+    B) FUNCTION SIGNATURE NOT VERIFIED: runAgentLoop 4 vs 7 args
+    C) EXPORT STATUS NOT VERIFIED: DEFAULT_LOOP_DETECTION_CONFIG
+    D) CONFIG SHAPE NOT VERIFIED: flat vs nested OpenClawConfig
+
+  Result: 7 test files, ~74 tests, 0 support files. Same test count,
+  but all 8 issues corrected for implementability.
+
+--- Iteration 2 Review -> Iteration 3 (V3) — THIS DOCUMENT ---
+
+  From-scratch rewrite absorbing ALL prior corrections as baseline,
+  plus coverage for the V3 port plan's corrected budget exhaustion
+  condition and failover behavior.
+
+  Changes from V2 Review:
+    - All 8 V2 Review corrections absorbed (no FIX markers)
+    - 7 new test cases added for V3 port plan changes:
+      . 3 guard condition tests (!timedOut, !silent, !yield)
+      . 1 positive-path guard test
+      . 1 stale instruction clearing test
+      . 2 failover behavior tests
+    - Expanded FILE 4 from ~25 to ~32 tests
+    - More detailed infrastructure notes (stream function pattern,
+      assertion helpers, harness loading pattern)
+    - Verified every assertion against actual source code
+
+  What was verified against actual OpenClaw source code this iteration:
+    . DEFAULT_LOOP_DETECTION_CONFIG export status (line 44: const, not export)
+    . runAgentLoop signature (7 args, emit as 4th)
+    . runAgentLoop call pattern (from agent-loop.test.ts lines 354-365)
+    . agent-scope.test.ts existence and content (lines 1-180)
+    . AgentLoopConfig interface (packages/agent-core/src/types.ts lines 143-304)
+    . EmbeddedAgentRunMeta.error.kind union (types.ts lines 157-164)
+    . Run harness pattern (run.overflow-compaction.harness.ts lines 1-150)
+    . Fixture builder (run.overflow-compaction.fixture.ts lines 1-120)
+    . Compaction continuation retry condition (run.ts lines 3823-3845)
+    . Schema test helpers (zod-schema.agent-defaults.test.ts lines 1-27)
+    . Config resolution test pattern (agent-scope.test.ts lines 97-180)
+    . Stream function pattern in agent-loop tests
+    . createAssistantMessageEventStream usage
+
+
+--- Summary of Changes Across All Iterations ---
+
+  Metric               | V1 Orig | V1 Rev | V2    | V2 Rev | V3
+  ---------------------+---------+--------+-------+--------+------
+  Test files           | 6       | 7      | 7     | 7      | 7
+  Support files        | 2       | 0      | 0     | 0      | 0
+  Estimated tests      | ~85     | ~78    | ~74   | ~74    | ~81
+  NEW files            | 6       | 4      | 4     | 3      | 3
+  EXTEND files         | 0       | 3      | 3     | 4      | 4
+  Incorrect locations  | 3       | 0      | 1     | 0      | 0
+  Wrong call signatures| 0       | 0      | 4     | 0      | 0
+  Wrong config shapes  | 0       | 0      | 1     | 0      | 0
+  Unexportable imports | 0       | 0      | 1     | 0      | 0
+  Issues found         | N/A     | 20     | N/A   | 8      | N/A
+  V3 new test cases    | N/A     | N/A    | N/A   | N/A    | 7
+
+  Test count: V1(85) -> V1R(78) -> V2(74) -> V2R(74) -> V3(81)
+
+  The increase from 74 to 81 reflects new coverage for V3 port plan
+  changes (guard conditions, stale instruction clearing, failover
+  behavior) — not regressions or unnecessary additions.
+
+
+--- Convergence Assessment ---
+
+  The plan has converged. The test structure, coverage matrix, file
+  locations, import paths, call signatures, config shapes, and assertion
+  patterns have all been verified against actual OpenClaw source code.
+
+  Issues per iteration: 20 -> 8 -> 0 (V3 absorbs all prior corrections)
+
+  The remaining risk is implementation-dependent behavior in FILE 4
+  (integration tests), where exact mock return values depend on how
+  Steps 7-13 of the port plan are implemented. The test plan documents
+  these dependencies with NOTE comments and provides guidance for
+  adapting assertions.
+
+  There are NO known issues in V3 that would prevent test implementation.
+
+
+================================================================================
+END OF SUMMARY
+================================================================================

@@ -1,0 +1,240 @@
+================================================================================
+CODE PORT PLAN SUMMARY V3
+================================================================================
+
+Feature: Iteration Budget & Agent Loop Safety
+Source:  Hermes Agent (Python) -> Target: OpenClaw (TypeScript)
+Date:    2026-06-28
+Plan:    V3 (Ground-Up, Incorporating All Prior Learnings)
+
+================================================================================
+1. WORK DONE TO GENERATE V3
+================================================================================
+
+V3 was produced from scratch, incorporating all 20 issues identified across
+the prior four iterations (V1, V1 review, V2, V2 review). The following
+verification activities were performed:
+
+  1. Read and analyzed V2 corrected plan and V2 review summary to extract
+     all 20 prior issues and their resolutions.
+
+  2. Read the complete Hermes code trace (iteration_budget.py, tool_guardrails.py,
+     conversation_loop.py, chat_completion_helpers.py) and the complete
+     OpenClaw code trace (tool-loop-detection.ts, run.ts, agent-loop.ts, etc.).
+
+  3. Fresh source code verification against the actual OpenClaw codebase:
+
+     a) Agent-core internals:
+        - Read agent-loop.ts inner loop structure (lines 310-425)
+        - Read types.ts AgentLoopConfig interface (lines 143-304)
+        - Read agent.ts Agent class (lines 104-266, 474-508)
+        - Verified shouldStopAfterTurn is in the interface but NOT mapped
+          in createLoopConfig (confirmed)
+
+     b) [V3-NEW] Harness investigation (resolves V2 FIX #7 definitively):
+        - Discovered CoreAgentHarness in packages/agent-core/src/harness/
+        - CoreAgentHarness does NOT extend Agent -- it wraps it
+        - CoreAgentHarness has its OWN createLoopConfig (lines 486-542)
+        - CoreAgentHarness.createLoopConfig does NOT map shouldStopAfterTurn
+        - Confirmed: TWO independent createLoopConfig implementations exist
+        - Both must be updated for the budget callback to work
+
+     c) Run.ts and attempt.ts:
+        - Verified outer loop structure (line 1885)
+        - Verified config resolution area (lines 1560-1610)
+        - Verified prompt injection pattern (lines 1934-1940)
+        - Verified result building (lines 4075-4152)
+        - Verified handleRetryLimitExhaustion pattern (retry-limit.ts)
+        - Verified backend.ts passes params through unchanged
+
+     d) Configuration system:
+        - Verified AgentRunRetriesConfigSchema pattern (defined in
+          zod-schema.agent-runtime.ts, exported, imported in agent-defaults.ts)
+        - Verified .optional() placement pattern (at usage sites, not definition)
+        - Verified resolveAgentConfig merge pattern (agent-scope-config.ts)
+        - Verified resolveMaxRunRetryIterations pattern (run/helpers.ts)
+
+     e) Session/callback safety:
+        - Verified installAgentToolHooks only overwrites beforeToolCall
+          and afterToolCall (agent-session.ts lines 497-551)
+        - Confirmed onBeforeToolCallingRound property is safe from overwriting
+        - Grepped shouldStopAfterTurn across entire codebase: currently
+          NEVER set by any consumer
+
+  4. Read the actual Hermes source code:
+     - iteration_budget.py (full 62-line file)
+     - tool_guardrails.py (config and signature classes, lines 1-130)
+     - conversation_loop.py (budget consumption section, lines 600-640)
+     - chat_completion_helpers.py (handle_max_iterations, lines 1356-1420)
+
+  5. Designed the V3 plan with the following improvements over V2:
+     - Definitive harness resolution (V2 FIX #7 fully addressed)
+     - All V2 review fixes incorporated (FIX #1-#8)
+     - Clear layer-based organization (6 layers, 16 steps)
+     - shouldStopAfterTurn documented as tested fallback alternative
+     - Precise line numbers from fresh code verification
+     - Comprehensive risk analysis with concrete mitigations
+
+
+================================================================================
+2. KEY CHANGES FROM V2 TO V3
+================================================================================
+
+  CHANGE #1 -- HARNESS RESOLUTION (V2 FIX #7 fully resolved)
+    V2: "During implementation, verify which createLoopConfig is called"
+    V3: Definitively identified BOTH createLoopConfig implementations:
+        - Agent.createLoopConfig (agent-core/agent.ts, lines 474-507)
+        - CoreAgentHarness.createLoopConfig (agent-core/harness/agent-harness.ts,
+          lines 486-542)
+        Both must map onBeforeToolCallingRound. Step 6D explicitly handles
+        the harness implementation.
+        Agent-core file count increased from 3 to 4.
+
+  CHANGE #2 -- LAYER-BASED ORGANIZATION
+    V2: 16 sequential steps without grouping
+    V3: 16 steps organized into 6 layers:
+        Layer 1 (Core Module), Layer 2 (Configuration), Layer 3 (Agent-Core),
+        Layer 4 (Runner Integration), Layer 5 (Defaults), Layer 6 (Testing)
+        Each layer builds on the previous, enabling incremental commits.
+
+  CHANGE #3 -- shouldStopAfterTurn ALTERNATIVE DOCUMENTED AS FALLBACK
+    V2: Documented as an alternative in A.5 but not actionable
+    V3: Full fallback plan with specific file changes in C.4
+        If the onBeforeToolCallingRound approach is rejected during PR review,
+        the shouldStopAfterTurn fallback reduces agent-core changes from
+        4 files to 2 files.
+
+  CHANGE #4 -- BUDGET REFUND MECHANISM CLARIFIED
+    V2: budget refund mentioned but interaction with summary attempt unclear
+    V3: Explicit refund mechanism for summary attempt:
+        iterationBudget.refund() gives one iteration back before the summary
+        outer-loop iteration, allowing exactly one more LLM call for the
+        summary.
+
+  CHANGE #5 -- FILE COUNT CORRECTION
+    V2: 17 files (4 new + 13 modified, missing harness)
+    V3: 19 files (4 new + 15 modified, includes harness + all correct targets)
+
+  All 8 V2 review fixes were incorporated:
+    FIX #1: payloadCount check in budget exhaustion detection (Step 8 Item 6)
+    FIX #2: Zod schema in agent-runtime.ts (Step 3)
+    FIX #3: .optional() at usage sites (Step 3)
+    FIX #4: Don't follow beforeToolCall pattern (Step 7)
+    FIX #5: EmbeddedRunAttemptParams in run/types.ts (Step 7)
+    FIX #6: shouldStopAfterTurn alternative documented (A.5 + C.4)
+    FIX #7: Harness createLoopConfig gap resolved (Step 6D)
+    FIX #8: Full return fields for summary attempt (Step 8 Item 7)
+
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY (V1 through V3)
+================================================================================
+
+ITERATION 1 -- V1 (Original Plan)
+-----------------------------------
+  Generated an 11-step porting plan. Core design decisions were sound:
+  - IterationBudget as a simple class (correct)
+  - Budget orthogonal to existing loop detection (correct)
+  - Config-driven rollback via enabled flag (correct)
+  - No threading.Lock for Node.js (correct)
+
+  However, several assumptions about OpenClaw's internals were wrong:
+  - Assumed ChatMessage type exists (it doesn't)
+  - Assumed error.kind accepts any string (it's a union)
+  - Assumed run.ts accesses diagnostic session state (it doesn't)
+  - Assumed resolveAgentConfig auto-discovers new fields (it doesn't)
+  - Proposed impractical callback for summary LLM call
+
+  Scope: ~400 lines across 12 files
+
+
+ITERATION 1 -- V1 Review (Corrected Plan)
+-------------------------------------------
+  Verified every assumption against actual source code. Found 12 issues:
+  - 3 critical (wrong types, missing union extension, inaccessible state)
+  - 2 high (missing resolveAgentConfig step, FailoverError state loss)
+  - 4 medium (unused config field, wrong validation, impractical callback,
+    ambiguous integration points)
+  - 3 low (undefined handling, test failure, pattern divergence)
+
+  Produced corrected 14-step plan with all issues resolved.
+
+  REMAINING BLIND SPOT: V1 corrected plan still assumed run.ts's while(true)
+  was the tool-calling loop. It was NOT.
+
+  Scope: ~450 lines across 14 files
+
+
+ITERATION 2 -- V2 (Ground-Up Rewrite)
+---------------------------------------
+  Discovered the two-level loop architecture:
+  - Outer loop (run.ts): retries, compaction, failover
+  - Inner loop (agent-core/agent-loop.ts): tool-calling cycle
+
+  Redesigned budget enforcement to thread through the inner loop via a
+  callback closure. This was the correct architectural insight.
+
+  Scope: ~500 lines across 17 files
+
+
+ITERATION 2 -- V2 Review (Corrected Plan)
+------------------------------------------
+  Verified V2 plan against actual agent-core source code. Found 8 issues:
+  - 0 critical
+  - 3 medium (#1 payloadCount check, #2 wrong schema file, #4 wrong
+    threading pattern)
+  - 5 low (#3 .optional() placement, #5 wrong type file, #6 alternative
+    not documented, #7 harness gap, #8 missing return fields)
+
+  Scope: ~500 lines across 17 files (same count, corrected targets)
+
+
+ITERATION 3 -- V3 (This Document)
+------------------------------------
+  Fresh ground-up plan incorporating ALL 20 prior issues. Key improvements:
+
+  1. HARNESS RESOLUTION: Definitively identified and handled both
+     createLoopConfig implementations (Agent + CoreAgentHarness).
+     Agent-core changes: 4 files (vs 3 in V2).
+
+  2. LAYER-BASED ORGANIZATION: 6 layers enabling incremental implementation
+     and PR splitting.
+
+  3. FALLBACK PLAN: shouldStopAfterTurn documented as concrete fallback
+     with specific file changes if onBeforeToolCallingRound is rejected.
+
+  4. BUDGET REFUND CLARITY: Explicit refund mechanism for summary attempt.
+
+  5. VERIFIED AGAINST ACTUAL CODE: All line numbers, type names, file paths,
+     and patterns verified by reading the actual source files.
+
+  Scope: ~500 lines across 19 files (4 new + 15 modified)
+
+
+PROGRESSION SUMMARY
+--------------------
+
+  Iteration    Steps  Files  Issues Found  Issues Inherited  Key Advancement
+  ---------    -----  -----  -----------   ----------------  ---------------
+  V1 orig      11     12     (baseline)    0                 Initial plan
+  V1 review    14     14     12            0                 Types, state, callbacks
+  V2           16     17     (baseline)    0 (V1 all fixed)  Inner loop architecture
+  V2 review    16     17     8             0                 Payload, schema, threading
+  V3           16     19     0 (new)       20 (all fixed)    Harness, layers, fallback
+
+  Total issues found across all reviews: 20
+    V1 review: 12 issues (3 critical, 2 high, 4 medium, 3 low)
+    V2 review:  8 issues (0 critical, 3 medium, 5 low)
+
+  Issue severity trend:
+    V1 → V2: Eliminated all critical/high issues
+    V2 → V3: Incorporated all medium/low issues + resolved open gap (harness)
+
+  V3 carries zero known open issues. The plan is ready for implementation
+  with high confidence. The feature is behind an enabled: false default,
+  so shipping the code has zero risk to existing deployments.
+
+
+================================================================================
+END OF V3 SUMMARY
+================================================================================

@@ -1,0 +1,249 @@
+================================================================================
+TEST PLAN REVIEW SUMMARY V3
+Iteration Budget & Agent Loop Safety -- Hermes -> OpenClaw
+================================================================================
+
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+3 issues were identified. 1 is moderate (wrong function targeted for
+default-filling tests) and 2 are minor (under-specified mock setup,
+ambiguous budget accounting).
+
+
+--- MODERATE ISSUE ---
+
+FIX #1: FILE 3 default value tests target the wrong function
+  SEVERITY: Moderate (tests would fail or test wrong behavior)
+
+  V3 BUG: V3's section 3.1 "Default Values" called resolveAgentConfig()
+  and expected per-field defaults to be returned:
+
+    cfg = { agents: { defaults: { iterationBudget: { enabled: true } },
+                       list: [{ id: "main" }] } }
+    resolved = resolveAgentConfig(cfg, "main")
+    expect(resolved?.iterationBudget?.maxIterations).toBe(90)  // WRONG
+
+  ACTUAL: resolveAgentConfig() performs SHALLOW MERGE only. It does NOT
+  fill in hardcoded defaults for missing fields. Verified against actual
+  source code at agent-scope-config.ts lines 147-158:
+
+    runRetries:
+      typeof entry.runRetries === "object" && entry.runRetries
+        ? { ...agentDefaults?.runRetries, ...entry.runRetries }
+        : agentDefaults?.runRetries,
+
+  If defaults only has { enabled: true }, the merged result will be
+  { enabled: true } — no maxIterations field added. Per-field defaults
+  (like base: 24 for runRetries) are applied at the CONSUMPTION SITE by
+  separate functions (e.g., resolveMaxRunRetryIterations in
+  run/helpers.ts lines 112-128):
+
+    const base = Math.max(1, configRetries?.base ?? BASE_RUN_RETRY_ITERATIONS);
+
+  The existing test at agent-scope.test.ts lines 152-180 confirms this
+  pattern: it provides ALL 4 runRetries fields in defaults and overrides
+  only one in the per-agent entry. It tests MERGE, not default-filling.
+
+  EVIDENCE: 4 tests affected (3.1.1 through 3.1.4):
+    - "applies default maxIterations of 90" → resolveAgentConfig returns
+      undefined for maxIterations, not 90
+    - "applies default subagentMaxIterations of 50" → same problem
+    - "defaults forceSummaryOnExhaustion to true" → same problem
+    - "defaults enabled to false when empty" → same problem
+
+  FIX: Restructured section 3.1 into two groups:
+
+    Group A (section 3.1 in review): MERGE tests that provide all fields
+    in defaults and test override behavior — matching the existing
+    runRetries test pattern.
+
+    Group B (section 3.3 in review): DEFAULT tests that call the Step 5
+    resolution function (resolveIterationBudgetConfig) directly to verify
+    hardcoded fallbacks for missing fields.
+
+    Total test count unchanged (11 tests). Structure realigned to match
+    OpenClaw's two-layer config resolution pattern.
+
+
+--- MINOR ISSUES ---
+
+FIX #2: FILE 4 test 4.3.8 mock setup for silent completion under-specified
+  SEVERITY: Minor (test description incomplete, but implementable)
+
+  V3 BUG: V3 said "Mock: 3 attempts where the final attempt is a
+  silent successful completion" without specifying HOW to trigger
+  emptyAssistantReplyIsSilent = true.
+
+  ACTUAL: emptyAssistantReplyIsSilent is computed by
+  shouldTreatEmptyAssistantReplyAsSilent() in run/incomplete-turn.ts
+  (line 649). It requires:
+    1. params.allowEmptyAssistantReplyAsSilent = true (on run params)
+    2. payloadCount = 0
+    3. assistantTexts = ["NO_REPLY"] (the silent reply token)
+    4. assistant stopReason !== "error"
+    5. Not aborted, timed out, yielded, or with clientToolCalls
+
+  When true, the result gets meta.terminalReplyKind = "silent-empty".
+
+  FIX: Added explicit mock setup instructions:
+    - Set allowEmptyAssistantReplyAsSilent: true on run params
+    - Use makeAttemptResult({ assistantTexts: ["NO_REPLY"] })
+    - Added assertion for meta.terminalReplyKind === "silent-empty"
+
+
+FIX #3: FILE 4 test 4.4.5 budget accounting ambiguous
+  SEVERITY: Minor (confusing description, but test logic correct)
+
+  V3 BUG: V3 described the stale-instruction-clearing test with:
+    "Attempt 4: tool calls (budget=3, now reasoning retry + budget)"
+  With maxIterations=4, "(budget=3)" implies used=3 → 1 remaining →
+  NOT exhausted. This contradicts the claim "Budget exhausted →
+  summary attempt."
+
+  ACTUAL: All loop iterations consume budget, including the reasoning-
+  only retry. With maxIterations=4:
+    Attempt 1: used=1
+    Attempt 2: used=2
+    Attempt 3: used=3 (reasoning-only → triggers retry instruction)
+    Attempt 4: used=4 → EXHAUSTED
+
+  FIX: Rewrote the sequence with clear budget.used values at each step
+  and noted that the total mock count is 5 (4 productive + 1 summary).
+
+
+================================================================================
+2. CHANGES SUMMARY
+================================================================================
+
+  V3 -> Review V3 changes:
+
+  TESTS RESTRUCTURED:
+    - FILE 3 section 3.1: Split into merge tests (calling resolveAgentConfig)
+      and default tests (calling Step 5 resolution function) [FIX #1]
+
+  MOCK SETUP SPECIFIED:
+    - FILE 4 test 4.3.8: Added explicit silent completion mock setup
+      with allowEmptyAssistantReplyAsSilent, assistantTexts=["NO_REPLY"],
+      and terminalReplyKind assertion [FIX #2]
+
+  DESCRIPTION CORRECTED:
+    - FILE 4 test 4.4.5: Budget accounting clarified with per-attempt
+      budget.used values and correct mock count [FIX #3]
+
+  INFRASTRUCTURE NOTES ADDED:
+    - Note 11: Config resolution two-layer pattern
+    - Note 12: emptyAssistantReplyIsSilent computation details
+    - Note 13: Verified EmbeddedRunAttemptResult field names and line numbers
+    - Note 14: config field on RunEmbeddedAgentParams
+
+  NET EFFECT:
+    V3:     ~81 tests across 7 files (3 NEW + 4 EXTEND)
+    Review: ~81 tests across 7 files (3 NEW + 4 EXTEND)
+
+  Test count unchanged. Test structure in FILE 3 realigned to match
+  OpenClaw's actual config resolution pattern. All tests remain
+  implementable.
+
+
+================================================================================
+3. ITERATION EVOLUTION
+================================================================================
+
+--- Iteration 0 -> Iteration 1 (V1) ---
+
+  INITIAL CREATION. 6 test files, ~85 tests, 2 support files.
+  Several incorrect assumptions about OpenClaw internals.
+
+--- Iteration 1 -> Iteration 1 Review ---
+
+  Deep review found 20 issues (8 critical, 7 moderate, 5 minor).
+  Key: schema .optional() not .default(), wrong file locations, infeasible
+  API tests, separate harness files unnecessary.
+  Result: 7 test files, ~78 tests, 0 support files.
+
+--- Iteration 1 Review -> Iteration 2 (V2) ---
+
+  From-scratch rewrite incorporating all 20 V1 fixes plus deeper code
+  exploration. Added awareness of error kind union, payloadCount,
+  makeAttemptResult factory, 5+ retry mechanisms.
+  Result: 7 test files, ~74 tests, 0 support files.
+
+--- Iteration 2 (V2) -> Iteration 2 Review (V2 Rev) ---
+
+  Targeted verification against actual source code revealed 8 issues:
+    3 Critical, 2 Moderate, 3 Minor
+  Root causes: incomplete file discovery, function signature not verified,
+  export status not verified, config shape not verified.
+  Result: 7 test files, ~74 tests, 0 support files.
+
+--- Iteration 2 Review -> Iteration 3 (V3) ---
+
+  From-scratch rewrite absorbing ALL prior corrections as baseline.
+  Added 7 new test cases for V3 port plan corrections (guard conditions,
+  stale instruction clearing, failover behavior).
+  Result: 7 test files, ~81 tests, 0 support files.
+
+--- Iteration 3 (V3) -> Iteration 3 Review (THIS DOCUMENT) ---
+
+  Targeted verification against actual source code revealed 3 issues:
+    1 Moderate, 2 Minor
+
+  Root causes of remaining issues:
+
+  A) CONFIG RESOLUTION PATTERN NOT FULLY UNDERSTOOD: V3 assumed
+     resolveAgentConfig() applies per-field defaults. Actual codebase
+     uses a two-layer pattern: resolveAgentConfig() does merge only,
+     consumption-site functions apply hardcoded defaults. Evidence:
+     runRetries test at lines 152-180 tests merge with all fields
+     provided; resolveMaxRunRetryIterations applies defaults separately.
+     Lesson: When testing config resolution, distinguish between merge
+     and default-filling layers.
+
+  B) COMPLEX MOCK DEPENDENCY NOT TRACED: V3 described the silent
+     completion guard test without specifying which attempt fields
+     trigger emptyAssistantReplyIsSilent=true. The actual computation
+     involves shouldTreatEmptyAssistantReplyAsSilent() which checks
+     allowEmptyAssistantReplyAsSilent (a run param, not attempt field),
+     assistantTexts for "NO_REPLY" token, and 5+ negative conditions.
+     Lesson: When testing run.ts guards that depend on computed local
+     variables, trace the computation to its source function.
+
+  C) BUDGET ACCOUNTING AMBIGUITY: V3 described per-attempt budget
+     counts using shorthand "(budget=N)" that was inconsistent with the
+     maxIterations value. Lesson: When describing multi-attempt test
+     scenarios, explicitly state budget.used after each attempt.
+
+
+--- Summary of Changes Across All Iterations ---
+
+  Metric               | V1 Orig | V1 Rev | V2    | V2 Rev | V3    | V3 Rev
+  ---------------------+---------+--------+-------+--------+-------+--------
+  Test files           | 6       | 7      | 7     | 7      | 7     | 7
+  Support files        | 2       | 0      | 0     | 0      | 0     | 0
+  Estimated tests      | ~85     | ~78    | ~74   | ~74    | ~81   | ~81
+  NEW files            | 6       | 4      | 4     | 3      | 3     | 3
+  EXTEND files         | 0       | 3      | 3     | 4      | 4     | 4
+  Issues found         | N/A     | 20     | N/A   | 8      | N/A   | 3
+    Critical           | N/A     | 8      | N/A   | 3      | N/A   | 0
+    Moderate           | N/A     | 7      | N/A   | 2      | N/A   | 1
+    Minor              | N/A     | 5      | N/A   | 3      | N/A   | 2
+
+  Issue trend: 20 -> 8 -> 3 (converging)
+
+  The 3 remaining issues are narrower in scope than previous iterations:
+    - V1R: broad architectural errors (wrong schemas, wrong modules)
+    - V2R: call signatures, file names, export status
+    - V3R: config resolution layering, mock setup details, notation clarity
+
+  All corrections are within the same test file locations and do not
+  change test count, file count, or overall structure. The plan is
+  approaching convergence — the remaining 3 issues are refinements to
+  test precision, not structural problems.
+
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

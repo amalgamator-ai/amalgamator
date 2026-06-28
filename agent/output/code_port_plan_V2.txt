@@ -1,0 +1,1601 @@
+================================================================================
+CODE PORT PLAN V2
+Iteration Budget & Agent Loop Safety — Hermes -> OpenClaw
+================================================================================
+
+Source:  Hermes Agent (Python)  -> Target: OpenClaw (TypeScript)
+Feature: Per-agent iteration budget with consume/refund semantics,
+         budget-exhaustion forced summary, and configuration.
+Porting Complexity: LOW-MEDIUM (core module 62 lines; integration touches
+                    ~14 files across 2 packages due to inner-loop threading)
+
+This is V2, a ground-up rewrite incorporating all 12 fixes from the V1
+review AND a critical architectural correction discovered during V2 analysis.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  PART A -- SCOPE & STRATEGY
+    A.1  What We Port (In Scope)
+    A.2  What We Don't Port (Out of Scope)
+    A.3  Key Language/Platform Differences
+    A.4  Reuse of Existing OpenClaw Infrastructure
+    A.5  CRITICAL ARCHITECTURAL FINDING (V2-only)
+
+  PART B -- STEP-BY-STEP IMPLEMENTATION PLAN
+    Step 1:  Create IterationBudget class
+    Step 2:  Add configuration types
+    Step 3:  Add Zod schema validation
+    Step 4:  Extend resolveAgentConfig with iterationBudget merge logic
+    Step 5:  Add config resolution function
+    Step 6:  Add onBeforeToolCallingRound callback to agent-core
+    Step 7:  Thread budget callback from attempt.ts to agent-core
+    Step 8:  Integrate budget creation and exhaustion detection in run.ts
+    Step 9:  Extend EmbeddedAgentRunMeta error kind union
+    Step 10: Add budget-exhaustion result builder
+    Step 11: Add budget-exhaustion summary injection in run.ts
+    Step 12: Add budget refund for compaction restarts
+    Step 13: Add budget metadata to run result
+    Step 14: Enable tool loop detection warnings by default
+    Step 15: Add unit tests for IterationBudget
+    Step 16: Add integration tests for budget in run loop
+
+  PART C -- RISK ANALYSIS
+
+
+================================================================================
+PART A -- SCOPE & STRATEGY
+================================================================================
+
+A.1  WHAT WE PORT (IN SCOPE)
+-----------------------------
+
+  1. IterationBudget class
+     - Per-agent iteration counter with consume()/refund()/used/remaining
+     - Adapted from: agent/iteration_budget.py (62 lines)
+     - This is the core high-impact module
+
+  2. Budget-aware inner loop termination
+     - Thread a budget callback from run.ts -> attempt.ts -> agent-core
+     - The agent-core inner loop (agent-loop.ts) calls the callback before
+       each tool-calling round. If the budget is exhausted, the loop stops.
+     - Budget checks complement (not replace) existing loop guards
+
+  3. Budget-exhaustion forced summary
+     - When budget exhausts -> attempt returns with budgetExhausted flag ->
+       run.ts injects a summary prompt + limits to 1 round -> returns result
+     - Adapted from: agent/chat_completion_helpers.py (handle_max_iterations)
+
+  4. Configuration
+     - Add maxIterations to AgentDefaultsConfig (default: 90)
+     - Add per-agent override in AgentConfig
+     - Subagent budgets controlled per-agent via agents.list[].iterationBudget
+
+  5. Budget refund for compaction restarts
+     - When the outer run.ts loop compacts context and retries, refund 1
+       iteration for the interrupted round
+     - Aligns with Hermes's refund-on-compression-restart logic
+
+  6. Observability
+     - Add budgetUsed/budgetMax to EmbeddedAgentRunMeta
+     - Populated from the IterationBudget instance in the final result
+
+  7. Enable tool loop detection warnings by default
+     - Change default from enabled: false -> enabled: true (warnings only)
+     - Aligns with Hermes's "warnings always-on" design principle
+
+
+A.2  WHAT WE DON'T PORT (OUT OF SCOPE)
+----------------------------------------
+
+  1. ToolCallGuardrailController
+     - OpenClaw has tool-loop-detection.ts with 5 detector kinds
+     - Different architecture (sliding window vs per-turn state machine)
+     - Both are valid approaches; no need to replace
+
+  2. Threading/Lock semantics
+     - Node.js is single-threaded -- no threading.Lock needed
+
+  3. Grace call mechanism
+     - Hermes's _budget_grace_call adds one extra iteration after exhaustion
+     - We achieve the same effect via the in-loop budget-exhaustion summary
+       which allows one more LLM round (the summary call) with tools limited
+
+  4. execute_code refund
+     - OpenClaw has no equivalent "execute_code" tool; skip for V1
+
+  5. Kanban worker integration
+     - OpenClaw has no equivalent kanban/task queue system; skip
+
+  6. subagentMaxIterations as a separate config field
+     - Deferred to V2. In V1, subagent budget is controlled per-agent:
+       each subagent agent ID can have its own iterationBudget.maxIterations
+       via the agents.list[] config.
+
+  7. Budget preservation across FailoverError
+     - FailoverError propagates outside run.ts; re-invocation resets budget.
+     - Accepted limitation. Documented in risk analysis.
+
+  8. Live budget tracking in diagnostic session state
+     - Budget usage is reported in the run result meta only.
+     - Diagnostic session state integration deferred for simplicity.
+
+
+A.3  KEY LANGUAGE/PLATFORM DIFFERENCES
+---------------------------------------
+
+  Python (Hermes)                    TypeScript (OpenClaw)
+  ------------------                 ----------------------
+  class with __init__                class with constructor
+  threading.Lock                     Not needed (single-threaded Node.js)
+  @property def used                 get used(): number
+  @dataclass(frozen=True)            type/interface (immutable by convention)
+  frozenset[str]                     ReadonlySet<string>
+  dict[str, int]                     Map<string, number> or Record<...>
+  typing.Optional[X]                 X | undefined
+  json.dumps(sorted_keys)            stableStringify() (already exists)
+  hashlib.sha256                     crypto.createHash("sha256")
+  def method(self, ...)              method(...): ReturnType
+  from X import Y                    import { Y } from "X.js"
+
+
+A.4  REUSE OF EXISTING OPENCLAW INFRASTRUCTURE
+------------------------------------------------
+
+  Existing Module                    Reuse For
+  ----------------                   ---------
+  tool-loop-detection.ts             Stays as-is; budget is orthogonal
+  post-compaction-loop-guard.ts      Stays as-is; budget complements it
+  run/helpers.ts                     Add resolveIterationBudgetConfig()
+  run/retry-limit.ts                 Pattern reference for exhaustion handler
+  types.agent-defaults.ts            Extend with IterationBudgetConfig type
+  types.agents.ts                    Extend with per-agent override
+  zod-schema.agent-defaults.ts       Extend with budget validation schema
+  zod-schema.agents.ts               Reference budget schema
+  agent-scope-config.ts              Extend with iterationBudget merge
+  embedded-agent-runner/types.ts     Extend error.kind union
+  agent-core/agent-loop.ts           Add onBeforeToolCallingRound callback
+  agent-core/types.ts                Extend AgentLoopConfig
+
+
+A.5  CRITICAL ARCHITECTURAL FINDING (V2-only)
+-----------------------------------------------
+
+  V1 assumed the tool-calling iteration loop was in run.ts (the outer
+  while(true) loop). This is WRONG.
+
+  OpenClaw has a TWO-LEVEL LOOP ARCHITECTURE:
+
+    OUTER LOOP (run.ts, while(true)):
+      - Handles retries, compaction, auth rotation, failover
+      - Each iteration dispatches ONE ATTEMPT via runEmbeddedAttemptWithBackend
+      - MAX_RUN_LOOP_ITERATIONS guards against retry storms
+      - All 18 `continue` paths are for error recovery
+      - The final return at line 4075 is the only success exit
+
+    INNER LOOP (agent-core/agent-loop.ts, while(hasMoreToolCalls)):
+      - Handles the agentic tool-calling cycle
+      - Each iteration: streamAssistantResponse -> executeToolCalls -> repeat
+      - This is where the model iterates: LLM -> tools -> LLM -> tools -> ...
+      - The loop stops when the model produces text (no more tool calls)
+      - No existing iteration budget or cap
+
+  The call chain:
+    run.ts
+     -> runEmbeddedAttemptWithBackend()   [run/backend.ts]
+       -> runEmbeddedAttempt()            [run/attempt.ts, ~5800 lines]
+         -> promptActiveSession()         [wraps activeSession.prompt()]
+           -> agent.prompt()              [agent-core/agent.ts]
+             -> runPromptMessages()
+               -> runAgentLoop()          [agent-core/agent-loop.ts]
+                 -> while(hasMoreToolCalls) {  <-- THE REAL LOOP
+                      streamAssistantResponse()  // LLM call
+                      executeToolCalls()          // tool execution
+                    }
+
+  CONSEQUENCE FOR BUDGET:
+    Counting outer-loop (run.ts) iterations would be nearly useless:
+    - A normal request typically runs 1 outer iteration
+    - All the tool-calling rounds happen inside agent-core's inner loop
+    - MAX_RUN_LOOP_ITERATIONS (default 32-160) already caps the outer loop
+
+    The iteration budget MUST be threaded into the inner loop via a
+    callback. The IterationBudget instance lives in run.ts (persisting
+    across attempts), but its consume() is called from within agent-core's
+    loop via a callback closure.
+
+  WHY V1 MISSED THIS:
+    The V1 plan assumed run.ts's while(true) was the tool-calling loop,
+    likely because:
+    - run.ts is ~4100 lines with 18 continue paths -- looks like a busy loop
+    - The code trace described it as the "main loop"
+    - agent-core is in a separate package (packages/agent-core)
+    - attempt.ts is ~5800 lines -- the inner loop is deeply nested
+
+  V2 APPROACH:
+    1. Add a lightweight callback (onBeforeToolCallingRound) to AgentLoopConfig
+    2. The callback is a closure over run.ts's IterationBudget instance
+    3. agent-loop.ts calls it before each inner-loop round
+    4. If budget.consume() returns false, the loop breaks
+    5. run.ts detects exhaustion via budget.remaining <= 0 after attempt return
+    6. run.ts handles summary injection at the outer-loop level
+
+    This keeps IterationBudget in the main source (no agent-core dependency
+    on internal types) and adds only ~10 lines to agent-core.
+
+
+================================================================================
+PART B -- STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+Each step is designed to be independently committable. Steps build on each
+other sequentially, but each step produces a working codebase.
+
+
+--------------------------------------------------------------------------------
+STEP 1: Create IterationBudget class
+--------------------------------------------------------------------------------
+
+  TARGET FILE (NEW):
+    src/agents/iteration-budget.ts
+
+  DESCRIPTION:
+    Create the core IterationBudget class -- a simple counter that tracks how
+    many productive LLM API calls an agent has made in the current run, with
+    consume/refund semantics. This is a direct TypeScript adaptation of
+    Hermes's agent/iteration_budget.py (62 lines) minus the threading.Lock.
+
+  IMPLEMENTATION:
+
+    /**
+     * Per-agent iteration budget -- counts productive LLM API calls.
+     *
+     * Each agent run (parent or subagent) gets its own IterationBudget.
+     * The budget is capped at `maxIterations` (default 90 for parent
+     * agents; configurable per agent via agents.list[].iterationBudget).
+     *
+     * Compaction-restart iterations are refunded via {@link refund} so
+     * they don't eat into the budget.
+     *
+     * Ported from Hermes: agent/iteration_budget.py
+     */
+    export class IterationBudget {
+      readonly maxTotal: number;
+      private _used: number = 0;
+
+      constructor(maxTotal: number) {
+        this.maxTotal = Math.max(1, Math.floor(maxTotal));
+      }
+
+      /** Try to consume one iteration. Returns true if allowed. */
+      consume(): boolean {
+        if (this._used >= this.maxTotal) {
+          return false;
+        }
+        this._used += 1;
+        return true;
+      }
+
+      /** Give back one iteration (e.g. for compaction restarts). */
+      refund(): void {
+        if (this._used > 0) {
+          this._used -= 1;
+        }
+      }
+
+      /** Number of iterations consumed so far. */
+      get used(): number {
+        return this._used;
+      }
+
+      /** Number of iterations remaining before budget exhaustion. */
+      get remaining(): number {
+        return Math.max(0, this.maxTotal - this._used);
+      }
+    }
+
+  NOTES:
+    - No threading.Lock -- Node.js is single-threaded
+    - maxTotal is floored and clamped to >= 1 for safety
+    - Uses TypeScript getter properties (get used, get remaining)
+    - Named export (not default) following OpenClaw convention
+    - File uses kebab-case matching OpenClaw naming (tool-loop-detection.ts)
+
+
+--------------------------------------------------------------------------------
+STEP 2: Add configuration types
+--------------------------------------------------------------------------------
+
+  TARGET FILE (MODIFY):
+    src/config/types.agent-defaults.ts
+
+  DESCRIPTION:
+    Add IterationBudgetConfig type to the agent defaults configuration system.
+    Follows the existing pattern of AgentRunRetriesConfig (lines 117-126).
+
+  CHANGES:
+
+    1. Add new type AFTER AgentRunRetriesConfig (line ~126):
+
+      /** Per-agent iteration budget configuration (default: enabled with 90 max). */
+      export type IterationBudgetConfig = {
+        /**
+         * Enable per-agent iteration budget enforcement (default: true).
+         * When disabled, agents can run unlimited productive iterations
+         * (still bounded by runRetries retry guard).
+         */
+        enabled?: boolean;
+        /**
+         * Maximum productive LLM API calls per agent run (default: 90).
+         * Does not count retries for errors, rate limits, or compaction.
+         * Each agent can override this via agents.list[].iterationBudget.
+         */
+        maxIterations?: number;
+        /**
+         * When budget is exhausted, make one final tool-limited LLM call
+         * requesting a summary of progress (default: true).
+         * If false, returns a generic error immediately.
+         */
+        forceSummaryOnExhaustion?: boolean;
+      };
+
+    2. Add iterationBudget field to AgentDefaultsConfig (alongside runRetries
+       at ~line 333):
+
+      /** Per-agent iteration budget controlling max productive LLM calls. */
+      iterationBudget?: IterationBudgetConfig;
+
+
+  TARGET FILE (MODIFY):
+    src/config/types.agents.ts
+
+  CHANGES:
+
+    1. Add iterationBudget override to AgentConfig type (alongside the
+       existing runRetries at line 146):
+
+      /** Per-agent iteration budget override. */
+      iterationBudget?: AgentDefaultsConfig["iterationBudget"];
+
+       Uses AgentDefaultsConfig["iterationBudget"] indexed access type,
+       matching the exact pattern used for runRetries at line 146.
+
+  OPENCLAW PATTERNS FOLLOWED:
+    - Type naming: *Config suffix
+    - All fields optional with JSDoc defaults
+    - Nested in AgentDefaultsConfig for global defaults
+    - Per-agent override via AgentDefaultsConfig["fieldName"] indexed access
+
+
+--------------------------------------------------------------------------------
+STEP 3: Add Zod schema validation
+--------------------------------------------------------------------------------
+
+  TARGET FILE (MODIFY):
+    src/config/zod-schema.agent-defaults.ts
+
+  DESCRIPTION:
+    Add Zod validation schema for IterationBudgetConfig and export it for
+    cross-file reuse. Follows the pattern of AgentRunRetriesConfigSchema
+    in zod-schema.agent-runtime.ts (lines 59-75).
+
+  CHANGES:
+
+    1. Add and EXPORT IterationBudgetSchema BEFORE it's referenced:
+
+      export const IterationBudgetSchema = z
+        .object({
+          enabled: z.boolean().optional(),
+          maxIterations: z.number().int().positive().optional(),
+          forceSummaryOnExhaustion: z.boolean().optional(),
+        })
+        .strict()
+        .optional();
+
+    2. Add iterationBudget field to the AgentDefaultsSchema object
+       (alongside runRetries at ~line 206):
+
+      iterationBudget: IterationBudgetSchema,
+
+
+  TARGET FILE (MODIFY):
+    src/config/zod-schema.agents.ts
+
+  DESCRIPTION:
+    Add iterationBudget to the per-agent schema. Import the shared
+    IterationBudgetSchema from zod-schema.agent-defaults.ts and reference
+    it in the per-agent schema.
+
+  CHANGES:
+
+    1. Add import:
+
+      import { IterationBudgetSchema } from "./zod-schema.agent-defaults.js";
+
+    2. In the per-agent schema object (alongside runRetries):
+
+      iterationBudget: IterationBudgetSchema,
+
+  OPENCLAW PATTERNS FOLLOWED:
+    - .strict() to reject unknown keys
+    - .optional() on the outer schema
+    - z.number().int().positive() for iteration counts
+    - Export schema for cross-file reuse (same as AgentRunRetriesConfigSchema)
+
+
+--------------------------------------------------------------------------------
+STEP 4: Extend resolveAgentConfig with iterationBudget merge logic
+--------------------------------------------------------------------------------
+
+  TARGET FILE (MODIFY):
+    src/agents/agent-scope-config.ts
+
+  DESCRIPTION:
+    The resolveAgentConfig function (lines 112-166) explicitly lists each
+    config field with its merge strategy. Without adding iterationBudget,
+    per-agent config lookups via resolveAgentConfig will return undefined
+    for iterationBudget -- breaking per-agent overrides.
+
+  CHANGES:
+
+    1. Add iterationBudget to the ResolvedAgentConfig type (~line 41):
+
+      export type ResolvedAgentConfig = {
+        // ... existing fields ...
+        runRetries?: AgentEntry["runRetries"];
+        iterationBudget?: AgentEntry["iterationBudget"];  // ADD
+        // ... remaining fields ...
+      };
+
+    2. Add iterationBudget merge logic in the resolveAgentConfig function
+       body (~line 155), following the exact pattern used for runRetries:
+
+      iterationBudget:
+        typeof entry.iterationBudget === "object" && entry.iterationBudget
+          ? { ...agentDefaults?.iterationBudget, ...entry.iterationBudget }
+          : agentDefaults?.iterationBudget,
+
+  NOTES:
+    - Shallow merge via spread ({ ...defaults, ...overrides })
+    - Exact same pattern as runRetries (adjacent field)
+    - The change is additive -- no existing fields are modified
+
+
+--------------------------------------------------------------------------------
+STEP 5: Add config resolution function
+--------------------------------------------------------------------------------
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run/helpers.ts
+
+  DESCRIPTION:
+    Add resolveIterationBudgetConfig() alongside existing
+    resolveMaxRunRetryIterations() (lines 112-128). Follows the same
+    resolution pattern: per-agent config (already merged via
+    resolveAgentConfig) -> global defaults -> hardcoded defaults.
+
+  CHANGES:
+
+    1. Add constant at module level:
+
+      const DEFAULT_MAX_ITERATIONS = 90;
+
+    2. Add resolved config type:
+
+      export type ResolvedIterationBudget = {
+        enabled: boolean;
+        maxIterations: number;
+        forceSummaryOnExhaustion: boolean;
+      };
+
+    3. Add resolver function:
+
+      /**
+       * Resolves the effective iteration budget for an agent run.
+       * Per-agent config (merged by resolveAgentConfig) overrides global
+       * defaults; missing fields fall back to hardcoded defaults.
+       *
+       * Follows the same resolution pattern as resolveMaxRunRetryIterations().
+       */
+      export function resolveIterationBudgetConfig(
+        cfg?: OpenClawConfig,
+        agentId?: string,
+      ): ResolvedIterationBudget {
+        const configBudget =
+          (cfg && agentId
+            ? resolveAgentConfig(cfg, agentId)?.iterationBudget
+            : undefined) ?? cfg?.agents?.defaults?.iterationBudget;
+
+        return {
+          enabled: configBudget?.enabled ?? true,
+          maxIterations: Math.max(
+            1,
+            configBudget?.maxIterations ?? DEFAULT_MAX_ITERATIONS,
+          ),
+          forceSummaryOnExhaustion:
+            configBudget?.forceSummaryOnExhaustion ?? true,
+        };
+      }
+
+  NOTES:
+    - Resolution chain mirrors resolveMaxRunRetryIterations() exactly
+    - Math.max(1, ...) clamping ensures maxIterations is always >= 1
+    - resolveAgentConfig is already imported in this file
+
+
+--------------------------------------------------------------------------------
+STEP 6: Add onBeforeToolCallingRound callback to agent-core
+--------------------------------------------------------------------------------
+
+  ** THIS STEP IS THE KEY V2 ARCHITECTURAL CHANGE **
+
+  TARGET FILE (MODIFY):
+    packages/agent-core/src/types.ts
+
+  DESCRIPTION:
+    Add a lightweight callback to AgentLoopConfig that the inner tool-calling
+    loop invokes before each round. This is the seam through which the
+    iteration budget reaches the inner loop.
+
+  CHANGES:
+
+    1. Add to AgentLoopConfig interface (alongside shouldStopAfterTurn):
+
+      /**
+       * Called before each tool-calling round in the inner loop.
+       * Return false to stop the loop (budget exhausted, external signal).
+       * Not called for the initial non-tool-call response.
+       *
+       * @param round - 1-based round number within this attempt
+       * @returns true to continue, false to stop after current round
+       */
+      onBeforeToolCallingRound?: (round: number) => boolean;
+
+
+  TARGET FILE (MODIFY):
+    packages/agent-core/src/agent-loop.ts
+
+  DESCRIPTION:
+    Add iteration counting and budget callback invocation to the inner
+    while(hasMoreToolCalls) loop. This is the minimal change to agent-core.
+
+  CHANGES:
+
+    1. Inside runAgentLoop(), before the inner while loop (~line 310),
+       add a counter:
+
+      let toolCallingRound = 0;
+
+    2. At the TOP of the inner while loop body (~line 311), BEFORE
+       streamAssistantResponse is called, add:
+
+      toolCallingRound += 1;
+      if (
+        config.onBeforeToolCallingRound &&
+        !config.onBeforeToolCallingRound(toolCallingRound)
+      ) {
+        // Caller-signaled stop (e.g. budget exhausted)
+        hasMoreToolCalls = false;
+        break;
+      }
+
+    NOTE ON CALLBACK PLACEMENT:
+      The callback is called BEFORE each LLM call, not after. This means:
+      - Round 1: callback(1) -> if false, NO LLM call -> loop exits
+      - Round N: callback(N) -> if false, NO LLM call -> loop exits
+
+      This matches Hermes's budget.consume() at the TOP of the loop.
+      When the budget is exhausted, the loop stops BEFORE making another
+      LLM call, preventing wasted API calls.
+
+    3. The counter resets to 0 for each outer-loop iteration (follow-up
+       messages). This is fine because the budget callback captures the
+       IterationBudget via closure, and the IterationBudget maintains
+       cumulative state across all rounds and attempts.
+
+  TOTAL AGENT-CORE CHANGE: ~10 lines (1 type field + 6 lines of logic)
+
+  NOTES:
+    - The callback is synchronous (returns boolean, not Promise<boolean>)
+      because budget.consume() is a synchronous operation. This avoids
+      adding async overhead to the hot loop.
+    - The callback is optional -- existing callers are unaffected.
+    - If the callback is not provided, the loop behaves exactly as before.
+    - The round parameter is informational; the actual budget logic is in
+      the closure (the IterationBudget instance in run.ts).
+
+
+--------------------------------------------------------------------------------
+STEP 7: Thread budget callback from attempt.ts to agent-core
+--------------------------------------------------------------------------------
+
+  DESCRIPTION:
+    Thread the onBeforeToolCallingRound callback from the attempt setup
+    through the agent session to the agent-core loop config. This step
+    requires understanding the exact call chain and adding the callback
+    at each level.
+
+  CALL CHAIN (with change points):
+
+    run.ts
+      -> creates IterationBudget, creates callback closure
+      -> passes callback via attempt params
+
+    run/backend.ts (runEmbeddedAttemptWithBackend)
+      -> passes through to runEmbeddedAttempt
+
+    run/attempt.ts (runEmbeddedAttempt)
+      -> passes callback to agent session setup
+      -> sets up agent with the callback in its options
+
+    agent-core/agent.ts (Agent class)
+      -> createLoopConfig() includes the callback in AgentLoopConfig
+
+    agent-core/agent-loop.ts (runAgentLoop)
+      -> calls callback before each inner-loop round
+
+
+  CHANGES:
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run/attempt.ts
+
+    1. Add onBeforeToolCallingRound to the attempt params type:
+
+      // In the params type for runEmbeddedAttempt:
+      onBeforeToolCallingRound?: (round: number) => boolean;
+
+    2. When setting up the agent session, pass the callback through.
+       The exact location depends on how the agent session is configured.
+       Look for where agent options are assembled (where beforeToolCall,
+       afterToolCall, etc. are set) and add:
+
+      onBeforeToolCallingRound: params.onBeforeToolCallingRound,
+
+    3. Add budgetExhausted flag to the attempt result type:
+
+      // In EmbeddedRunAttemptResult (or equivalent):
+      budgetExhausted?: boolean;
+
+    4. After promptActiveSession returns, check if budget was exhausted.
+       This is done by checking the IterationBudget instance passed via
+       closure (NOT by modifying the agent-core return value):
+
+      // After await promptActiveSession(...):
+      // The budget instance is captured by the closure in run.ts.
+      // The attempt result just needs a flag for the outer loop:
+      // (this flag is set based on checking budget.remaining after the call)
+
+  TARGET FILE (MODIFY):
+    packages/agent-core/src/agent.ts
+
+    1. Add onBeforeToolCallingRound to AgentOptions:
+
+      /** Called before each tool-calling round. Return false to stop. */
+      onBeforeToolCallingRound?: (round: number) => boolean;
+
+    2. In createLoopConfig(), pass it through:
+
+      // In the returned AgentLoopConfig object:
+      onBeforeToolCallingRound: this.options.onBeforeToolCallingRound,
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run/backend.ts
+
+    1. Pass onBeforeToolCallingRound through from the outer params
+       to runEmbeddedAttempt params. This is a simple pass-through.
+
+  NOTES:
+    - The callback is a CLOSURE over the IterationBudget in run.ts.
+      It captures the budget instance, so budget state persists across
+      attempts. This is the key design decision: the budget lives in
+      run.ts, but its consume() is called from agent-core.
+    - The budget is NOT passed as an object -- only the callback is
+      threaded. This keeps agent-core decoupled from IterationBudget.
+    - The attempt result can indicate budgetExhausted by checking
+      budget.remaining <= 0 after the prompt completes.
+
+  IMPLEMENTATION GUIDANCE:
+    To find the exact locations for threading, search for how these
+    existing callbacks are threaded:
+    - beforeToolCall (already threaded from attempt -> agent -> loop)
+    - afterToolCall (same pattern)
+    - shouldStopAfterTurn (same pattern)
+    - prepareNextTurn (same pattern)
+
+    Follow the EXACT same pattern for onBeforeToolCallingRound. Each
+    of these callbacks is:
+    1. Defined in the attempt params
+    2. Passed to agent session setup
+    3. Included in AgentOptions
+    4. Passed through createLoopConfig to AgentLoopConfig
+    5. Called in runAgentLoop
+
+    Grep for "beforeToolCall" across these files to find all the
+    threading points and replicate for onBeforeToolCallingRound.
+
+
+--------------------------------------------------------------------------------
+STEP 8: Integrate budget creation and exhaustion detection in run.ts
+--------------------------------------------------------------------------------
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run.ts
+
+  DESCRIPTION:
+    Create the IterationBudget, build the callback closure, pass it to
+    the attempt, and detect budget exhaustion after the attempt returns.
+
+  CHANGES:
+
+    1. Add imports at file top:
+
+      import { IterationBudget } from "../iteration-budget.js";
+      import {
+        resolveIterationBudgetConfig,
+        type ResolvedIterationBudget,
+      } from "./run/helpers.js";
+      import { buildBudgetExhaustionResult } from "./run/budget-exhaustion.js";
+
+    2. Add budget initialization NEAR line 1562 (alongside
+       MAX_RUN_LOOP_ITERATIONS resolution):
+
+      // --- Iteration Budget (productive-turn cap) ---
+      const budgetConfig = resolveIterationBudgetConfig(
+        params.config,
+        sessionAgentId,
+      );
+      const iterationBudget = budgetConfig.enabled
+        ? new IterationBudget(budgetConfig.maxIterations)
+        : undefined;
+
+      // Callback closure for the agent-core inner loop.
+      // budget.consume() is called from within agent-loop.ts
+      // via this callback, but the IterationBudget instance
+      // lives here in run.ts and persists across attempts.
+      const onBeforeToolCallingRound = iterationBudget
+        ? (_round: number): boolean => iterationBudget.consume()
+        : undefined;
+
+    3. Add loop-level tracking variables (~line 1577):
+
+      // Budget: should the next iteration inject a summary request?
+      let budgetExhaustedSummaryPending = false;
+      // Budget: is the current iteration a summary attempt?
+      let budgetSummaryAttempt = false;
+
+    4. Pass the callback to the attempt dispatch (~line 2044):
+
+      const rawAttempt = await runEmbeddedAttemptWithBackend({
+        // ... existing params ...
+        onBeforeToolCallingRound: budgetSummaryAttempt
+          ? undefined   // Summary attempt: no budget callback (allow 1 round)
+          : onBeforeToolCallingRound,
+        // ... remaining params ...
+      });
+
+    5. After the attempt result is processed, in the "Successful
+       Completion" section (~line 3508), BEFORE the existing retry
+       checks (reasoning-only, empty-response), add budget exhaustion
+       detection:
+
+      // --- Budget Exhaustion Detection ---
+      if (
+        iterationBudget &&
+        iterationBudget.remaining <= 0 &&
+        !budgetSummaryAttempt &&
+        !aborted &&
+        !promptError
+      ) {
+        // Budget exhausted during this attempt's inner loop.
+        // The inner loop broke because budget.consume() returned false.
+        if (budgetConfig.forceSummaryOnExhaustion) {
+          budgetExhaustedSummaryPending = true;
+          // Continue to the next outer-loop iteration, which will inject
+          // the summary prompt (Step 11).
+          continue;
+        } else {
+          // Return error immediately
+          return buildBudgetExhaustionResult({
+            budget: iterationBudget,
+            durationMs: Date.now() - started,
+            agentMeta,
+            livenessState: resolveRunLivenessState({
+              payloadCount: 0,
+              aborted,
+              timedOut,
+              attempt,
+              incompleteTurnText: null,
+            }),
+          });
+        }
+      }
+
+    6. Handle summary attempt completion. AFTER the budget detection
+       block above, add:
+
+      // --- Budget Summary Attempt Result ---
+      if (budgetSummaryAttempt) {
+        budgetSummaryAttempt = false;
+        const summaryText = resolveFinalAssistantVisibleText(
+          sessionLastAssistant,
+        );
+        if (summaryText) {
+          // Summary produced -- return as result with budget metadata
+          return {
+            payloads: [{ text: summaryText }],
+            meta: {
+              durationMs: Date.now() - started,
+              agentMeta,
+              ...(iterationBudget
+                ? {
+                    budgetUsed: iterationBudget.used,
+                    budgetMax: iterationBudget.maxTotal,
+                  }
+                : {}),
+              error: {
+                kind: "budget_exhausted" as const,
+                message: `Budget exhausted: ${iterationBudget!.used}/${iterationBudget!.maxTotal}`,
+              },
+            },
+          };
+        }
+        // Fallback if summary didn't produce text
+        return buildBudgetExhaustionResult({
+          budget: iterationBudget!,
+          durationMs: Date.now() - started,
+          agentMeta,
+          summaryError: "Summary call did not produce visible text",
+        });
+      }
+
+  NOTES:
+    - Budget is undefined when disabled -- all checks guarded with `if`
+    - The callback closure captures iterationBudget by reference, so
+      budget state persists across outer-loop attempts
+    - For the summary attempt, onBeforeToolCallingRound is undefined,
+      allowing the summary call to proceed without budget consumption
+    - The `continue` for budgetExhaustedSummaryPending goes back to the
+      top of the while(true) loop, where Step 11 will inject the summary
+
+
+--------------------------------------------------------------------------------
+STEP 9: Extend EmbeddedAgentRunMeta error kind union
+--------------------------------------------------------------------------------
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/types.ts
+
+  DESCRIPTION:
+    The error.kind field on EmbeddedAgentRunMeta is a string literal union
+    (lines 157-164). Adding "budget_exhausted" without modifying this type
+    would cause a TypeScript compilation error.
+
+  CHANGES:
+
+    1. At ~line 157-164, add "budget_exhausted" to the kind union:
+
+      error?: {
+        kind:
+          | "context_overflow"
+          | "compaction_failure"
+          | "role_ordering"
+          | "image_size"
+          | "retry_limit"
+          | "incomplete_turn"
+          | "hook_block"
+          | "budget_exhausted";       // ADD
+        message: string;
+        fallbackSafe?: boolean;
+        terminalPresentation?: boolean;
+      };
+
+  NOTES:
+    - No existing code references "budget_exhausted" -- no conflicts.
+    - Follows snake_case naming convention of existing values.
+    - Adding to the union is backward-compatible.
+
+
+--------------------------------------------------------------------------------
+STEP 10: Add budget-exhaustion result builder
+--------------------------------------------------------------------------------
+
+  TARGET FILE (NEW):
+    src/agents/embedded-agent-runner/run/budget-exhaustion.ts
+
+  DESCRIPTION:
+    Simple function that builds an EmbeddedAgentRunResult for budget
+    exhaustion cases. Used when forceSummaryOnExhaustion is disabled
+    or when the summary call fails.
+
+    Mirrors the structure of handleRetryLimitExhaustion() in retry-limit.ts
+    (lines 15-53).
+
+  IMPLEMENTATION:
+
+    import type {
+      EmbeddedAgentMeta,
+      EmbeddedAgentRunResult,
+      EmbeddedRunLivenessState,
+    } from "../types.js";
+    import type { IterationBudget } from "../../iteration-budget.js";
+
+    /**
+     * Builds a terminal EmbeddedAgentRunResult for iteration budget
+     * exhaustion.
+     *
+     * Called when:
+     * 1. Budget exhausted + forceSummaryOnExhaustion disabled -> error
+     * 2. Budget exhausted + forced summary call failed -> fallback error
+     *
+     * Follows the same return pattern as handleRetryLimitExhaustion().
+     */
+    export function buildBudgetExhaustionResult(params: {
+      budget: IterationBudget;
+      durationMs: number;
+      agentMeta: EmbeddedAgentMeta;
+      livenessState?: EmbeddedRunLivenessState;
+      summaryError?: unknown;
+    }): EmbeddedAgentRunResult {
+      const { budget, durationMs, agentMeta, livenessState, summaryError } =
+        params;
+
+      const text = summaryError
+        ? `I reached the maximum iterations (${budget.maxTotal}) ` +
+          `but couldn't summarize. Error: ${String(summaryError)}`
+        : `Iteration budget exhausted ` +
+          `(${budget.used}/${budget.maxTotal} productive iterations). ` +
+          `Please try again with a simpler request, or increase ` +
+          `agents.defaults.iterationBudget.maxIterations in your config.`;
+
+      return {
+        payloads: [{ text, isError: true }],
+        meta: {
+          durationMs,
+          agentMeta,
+          ...(livenessState ? { livenessState } : {}),
+          error: {
+            kind: "budget_exhausted",
+            message: `Budget exhausted: ${budget.used}/${budget.maxTotal}`,
+          },
+        },
+      };
+    }
+
+  NOTES:
+    - Mirrors handleRetryLimitExhaustion() structure exactly
+    - No async -- this is a pure result builder
+    - summaryError handles the fallback case when summary fails
+    - Returns isError: true so downstream knows it's an error
+
+
+--------------------------------------------------------------------------------
+STEP 11: Add budget-exhaustion summary injection in run.ts
+--------------------------------------------------------------------------------
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run.ts
+
+  DESCRIPTION:
+    When budgetExhaustedSummaryPending is true (set in Step 8), the next
+    outer-loop iteration injects a summary prompt. This follows the
+    EXACT pattern of compactionContinuationRetryInstruction, which also
+    injects instructions and re-enters the loop.
+
+  CHANGES:
+
+    1. Add constant near line 255 (alongside existing instruction constants):
+
+      const BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION =
+        "You've reached the maximum number of tool-calling iterations " +
+        "allowed for this request. Please provide a final response " +
+        "summarizing what you've accomplished so far, what remains " +
+        "incomplete, and any next steps the user should take. " +
+        "Do not call any more tools.";
+
+    2. Add a new variable alongside existing retry instruction variables
+       (~line 1631):
+
+      let budgetExhaustionSummaryInstruction: string | null = null;
+
+    3. Add the budget instruction to the promptAdditions array (~line 1934):
+
+      const promptAdditions = [
+        reasoningOnlyRetryInstruction,
+        emptyResponseRetryInstruction,
+        compactionContinuationRetryInstruction,
+        budgetExhaustionSummaryInstruction,  // ADD
+      ].filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0,
+      );
+
+    4. At the TOP of the while(true) body, AFTER the MAX_RUN_LOOP_ITERATIONS
+       check (~line 1920), add the summary setup:
+
+      // --- Budget Exhaustion: prepare summary attempt ---
+      if (budgetExhaustedSummaryPending) {
+        budgetExhaustedSummaryPending = false;
+        budgetSummaryAttempt = true;
+        budgetExhaustionSummaryInstruction =
+          BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION;
+        // Note: onBeforeToolCallingRound is set to undefined for this
+        // attempt in Step 8, item 4. This allows the summary LLM call
+        // to proceed without budget consumption. The model sees the
+        // summary instruction and should produce text, not tool calls.
+        // If it does call tools, the inner loop runs one round and
+        // the model responds to tool results on the next round (also
+        // without budget checks). This is intentional -- the summary
+        // attempt is bounded by being a single attempt, not by budget.
+      }
+
+    5. Clear the summary instruction after use. In the success path
+       (~line 3846, where compactionContinuationRetryInstruction is
+       cleared), add:
+
+      budgetExhaustionSummaryInstruction = null;
+
+  ALTERNATIVE TOOL SUPPRESSION:
+    If the model ignores the "do not call any more tools" instruction
+    and calls tools anyway, the summary attempt becomes a normal
+    tool-calling attempt (unbounded by budget since the callback is
+    undefined). To prevent this:
+
+    Option A (simple): Limit inner loop rounds for summary attempt.
+      Pass maxToolCallingRounds: 1 (or a new option) to limit the
+      summary attempt to 1 tool-calling round. After that round, the
+      inner loop stops and the model's tool results are returned.
+      The outer loop then returns whatever text was produced.
+
+    Option B (strict): Suppress tools entirely for summary attempt.
+      Thread a suppressTools flag through the attempt -> agent session
+      -> agent-core chain. When set, the LLM call is made without
+      tools in the request, forcing text-only response.
+
+    Recommendation: Start with the simple approach (no special tool
+    suppression). The "do not call any more tools" instruction in the
+    summary prompt should be sufficient for most models. If testing
+    reveals models ignoring the instruction, add Option A or B as a
+    follow-up.
+
+  NOTES:
+    - Follows the EXACT same pattern as compactionContinuationRetryInstruction
+    - The summary instruction is appended to basePrompt via promptAdditions
+    - The summary attempt uses the SAME session context (model sees all
+      previous tool results and can summarize accurately)
+    - budgetSummaryAttempt flag prevents budget from being checked again
+      during the summary attempt
+
+
+--------------------------------------------------------------------------------
+STEP 12: Add budget refund for compaction restarts
+--------------------------------------------------------------------------------
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run.ts
+
+  DESCRIPTION:
+    When the outer run.ts loop performs a compaction restart, refund 1
+    iteration from the budget. The compaction interrupted a productive
+    round, so the model should get that round back.
+
+    Adapted from Hermes: conversation_loop.py lines 3733-3734
+
+  CHANGES:
+
+    At each point where postCompactionGuard.armPostCompaction() is called
+    AND the loop continues, add a refund:
+
+    1. After timeout compaction success (~line 2554):
+
+      if (iterationBudget) {
+        iterationBudget.refund();
+      }
+      postCompactionGuard.armPostCompaction();
+      continue;
+
+    2. After overflow compaction success (~line 2804):
+
+      if (iterationBudget) {
+        iterationBudget.refund();
+      }
+      postCompactionGuard.armPostCompaction();
+      continue;
+
+    3. After compaction-interrupted visible answer continuation (~line 3843):
+
+      if (iterationBudget) {
+        iterationBudget.refund();
+      }
+      postCompactionGuard.armPostCompaction();
+      continue;
+
+  NOTES:
+    - Refund gives back 1 iteration for the interrupted round
+    - Safe even if consume() wasn't called (refund floors at 0)
+    - The budget persists across attempts via closure, so the refund
+      correctly adjusts the cumulative count
+    - Search for ALL armPostCompaction() calls to ensure completeness
+
+
+--------------------------------------------------------------------------------
+STEP 13: Add budget metadata to run result
+--------------------------------------------------------------------------------
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/types.ts
+
+  DESCRIPTION:
+    Add optional budget fields to EmbeddedAgentRunMeta for observability.
+
+  CHANGES:
+
+    1. Add budget fields to EmbeddedAgentRunMeta (~line 141):
+
+      export type EmbeddedAgentRunMeta = {
+        durationMs: number;
+        agentMeta?: EmbeddedAgentMeta;
+        // ... existing fields ...
+        /** Iteration budget usage when budget is enabled. */
+        budgetUsed?: number;
+        /** Iteration budget maximum when budget is enabled. */
+        budgetMax?: number;
+      };
+
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run.ts
+
+  CHANGES:
+
+    1. In the final result construction (~line 4080), add budget fields
+       to the meta object:
+
+      meta: {
+        durationMs: Date.now() - started,
+        agentMeta,
+        // ... existing fields ...
+        ...(iterationBudget
+          ? {
+              budgetUsed: iterationBudget.used,
+              budgetMax: iterationBudget.maxTotal,
+            }
+          : {}),
+      },
+
+  NOTES:
+    - Budget fields are optional (undefined when budget is disabled)
+    - Follows the existing pattern of optional metadata fields
+    - Downstream consumers can check budgetMax to know if budget was active
+
+
+--------------------------------------------------------------------------------
+STEP 14: Enable tool loop detection warnings by default
+--------------------------------------------------------------------------------
+
+  TARGET FILE (MODIFY):
+    src/agents/tool-loop-detection.ts
+
+  DESCRIPTION:
+    Change the default for tool loop detection from disabled to enabled.
+    Aligns with Hermes's "warnings always-on" design principle.
+
+  CHANGES:
+
+    1. In DEFAULT_LOOP_DETECTION_CONFIG (~line 44-56), change:
+
+      OLD:  enabled: false,
+      NEW:  enabled: true,
+
+
+  TARGET FILE (MODIFY):
+    src/agents/tool-loop-detection.test.ts
+
+  DESCRIPTION:
+    The test "is disabled by default" (~line 317) will fail after the
+    default change. Update it.
+
+  CHANGES:
+
+    1. Rename test from "is disabled by default" to "is enabled by default"
+       or similar descriptive name.
+
+    2. Update expectations: after enough repeated calls (>= warningThreshold),
+       detectToolCallLoop should return { stuck: true, level: "warning", ... }
+
+    3. Add a NEW test "can be disabled via config" that passes
+       { enabled: false } and verifies the old behavior
+       (20 repeated calls return { stuck: false }).
+
+  RISK:
+    - LOW: Warning-level detections log guidance but don't block execution.
+    - Critical-level blocking (threshold 20) only triggers for stuck loops.
+    - Users can disable via config: tools.loopDetection.enabled: false
+
+
+--------------------------------------------------------------------------------
+STEP 15: Add unit tests for IterationBudget
+--------------------------------------------------------------------------------
+
+  TARGET FILE (NEW):
+    src/agents/iteration-budget.test.ts
+
+  DESCRIPTION:
+    Port test cases from Hermes's test_iteration_budget_race.py to
+    TypeScript/Vitest. Omit thread-safety tests (not applicable to Node.js).
+
+  IMPLEMENTATION:
+
+    import { describe, expect, test } from "vitest";
+    import { IterationBudget } from "./iteration-budget.js";
+
+    describe("IterationBudget", () => {
+
+      test("consume returns true until budget exhausted", () => {
+        const budget = new IterationBudget(3);
+        expect(budget.consume()).toBe(true);   // 1/3
+        expect(budget.consume()).toBe(true);   // 2/3
+        expect(budget.consume()).toBe(true);   // 3/3
+        expect(budget.consume()).toBe(false);  // exhausted
+        expect(budget.consume()).toBe(false);  // still exhausted
+      });
+
+      test("refund restores one iteration", () => {
+        const budget = new IterationBudget(2);
+        expect(budget.consume()).toBe(true);   // 1/2
+        expect(budget.consume()).toBe(true);   // 2/2
+        expect(budget.consume()).toBe(false);  // exhausted
+        budget.refund();                       // 1/2
+        expect(budget.consume()).toBe(true);   // 2/2
+        expect(budget.consume()).toBe(false);  // exhausted again
+      });
+
+      test("refund does not go below zero", () => {
+        const budget = new IterationBudget(5);
+        budget.refund();
+        budget.refund();
+        expect(budget.used).toBe(0);
+        expect(budget.remaining).toBe(5);
+      });
+
+      test("used reflects consume and refund accurately", () => {
+        const budget = new IterationBudget(10);
+        expect(budget.used).toBe(0);
+        budget.consume();
+        expect(budget.used).toBe(1);
+        budget.consume();
+        expect(budget.used).toBe(2);
+        budget.refund();
+        expect(budget.used).toBe(1);
+      });
+
+      test("remaining equals maxTotal minus used", () => {
+        const budget = new IterationBudget(5);
+        expect(budget.remaining).toBe(5);
+        budget.consume();
+        expect(budget.remaining).toBe(4);
+        budget.consume();
+        budget.consume();
+        expect(budget.remaining).toBe(2);
+      });
+
+      test("maxTotal is clamped to at least 1", () => {
+        const budget = new IterationBudget(0);
+        expect(budget.maxTotal).toBe(1);
+        expect(budget.remaining).toBe(1);
+      });
+
+      test("maxTotal is floored for fractional values", () => {
+        const budget = new IterationBudget(3.7);
+        expect(budget.maxTotal).toBe(3);
+      });
+
+      test("negative maxTotal is clamped to 1", () => {
+        const budget = new IterationBudget(-5);
+        expect(budget.maxTotal).toBe(1);
+      });
+
+      test("budget persists state across multiple operations", () => {
+        // Simulates budget persisting across attempts
+        const budget = new IterationBudget(10);
+        // Attempt 1: consumes 5
+        for (let i = 0; i < 5; i++) budget.consume();
+        expect(budget.used).toBe(5);
+        expect(budget.remaining).toBe(5);
+        // Compaction: refund 1
+        budget.refund();
+        expect(budget.used).toBe(4);
+        // Attempt 2: consumes remaining
+        for (let i = 0; i < 6; i++) budget.consume();
+        expect(budget.used).toBe(10);
+        expect(budget.remaining).toBe(0);
+        expect(budget.consume()).toBe(false);
+      });
+    });
+
+
+--------------------------------------------------------------------------------
+STEP 16: Add integration tests for budget in run loop
+--------------------------------------------------------------------------------
+
+  TARGET FILE (NEW):
+    src/agents/embedded-agent-runner/run.iteration-budget.test.ts
+
+  DESCRIPTION:
+    Integration tests verifying budget integration with the run loop.
+    Uses the same test infrastructure as run.compaction-loop-guard.test.ts:
+    vi.hoisted() for module-level mocks, vi.mock() for dependency injection,
+    and loadRunOverflowCompactionHarness-style test harness.
+
+  TEST CASES:
+
+    import { describe, expect, test, vi, beforeAll, beforeEach } from "vitest";
+
+    describe("iteration budget in run loop", () => {
+
+      test("budget is consumed on each tool-calling round", () => {
+        // Setup: config with maxIterations: 5
+        // Mock: LLM returns tool calls for 5 rounds, then text
+        // Assert: result.meta.budgetUsed === 5
+        // Assert: result.meta.budgetMax === 5
+      });
+
+      test("budget exhaustion triggers summary when enabled", () => {
+        // Setup: maxIterations: 3, forceSummaryOnExhaustion: true
+        // Mock: LLM returns tool calls for 3 rounds
+        // Assert: one more attempt is made with summary instruction
+        // Assert: result contains summary text
+        // Assert: result.meta.error.kind === "budget_exhausted"
+      });
+
+      test("budget exhaustion returns error when summary disabled", () => {
+        // Setup: maxIterations: 3, forceSummaryOnExhaustion: false
+        // Assert: result.payloads[0].isError === true
+        // Assert: result.meta.error.kind === "budget_exhausted"
+      });
+
+      test("compaction restart refunds budget", () => {
+        // Setup: maxIterations: 10, trigger compaction at round 5
+        // Assert: after compaction, budget.used is decreased by 1
+        // Assert: agent can continue with remaining budget
+      });
+
+      test("budget persists across outer-loop attempts", () => {
+        // Setup: maxIterations: 8
+        // Mock: first attempt uses 4 rounds, then compaction, then 4 more
+        // Assert: budget reflects cumulative usage across both attempts
+        // Assert: result.meta.budgetUsed === 8 (minus refund)
+      });
+
+      test("disabled budget allows unlimited iterations", () => {
+        // Setup: iterationBudget.enabled: false
+        // Assert: result.meta.budgetUsed is undefined
+        // Assert: result.meta.budgetMax is undefined
+        // Assert: loop runs limited only by MAX_RUN_LOOP_ITERATIONS
+      });
+
+      test("per-agent config overrides default maxIterations", () => {
+        // Setup: defaults.maxIterations: 90, agent[x].maxIterations: 15
+        // Assert: agent uses budget of 15
+        // Assert: result.meta.budgetMax === 15
+      });
+
+      test("onBeforeToolCallingRound callback stops inner loop", () => {
+        // Unit-level test for the callback mechanism
+        // Setup: callback returns false on 3rd call
+        // Assert: inner loop runs exactly 2 rounds
+      });
+    });
+
+  NOTES:
+    - Reference run.compaction-loop-guard.test.ts for mock setup patterns
+    - Uses vi.hoisted() + vi.mock() for module-level dependency injection
+    - Focus on behavioral verification at the integration level
+
+
+================================================================================
+PART C -- RISK ANALYSIS
+================================================================================
+
+C.1  LOW RISK
+--------------
+
+  1. IterationBudget class (Step 1)
+     - Pure, side-effect-free class with trivial logic
+     - Direct translation from battle-tested Hermes code
+     - Comprehensive unit tests in Step 15
+     - Risk: Essentially zero
+
+  2. Configuration types & schema (Steps 2-3)
+     - Follows existing patterns exactly
+     - All fields optional with safe defaults
+     - Zod strict() catches typos in config
+     - Risk: Very low
+
+  3. Config resolver (Step 5)
+     - Follows resolveMaxRunRetryIterations() pattern exactly
+     - Same fallback chain: per-agent -> defaults -> hardcoded
+     - Risk: Very low
+
+  4. Error kind extension (Step 9)
+     - Adding to string literal union -- backward compatible
+     - No existing code affected
+     - Risk: Very low
+
+
+C.2  MEDIUM RISK
+-----------------
+
+  5. resolveAgentConfig extension (Step 4)
+     - Modifying a widely-used function (100+ consumers)
+     - Risk: Incorrect merge logic could affect other config fields
+     - Mitigation: Follows the EXACT pattern of adjacent runRetries field
+     - Mitigation: Change is additive -- no existing fields modified
+
+  6. agent-core loop modification (Step 6) ***
+     - Modifying the inner tool-calling loop in a separate package
+     - Risk: Incorrect callback placement could cause subtle behavioral changes
+     - Mitigation: Callback is optional -- existing callers are unaffected
+     - Mitigation: Change is ~10 lines with clear semantics
+     - Mitigation: Callback is synchronous -- no async race conditions
+     - Mitigation: Counter resets per inner-loop lifecycle naturally
+
+  7. Budget callback threading (Step 7) ***
+     - Threading a parameter through 4+ levels of function calls
+     - Risk: Missing a level causes the callback to not reach agent-core
+     - Mitigation: Follow the EXACT same pattern as beforeToolCall callback
+     - Mitigation: TypeScript compiler catches missing parameters
+     - Mitigation: Integration tests verify end-to-end behavior
+
+  8. Budget-exhaustion summary injection (Step 11)
+     - Risk: Model might ignore "do not call tools" instruction
+     - Mitigation: Even if model calls tools, the attempt is bounded by
+       the outer loop's MAX_RUN_LOOP_ITERATIONS
+     - Mitigation: Follow-up can add strict tool suppression if needed
+     - Mitigation: Summary instruction is adapted from Hermes's proven prompt
+
+  9. Budget refund for compaction (Step 12)
+     - Risk: Could miss a compaction path or refund twice
+     - Mitigation: Search for ALL armPostCompaction() calls
+     - Mitigation: Refund is idempotent (floors at 0)
+
+  10. Enabling loop detection by default (Step 14)
+     - Known test failure -- must update test
+     - Risk: Other tests may also assume disabled default
+     - Mitigation: Search for all tests referencing DEFAULT_LOOP_DETECTION_CONFIG
+
+
+C.3  KNOWN LIMITATIONS
+-----------------------
+
+  1. Budget lost on FailoverError
+     When the run loop throws FailoverError and the outer caller re-invokes
+     runEmbeddedAgent with a different model, the budget resets to full.
+
+     Impact: LOW -- failover is rare, and a fresh budget for a new model
+     is reasonable (it hasn't done any work with that model).
+
+     Resolution: Pass budget state through RunEmbeddedAgentParams so
+     failover inherits remaining budget.
+
+  2. No separate subagent budget default
+     Each subagent agent ID can have its own iterationBudget.maxIterations
+     via per-agent config. No global subagent default.
+
+     Impact: LOW -- operators who want different subagent budgets can set
+     them per-agent. The default of 90 applies to all agents equally.
+
+     Resolution: Add subagentMaxIterations with detection via spawnedBy.
+
+  3. No live budget tracking in diagnostic session state
+     Budget usage is reported in the run result meta, not in real-time
+     diagnostic session state.
+
+     Impact: LOW -- run result still reports budget usage.
+
+     Resolution: Thread diagnostic session ref through run.ts and
+     update budget fields from the callback.
+
+  4. Summary attempt not strictly tool-free
+     The summary attempt relies on the instruction to prevent tool calls.
+     If the model ignores the instruction, it may make one more tool call
+     before the outer loop returns.
+
+     Impact: LOW -- the summary attempt is still bounded by being a
+     single outer-loop iteration.
+
+     Resolution: Add suppressTools flag to the attempt params that
+     omits tools from the LLM API request entirely.
+
+
+C.4  ROLLBACK PLAN
+-------------------
+
+  All changes are behind the `iterationBudget.enabled` config flag
+  (default: true). If issues arise:
+
+    1. Set agents.defaults.iterationBudget.enabled: false in config
+    2. This disables budget creation; onBeforeToolCallingRound is undefined
+    3. The agent-core loop check becomes a no-op (callback not provided)
+    4. All budget-related run.ts logic is skipped (iterationBudget is undefined)
+    5. No code change or deployment needed -- config change only
+
+  For the loop detection default change (Step 14):
+    1. Set tools.loopDetection.enabled: false in config
+    2. Returns to previous behavior immediately
+
+
+C.5  DEPENDENCY SUMMARY
+-------------------------
+
+  New external dependencies: NONE
+
+  New internal dependencies:
+    - src/agents/iteration-budget.ts (new module, zero deps)
+    - src/agents/embedded-agent-runner/run/budget-exhaustion.ts (new module)
+      - Depends on: ../types.ts, ../../iteration-budget.ts
+
+  Modified files (main source):
+    - src/config/types.agent-defaults.ts (add type)
+    - src/config/types.agents.ts (add type)
+    - src/config/zod-schema.agent-defaults.ts (add + export schema)
+    - src/config/zod-schema.agents.ts (import + add schema reference)
+    - src/agents/agent-scope-config.ts (add merge logic)
+    - src/agents/embedded-agent-runner/run/helpers.ts (add resolver)
+    - src/agents/embedded-agent-runner/types.ts (extend error kind + meta)
+    - src/agents/embedded-agent-runner/run.ts (main integration)
+    - src/agents/embedded-agent-runner/run/attempt.ts (thread callback)
+    - src/agents/embedded-agent-runner/run/backend.ts (thread callback)
+    - src/agents/tool-loop-detection.ts (default change)
+
+  Modified files (agent-core package):
+    - packages/agent-core/src/types.ts (add callback to AgentLoopConfig)
+    - packages/agent-core/src/agent.ts (thread callback)
+    - packages/agent-core/src/agent-loop.ts (call callback in loop)
+
+  Modified test files:
+    - src/agents/tool-loop-detection.test.ts (update default test)
+
+  New test files:
+    - src/agents/iteration-budget.test.ts
+    - src/agents/embedded-agent-runner/run.iteration-budget.test.ts
+
+
+C.6  COMPARISON: V1 vs V2 APPROACH
+------------------------------------
+
+  V1 (Corrected Plan):
+    - Counted outer-loop (run.ts) iterations only
+    - "Productive" flag set at continue/return points in run.ts
+    - Budget consumed at the top of each outer-loop iteration
+    - DID NOT reach the inner tool-calling loop in agent-core
+    - Would have been almost useless: outer loop typically runs 1x
+      for normal requests, with all tool calling inside the attempt
+    - 14 steps, 14 files modified/created
+
+  V2 (This Plan):
+    - Threads budget callback into the agent-core inner loop
+    - Budget consumed before each tool-calling round in agent-loop.ts
+    - Correctly counts individual LLM tool-calling rounds (matches Hermes)
+    - Budget persists across outer-loop attempts via closure
+    - Architecturally correct: budget enforced where iteration actually happens
+    - 16 steps, 17 files modified/created (3 additional agent-core files)
+
+  Why V2 is better:
+    1. Actually prevents runaway tool-calling loops (the primary user complaint)
+    2. Matches Hermes's per-LLM-call counting semantics
+    3. Default of 90 is meaningful (90 tool-calling rounds, not 90 retry attempts)
+    4. Provides real observability (budgetUsed reflects actual work done)
+    5. The callback pattern is lightweight and follows existing conventions
+
+  Trade-off:
+    V2 touches agent-core (3 files, ~15 lines). This is a SEPARATE PACKAGE
+    in the monorepo. However, the change is minimal, optional (guarded by
+    callback presence), and follows existing patterns (beforeToolCall,
+    afterToolCall are already threaded through the same path).
+
+
+================================================================================
+END OF PLAN
+================================================================================

@@ -1,0 +1,905 @@
+================================================================================
+TEST PLAN REVIEW V2 (CORRECTED): Iteration Budget & Agent Loop Safety
+Ported Feature: Hermes -> OpenClaw
+================================================================================
+
+Source:  Hermes Agent (Python)  -> Target: OpenClaw (TypeScript)
+Feature: Per-agent iteration budget with consume/refund semantics,
+         budget-exhaustion forced summary, and configuration.
+Plan covers: All 16 steps from code_port_plan_review_V3.txt
+
+This is the CORRECTED test plan produced by reviewing V2 against the actual
+OpenClaw source code. Every correction is marked with [FIX #N] and
+cross-referenced to the review summary.
+
+Test runner:    Vitest (via scoped project configs in test/vitest/)
+Conventions:    *.test.ts colocated with source; *.e2e.test.ts for end-to-end
+Imports:        import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
+Assertions:     expect().toBe / toEqual / toHaveLength / toHaveBeenCalled
+Mocking:        vi.fn(), vi.mock(), vi.hoisted(), vi.doMock()
+Import exts:    All imports use explicit .js extensions
+
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  TEST FILE 1: src/agents/iteration-budget.test.ts                      [NEW]
+               Unit tests for the IterationBudget class (Step 1)
+
+  TEST FILE 2: src/config/zod-schema.agent-defaults.test.ts          [EXTEND]
+               Zod schema validation for iterationBudget config (Steps 2-3)
+
+  TEST FILE 3: src/agents/agent-scope.test.ts                        [EXTEND]
+               Config resolution / merge logic for iterationBudget (Steps 4-5)
+               [FIX #1] CHANGED from agent-scope-config.test.ts (NEW) to
+               agent-scope.test.ts (EXTEND) -- the existing file already
+               tests resolveAgentConfig().
+
+  TEST FILE 4: src/agents/embedded-agent-runner/run.iteration-budget.test.ts
+               Integration tests for budget in the run loop (Steps 7-13) [NEW]
+
+  TEST FILE 5: src/agents/embedded-agent-runner/run/budget-exhaustion.test.ts
+               Budget-exhaustion result builder and instruction (Steps 9-11) [NEW]
+
+  TEST FILE 6: packages/agent-core/src/agent-loop.test.ts            [EXTEND]
+               onBeforeToolCallingRound callback in agent loop (Step 6)
+
+  TEST FILE 7: src/agents/tool-loop-detection.test.ts                [EXTEND]
+               Step 14: verify default enabled changed to true
+
+  CROSS-CUTTING: Regression scenarios mapped to GitHub issues
+
+
+================================================================================
+TEST FILE 1: src/agents/iteration-budget.test.ts
+================================================================================
+
+  [UNCHANGED from V2.]
+
+Purpose:      Unit tests for the IterationBudget class
+Source file:  src/agents/iteration-budget.ts (new file, Step 1)
+Hermes analog: tests/run_agent/test_iteration_budget_race.py
+Action:       NEW file
+
+--- Why no thread-safety tests ---
+
+  Hermes's test_iteration_budget_used_is_thread_safe uses 10 threads x 200
+  ops with ThreadPoolExecutor to verify the threading.Lock protects
+  concurrent access. Node.js is single-threaded (no data races possible),
+  so the TypeScript IterationBudget does NOT need a Lock/Mutex and the
+  thread-safety test is correctly EXCLUDED.
+
+--- Imports ---
+
+  import { describe, it, expect } from "vitest";
+  import { IterationBudget } from "./iteration-budget.js";
+
+--- Test Structure ---
+
+  describe("IterationBudget", () => {
+
+    // === 1.1 Constructor & Defaults ===
+
+    describe("constructor", () => {
+
+      it("creates a budget with specified maxTotal and zero used", () => {
+        Arrange: const budget = new IterationBudget(90)
+        Assert:
+          expect(budget.maxTotal).toBe(90)
+          expect(budget.used).toBe(0)
+          expect(budget.remaining).toBe(90)
+      });
+
+      it("accepts maxTotal of 1 (minimum useful budget)", () => {
+        Arrange: const budget = new IterationBudget(1)
+        Assert:
+          expect(budget.maxTotal).toBe(1)
+          expect(budget.remaining).toBe(1)
+          expect(budget.consume()).toBe(true)
+          expect(budget.consume()).toBe(false)
+      });
+
+      it("handles maxTotal of 0 (immediately exhausted)", () => {
+        Arrange: const budget = new IterationBudget(0)
+        Assert:
+          expect(budget.maxTotal).toBe(0)
+          expect(budget.remaining).toBe(0)
+          expect(budget.consume()).toBe(false)
+      });
+    });
+
+    // === 1.2 consume() ===
+
+    describe("consume", () => {
+
+      it("returns true and increments used when under budget", () => {
+        Arrange: const budget = new IterationBudget(5)
+        Act:     const result = budget.consume()
+        Assert:
+          expect(result).toBe(true)
+          expect(budget.used).toBe(1)
+          expect(budget.remaining).toBe(4)
+      });
+
+      it("returns true for each consume up to maxTotal", () => {
+        Arrange: const budget = new IterationBudget(3)
+        Act:     const results = [budget.consume(), budget.consume(), budget.consume()]
+        Assert:
+          expect(results).toEqual([true, true, true])
+          expect(budget.used).toBe(3)
+          expect(budget.remaining).toBe(0)
+      });
+
+      it("returns false when budget is exhausted", () => {
+        Arrange: const budget = new IterationBudget(3)
+        Act:     consume 3 times, then const fourth = budget.consume()
+        Assert:
+          expect(fourth).toBe(false)
+          expect(budget.used).toBe(3)   // unchanged
+          expect(budget.remaining).toBe(0)
+      });
+
+      it("returns false on repeated calls after exhaustion", () => {
+        Arrange: const budget = new IterationBudget(2)
+        Act:     consume 2 (exhaust), then consume 3 more
+        Assert:
+          All 3 extra calls return false
+          expect(budget.used).toBe(2)   // stays at 2
+      });
+    });
+
+    // === 1.3 refund() ===
+
+    describe("refund", () => {
+
+      it("decrements used count by 1", () => {
+        Arrange: const budget = new IterationBudget(5)
+        Act:     budget.consume(); budget.consume(); budget.refund()
+        Assert:
+          expect(budget.used).toBe(1)
+          expect(budget.remaining).toBe(4)
+      });
+
+      it("restores consume ability after exhaustion", () => {
+        Arrange: const budget = new IterationBudget(2)
+        Act:     consume 2 (exhausted), then refund()
+        Assert:
+          expect(budget.remaining).toBe(1)
+          expect(budget.consume()).toBe(true)
+      });
+
+      it("floors used at 0 (refund on fresh budget is no-op)", () => {
+        Arrange: const budget = new IterationBudget(5)
+        Act:     budget.refund()
+        Assert:
+          expect(budget.used).toBe(0)
+          expect(budget.remaining).toBe(5)
+      });
+
+      it("floors used at 0 after multiple refunds beyond usage", () => {
+        Arrange: const budget = new IterationBudget(3)
+        Act:     budget.consume(); for (let i = 0; i < 5; i++) budget.refund()
+        Assert:
+          expect(budget.used).toBe(0)
+          expect(budget.remaining).toBe(3)
+      });
+    });
+
+    // === 1.4 used / remaining Properties ===
+
+    describe("used and remaining", () => {
+
+      it("used reflects consume and refund accurately", () => {
+        Arrange: const budget = new IterationBudget(10)
+        Act + Assert:
+          expect(budget.used).toBe(0)
+          budget.consume(); expect(budget.used).toBe(1)
+          budget.consume(); expect(budget.used).toBe(2)
+          budget.refund();  expect(budget.used).toBe(1)
+          budget.refund();  expect(budget.used).toBe(0)
+      });
+
+      it("remaining equals maxTotal minus used", () => {
+        Arrange: const budget = new IterationBudget(5)
+        Act + Assert:
+          expect(budget.remaining).toBe(5)
+          budget.consume(); expect(budget.remaining).toBe(4)
+          budget.consume(); budget.consume(); expect(budget.remaining).toBe(2)
+          budget.refund(); expect(budget.remaining).toBe(3)
+      });
+
+      it("remaining never goes below 0", () => {
+        Arrange: const budget = new IterationBudget(2)
+        Act:     consume 2, then try consume 5 more
+        Assert:  expect(budget.remaining).toBe(0) after each extra consume
+      });
+    });
+
+    // === 1.5 Interleaved Consume/Refund Sequences ===
+
+    describe("interleaved sequences", () => {
+
+      it("handles alternating consume-refund pattern without drift", () => {
+        Arrange: const budget = new IterationBudget(3)
+        Act:     10 cycles of [consume, refund]
+        Assert:
+          Each consume returns true
+          expect(budget.used).toBe(0)
+          expect(budget.remaining).toBe(3)
+      });
+
+      it("tracks state correctly through complex sequence", () => {
+        Arrange: const budget = new IterationBudget(5)
+        Act + Assert at each step:
+          consume x3 -> expect(budget.used).toBe(3)
+          refund  x1 -> expect(budget.used).toBe(2)
+          consume x2 -> expect(budget.used).toBe(4)
+          refund  x4 -> expect(budget.used).toBe(0)
+          consume x5 -> expect(budget.used).toBe(5)
+          consume x1 -> expect(result).toBe(false)
+          refund  x1 -> expect(budget.used).toBe(4)
+          consume x1 -> expect(result).toBe(true)
+                      -> expect(budget.used).toBe(5)
+      });
+    });
+  });
+
+--- Estimated Test Count: 14 tests ---
+
+
+================================================================================
+TEST FILE 2: src/config/zod-schema.agent-defaults.test.ts (EXTEND)
+================================================================================
+
+  [UNCHANGED from V2, with one clarification.]
+
+Purpose:      Validate Zod schema accepts/rejects iterationBudget config shapes
+Source files: src/config/zod-schema.agent-defaults.ts (modified, Step 3)
+              src/config/types.agent-defaults.ts (modified, Step 2)
+Approach:     Add a new describe() block to EXISTING file
+Action:       EXTEND existing file
+
+--- Import Clarification ---
+
+  [FIX #5] CLARIFIED: AgentEntrySchema lives in a DIFFERENT schema file.
+  The existing test file imports it separately:
+
+    import { AgentEntrySchema } from "./zod-schema.agent-runtime.js";
+
+  This import already exists in the test file (line 5). Test 2.1.5 below
+  ("accepts iterationBudget on per-agent entries") uses AgentEntrySchema,
+  which is valid because the import is already present. However, for this
+  test to work, Step 3 of the port plan must ALSO add the iterationBudget
+  sub-schema to the AgentEntrySchema definition in zod-schema.agent-runtime.ts
+  (not just to AgentDefaultsSchema in zod-schema.agent-defaults.ts).
+
+  If the port plan only adds iterationBudget to AgentDefaultsSchema, test
+  2.1.5 will FAIL. The reviewer should verify that Step 3 covers BOTH
+  schemas.
+
+--- Test Structure ---
+
+  [All tests unchanged from V2.]
+
+  describe("iterationBudget config", () => {
+
+    describe("valid configurations", () => {
+      it("accepts iterationBudget with all fields specified")
+      it("accepts iterationBudget with only enabled field")
+      it("accepts iterationBudget with enabled=false")
+      it("accepts empty iterationBudget object (all fields optional)")
+      it("accepts iterationBudget on per-agent entries")
+      it("preserves explicit values through parsing")
+    });
+
+    describe("boundary values", () => {
+      it("accepts maxIterations=1 (minimum useful value)")
+      it("rejects maxIterations=0")
+      it("rejects negative maxIterations")
+      it("rejects non-integer maxIterations")
+      it("rejects non-integer subagentMaxIterations")
+      it("accepts large maxIterations (500)")
+    });
+
+    describe("invalid inputs", () => {
+      it("rejects string value for maxIterations")
+      it("rejects string value for enabled")
+      it("rejects unknown properties in iterationBudget sub-schema")
+    });
+  });
+
+--- Estimated Test Count: 12 tests ---
+
+
+================================================================================
+TEST FILE 3: src/agents/agent-scope.test.ts (EXTEND)
+================================================================================
+
+  [FIX #1] CORRECTED: File path and action.
+
+  V2 ERROR: V2 proposed creating a NEW file:
+    src/agents/agent-scope-config.test.ts
+
+  V2 also stated in insight #23: "agent-scope-config.test.ts does NOT
+  exist yet -- FILE 3 is entirely NEW."
+
+  ACTUAL: src/agents/agent-scope.test.ts ALREADY EXISTS and ALREADY tests
+  resolveAgentConfig(). Verified contents:
+
+    - Imports: resolveAgentConfig, resolveDefaultAgentDir,
+      resolveAgentDir, resolveAgentEffectiveModelPrimary, etc.
+      from "./agent-scope.js"
+    - Has describe("resolveAgentConfig", ...) with tests for:
+      . Returns undefined when no agents config
+      . Returns undefined when agent ID doesn't exist
+      . Merges contextLimits (defaults + per-agent override)
+      . Merges experimental flags (defaults + per-agent override)
+      . Merges runRetries (defaults + per-agent override, verified at
+        lines 152-180 with exact assertion:
+        defaults { base:24, perProfile:8, min:32, max:160 }
+        agent override { max:50 } -> result { base:24, perProfile:8,
+        min:32, max:50 })
+      . Normalizes agent IDs
+
+  Creating a parallel agent-scope-config.test.ts would violate OpenClaw's
+  convention of one test file per source module and would duplicate the
+  existing describe structure.
+
+  [FIX #2] CORRECTED: Import path.
+
+  V2 used: import { resolveAgentConfig } from "./agent-scope-config.js";
+
+  ACTUAL: The existing test file imports from "./agent-scope.js"
+  (NOT "./agent-scope-config.js"). There is a re-export chain:
+    agent-scope.ts re-exports resolveAgentConfig from agent-scope-config.ts.
+  Tests import from the public barrel module, not the internal file.
+
+  CORRECTED:
+    import { resolveAgentConfig } from "./agent-scope.js";
+
+
+Purpose:      Test iteration budget config resolution + default application
+Source file:  src/agents/agent-scope-config.ts (modified, Steps 4-5)
+Approach:     Add a new describe() block to EXISTING agent-scope.test.ts
+Action:       EXTEND existing file
+
+--- Imports ---
+
+  No new imports needed for resolveAgentConfig (already imported).
+  May need OpenClawConfig type import if not already present.
+
+--- Fixture Helpers ---
+
+  [FIX #3] SIMPLIFIED: Use the existing test file's inline config pattern.
+
+  The existing tests in agent-scope.test.ts create OpenClawConfig objects
+  inline using the pattern verified at lines 97-180:
+
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: {
+          iterationBudget: { enabled: true, maxIterations: 90 },
+        },
+        list: [
+          {
+            id: "main",
+            iterationBudget: { maxIterations: 120 },
+          },
+        ],
+      },
+    } as OpenClawConfig;
+
+  V2's makeConfig() helper is acceptable but should match this inline
+  pattern and produce a correctly-shaped OpenClawConfig with iterationBudget
+  nested under agents.defaults and agents.list[].
+
+--- Test Structure ---
+
+  [Tests unchanged from V2 aside from file path and import corrections.]
+
+  describe("iterationBudget config resolution", () => {
+
+    describe("default values", () => {
+      it("applies default maxIterations of 90 when not specified")
+      it("applies default subagentMaxIterations of 50 when not specified")
+      it("defaults forceSummaryOnExhaustion to true when not specified")
+      it("defaults enabled to false when iterationBudget section is empty")
+    });
+
+    describe("missing config", () => {
+      it("returns undefined iterationBudget when no section in config")
+      it("returns undefined for unknown agent id")
+    });
+
+    describe("global defaults", () => {
+      it("uses global defaults when only defaults.iterationBudget specified")
+    });
+
+    describe("per-agent override", () => {
+      it("per-agent config overrides global defaults")
+      it("per-agent config merges with (not replaces) global defaults")
+      it("per-agent enabled=false overrides global enabled=true")
+    });
+
+    describe("subagent budget", () => {
+      it("resolves subagentMaxIterations separately from maxIterations")
+    });
+
+    describe("edge cases", () => {
+      it("handles agent id case-insensitivity")
+    });
+  });
+
+
+--- Estimated Test Count: 11 tests (appended to existing file's ~20 tests) ---
+
+
+================================================================================
+TEST FILE 4: src/agents/embedded-agent-runner/run.iteration-budget.test.ts
+================================================================================
+
+  [Mostly unchanged from V2, with config injection fix.]
+
+Purpose:      Integration tests for budget lifecycle in the run.ts main loop
+Source files: src/agents/embedded-agent-runner/run.ts (modified, Step 8)
+              src/agents/embedded-agent-runner/run/types.ts (modified, Step 7)
+Follows:      Pattern from run.compaction-loop-guard.test.ts
+Action:       NEW file
+
+--- Config Injection ---
+
+  [FIX #4] CORRECTED: makeBudgetConfig fixture helper shape.
+
+  V2 ERROR: V2's makeBudgetConfig returned:
+    { iterationBudget: { enabled: true, maxIterations: 10, ... } }
+
+  This is NOT a valid OpenClawConfig shape. The config field on
+  RunEmbeddedAgentParams is typed as `config?: OpenClawConfig`, and
+  OpenClawConfig nests agent settings under `agents.defaults` or
+  per-agent entries in `agents.list`.
+
+  CORRECTED makeBudgetConfig:
+
+    function makeBudgetConfig(overrides?: Partial<IterationBudgetConfig>) {
+      return {
+        agents: {
+          defaults: {
+            iterationBudget: {
+              enabled: true,
+              maxIterations: 10,
+              subagentMaxIterations: 5,
+              forceSummaryOnExhaustion: true,
+              ...overrides,
+            },
+          },
+        },
+      } as OpenClawConfig;
+    }
+
+  This matches the OpenClawConfig shape that resolveAgentConfig reads
+  from, consistent with the pattern verified in agent-scope.test.ts
+  (see FIX #1).
+
+  NOTE: run.ts does NOT currently call resolveAgentConfig() directly
+  (verified by grep: 0 hits for resolveAgentConfig in run.ts). The port
+  plan Step 8 adds budget config resolution to run.ts. The implementation
+  may:
+    (a) Call resolveAgentConfig() and read iterationBudget from the result
+    (b) Read config.agents?.defaults?.iterationBudget directly
+    (c) Use a new dedicated resolver
+
+  makeBudgetConfig produces a valid OpenClawConfig for approach (a) or (b).
+  If approach (c) is used, adjust the fixture accordingly.
+
+--- Test Structure ---
+
+  [All test sections 4.1 through 4.10 unchanged from V2. Only the
+   config injection via makeBudgetConfig is corrected per FIX #4.]
+
+  describe("iteration budget in run loop", () => {
+
+    let runEmbeddedAgent: typeof import("./run.js").runEmbeddedAgent;
+
+    beforeAll(async () => {
+      ({ runEmbeddedAgent } = await loadRunOverflowCompactionHarness());
+    });
+
+    beforeEach(() => {
+      resetRunOverflowCompactionHarnessMocks();
+    });
+
+    // 4.1: Budget Creation (3 tests)
+    // 4.2: Budget Consumption (2 tests)
+    // 4.3: Budget Exhaustion Detection (8 tests)
+    // 4.4: Forced Summary on Exhaustion (4 tests)
+    // 4.5: Budget Refund on Compaction (1 test)
+    // 4.6: Budget Metadata in Result (3 tests)
+    // 4.7: onBeforeToolCallingRound Threading (2 tests)
+    // 4.8: Error Kind Extension (2 tests)
+    // 4.9: Interaction with Existing Retries (2 tests)
+    // 4.10: Regression Scenarios (1 test)
+  });
+
+
+--- Estimated Test Count: 25 tests (unchanged) ---
+
+
+================================================================================
+TEST FILE 5: src/agents/embedded-agent-runner/run/budget-exhaustion.test.ts
+================================================================================
+
+  [UNCHANGED from V2.]
+
+Purpose:      Unit tests for budget-exhaustion result builder and instruction
+Source files: Implementation location depends on Step 10 decisions
+Action:       NEW file (adjust import path per implementation)
+
+--- Test Structure ---
+
+  describe("budget exhaustion", () => {
+
+    describe("BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION", () => {
+      it("is a non-empty string")
+      it("instructs the model to summarize work done")
+    });
+
+    describe("buildBudgetExhaustedResult", () => {
+      it("builds result with error.kind='budget_exhausted'")
+      it("includes budget metadata in result")
+      it("includes summary text as payload when summary succeeded")
+      it("includes fallback error payload when no summary available")
+      it("conforms to EmbeddedAgentRunResult type shape")
+    });
+  });
+
+
+--- Estimated Test Count: 7 tests ---
+
+
+================================================================================
+TEST FILE 6: packages/agent-core/src/agent-loop.test.ts (EXTEND)
+================================================================================
+
+  [FIX #6] CORRECTED: runAgentLoop call signature.
+
+  V2 ERROR: V2 used this call pattern:
+    await runAgentLoop([], context, loopConfig, streamFn)
+  This is WRONG. The actual runAgentLoop signature (verified at
+  packages/agent-core/src/agent-loop.ts lines 172-196) is:
+
+    export async function runAgentLoop(
+      prompts: AgentMessage[],
+      context: AgentContext,         // { systemPrompt, messages, tools }
+      config: AgentLoopConfig,
+      emit: AgentEventSink,          // <-- 4th arg is event callback!
+      signal?: AbortSignal,
+      streamFn?: StreamFn,           // <-- streamFn is 6th arg!
+      runtime?: AgentCoreStreamRuntimeDeps,
+    ): Promise<AgentMessage[]>
+
+  The 4th argument is `emit: AgentEventSink`, NOT streamFn. streamFn is
+  the 6th argument. All existing tests (verified at lines 354, 426, 492,
+  571, 677, 924, 988) use this pattern:
+
+    const messages = await runAgentLoop(
+      [{ role: "user", content: "...", timestamp: Date.now() }],
+      { systemPrompt: "test", messages: [], tools: [tool] },
+      configWithCallbacks,
+      (_event: AgentEvent) => {},     // 4th: emit callback (no-op)
+      undefined,                      // 5th: signal (unused)
+      streamFn,                       // 6th: stream function
+    );
+
+  [FIX #7] CLARIFIED: context parameter.
+
+  V2 did not show how the `context: AgentContext` parameter is constructed.
+  From verified test code (line 354), context is:
+    { systemPrompt: "test", messages: [], tools: [tool] }
+
+  Tools must be included in context.tools for tool execution to work.
+
+
+Purpose:      Test onBeforeToolCallingRound callback in the inner agent loop
+Source file:  packages/agent-core/src/agent-loop.ts (modified, Step 6B)
+Approach:     Add a new describe() block to EXISTING file
+Action:       EXTEND existing file
+
+--- CORRECTED Test Structure ---
+
+  describe("onBeforeToolCallingRound callback", () => {
+
+    it("calls onBeforeToolCallingRound before each tool-calling round", () => {
+      Arrange:
+        const onBeforeToolCallingRound = vi.fn(() => true)
+        const executed: string[] = []
+        const tool = makeTool("my-tool", executed)
+        let turn = 0
+        const streamFn: StreamFn = () => {
+          turn += 1
+          if (turn === 1) {
+            return asyncGeneratorOf(makeAssistantMessage([
+              { type: "toolCall", id: "tc-1", name: "my-tool", input: {} }
+            ]))
+          }
+          return asyncGeneratorOf(makeAssistantMessage([
+            { type: "text", text: "done" }
+          ]))
+        }
+        const loopConfig = {
+          ...config,
+          onBeforeToolCallingRound,
+        }
+      Act:
+        [FIX #6] CORRECTED call:
+        const result = await runAgentLoop(
+          [{ role: "user", content: "test", timestamp: Date.now() }],
+          { systemPrompt: "test", messages: [], tools: [tool] },
+          loopConfig,
+          (_event: AgentEvent) => {},   // 4th: emit
+          undefined,                     // 5th: signal
+          streamFn,                      // 6th: streamFn
+        )
+      Assert:
+        expect(onBeforeToolCallingRound).toHaveBeenCalledTimes(1)
+        expect(executed).toContain("my-tool")
+    });
+
+    it("stops tool execution when callback returns false", () => {
+      Arrange:
+        const onBeforeToolCallingRound = vi.fn()
+          .mockReturnValueOnce(true)
+          .mockReturnValueOnce(false)
+        const executed: string[] = []
+        const tool = makeTool("my-tool", executed)
+        let turn = 0
+        const streamFn: StreamFn = () => {
+          turn += 1
+          return asyncGeneratorOf(makeAssistantMessage([
+            { type: "toolCall", id: `tc-${turn}`, name: "my-tool", input: {} }
+          ]))
+        }
+      Act:
+        [FIX #6] CORRECTED call:
+        const result = await runAgentLoop(
+          [{ role: "user", content: "test", timestamp: Date.now() }],
+          { systemPrompt: "test", messages: [], tools: [tool] },
+          { ...config, onBeforeToolCallingRound },
+          (_event: AgentEvent) => {},
+          undefined,
+          streamFn,
+        )
+      Assert:
+        expect(onBeforeToolCallingRound).toHaveBeenCalledTimes(2)
+        expect(executed).toHaveLength(1)
+    });
+
+    it("does not interfere when callback is undefined", () => {
+      Arrange:
+        config with onBeforeToolCallingRound: undefined
+        const executed: string[] = []
+        const tool = makeTool("my-tool", executed)
+        streamFn returns tool call then text
+      Act:
+        [FIX #6] CORRECTED call:
+        const result = await runAgentLoop(
+          [{ role: "user", content: "test", timestamp: Date.now() }],
+          { systemPrompt: "test", messages: [], tools: [tool] },
+          config,
+          (_event: AgentEvent) => {},
+          undefined,
+          streamFn,
+        )
+      Assert:
+        Loop completes normally, tools executed, no errors
+    });
+
+    it("passes incrementing round number to callback", () => {
+      Arrange:
+        const onBeforeToolCallingRound = vi.fn(() => true)
+        const tool = makeTool("tool-a", [])
+        let turn = 0
+        const streamFn: StreamFn = () => {
+          turn += 1
+          if (turn <= 3) {
+            return asyncGeneratorOf(makeAssistantMessage([
+              { type: "toolCall", id: `tc-${turn}`, name: "tool-a", input: {} }
+            ]))
+          }
+          return asyncGeneratorOf(makeAssistantMessage([
+            { type: "text", text: "final" }
+          ]))
+        }
+      Act:
+        [FIX #6] CORRECTED call:
+        await runAgentLoop(
+          [{ role: "user", content: "test", timestamp: Date.now() }],
+          { systemPrompt: "test", messages: [], tools: [tool] },
+          { ...config, onBeforeToolCallingRound },
+          (_event: AgentEvent) => {},
+          undefined,
+          streamFn,
+        )
+      Assert:
+        expect(onBeforeToolCallingRound).toHaveBeenCalledTimes(3)
+        expect(onBeforeToolCallingRound.mock.calls[0][0]).toBe(1)
+        expect(onBeforeToolCallingRound.mock.calls[1][0]).toBe(2)
+        expect(onBeforeToolCallingRound.mock.calls[2][0]).toBe(3)
+    });
+  });
+
+
+--- Estimated Test Count: 4 tests ---
+
+
+================================================================================
+TEST FILE 7: src/agents/tool-loop-detection.test.ts (EXTEND)
+================================================================================
+
+  [FIX #8] CORRECTED: DEFAULT_LOOP_DETECTION_CONFIG is not exported.
+
+  V2 ERROR: V2 proposed:
+    Import: DEFAULT_LOOP_DETECTION_CONFIG from "./tool-loop-detection.js"
+    Assert: expect(DEFAULT_LOOP_DETECTION_CONFIG.enabled).toBe(true)
+
+  ACTUAL: DEFAULT_LOOP_DETECTION_CONFIG is declared as `const` (NOT
+  `export const`) at tool-loop-detection.ts line 44. It is NOT exported.
+  The function resolveLoopDetectionConfig() that reads it is also NOT
+  exported. The test CANNOT import DEFAULT_LOOP_DETECTION_CONFIG directly.
+
+  What IS exported:
+    - TOOL_CALL_HISTORY_SIZE (30)
+    - WARNING_THRESHOLD (10)
+    - UNKNOWN_TOOL_THRESHOLD (10)
+    - CRITICAL_THRESHOLD (20)
+    - GLOBAL_CIRCUIT_BREAKER_THRESHOLD (30)
+    - hashToolCall()
+    - detectToolCallLoop()
+    - recordToolCall()
+    - recordToolCallOutcome()
+
+  THREE OPTIONS for testing Step 14:
+
+  OPTION A (PREFERRED): Step 14 implementation must ALSO add `export`
+  to DEFAULT_LOOP_DETECTION_CONFIG (change `const` to `export const`).
+  Then the V2 test works as written. This is the cleanest approach and
+  the test plan RECOMMENDS this implementation change.
+
+  OPTION B: Test indirectly via detectToolCallLoop(). Call it with no
+  config parameter (so it uses the default). Set up a state with enough
+  repeated tool calls to trigger the warning threshold. If detection
+  fires, the default is enabled=true. Example:
+
+    it("default config enables loop detection", () => {
+      const state = createState();
+      // Record enough repeated tool calls to exceed WARNING_THRESHOLD
+      for (let i = 0; i < WARNING_THRESHOLD + 1; i++) {
+        recordToolCall(state, "my-tool", { key: "same" }, `tc-${i}`);
+        recordToolCallOutcome(state, {
+          toolName: "my-tool",
+          toolParams: { key: "same" },
+          toolCallId: `tc-${i}`,
+          result: { content: [{ type: "text", text: "same result" }] },
+        });
+      }
+      // detectToolCallLoop with NO config -> uses defaults
+      const result = detectToolCallLoop(state, "my-tool", { key: "same" });
+      expect(result.stuck).toBe(true);
+      expect(result.level).toBe("warning");
+    });
+
+  OPTION C: If the implementation adds a getDefaultLoopDetectionConfig()
+  export or similar accessor, test against that.
+
+  THE CORRECTED PLAN USES OPTION A. If the implementer cannot export the
+  constant, fall back to OPTION B.
+
+--- Test (OPTION A) ---
+
+  it("has tool loop detection enabled by default", () => {
+    Import: DEFAULT_LOOP_DETECTION_CONFIG from "./tool-loop-detection.js"
+    Assert: expect(DEFAULT_LOOP_DETECTION_CONFIG.enabled).toBe(true)
+
+    PREREQUISITE: Step 14 must change `const` to `export const` for
+    DEFAULT_LOOP_DETECTION_CONFIG.
+  });
+
+--- Test (OPTION B, fallback) ---
+
+  it("default config enables loop detection", () => {
+    // Verify detection fires with no explicit config (uses default)
+    // This indirectly confirms enabled=true in the default config.
+    [Setup and assertions as described above in OPTION B.]
+  });
+
+
+--- Estimated Test Count: 1 test ---
+
+
+================================================================================
+CROSS-CUTTING: REGRESSION SCENARIOS
+================================================================================
+
+  [UNCHANGED from V2.]
+
+--- R1-R7 regression scenario mappings are unchanged. ---
+
+
+================================================================================
+TEST COVERAGE MATRIX
+================================================================================
+
+  Step | Plan Description                         | Test File(s)
+  -----+------------------------------------------+---------------------------------
+   1   | IterationBudget class                    | FILE 1 (iteration-budget.test.ts)
+   2   | TypeScript config types                  | FILE 2 (zod-schema.agent-defaults.test.ts)
+   3   | Zod schema validation                    | FILE 2 (zod-schema.agent-defaults.test.ts)
+   4   | resolveAgentConfig merge                 | FILE 3 (agent-scope.test.ts) [FIX #1]
+   5   | Config resolution function               | FILE 3 (agent-scope.test.ts) [FIX #1]
+   6A  | AgentLoopConfig interface                | FILE 6 (agent-loop.test.ts)
+   6B  | Call callback in inner loop              | FILE 6 (agent-loop.test.ts) [FIX #6]
+   6C  | Map in Agent.createLoopConfig            | Compile-time type check only
+   6D  | Map in CoreAgentHarness.createLoopConfig | Compile-time type check only
+   7   | Thread callback through attempt params   | FILE 4 (run.iteration-budget.test.ts)
+   8   | Budget creation/exhaustion in run.ts     | FILE 4 (run.iteration-budget.test.ts)
+   9   | EmbeddedAgentRunMeta error kind          | FILE 4 + FILE 5
+  10   | Budget-exhaustion result builder         | FILE 5 (budget-exhaustion.test.ts)
+  11   | Budget-exhaustion summary injection      | FILE 4 (run.iteration-budget.test.ts)
+  12   | Budget refund for compaction             | FILE 4 (run.iteration-budget.test.ts)
+  13   | Budget metadata in run result            | FILE 4 (run.iteration-budget.test.ts)
+  14   | Enable tool loop detection defaults      | FILE 7 (tool-loop-detection.test.ts) [FIX #8]
+  15   | Unit tests for IterationBudget           | FILE 1 (iteration-budget.test.ts)
+  16   | Integration tests for budget             | FILE 4 (run.iteration-budget.test.ts)
+
+
+================================================================================
+TEST FILE SUMMARY
+================================================================================
+
+  #  | File Path                                                         | Type        | Tests | Action
+  ---+-------------------------------------------------------------------+-------------+-------+--------
+  1  | src/agents/iteration-budget.test.ts                              | Unit        | ~14   | NEW
+  2  | src/config/zod-schema.agent-defaults.test.ts                     | Unit        | ~12   | EXTEND
+  3  | src/agents/agent-scope.test.ts                                   | Unit        | ~11   | EXTEND
+     |   [FIX #1: was agent-scope-config.test.ts NEW]                   |             |       | [FIX]
+  4  | src/agents/embedded-agent-runner/run.iteration-budget.test.ts    | Integration | ~25   | NEW
+  5  | src/agents/embedded-agent-runner/run/budget-exhaustion.test.ts   | Unit        | ~7    | NEW
+  6  | packages/agent-core/src/agent-loop.test.ts                      | Unit        | ~4    | EXTEND
+  7  | src/agents/tool-loop-detection.test.ts                          | Unit        | ~1    | EXTEND
+  ---+-------------------------------------------------------------------+-------------+-------+--------
+                                                          TOTAL ESTIMATED:  ~74 tests
+
+  Supporting files: NONE (use existing harness infrastructure)
+
+
+================================================================================
+TESTING INFRASTRUCTURE NOTES
+================================================================================
+
+  [All 9 notes unchanged from V2, with one addition:]
+
+  10. AGENT-LOOP runAgentLoop SIGNATURE (FIX #6):
+
+    runAgentLoop takes 7 arguments. Tests MUST use the correct order:
+      arg 1: prompts (AgentMessage[])
+      arg 2: context (AgentContext = { systemPrompt, messages, tools })
+      arg 3: config (AgentLoopConfig)
+      arg 4: emit (AgentEventSink = (event: AgentEvent) => void)
+      arg 5: signal (AbortSignal | undefined)
+      arg 6: streamFn (StreamFn | undefined)
+      arg 7: runtime (AgentCoreStreamRuntimeDeps | undefined)
+
+    Standard test call pattern:
+      await runAgentLoop(
+        [{ role: "user", content: "test", timestamp: Date.now() }],
+        { systemPrompt: "test", messages: [], tools: [tool] },
+        configWithCallbacks,
+        (_event: AgentEvent) => {},    // no-op emit
+        undefined,                      // no abort signal
+        streamFn,                       // stream function
+      )
+
+
+================================================================================
+END OF CORRECTED TEST PLAN V2
+================================================================================

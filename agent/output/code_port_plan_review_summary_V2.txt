@@ -1,0 +1,400 @@
+================================================================================
+CODE PORT PLAN REVIEW SUMMARY V2
+================================================================================
+
+Feature: Iteration Budget & Agent Loop Safety
+Source:  Hermes Agent (Python) -> Target: OpenClaw (TypeScript)
+Date:    2026-06-28
+Review:  V2 Plan -> V2 Corrected Plan
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+8 issues were identified during the review. Each was verified against actual
+OpenClaw source code. Issues are ordered by severity (critical first).
+
+
+------------------------------------------------------------------------------
+FIX #1 -- MEDIUM: Missing payloadCount check in budget exhaustion detection
+------------------------------------------------------------------------------
+
+  AFFECTED: Step 8, item 5 (budget exhaustion detection in run.ts)
+
+  WHAT WAS WRONG:
+    V2 plan checked only `iterationBudget.remaining <= 0` to trigger budget
+    exhaustion handling. This does not distinguish between:
+    (a) Budget exhausted AND model was interrupted mid-tool-calling (no text)
+    (b) Budget exhausted AND model naturally finished with text response
+
+    In scenario (b), the model used all N allowed rounds and produced a
+    final text answer on the last round. Budget.remaining is 0, but there
+    IS a text response. Without a payload check, the code would incorrectly
+    trigger the exhaustion handler -- either requesting an unnecessary
+    summary or returning an error despite a valid answer existing.
+
+  WHY IT MATTERS:
+    Users would see a budget exhaustion error when the agent actually
+    completed its task. Incorrect behavior for the most common "exactly
+    at budget boundary" scenario.
+
+  HOW FIXED:
+    Added `payloadCount === 0` and `!attempt.clientToolCalls` to the
+    exhaustion condition. Budget exhaustion handling only triggers when
+    there is no text response AND no client tool calls. If the model
+    produced a final answer, it flows through the normal success path.
+    Budget metadata (budgetUsed/budgetMax) is still included via Step 13.
+
+
+------------------------------------------------------------------------------
+FIX #2 -- MEDIUM: Zod schema defined in wrong file
+------------------------------------------------------------------------------
+
+  AFFECTED: Step 3 (Zod schema validation)
+
+  WHAT WAS WRONG:
+    V2 plan defined IterationBudgetSchema in zod-schema.agent-defaults.ts.
+    The actual established pattern is:
+
+      AgentRunRetriesConfigSchema:
+        DEFINED in: zod-schema.agent-runtime.ts (line 59)
+        IMPORTED in: zod-schema.agent-defaults.ts (line 12)
+        USED in: zod-schema.agent-defaults.ts (line 206)
+                 zod-schema.agent-runtime.ts (line 1081, per-agent schema)
+
+    The schema belongs in zod-schema.agent-runtime.ts, not
+    zod-schema.agent-defaults.ts.
+
+  WHY IT MATTERS:
+    Placing the schema in the wrong file breaks the established import
+    graph pattern. The per-agent schema (AgentEntrySchema at line 1081 of
+    zod-schema.agent-runtime.ts) needs the schema in the same file, not
+    imported from agent-defaults (which would create a circular import).
+
+  HOW FIXED:
+    Moved IterationBudgetSchema definition to zod-schema.agent-runtime.ts.
+    Both the defaults schema (agent-defaults.ts) and per-agent schema
+    (agent-runtime.ts) now reference it from the correct location.
+
+
+------------------------------------------------------------------------------
+FIX #3 -- LOW: Zod schema .optional() applied at wrong level
+------------------------------------------------------------------------------
+
+  AFFECTED: Step 3 (Zod schema validation)
+
+  WHAT WAS WRONG:
+    V2 plan defined the schema as:
+      export const IterationBudgetSchema = z.object({...}).strict().optional();
+
+    The established pattern (AgentRunRetriesConfigSchema) defines WITHOUT
+    .optional() and applies .optional() at each USAGE site:
+      export const AgentRunRetriesConfigSchema = z.object({...}).strict().refine(...);
+      // Usage: runRetries: AgentRunRetriesConfigSchema.optional(),
+
+  WHY IT MATTERS:
+    Applying .optional() on the schema definition means it's always optional
+    and cannot be used in a required context. Following the pattern keeps
+    the schema reusable. This is a minor consistency issue.
+
+  HOW FIXED:
+    Removed .optional() from the schema definition. Added .optional() at
+    each usage site: IterationBudgetSchema.optional() in both the defaults
+    schema and per-agent schema.
+
+
+------------------------------------------------------------------------------
+FIX #4 -- MEDIUM: Callback threading guidance follows wrong pattern
+------------------------------------------------------------------------------
+
+  AFFECTED: Step 7 (thread budget callback from attempt.ts to agent-core)
+
+  WHAT WAS WRONG:
+    V2 plan said: "follow the EXACT same pattern as beforeToolCall callback"
+    and "Grep for 'beforeToolCall' across these files to find all the
+    threading points and replicate."
+
+    Investigation revealed that beforeToolCall is OVERWRITTEN by
+    AgentSession.installAgentToolHooks() (lines 498-519 of agent-session.ts).
+    The session replaces the constructor-set beforeToolCall with its own
+    implementation that wraps extension runner events.
+
+    Following this pattern for onBeforeToolCallingRound would NOT cause
+    the callback to be overwritten (installAgentToolHooks only touches
+    beforeToolCall and afterToolCall). However, the guidance is misleading:
+    an implementer following it literally would look at how beforeToolCall
+    is set and find it's overwritten, causing confusion.
+
+  WHY IT MATTERS:
+    Misleading implementation guidance wastes developer time and risks
+    incorrect conclusions about whether the callback survives session setup.
+
+  HOW FIXED:
+    Replaced the "follow beforeToolCall" guidance with explicit instructions:
+    1. Add onBeforeToolCallingRound as a public property on Agent class
+    2. Add to AgentOptions and set in constructor
+    3. Map in createLoopConfig
+    4. In attempt.ts, set the callback DIRECTLY on the agent instance
+       AFTER session creation (explicitly bypassing the AgentOptions path
+       to avoid any ambiguity about overwriting)
+
+    This approach is explicit, safe, and doesn't rely on understanding
+    the beforeToolCall lifecycle.
+
+
+------------------------------------------------------------------------------
+FIX #5 -- LOW: EmbeddedRunAttemptParams type is in run/types.ts
+------------------------------------------------------------------------------
+
+  AFFECTED: Step 7 (thread budget callback)
+
+  WHAT WAS WRONG:
+    V2 plan said: "TARGET FILE (MODIFY): run/attempt.ts" and
+    "Add onBeforeToolCallingRound to the attempt params type."
+    But EmbeddedRunAttemptParams is defined in run/types.ts (lines 54-113),
+    not in attempt.ts.
+
+  WHY IT MATTERS:
+    Wrong file target. attempt.ts uses the type but doesn't define it.
+
+  HOW FIXED:
+    Changed target file for the type modification to run/types.ts.
+    attempt.ts is still modified for the callback installation logic
+    (setting the property on the agent instance).
+
+
+------------------------------------------------------------------------------
+FIX #6 -- LOW: shouldStopAfterTurn alternative not documented
+------------------------------------------------------------------------------
+
+  AFFECTED: Step 6 (agent-core callback), Part A.5 (architecture)
+
+  WHAT WAS WRONG:
+    V2 plan proposes adding a NEW onBeforeToolCallingRound callback to
+    AgentLoopConfig. But shouldStopAfterTurn ALREADY exists in
+    AgentLoopConfig (types.ts line 218) and is ALREADY invoked in
+    agent-loop.ts (lines 409-419).
+
+    Using shouldStopAfterTurn would eliminate changes to:
+    - packages/agent-core/src/types.ts (field already exists)
+    - packages/agent-core/src/agent-loop.ts (invocation already exists)
+
+    Only agent.ts would need changes (add to AgentOptions + createLoopConfig).
+    This reduces agent-core touch points from 3 files to 1.
+
+  WHY IT MATTERS:
+    A viable alternative that reduces scope was not considered. During
+    code review of the PR, reviewers might ask why a new callback was
+    added when an existing one could work.
+
+  HOW FIXED:
+    Added documentation of the shouldStopAfterTurn alternative in Part A.5
+    with trade-off analysis. The V2 plan's onBeforeToolCallingRound approach
+    is RETAINED as the recommended approach because:
+    1. Dedicated purpose separation (doesn't occupy a general-purpose slot)
+    2. Synchronous-only signature (no async overhead)
+    3. Called BEFORE the LLM call (prevents wasted API call at boundary)
+    4. Won't conflict with future uses of shouldStopAfterTurn
+
+
+------------------------------------------------------------------------------
+FIX #7 -- LOW: agent-harness.ts has its own createLoopConfig
+------------------------------------------------------------------------------
+
+  AFFECTED: Step 6 (agent-core callback), Risk Analysis
+
+  WHAT WAS WRONG:
+    Investigation found that agent-harness.ts also has a createLoopConfig
+    method (~line 486). The V2 plan only addresses agent.ts's
+    createLoopConfig. If the embedded agent code path goes through
+    AgentHarness, the callback would not be threaded.
+
+  WHY IT MATTERS:
+    If the callback is not mapped in the active createLoopConfig, the
+    budget enforcement silently fails. The budget object would never
+    be consumed, and budget.remaining would never reach 0.
+
+  HOW FIXED:
+    Added implementation guidance to verify during development which
+    createLoopConfig is in the code path. Added risk analysis entry for
+    this gap.
+
+
+------------------------------------------------------------------------------
+FIX #8 -- LOW: Summary attempt return missing standard fields
+------------------------------------------------------------------------------
+
+  AFFECTED: Step 8, item 6 (summary attempt result)
+
+  WHAT WAS WRONG:
+    The V2 plan's summary attempt return object contained only payloads
+    and meta, but the normal success return (lines 4075-4152 of run.ts)
+    includes many additional fields:
+    - didSendViaMessagingTool
+    - didDeliverSourceReplyViaMessageTool
+    - messagingToolSentTexts, messagingToolSentMediaUrls, etc.
+    - heartbeatToolResponse, successfulCronAdds, acceptedSessionSpawns
+
+    Missing these fields could cause downstream consumers to behave
+    incorrectly (e.g., messaging channel adapters missing delivery data).
+
+  WHY IT MATTERS:
+    Inconsistent return shapes can cause subtle bugs in downstream
+    consumers that expect these fields.
+
+  HOW FIXED:
+    Expanded the summary attempt return to include all standard fields
+    from the attempt result, matching the shape of the normal success
+    return path.
+
+
+================================================================================
+2. STRUCTURAL CHANGES TO THE PLAN
+================================================================================
+
+V2 Plan Steps (16)              Corrected Plan Steps (16)
+-------------------              -------------------------
+Step 1:  IterationBudget class   Step 1:  (unchanged)
+Step 2:  Config types            Step 2:  (unchanged)
+Step 3:  Zod schema              Step 3:  (FIX #2,#3: moved to agent-runtime.ts,
+                                          fixed .optional() placement)
+Step 4:  resolveAgentConfig      Step 4:  (unchanged)
+Step 5:  Config resolution       Step 5:  (unchanged)
+Step 6:  agent-core callback     Step 6:  (FIX #6,#7: shouldStopAfterTurn
+                                          alternative documented, harness noted)
+Step 7:  Thread callback         Step 7:  (FIX #4,#5: corrected threading
+                                          guidance, fixed types.ts file target)
+Step 8:  run.ts integration      Step 8:  (FIX #1,#8: added payloadCount check,
+                                          expanded summary return fields)
+Step 9:  Error kind union        Step 9:  (unchanged)
+Step 10: Budget exhaustion       Step 10: (unchanged)
+Step 11: Summary injection       Step 11: (unchanged)
+Step 12: Compaction refund       Step 12: (unchanged)
+Step 13: Budget metadata         Step 13: (unchanged)
+Step 14: Loop detection default  Step 14: (unchanged)
+Step 15: Unit tests              Step 15: (unchanged)
+Step 16: Integration tests       Step 16: (unchanged)
+
+Key changes:
+  - Step count unchanged (16)
+  - 5 of 16 steps modified with corrections
+  - No steps added or removed
+  - File list corrected in dependency summary
+  - Risk analysis updated with 2 new entries
+
+Files changed:
+  V2:          17 files total
+  V2-corrected: 17 files total (same count, corrected file targets)
+  Changed: zod-schema.agent-runtime.ts replaces zod-schema.agents.ts
+           run/types.ts added as explicit target (was implicit)
+
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+ITERATION 1 -- V1 (Original Plan)
+-----------------------------------
+
+  Generated an 11-step porting plan. Core design decisions were sound:
+  - IterationBudget as a simple class (correct)
+  - Budget orthogonal to existing loop detection (correct)
+  - Config-driven rollback via enabled flag (correct)
+  - No threading.Lock for Node.js (correct)
+
+  However, several assumptions about OpenClaw's internals were wrong:
+  - Assumed ChatMessage type exists (it doesn't)
+  - Assumed error.kind accepts any string (it's a union)
+  - Assumed run.ts accesses diagnostic session state (it doesn't)
+  - Assumed resolveAgentConfig auto-discovers new fields (it doesn't)
+  - Proposed impractical callback for summary LLM call
+
+  Scope: ~400 lines across 12 files
+
+
+ITERATION 1 -- V1 Review (Corrected Plan)
+-------------------------------------------
+
+  Verified every assumption against actual source code. Found 12 issues:
+  - 3 critical (wrong types, missing union extension, inaccessible state)
+  - 2 high (missing resolveAgentConfig step, FailoverError state loss)
+  - 4 medium (unused config field, wrong validation, impractical callback,
+    ambiguous integration points)
+  - 3 low (undefined handling, test failure, pattern divergence)
+
+  Produced corrected 14-step plan with all issues resolved.
+
+  REMAINING BLIND SPOT: V1 corrected plan still assumed run.ts's while(true)
+  was the tool-calling loop. It was NOT.
+
+  Scope: ~450 lines across 14 files
+
+
+ITERATION 2 -- V2 (Ground-Up Rewrite)
+---------------------------------------
+
+  Discovered the two-level loop architecture:
+  - Outer loop (run.ts): retries, compaction, failover
+  - Inner loop (agent-core/agent-loop.ts): tool-calling cycle
+
+  Redesigned budget enforcement to thread through the inner loop via a
+  callback closure. This was the correct architectural insight.
+
+  Scope: ~500 lines across 17 files
+
+
+ITERATION 2 -- V2 Review (This Document)
+------------------------------------------
+
+  Verified the V2 plan against actual agent-core source code, including:
+  - Read agent-loop.ts lines 300-440 (inner loop structure)
+  - Read agent.ts lines 100-260 (AgentOptions, constructor)
+  - Read agent.ts lines 460-510 (createLoopConfig)
+  - Read run/types.ts lines 50-115 (EmbeddedRunAttemptParams)
+  - Searched AgentRunRetriesConfigSchema across all config files
+  - Searched shouldStopAfterTurn across all agent-core files
+  - Verified agent-session.ts callback overwriting behavior
+
+  Found 8 issues (0 critical, 3 medium, 5 low):
+
+  MEDIUM:
+    #1: Missing payloadCount check in budget exhaustion detection
+    #2: Zod schema defined in wrong file
+    #4: Callback threading guidance follows wrong pattern
+
+  LOW:
+    #3: .optional() at wrong schema level
+    #5: Wrong file for EmbeddedRunAttemptParams type
+    #6: shouldStopAfterTurn alternative not documented
+    #7: agent-harness.ts createLoopConfig gap
+    #8: Summary return missing standard fields
+
+  Scope: ~500 lines across 17 files (same as V2, corrected targets)
+
+
+PROGRESSION SUMMARY
+--------------------
+
+  Iteration    Steps  Files  Issues Found  Key Fix
+  ---------    -----  -----  -----------   -------
+  V1 orig      11     12     (baseline)    Initial plan
+  V1 review    14     14     12            Types, state access, callbacks
+  V2           16     17     (baseline)    Inner loop architecture
+  V2 review    16     17     8             Payload check, schema file, threading
+
+  Total issues found across all reviews: 20
+  - V1 review: 12 issues (3 critical, 2 high, 4 medium, 3 low)
+  - V2 review: 8 issues (0 critical, 3 medium, 5 low)
+
+  Issue severity trend: V1->V2 eliminated all critical/high issues.
+  V2 review found only medium and low issues -- refinements, not
+  architectural problems.
+
+  The V2 architectural insight (inner loop in agent-core) is CONFIRMED
+  CORRECT by source code verification. The corrected V2 plan is ready
+  for implementation with high confidence.
+
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

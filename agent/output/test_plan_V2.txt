@@ -1,0 +1,1827 @@
+================================================================================
+TEST PLAN V2: Iteration Budget & Agent Loop Safety
+Ported Feature: Hermes -> OpenClaw
+================================================================================
+
+Source:  Hermes Agent (Python)  -> Target: OpenClaw (TypeScript)
+Feature: Per-agent iteration budget with consume/refund semantics,
+         budget-exhaustion forced summary, and configuration.
+Plan covers: All 16 steps from code_port_plan_review_V3.txt
+Iteration: 2 (incorporates all 20 fixes from V1 review)
+
+Test runner:    Vitest (via scoped project configs in test/vitest/)
+Conventions:    *.test.ts colocated with source; *.e2e.test.ts for end-to-end
+Imports:        import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
+Assertions:     expect().toBe / toEqual / toHaveLength / toHaveBeenCalled
+Mocking:        vi.fn(), vi.mock(), vi.hoisted(), vi.doMock()
+Import exts:    All imports use explicit .js extensions (e.g., "./iteration-budget.js")
+
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  TEST FILE 1: src/agents/iteration-budget.test.ts                      [NEW]
+               Unit tests for the IterationBudget class (Step 1)
+
+  TEST FILE 2: src/config/zod-schema.agent-defaults.test.ts          [EXTEND]
+               Zod schema validation for iterationBudget config (Steps 2-3)
+
+  TEST FILE 3: src/agents/agent-scope-config.test.ts                    [NEW]
+               Config resolution / merge logic for iterationBudget (Steps 4-5)
+
+  TEST FILE 4: src/agents/embedded-agent-runner/run.iteration-budget.test.ts
+               Integration tests for budget in the run loop (Steps 7-13) [NEW]
+
+  TEST FILE 5: src/agents/embedded-agent-runner/run/budget-exhaustion.test.ts
+               Budget-exhaustion result builder and instruction (Steps 9-11) [NEW]
+
+  TEST FILE 6: packages/agent-core/src/agent-loop.test.ts            [EXTEND]
+               onBeforeToolCallingRound callback in agent loop (Step 6)
+
+  TEST FILE 7: src/agents/tool-loop-detection.test.ts                [EXTEND]
+               Step 14: verify default enabled changed to true
+
+  CROSS-CUTTING: Regression scenarios mapped to GitHub issues
+
+
+================================================================================
+KEY LEARNINGS FROM V1 (incorporated into V2)
+================================================================================
+
+  The V1 test plan underwent review that identified 20 issues (8 critical,
+  7 moderate, 5 minor). V2 is written from scratch but incorporates all
+  corrections:
+
+  1. IterationBudget has NO snapshot() method (V1 FIX #1)
+  2. Schema test file must EXTEND existing, not create parallel files (V1 FIX #2)
+  3. Zod schema uses .optional() NOT .default() -- defaults applied in config
+     resolution, not schema parsing (V1 FIX #3)
+  4. Sub-schema needs .strict() for unknown property detection (V1 FIX #4)
+  5. Config resolution lives in agent-scope-config.ts, not helpers.ts (V1 FIX #5)
+  6. Default value tests belong in config resolution, not schema (V1 FIX #6)
+  7. Use existing harness infrastructure, no separate harness files (V1 FIX #7)
+  8. Config injection via getRuntimeConfigSnapshot() mock or
+     paramsInput.config, not separate config param (V1 FIX #8)
+  9. Cannot pre-set internal budget state from outside; test callback
+     behavior indirectly via observable outputs (V1 FIX #9)
+  10. emptyAssistantReplyIsSilent is computed, not directly settable (V1 FIX #10)
+  11. Verify summary instruction by inspecting mock.calls params (V1 FIX #11)
+  12. All loop iterations consume budget equally (no productive/retry
+      distinction) (V1 FIX #12)
+  13. Budget-exhaustion module location may vary (V1 FIX #13)
+  14. Don't assert instruction does NOT contain "tool" -- too brittle (V1 FIX #14)
+  15. Agent-core tests extend existing agent-loop.test.ts (V1 FIX #15)
+  16. Test callback BEHAVIOR via runAgentLoop(), not createLoopConfig
+      mapping (V1 FIX #16)
+  17. "Round" = one LLM call producing tool calls, not per-tool (V1 FIX #17)
+  18. Step 14 (loop detection default change) needs its own test (V1 FIX #18)
+  19. With Step 14, both-enabled is the default scenario (V1 FIX #19)
+  20. packages/agent-core has no dedicated vitest config (V1 FIX #20)
+
+  ADDITIONAL V2 INSIGHTS from deeper code exploration:
+
+  21. ResolvedAgentConfig does NOT currently have iterationBudget --
+      it must be added in Step 4. The type lives at
+      src/agents/agent-scope-config.ts lines 18-45.
+  22. Error kind union in EmbeddedAgentRunMeta is:
+        "context_overflow" | "compaction_failure" | "role_ordering" |
+        "image_size" | "retry_limit" | "incomplete_turn" | "hook_block"
+      Step 9 adds "budget_exhausted" to this union.
+  23. agent-scope-config.test.ts does NOT exist yet -- FILE 3 is entirely NEW.
+  24. Config merge pattern in resolveAgentConfig uses:
+      - Scalar: entry.field ?? agentDefaults?.field
+      - Object: { ...agentDefaults?.field, ...entry.field } with type guard
+  25. DEFAULT_LOOP_DETECTION_CONFIG is declared as a plain object (not
+      exported type) at tool-loop-detection.ts lines 44-56. Step 14
+      changes enabled: false -> enabled: true.
+  26. makeAttemptResult() factory in run.overflow-compaction.fixture.ts
+      has deep defaults: aborted=false, timedOut=false, promptError=null,
+      assistantTexts=["Hello!"], etc. Tests override via spread.
+  27. The run loop has 5+ retry mechanisms (reasoning-only, empty-response,
+      missing-assistant, compaction-continuation, before-agent-finalize).
+      Budget consumption applies to ALL of them equally.
+  28. payloadCount is computed from assistantTexts.length + messaging
+      tool sent texts. makeAttemptResult defaults to assistantTexts=["Hello!"]
+      meaning payloadCount >= 1 by default.
+
+
+================================================================================
+TEST FILE 1: src/agents/iteration-budget.test.ts
+================================================================================
+
+Purpose:      Unit tests for the IterationBudget class
+Source file:  src/agents/iteration-budget.ts (new file, Step 1)
+Hermes analog: tests/run_agent/test_iteration_budget_race.py
+Action:       NEW file
+
+--- Why no thread-safety tests ---
+
+  Hermes's test_iteration_budget_used_is_thread_safe uses 10 threads x 200
+  ops with ThreadPoolExecutor to verify the threading.Lock protects
+  concurrent access. Node.js is single-threaded (no data races possible),
+  so the TypeScript IterationBudget does NOT need a Lock/Mutex and the
+  thread-safety test is correctly EXCLUDED.
+
+--- Imports ---
+
+  import { describe, it, expect } from "vitest";
+  import { IterationBudget } from "./iteration-budget.js";
+
+--- Test Structure ---
+
+  describe("IterationBudget", () => {
+
+    // === 1.1 Constructor & Defaults ===
+
+    describe("constructor", () => {
+
+      it("creates a budget with specified maxTotal and zero used", () => {
+        Arrange: const budget = new IterationBudget(90)
+        Assert:
+          expect(budget.maxTotal).toBe(90)
+          expect(budget.used).toBe(0)
+          expect(budget.remaining).toBe(90)
+      });
+
+      it("accepts maxTotal of 1 (minimum useful budget)", () => {
+        Arrange: const budget = new IterationBudget(1)
+        Assert:
+          expect(budget.maxTotal).toBe(1)
+          expect(budget.remaining).toBe(1)
+          expect(budget.consume()).toBe(true)
+          expect(budget.consume()).toBe(false)
+      });
+
+      it("handles maxTotal of 0 (immediately exhausted)", () => {
+        Arrange: const budget = new IterationBudget(0)
+        Assert:
+          expect(budget.maxTotal).toBe(0)
+          expect(budget.remaining).toBe(0)
+          expect(budget.consume()).toBe(false)
+      });
+    });
+
+    // === 1.2 consume() ===
+
+    describe("consume", () => {
+
+      it("returns true and increments used when under budget", () => {
+        Arrange: const budget = new IterationBudget(5)
+        Act:     const result = budget.consume()
+        Assert:
+          expect(result).toBe(true)
+          expect(budget.used).toBe(1)
+          expect(budget.remaining).toBe(4)
+      });
+
+      it("returns true for each consume up to maxTotal", () => {
+        Arrange: const budget = new IterationBudget(3)
+        Act:     const results = [budget.consume(), budget.consume(), budget.consume()]
+        Assert:
+          expect(results).toEqual([true, true, true])
+          expect(budget.used).toBe(3)
+          expect(budget.remaining).toBe(0)
+      });
+
+      it("returns false when budget is exhausted", () => {
+        Arrange: const budget = new IterationBudget(3)
+        Act:     consume 3 times, then const fourth = budget.consume()
+        Assert:
+          expect(fourth).toBe(false)
+          expect(budget.used).toBe(3)   // unchanged
+          expect(budget.remaining).toBe(0)
+      });
+
+      it("returns false on repeated calls after exhaustion", () => {
+        Arrange: const budget = new IterationBudget(2)
+        Act:     consume 2 (exhaust), then consume 3 more
+        Assert:
+          All 3 extra calls return false
+          expect(budget.used).toBe(2)   // stays at 2
+      });
+    });
+
+    // === 1.3 refund() ===
+
+    describe("refund", () => {
+
+      it("decrements used count by 1", () => {
+        Arrange: const budget = new IterationBudget(5)
+        Act:     budget.consume(); budget.consume(); budget.refund()
+        Assert:
+          expect(budget.used).toBe(1)
+          expect(budget.remaining).toBe(4)
+      });
+
+      it("restores consume ability after exhaustion", () => {
+        Arrange: const budget = new IterationBudget(2)
+        Act:     consume 2 (exhausted), then refund()
+        Assert:
+          expect(budget.remaining).toBe(1)
+          expect(budget.consume()).toBe(true)
+      });
+
+      it("floors used at 0 (refund on fresh budget is no-op)", () => {
+        Arrange: const budget = new IterationBudget(5)
+        Act:     budget.refund()  // refund without prior consume
+        Assert:
+          expect(budget.used).toBe(0)        // not -1
+          expect(budget.remaining).toBe(5)   // unchanged
+      });
+
+      it("floors used at 0 after multiple refunds beyond usage", () => {
+        Arrange: const budget = new IterationBudget(3)
+        Act:     budget.consume(); for (let i = 0; i < 5; i++) budget.refund()
+        Assert:
+          expect(budget.used).toBe(0)        // never goes negative
+          expect(budget.remaining).toBe(3)
+      });
+    });
+
+    // === 1.4 used / remaining Properties ===
+
+    describe("used and remaining", () => {
+
+      it("used reflects consume and refund accurately", () => {
+        Mirrors Hermes test_iteration_budget_used_reflects_consume_and_refund.
+
+        Arrange: const budget = new IterationBudget(10)
+        Act + Assert:
+          expect(budget.used).toBe(0)
+          budget.consume(); expect(budget.used).toBe(1)
+          budget.consume(); expect(budget.used).toBe(2)
+          budget.refund();  expect(budget.used).toBe(1)
+          budget.refund();  expect(budget.used).toBe(0)
+      });
+
+      it("remaining equals maxTotal minus used", () => {
+        Mirrors Hermes test_iteration_budget_remaining.
+
+        Arrange: const budget = new IterationBudget(5)
+        Act + Assert:
+          expect(budget.remaining).toBe(5)
+          budget.consume(); expect(budget.remaining).toBe(4)
+          budget.consume(); budget.consume(); expect(budget.remaining).toBe(2)
+          budget.refund(); expect(budget.remaining).toBe(3)
+      });
+
+      it("remaining never goes below 0", () => {
+        Arrange: const budget = new IterationBudget(2)
+        Act:     consume 2, then try consume 5 more
+        Assert:  expect(budget.remaining).toBe(0) after each extra consume
+      });
+    });
+
+    // === 1.5 Interleaved Consume/Refund Sequences ===
+
+    describe("interleaved sequences", () => {
+
+      it("handles alternating consume-refund pattern without drift", () => {
+        Arrange: const budget = new IterationBudget(3)
+        Act:     10 cycles of [consume, refund]
+        Assert:
+          Each consume returns true (budget is never exhausted)
+          expect(budget.used).toBe(0)
+          expect(budget.remaining).toBe(3)
+      });
+
+      it("tracks state correctly through complex sequence", () => {
+        Arrange: const budget = new IterationBudget(5)
+        Act + Assert at each step:
+          consume x3 -> expect(budget.used).toBe(3)
+          refund  x1 -> expect(budget.used).toBe(2)
+          consume x2 -> expect(budget.used).toBe(4)
+          refund  x4 -> expect(budget.used).toBe(0)     // floors at 0
+          consume x5 -> expect(budget.used).toBe(5)     // exhausted
+          consume x1 -> expect(result).toBe(false)       // rejected
+          refund  x1 -> expect(budget.used).toBe(4)
+          consume x1 -> expect(result).toBe(true)        // restored
+                      -> expect(budget.used).toBe(5)
+      });
+    });
+
+    NOTE: NO snapshot() method tests -- IterationBudget has only:
+    constructor, consume, refund, used (property), remaining (property).
+    Step 13 reads used/remaining directly for result metadata.
+  });
+
+
+--- Fixtures/Mocks ---
+
+  None. IterationBudget is a pure data structure with no dependencies.
+
+--- Estimated Test Count: 14 tests ---
+
+
+================================================================================
+TEST FILE 2: src/config/zod-schema.agent-defaults.test.ts (EXTEND)
+================================================================================
+
+Purpose:      Validate Zod schema accepts/rejects iterationBudget config shapes
+Source files: src/config/zod-schema.agent-defaults.ts (modified, Step 3)
+              src/config/types.agent-defaults.ts (modified, Step 2)
+Approach:     Add a new describe() block to EXISTING file
+Action:       EXTEND existing file
+
+--- Why EXTEND, not NEW ---
+
+  OpenClaw convention: one test file per schema file. All 30+ zod-schema
+  test files match their source file name. The pattern is:
+    zod-schema.agent-defaults.ts -> zod-schema.agent-defaults.test.ts
+  Creating a separate zod-schema.iteration-budget.test.ts would violate
+  this convention.
+
+--- No New Imports Needed ---
+
+  The existing file already imports AgentDefaultsSchema and uses:
+    expectSchemaSuccess(result: SafeParseReturnType<...>)
+    expectSchemaFailurePath(result: SafeParseReturnType<...>, path: string)
+
+  These helpers are defined INSIDE the test file (not imported):
+    - expectSchemaSuccess: asserts result.success === true
+    - expectSchemaFailurePath: asserts !result.success and checks that
+      at least one issue path matches the expected prefix
+
+--- Why NO default value tests here ---
+
+  AgentDefaultsSchema uses .optional() on all fields, NOT .default().
+  Calling .parse({iterationBudget: {enabled: true}}) returns the input
+  as-is WITHOUT filling in maxIterations=90. Default merging happens in
+  resolveAgentConfig() (tested in FILE 3). This was V1 FIX #3/#6.
+
+--- Test Structure (appended to existing describe block) ---
+
+  describe("iterationBudget config", () => {
+
+    // === 2.1 Valid Configurations ===
+
+    describe("valid configurations", () => {
+
+      it("accepts iterationBudget with all fields specified", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: {
+            enabled: true,
+            maxIterations: 90,
+            subagentMaxIterations: 50,
+            forceSummaryOnExhaustion: true,
+          },
+        });
+        expectSchemaSuccess(result);
+      });
+
+      it("accepts iterationBudget with only enabled field", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { enabled: true },
+        });
+        expectSchemaSuccess(result);
+      });
+
+      it("accepts iterationBudget with enabled=false", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { enabled: false },
+        });
+        expectSchemaSuccess(result);
+      });
+
+      it("accepts empty iterationBudget object (all fields optional)", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: {},
+        });
+        expectSchemaSuccess(result);
+      });
+
+      it("accepts iterationBudget on per-agent entries", () => {
+        PURPOSE: Verify AgentEntrySchema also accepts the iterationBudget field.
+
+        const result = AgentEntrySchema.safeParse({
+          id: "coordinator",
+          iterationBudget: {
+            enabled: true,
+            maxIterations: 120,
+          },
+        });
+        expectSchemaSuccess(result);
+      });
+
+      it("preserves explicit values through parsing", () => {
+        const input = {
+          iterationBudget: {
+            enabled: true,
+            maxIterations: 42,
+            subagentMaxIterations: 25,
+            forceSummaryOnExhaustion: false,
+          },
+        };
+        const result = AgentDefaultsSchema.parse(input);
+        expect(result.iterationBudget).toEqual(input.iterationBudget);
+      });
+    });
+
+    // === 2.2 Boundary Values ===
+
+    describe("boundary values", () => {
+
+      it("accepts maxIterations=1 (minimum useful value)", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { maxIterations: 1 },
+        });
+        expectSchemaSuccess(result);
+      });
+
+      it("rejects maxIterations=0", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { maxIterations: 0 },
+        });
+        expectSchemaFailurePath(result, "iterationBudget.maxIterations");
+      });
+
+      it("rejects negative maxIterations", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { maxIterations: -5 },
+        });
+        expectSchemaFailurePath(result, "iterationBudget.maxIterations");
+      });
+
+      it("rejects non-integer maxIterations", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { maxIterations: 10.5 },
+        });
+        expectSchemaFailurePath(result, "iterationBudget.maxIterations");
+      });
+
+      it("rejects non-integer subagentMaxIterations", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { subagentMaxIterations: 3.7 },
+        });
+        expectSchemaFailurePath(result, "iterationBudget.subagentMaxIterations");
+      });
+
+      it("accepts large maxIterations (500)", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { maxIterations: 500 },
+        });
+        expectSchemaSuccess(result);
+      });
+    });
+
+    // === 2.3 Invalid Input Rejection ===
+
+    describe("invalid inputs", () => {
+
+      it("rejects string value for maxIterations", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { maxIterations: "ninety" },
+        });
+        expectSchemaFailurePath(result, "iterationBudget.maxIterations");
+      });
+
+      it("rejects string value for enabled", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { enabled: "yes" },
+        });
+        expectSchemaFailurePath(result, "iterationBudget.enabled");
+      });
+
+      it("rejects unknown properties in iterationBudget sub-schema", () => {
+        const result = AgentDefaultsSchema.safeParse({
+          iterationBudget: { enabled: true, unknownField: 42 },
+        });
+        expectSchemaFailurePath(result, "iterationBudget");
+
+        IMPLEMENTATION NOTE: This test requires the iterationBudget
+        sub-schema to use .strict(). AgentDefaultsSchema uses .strict()
+        at the top level (confirmed at line 274 of the source), but the
+        sub-schema must ALSO use .strict() for this assertion to work
+        at the "iterationBudget" path level. If .strict() is only on
+        the outer schema, the unknown field inside the nested object
+        may be silently stripped by Zod rather than rejected.
+
+        If the sub-schema uses .passthrough() or default behavior,
+        this test should be adjusted to check at the outer level path
+        or the sub-schema should be updated.
+      });
+    });
+  });
+
+
+--- Estimated Test Count: 12 tests ---
+
+
+================================================================================
+TEST FILE 3: src/agents/agent-scope-config.test.ts (NEW)
+================================================================================
+
+Purpose:      Test iteration budget config resolution + default application
+Source file:  src/agents/agent-scope-config.ts (modified, Steps 4-5)
+Action:       NEW file (agent-scope-config.test.ts does NOT currently exist)
+
+--- Why this file ---
+
+  The resolveAgentConfig() function in agent-scope-config.ts is where
+  per-agent config merges with global defaults. It uses the pattern:
+    scalar:  entry.field ?? agentDefaults?.field
+    object:  { ...agentDefaults?.field, ...entry.field } with type guard
+
+  Step 4 extends resolveAgentConfig to handle iterationBudget. Since
+  Zod schema uses .optional() (not .default()), defaults like
+  maxIterations=90 and subagentMaxIterations=50 are applied HERE during
+  config resolution, not during schema parsing. Therefore, default value
+  tests belong in this file.
+
+  The current ResolvedAgentConfig type (lines 18-45 of agent-scope-config.ts)
+  does NOT have iterationBudget -- Step 4 adds it.
+
+--- Imports ---
+
+  import { describe, it, expect } from "vitest";
+  import { resolveAgentConfig } from "./agent-scope-config.js";
+  import type { OpenClawConfig } from "../config/types.js";
+
+--- Fixture Helpers ---
+
+  function makeConfig(overrides: {
+    defaults?: { iterationBudget?: Partial<IterationBudgetConfig> };
+    agents?: Array<{
+      id: string;
+      iterationBudget?: Partial<IterationBudgetConfig>;
+    }>;
+  }): OpenClawConfig {
+    return {
+      agents: {
+        defaults: overrides.defaults,
+        list: (overrides.agents ?? []).map((a) => ({
+          id: a.id,
+          iterationBudget: a.iterationBudget,
+        })),
+      },
+    } as OpenClawConfig;
+  }
+
+--- Test Structure ---
+
+  describe("iterationBudget config resolution", () => {
+
+    // === 3.1 Default Values ===
+    //
+    // These tests were in FILE 2 (schema tests) in V1 but belong here
+    // because defaults are applied during config resolution, not schema
+    // parsing. The Zod schema uses .optional() without .default().
+
+    describe("default values", () => {
+
+      it("applies default maxIterations of 90 when not specified", () => {
+        Arrange: config with agent "main" having
+                 iterationBudget: { enabled: true }  (no maxIterations)
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:  expect(resolved?.iterationBudget?.maxIterations).toBe(90)
+      });
+
+      it("applies default subagentMaxIterations of 50 when not specified", () => {
+        Arrange: config with agent "main" having
+                 iterationBudget: { enabled: true }  (no subagentMaxIterations)
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:  expect(resolved?.iterationBudget?.subagentMaxIterations).toBe(50)
+      });
+
+      it("defaults forceSummaryOnExhaustion to true when not specified", () => {
+        Arrange: config with iterationBudget: { enabled: true }
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:  expect(resolved?.iterationBudget?.forceSummaryOnExhaustion).toBe(true)
+      });
+
+      it("defaults enabled to false when iterationBudget section is empty", () => {
+        Arrange: config with iterationBudget: {}
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:  expect(resolved?.iterationBudget?.enabled).toBe(false)
+      });
+    });
+
+    // === 3.2 Missing Config ===
+
+    describe("missing config", () => {
+
+      it("returns undefined iterationBudget when no section in config", () => {
+        Arrange: config with agent "main" but no iterationBudget anywhere
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:  resolved?.iterationBudget is undefined
+                 (feature disabled by absence)
+      });
+
+      it("returns undefined for unknown agent id", () => {
+        Arrange: config with agent "main" and iterationBudget config
+        Act:     const resolved = resolveAgentConfig(config, "nonexistent")
+        Assert:  expect(resolved).toBeUndefined()
+        Purpose: Verify graceful handling when agent isn't in the config list
+      });
+    });
+
+    // === 3.3 Global Defaults ===
+
+    describe("global defaults", () => {
+
+      it("uses global defaults when only defaults.iterationBudget specified", () => {
+        Arrange: config with agents.defaults.iterationBudget = {
+                   enabled: true, maxIterations: 90
+                 }
+                 Agent "main" in list with no per-agent iterationBudget
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:
+          expect(resolved?.iterationBudget?.enabled).toBe(true)
+          expect(resolved?.iterationBudget?.maxIterations).toBe(90)
+      });
+    });
+
+    // === 3.4 Per-Agent Override ===
+
+    describe("per-agent override", () => {
+
+      it("per-agent config overrides global defaults", () => {
+        Arrange:
+          config with defaults.iterationBudget.maxIterations = 90
+          agent "main" with iterationBudget.maxIterations = 120
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:  expect(resolved?.iterationBudget?.maxIterations).toBe(120)
+      });
+
+      it("per-agent config merges with (not replaces) global defaults", () => {
+        PURPOSE: Verify the object spread merge pattern:
+                 { ...agentDefaults?.iterationBudget, ...entry.iterationBudget }
+                 This is the same pattern used for runRetries and contextLimits.
+
+        Arrange:
+          config.agents.defaults.iterationBudget = {
+            enabled: true,
+            maxIterations: 90,
+            forceSummaryOnExhaustion: true,
+          }
+          agent "main".iterationBudget = {
+            maxIterations: 60,   // only override one field
+          }
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:
+          expect(resolved?.iterationBudget?.enabled).toBe(true)               // from global
+          expect(resolved?.iterationBudget?.maxIterations).toBe(60)           // from agent
+          expect(resolved?.iterationBudget?.forceSummaryOnExhaustion).toBe(true)  // from global
+      });
+
+      it("per-agent enabled=false overrides global enabled=true", () => {
+        Arrange:
+          defaults.iterationBudget = { enabled: true, maxIterations: 90 }
+          agent "main".iterationBudget = { enabled: false }
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:  expect(resolved?.iterationBudget?.enabled).toBe(false)
+      });
+    });
+
+    // === 3.5 Subagent Budget ===
+
+    describe("subagent budget", () => {
+
+      it("resolves subagentMaxIterations separately from maxIterations", () => {
+        Arrange: defaults.iterationBudget = {
+                   enabled: true,
+                   maxIterations: 90,
+                   subagentMaxIterations: 50,
+                 }
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:
+          expect(resolved?.iterationBudget?.maxIterations).toBe(90)
+          expect(resolved?.iterationBudget?.subagentMaxIterations).toBe(50)
+      });
+    });
+
+    // === 3.6 Edge Cases ===
+
+    describe("edge cases", () => {
+
+      it("handles agent id case-insensitivity", () => {
+        PURPOSE: resolveAgentConfig normalizes agent IDs via normalizeAgentId().
+        Arrange: config with agent id "Main", query with "main"
+        Act:     const resolved = resolveAgentConfig(config, "main")
+        Assert:  resolved is defined (found the agent despite case difference)
+      });
+    });
+  });
+
+
+--- Fixtures/Mocks ---
+
+  Minimal inline OpenClawConfig objects using the makeConfig() factory.
+  No module mocks needed -- resolveAgentConfig is a pure function.
+
+--- Estimated Test Count: 11 tests ---
+
+
+================================================================================
+TEST FILE 4: src/agents/embedded-agent-runner/run.iteration-budget.test.ts
+================================================================================
+
+Purpose:      Integration tests for budget lifecycle in the run.ts main loop
+Source files: src/agents/embedded-agent-runner/run.ts (modified, Step 8)
+              src/agents/embedded-agent-runner/run/types.ts (modified, Step 7)
+Follows:      Pattern from run.compaction-loop-guard.test.ts
+Action:       NEW file
+
+--- Harness Strategy ---
+
+  REUSE the existing run.overflow-compaction.harness.ts. This harness already
+  mocks 50+ dependencies needed for run.ts integration tests including:
+    - mockedRunEmbeddedAttempt (mock attempt execution)
+    - mockedResolveModel (model resolution)
+    - Plugin hook runners (before/after agent, compaction, reply)
+    - Context engine mocks (compaction)
+    - overflowBaseRunParams (base params for runEmbeddedAgent)
+    - makeAttemptResult() factory (deep defaults with overrides)
+
+  The run.compaction-loop-guard.test.ts demonstrates this pattern:
+    beforeAll: load harness -> get runEmbeddedAgent
+    beforeEach: resetRunOverflowCompactionHarnessMocks()
+    Tests: mock mockedRunEmbeddedAttempt sequences, run, assert results
+
+  NO separate harness or fixture files needed. Budget config helpers
+  are defined inline.
+
+--- Config Injection Strategy ---
+
+  run.ts loads config via (lines 1562-1566):
+    const config = paramsInput.config ?? (getRuntimeConfigSnapshot() ?? undefined);
+
+  Two approaches for injecting budget config:
+
+  APPROACH A (preferred): If RunEmbeddedAgentParams has a config field
+    (or will have one added), pass config via:
+      runEmbeddedAgent({ ...overflowBaseRunParams, config: budgetConfig })
+
+  APPROACH B (fallback): Mock getRuntimeConfigSnapshot() to return
+    config with iterationBudget section. The harness already mocks
+    this function.
+
+  During implementation, check RunEmbeddedAgentParams and choose the
+  approach. Tests below use APPROACH A syntax but adjust if needed.
+
+--- Imports ---
+
+  import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+  import type { EmbeddedAgentRunResult } from "./run/types.js";
+
+--- Fixture Helpers (inline at top of test file) ---
+
+  // Budget config factory -- small budgets for fast tests
+  function makeBudgetConfig(overrides?: Partial<IterationBudgetConfig>) {
+    return {
+      iterationBudget: {
+        enabled: true,
+        maxIterations: 10,
+        subagentMaxIterations: 5,
+        forceSummaryOnExhaustion: true,
+        ...overrides,
+      },
+    };
+  }
+
+  // Attempt that produces tool calls but no text payload
+  // payloadCount = 0 because assistantTexts is empty
+  function makeToolCallAttempt(toolCount = 1) {
+    return makeAttemptResult({
+      promptError: null,
+      assistantTexts: [],     // no text payload -> payloadCount = 0
+      toolMetas: Array.from({ length: toolCount }, (_, i) => ({
+        toolName: `tool-${i}`,
+      })),
+    });
+  }
+
+  // Attempt that produces text payload (successful completion)
+  // payloadCount >= 1 because assistantTexts has content
+  function makePayloadAttempt(text = "done") {
+    return makeAttemptResult({
+      promptError: null,
+      assistantTexts: [text],
+    });
+  }
+
+  // Attempt that produces no text and no tools (empty response)
+  function makeEmptyAttempt() {
+    return makeAttemptResult({
+      promptError: null,
+      assistantTexts: [],
+      toolMetas: [],
+    });
+  }
+
+--- Test Structure ---
+
+  describe("iteration budget in run loop", () => {
+
+    let runEmbeddedAgent: typeof import("./run.js").runEmbeddedAgent;
+
+    beforeAll(async () => {
+      ({ runEmbeddedAgent } = await loadRunOverflowCompactionHarness());
+    });
+
+    beforeEach(() => {
+      resetRunOverflowCompactionHarnessMocks();
+    });
+
+    // === 4.1 Budget Creation ===
+
+    describe("budget creation", () => {
+
+      it("creates IterationBudget with resolved maxIterations from config", () => {
+        Arrange: config with iterationBudget.enabled=true, maxIterations=10
+        Mock:    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makePayloadAttempt())
+        Act:     result = await runEmbeddedAgent({
+                   ...overflowBaseRunParams,
+                   config: makeBudgetConfig({ maxIterations: 10 }),
+                 })
+        Assert:
+          expect(result.meta.iterationBudget).toBeDefined()
+          expect(result.meta.iterationBudget.maxTotal).toBe(10)
+      });
+
+      it("does not create budget when iterationBudget.enabled=false", () => {
+        Arrange: config with iterationBudget.enabled=false
+        Mock:    single attempt -> payload
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:  expect(result.meta.iterationBudget).toBeUndefined()
+      });
+
+      it("does not create budget when iterationBudget config is absent", () => {
+        Arrange: config with no iterationBudget section
+        Mock:    single attempt -> payload
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:  expect(result.meta.iterationBudget).toBeUndefined()
+      });
+    });
+
+    // === 4.2 Budget Consumption (Normal Flow) ===
+
+    describe("budget consumption", () => {
+
+      it("consumes one iteration per run loop cycle", () => {
+        Arrange: config with maxIterations=5
+        Mock sequence:
+          mockedRunEmbeddedAttempt
+            .mockResolvedValueOnce(makeToolCallAttempt())  // iter 1: tools
+            .mockResolvedValueOnce(makeToolCallAttempt())  // iter 2: tools
+            .mockResolvedValueOnce(makeToolCallAttempt())  // iter 3: tools
+            .mockResolvedValueOnce(makePayloadAttempt())   // iter 4: payload -> done
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.iterationBudget.used).toBe(4)
+          expect(result.meta.iterationBudget.maxTotal).toBe(5)
+          expect(result.meta.iterationBudget.remaining).toBe(1)
+      });
+
+      it("allows full budget to be consumed when last iteration has payload", () => {
+        Arrange: config with maxIterations=3
+        Mock sequence:
+          iter 1-2: tool calls (no payload)
+          iter 3: text payload -> success
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.iterationBudget.used).toBe(3)
+          No error.kind in result (successful completion)
+      });
+    });
+
+    // === 4.3 Budget Exhaustion Detection ===
+    //
+    // Budget exhaustion triggers ONLY when ALL of these are true:
+    //   - iterationBudget.remaining <= 0
+    //   - payloadCount === 0
+    //   - !attempt.clientToolCalls
+    //   - !budgetExhaustedSummaryPending (not already a summary attempt)
+    //   - !aborted
+    //   - !promptError
+    //   - !timedOut                  (FIX #2 from V1 review)
+    //   - !emptyAssistantReplyIsSilent (FIX #3 from V1 review)
+    //   - !attempt.yieldDetected      (FIX #3 from V1 review)
+
+    describe("budget exhaustion", () => {
+
+      it("triggers budget exhaustion when budget runs out with no payload", () => {
+        Arrange: config with maxIterations=3, forceSummaryOnExhaustion=true
+        Mock sequence:
+          iter 1-3: tool calls, no text (budget exhausted, payloadCount=0)
+          iter 4: summary attempt returns text
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.error?.kind).toBe("budget_exhausted")
+          Result includes payload from summary attempt
+      });
+
+      it("does NOT trigger when attempt produces text payload", () => {
+        Arrange: config with maxIterations=3
+        Mock:
+          iter 1-2: tool calls (payloadCount=0, budget used=2)
+          iter 3: text payload (payloadCount>=1, budget used=3)
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.error).toBeUndefined()
+          Normal success result
+      });
+
+      it("does NOT trigger when attempt has clientToolCalls", () => {
+        Arrange: config with maxIterations=2
+        Mock:
+          iter 1: tool call (used=1)
+          iter 2: clientToolCalls present, payloadCount=0 (used=2)
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:  Normal result with client tool calls, not budget error
+      });
+
+      it("does NOT trigger when attempt timed out", () => {
+        PURPOSE: timedOut attempts are handled by timeout path (lines
+                 3628-3707 of run.ts), not budget exhaustion (V1 FIX #2).
+
+        Arrange: config with maxIterations=3
+        Mock:
+          iter 1-2: tool calls
+          iter 3: makeAttemptResult({ timedOut: true, assistantTexts: [] })
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:  Timeout handling fires, NOT budget_exhausted error.kind
+      });
+
+      it("does NOT trigger when emptyAssistantReplyIsSilent", () => {
+        PURPOSE: Silent completions (intentional no-output) are successful.
+                 Budget=0 is coincidental (V1 FIX #3).
+
+        Arrange: config with maxIterations=3
+        Mock:    Set up conditions where
+                 shouldTreatEmptyAssistantReplyAsSilent() returns true:
+                 payloadCount=0, stop reason != "error", and
+                 allowEmptyAssistantReplyAsSilent=true in params
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.error?.kind).not.toBe("budget_exhausted")
+          Silent completion result (terminalReplyKind: "silent-empty")
+
+        NOTE: emptyAssistantReplyIsSilent is computed by
+        shouldTreatEmptyAssistantReplyAsSilent() in incomplete-turn.ts.
+        The test must set up the correct conditions for that function
+        to return true.
+      });
+
+      it("does NOT trigger when yieldDetected", () => {
+        PURPOSE: Agent yielded voluntarily. Budget=0 is coincidental
+                 (V1 FIX #3).
+
+        Arrange: config with maxIterations=2
+        Mock:
+          iter 1: tool call (used=1)
+          iter 2: makeAttemptResult({
+                    yieldDetected: true,
+                    assistantTexts: [],
+                  })
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:  Yield result, not budget_exhausted error
+      });
+
+      it("does NOT trigger on already-summary attempt", () => {
+        PURPOSE: budgetExhaustedSummaryPending flag prevents re-triggering.
+
+        Arrange: config maxIterations=3, forceSummaryOnExhaustion=true
+        Mock sequence:
+          iter 1-3: tool calls (exhaust budget -> triggers summary)
+          iter 4 (summary): also produces no payload (edge case)
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          Does NOT enter infinite re-entry loop
+          Returns error result with fallback message
+          mockedRunEmbeddedAttempt called at most 4 times
+      });
+
+      it("does NOT trigger when aborted", () => {
+        Arrange: config with maxIterations=3
+        Mock:
+          iter 3: makeAttemptResult({ aborted: true, assistantTexts: [] })
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:  Abort result, not budget_exhausted error
+      });
+
+      it("does NOT trigger when promptError exists", () => {
+        Arrange: config with maxIterations=3
+        Mock:
+          iter 3: makeAttemptResult({
+                    promptError: new Error("context overflow"),
+                    assistantTexts: [],
+                  })
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:  Error handling path fires, not budget exhaustion
+      });
+    });
+
+    // === 4.4 Budget Exhaustion Summary Flow ===
+
+    describe("forced summary on exhaustion", () => {
+
+      it("refunds one iteration and continues with summary instruction", () => {
+        Arrange: config maxIterations=3, forceSummaryOnExhaustion=true
+        Mock:
+          iter 1-3: makeToolCallAttempt() (budget exhausted, payloadCount=0)
+          iter 4: makePayloadAttempt("Summary of work done")
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(4)
+          // Verify 4th attempt's prompt contains budget summary instruction
+          const summaryAttemptParams = mockedRunEmbeddedAttempt.mock.calls[3][0]
+          expect(summaryAttemptParams.prompt || summaryAttemptParams.instructions)
+            .toContain(/* budget summary instruction substring */)
+      });
+
+      it("clears stale retry instructions before summary attempt", () => {
+        PURPOSE: V1 FIX #4 -- prevent conflicting prompts. When budget
+                 exhaustion fires, reasoningOnlyRetryInstruction,
+                 emptyResponseRetryInstruction, and
+                 compactionContinuationRetryInstruction must be cleared.
+
+        Arrange: config maxIterations=3, forceSummaryOnExhaustion=true
+        Mock:
+          iter 1: reasoning-only response -> sets retry instruction
+          iter 2: retry with instruction -> tool calls
+          iter 3: tool calls (budget exhausted -> summary flow)
+          iter 4: summary attempt returns text
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          Inspect mockedRunEmbeddedAttempt.mock.calls[3] (4th call):
+          Summary attempt does NOT contain reasoning-only retry instruction
+          Summary attempt contains ONLY budget summary instruction
+      });
+
+      it("returns error result when forceSummaryOnExhaustion is disabled", () => {
+        Arrange: config maxIterations=3, forceSummaryOnExhaustion=false
+        Mock:    iter 1-3: makeToolCallAttempt() (budget exhausted)
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(3)
+          // No 4th summary attempt
+          expect(result.meta.error?.kind).toBe("budget_exhausted")
+      });
+
+      it("handles summary attempt failure gracefully", () => {
+        Arrange: config maxIterations=3, forceSummaryOnExhaustion=true
+        Mock:
+          iter 1-3: makeToolCallAttempt()
+          iter 4 (summary): makeAttemptResult({
+                     promptError: new Error("API error during summary"),
+                     assistantTexts: [],
+                   })
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.error?.kind).toBe("budget_exhausted")
+          Result has fallback error payload (does not throw/crash)
+      });
+    });
+
+    // === 4.5 Budget Refund on Compaction ===
+
+    describe("budget refund on compaction restart", () => {
+
+      it("refunds budget iteration when compaction triggers loop restart", () => {
+        Arrange: config maxIterations=5
+        Mock:
+          iter 1: makeAttemptResult({
+                    promptError: makeOverflowError(),
+                    assistantTexts: [],
+                  })
+          (compaction happens via mockedCompactDirect)
+          iter 2: makePayloadAttempt("done")
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          // The overflow iteration was refunded, so net used should
+          // reflect only productive iterations.
+          // Exact assertion depends on implementation:
+          //   If refund is at compaction point: used = 2 consumed - 1 refunded = 1
+          //   Verify during implementation and adjust.
+          expect(result.meta.iterationBudget.used).toBeGreaterThanOrEqual(1)
+          expect(result.meta.iterationBudget.used).toBeLessThanOrEqual(2)
+      });
+    });
+
+    // === 4.6 Budget Metadata in Result ===
+
+    describe("budget metadata in result", () => {
+
+      it("includes budget metadata in successful run result", () => {
+        Arrange: config maxIterations=10
+        Mock:    2 tool call attempts, 3rd returns payload
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.iterationBudget).toBeDefined()
+          expect(result.meta.iterationBudget.used).toBe(3)
+          expect(result.meta.iterationBudget.maxTotal).toBe(10)
+          expect(result.meta.iterationBudget.remaining).toBe(7)
+      });
+
+      it("includes budget metadata in error run result", () => {
+        Arrange: config maxIterations=3
+        Mock:    3 attempts exhaust budget
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.iterationBudget).toBeDefined()
+          expect(result.meta.iterationBudget.used).toBe(3)
+      });
+
+      it("omits budget metadata when budget is disabled", () => {
+        Arrange: config iterationBudget.enabled=false
+        Mock:    normal successful run
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:  expect(result.meta.iterationBudget).toBeUndefined()
+      });
+    });
+
+    // === 4.7 onBeforeToolCallingRound Callback Threading ===
+    //
+    // The callback is an implementation detail of how run.ts communicates
+    // with the inner agent loop. Test its effects INDIRECTLY through
+    // observable outputs (V1 FIX #9).
+
+    describe("onBeforeToolCallingRound threading", () => {
+
+      it("passes onBeforeToolCallingRound callback to attempt params when budget enabled", () => {
+        Arrange: config maxIterations=5
+        Mock:    single attempt -> payload
+        Act:     await runEmbeddedAgent(...)
+        Assert:
+          const attemptParams = mockedRunEmbeddedAttempt.mock.calls[0][0]
+          expect(typeof attemptParams.onBeforeToolCallingRound).toBe("function")
+      });
+
+      it("does not pass onBeforeToolCallingRound when budget is disabled", () => {
+        Arrange: config iterationBudget.enabled=false
+        Mock:    single attempt -> payload
+        Act:     await runEmbeddedAgent(...)
+        Assert:
+          const attemptParams = mockedRunEmbeddedAttempt.mock.calls[0][0]
+          expect(attemptParams.onBeforeToolCallingRound).toBeUndefined()
+      });
+
+      // NOTE: Cannot test callback return values directly because the
+      // budget's internal used count is encapsulated in run.ts. Callback
+      // return behavior (true when budget available, false when exhausted)
+      // is tested INDIRECTLY via:
+      //   - Budget exhaustion integration tests (section 4.3)
+      //   - Agent-core loop tests (FILE 6) that test the callback contract
+    });
+
+    // === 4.8 Error Kind Extension ===
+
+    describe("error kind", () => {
+
+      it("uses 'budget_exhausted' error kind in meta", () => {
+        PURPOSE: Step 9 adds "budget_exhausted" to the error kind union:
+          "context_overflow" | "compaction_failure" | "role_ordering" |
+          "image_size" | "retry_limit" | "incomplete_turn" | "hook_block" |
+          "budget_exhausted"   <-- new
+
+        Arrange: config maxIterations=2, forceSummaryOnExhaustion=false
+        Mock:    2 attempts with tools, no payload
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.error?.kind).toBe("budget_exhausted")
+          expect(result.meta.error?.message).toBeDefined()
+          expect(result.meta.error?.message).toMatch(/iteration|budget/i)
+      });
+
+      it("budget exhaustion does not trigger failover", () => {
+        PURPOSE: Budget exhaustion is a controlled stop, not a provider
+                 error. It should NOT throw FailoverError.
+
+        Arrange: config maxIterations=2, fallback model configured
+        Mock:    2 attempts exhaust budget
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.error?.kind).toBe("budget_exhausted")
+          // Did NOT throw FailoverError (runEmbeddedAgent completed normally)
+          // result.meta.error.fallbackSafe should indicate no failover
+      });
+    });
+
+    // === 4.9 Interaction with Existing Retry Mechanisms ===
+
+    describe("interaction with existing retries", () => {
+
+      it("budget consumption includes reasoning-only retry iterations", () => {
+        PURPOSE: run.ts has a single runLoopIterations counter. Budget
+                 consumption mirrors this: every loop pass consumes one
+                 unit. There is no productive/retry distinction (V1 FIX #12).
+
+        Arrange: config maxIterations=5
+        Mock:
+          iter 1: reasoning-only response (triggers retry)
+          iter 2: retry with instruction -> tool calls
+          iter 3: text payload
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.iterationBudget.used).toBe(3)
+          // All iterations consumed budget, including the retry
+      });
+
+      it("budget and MAX_RUN_LOOP_ITERATIONS are independent guards", () => {
+        PURPOSE: Budget is a configurable turn limit for productive work.
+                 MAX_RUN_LOOP_ITERATIONS is a defensive retry-storm cap.
+                 They operate independently.
+
+        Arrange: config maxIterations=3 (budget exhausts at 3, well before
+                 MAX_RUN_LOOP_ITERATIONS default of 32)
+        Mock:    3 tool call attempts (budget exhausts)
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.error?.kind).toBe("budget_exhausted")
+          // NOT "retry_limit"
+          expect(mockedRunEmbeddedAttempt.mock.calls.length).toBeLessThanOrEqual(4)
+          // At most 3 + 1 summary attempt
+      });
+    });
+
+    // === 4.10 Regression: Budget Stops Loop Even When Tool-Loop-Detection Fails ===
+
+    describe("regression scenarios", () => {
+
+      it("budget stops loop even when tool-loop-detection is defeated", () => {
+        PURPOSE: GitHub issue regression -- volatile messageIds defeat
+                 content-hash dedup. Budget provides a hard iteration
+                 count guard regardless of detection heuristics.
+
+        Arrange: config maxIterations=5, tool loop detection enabled
+        Mock:    5 tool call attempts (budget exhausts)
+                 Each attempt has different assistantTexts / tool results
+                 (simulating volatile content that defeats dedup)
+        Act:     result = await runEmbeddedAgent(...)
+        Assert:
+          expect(result.meta.error?.kind).toBe("budget_exhausted")
+          // Budget stopped the loop after exactly 5 iterations
+          // regardless of whether tool-loop-detection triggered
+      });
+    });
+  });
+
+
+--- Supporting Infrastructure ---
+
+  Use existing harness infrastructure. Files:
+    - run.overflow-compaction.harness.ts (50+ mocks, load/reset functions)
+    - run.overflow-compaction.fixture.ts (makeAttemptResult, makeOverflowError)
+  Define budget config helpers inline at the top of this test file.
+
+--- Vitest Config Placement ---
+
+  FILE 4 tests are integration tests. They should be included in:
+    - test/vitest/vitest.agents-embedded-agent.config.ts (alongside
+      run.compaction-loop-guard.test.ts and other run.*.test.ts files)
+
+--- Estimated Test Count: 25 tests ---
+
+
+================================================================================
+TEST FILE 5: src/agents/embedded-agent-runner/run/budget-exhaustion.test.ts
+================================================================================
+
+Purpose:      Unit tests for budget-exhaustion result builder and instruction
+Source files: Implementation location depends on Step 10 decisions:
+              - Standalone: run/budget-exhaustion.ts (NEW)
+              - Inline: run/helpers.ts or run.ts
+Action:       NEW file (adjust import path per implementation)
+
+--- Module Location Note ---
+
+  Port plan Step 10 says "Add budget-exhaustion result builder". This
+  could be:
+    (a) A new module: src/agents/embedded-agent-runner/run/budget-exhaustion.ts
+    (b) A function added to helpers.ts
+    (c) Inline logic in run.ts
+
+  If (a), the test file path below is correct.
+  If (b), tests should go in helpers.test.ts.
+  If (c), tests are covered by FILE 4 integration tests.
+
+  These tests are valid for (a) or (b). For (c), merge into FILE 4.
+
+--- Imports ---
+
+  import { describe, it, expect } from "vitest";
+  import {
+    BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION,
+    buildBudgetExhaustedResult,
+  } from "./budget-exhaustion.js";  // adjust path per implementation
+
+--- Test Structure ---
+
+  describe("budget exhaustion", () => {
+
+    // === 5.1 Summary Instruction Constant ===
+
+    describe("BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION", () => {
+
+      it("is a non-empty string", () => {
+        expect(typeof BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION).toBe("string");
+        expect(BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION.trim().length).toBeGreaterThan(0);
+      });
+
+      it("instructs the model to summarize work done", () => {
+        // Positive assertion: contains summarize/summary/final keywords
+        expect(BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION).toMatch(
+          /summariz|summary|final\s+response|what\s+you/i
+        );
+        // NOTE: Do NOT assert absence of "tool" or "function" words.
+        // The instruction may legitimately contain "tool-calling iterations"
+        // or similar phrases (V1 FIX #14).
+      });
+    });
+
+    // === 5.2 Budget Exhaustion Result Builder ===
+
+    describe("buildBudgetExhaustedResult", () => {
+
+      it("builds result with error.kind='budget_exhausted'", () => {
+        const result = buildBudgetExhaustedResult({
+          durationMs: 5000,
+          budgetUsed: 10,
+          budgetMax: 10,
+          message: "Budget exhausted after 10 iterations",
+        });
+        expect(result.meta.error?.kind).toBe("budget_exhausted");
+        expect(result.meta.error?.message).toContain("10");
+        expect(result.meta.durationMs).toBe(5000);
+      });
+
+      it("includes budget metadata in result", () => {
+        const result = buildBudgetExhaustedResult({
+          budgetUsed: 5,
+          budgetMax: 10,
+          durationMs: 3000,
+        });
+        expect(result.meta.iterationBudget).toEqual({
+          used: 5,
+          maxTotal: 10,
+          remaining: 5,
+        });
+      });
+
+      it("includes summary text as payload when summary succeeded", () => {
+        const summaryText = "I completed steps 1-3 but could not finish step 4.";
+        const result = buildBudgetExhaustedResult({
+          summaryText,
+          budgetUsed: 10,
+          budgetMax: 10,
+          durationMs: 5000,
+        });
+        expect(result.payloads?.[0]?.text).toBe(summaryText);
+      });
+
+      it("includes fallback error payload when no summary available", () => {
+        const result = buildBudgetExhaustedResult({
+          summaryText: undefined,
+          budgetUsed: 10,
+          budgetMax: 10,
+          durationMs: 5000,
+        });
+        expect(result.payloads?.[0]?.text).toMatch(/iteration|budget/i);
+        // Fallback message should indicate the budget was exhausted
+      });
+
+      it("conforms to EmbeddedAgentRunResult type shape", () => {
+        const result = buildBudgetExhaustedResult({
+          budgetUsed: 1,
+          budgetMax: 1,
+          durationMs: 100,
+        });
+        // Runtime shape validation
+        expect(result.meta).toBeDefined();
+        expect(typeof result.meta.durationMs).toBe("number");
+        expect(Array.isArray(result.payloads) || result.payloads === undefined).toBe(true);
+        // TypeScript compile-time check: result should be assignable to
+        // EmbeddedAgentRunResult. If the type is wrong, this file won't compile.
+      });
+    });
+  });
+
+
+--- Fixtures/Mocks ---
+
+  None. buildBudgetExhaustedResult and BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION
+  are pure functions/constants with no dependencies.
+
+--- Estimated Test Count: 7 tests ---
+
+
+================================================================================
+TEST FILE 6: packages/agent-core/src/agent-loop.test.ts (EXTEND)
+================================================================================
+
+Purpose:      Test onBeforeToolCallingRound callback in the inner agent loop
+Source file:  packages/agent-core/src/agent-loop.ts (modified, Step 6B)
+Approach:     Add a new describe() block to EXISTING file
+Action:       EXTEND existing file (currently ~1124 lines)
+
+--- Why EXTEND, not NEW ---
+
+  packages/agent-core/src/agent-loop.test.ts already exists with
+  comprehensive tests for the agent loop. It defines all needed test
+  infrastructure: model, config, TEST_USAGE, collectEvents(), StreamFn
+  factories, makeAssistantMessage(), makeTool(). Creating a separate
+  file would duplicate this infrastructure.
+
+--- Existing Infrastructure Reused ---
+
+  From agent-loop.test.ts:
+
+  const model: Model = {
+    id: "test-model", name: "Test Model", api: "test-api",
+    provider: "test-provider", baseUrl: "https://example.test",
+    reasoning: false, input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1000, maxTokens: 1000,
+  };
+
+  const config: AgentLoopConfig = {
+    model,
+    convertToLlm: (messages) => messages as Message[],
+  };
+
+  const TEST_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+    totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+
+  async function collectEvents(stream) { ... }
+  function makeAssistantMessage(content) { ... }
+  function makeTool(name, executed) { ... }
+
+--- Test Structure (appended to existing file) ---
+
+  describe("onBeforeToolCallingRound callback", () => {
+
+    it("calls onBeforeToolCallingRound before each tool-calling round", () => {
+      Arrange:
+        const onBeforeToolCallingRound = vi.fn(() => true)
+        const executed: string[] = []
+        const tool = makeTool("my-tool", executed)
+        let turn = 0
+        const streamFn: StreamFn = () => {
+          turn += 1
+          if (turn === 1) {
+            // Return tool call
+            return asyncGeneratorOf(makeAssistantMessage([
+              { type: "toolCall", id: "tc-1", name: "my-tool", input: {} }
+            ]))
+          }
+          // Return text (done)
+          return asyncGeneratorOf(makeAssistantMessage([
+            { type: "text", text: "done" }
+          ]))
+        }
+        const loopConfig = {
+          ...config,
+          onBeforeToolCallingRound,
+        }
+      Act:
+        const result = await runAgentLoop([], context, loopConfig, streamFn)
+      Assert:
+        expect(onBeforeToolCallingRound).toHaveBeenCalledTimes(1)
+        expect(executed).toContain("my-tool")  // tool was executed
+    });
+
+    it("stops tool execution when callback returns false", () => {
+      Arrange:
+        const onBeforeToolCallingRound = vi.fn()
+          .mockReturnValueOnce(true)    // round 1: allow
+          .mockReturnValueOnce(false)   // round 2: stop
+        const executed: string[] = []
+        const tool = makeTool("my-tool", executed)
+        let turn = 0
+        const streamFn: StreamFn = () => {
+          turn += 1
+          // Always return tool calls
+          return asyncGeneratorOf(makeAssistantMessage([
+            { type: "toolCall", id: `tc-${turn}`, name: "my-tool", input: {} }
+          ]))
+        }
+      Act:
+        const result = await runAgentLoop([], context, { ...config,
+          onBeforeToolCallingRound }, streamFn)
+      Assert:
+        expect(onBeforeToolCallingRound).toHaveBeenCalledTimes(2)
+        // Only round 1's tool was executed (round 2 stopped by callback)
+        expect(executed).toHaveLength(1)
+
+      SEMANTICS NOTE: "round" = one LLM call that produces tool calls.
+      The callback is invoked before the LLM call or before tool execution
+      (per implementation). Round 2 returns false -> no execution.
+    });
+
+    it("does not interfere when callback is undefined", () => {
+      PURPOSE: Backward compatibility. Existing behavior must be unchanged
+               when onBeforeToolCallingRound is not set.
+
+      Arrange:
+        config with onBeforeToolCallingRound: undefined
+        streamFn returns tool call then text (normal 2-turn flow)
+      Act:
+        const result = await runAgentLoop([], context, config, streamFn)
+      Assert:
+        Loop completes normally with tools executed and text returned
+        No errors thrown
+    });
+
+    it("passes incrementing round number to callback", () => {
+      Arrange:
+        const onBeforeToolCallingRound = vi.fn(() => true)
+        const executed: string[] = []
+        let turn = 0
+        const streamFn: StreamFn = () => {
+          turn += 1
+          if (turn <= 3) {
+            return asyncGeneratorOf(makeAssistantMessage([
+              { type: "toolCall", id: `tc-${turn}`, name: "tool-a", input: {} }
+            ]))
+          }
+          return asyncGeneratorOf(makeAssistantMessage([
+            { type: "text", text: "final" }
+          ]))
+        }
+      Act:
+        await runAgentLoop([], context, { ...config,
+          onBeforeToolCallingRound }, streamFn)
+      Assert:
+        expect(onBeforeToolCallingRound).toHaveBeenCalledTimes(3)
+        expect(onBeforeToolCallingRound.mock.calls[0][0]).toBe(1)
+        expect(onBeforeToolCallingRound.mock.calls[1][0]).toBe(2)
+        expect(onBeforeToolCallingRound.mock.calls[2][0]).toBe(3)
+    });
+
+    NOTE: Tests 6.3 and 6.4 from V1 (Agent.createLoopConfig and
+    CoreAgentHarness.createLoopConfig mapping tests) are EXCLUDED because
+    they require instantiating Agent/CoreAgentHarness with full dependency
+    graphs (session, hooks, state management). This is disproportionate
+    for a ~1-line property mapping. Property mapping correctness is a
+    TypeScript compile-time concern (V1 FIX #16).
+  });
+
+
+--- Fixtures/Mocks ---
+
+  Reuse existing test infrastructure (model, config, TEST_USAGE,
+  collectEvents, makeAssistantMessage, makeTool). Define tools and
+  StreamFn factories inline in each test.
+
+--- Vitest Config Placement ---
+
+  packages/agent-core does NOT have a dedicated vitest.config.ts.
+  Tests are discovered by the root vitest.config.ts (V1 FIX #20).
+
+--- Estimated Test Count: 4 tests ---
+
+
+================================================================================
+TEST FILE 7: src/agents/tool-loop-detection.test.ts (EXTEND)
+================================================================================
+
+Purpose:      Verify tool loop detection default is now enabled (Step 14)
+Source file:  src/agents/tool-loop-detection.ts (modified, Step 14)
+Approach:     Add or modify existing test
+Action:       EXTEND existing file
+
+--- What Step 14 Changes ---
+
+  DEFAULT_LOOP_DETECTION_CONFIG.enabled changes from false to true.
+  This is at tool-loop-detection.ts lines 44-56:
+    const DEFAULT_LOOP_DETECTION_CONFIG = {
+      enabled: false,  // <-- Step 14 changes to: true
+      ...
+    };
+
+--- Test ---
+
+  it("has tool loop detection enabled by default", () => {
+    Import: DEFAULT_LOOP_DETECTION_CONFIG from "./tool-loop-detection.js"
+    Assert: expect(DEFAULT_LOOP_DETECTION_CONFIG.enabled).toBe(true)
+
+    PURPOSE: Step 14 changes the default from false to true. This test
+    catches regressions if someone reverts the default.
+
+    NOTE: If there is an EXISTING test that asserts enabled===false,
+    that test must be UPDATED to assert enabled===true instead.
+    Check existing test file before adding.
+  });
+
+
+--- Estimated Test Count: 1 test ---
+
+
+================================================================================
+CROSS-CUTTING: REGRESSION SCENARIOS
+================================================================================
+
+These regression scenarios map to known issues and are covered by the
+tests above. This section documents the mapping.
+
+--- R1: Runaway Loop Prevention ---
+  Issue: Agent enters infinite tool-calling loop, OOM kills, unbounded
+         token spend.
+  Test:  FILE 4, section 4.3 "triggers budget exhaustion when budget
+         runs out with no payload"
+  Guard: Budget provides a hard iteration count limit regardless of
+         tool-loop-detection heuristics.
+
+--- R2: Volatile MessageId Loop Detection Bypass ---
+  Issue: Messaging tool results contain volatile IDs (messageId,
+         timestamps) that defeat content-hash dedup in tool-loop-detection.
+  Test:  FILE 4, section 4.10 "budget stops loop even when
+         tool-loop-detection is defeated"
+  Guard: Budget counting is independent of content hashing -- it counts
+         iterations, not content signatures.
+
+--- R3: Budget Resets on Failover ---
+  Issue: If a FailoverError triggers mid-run, budget state may be
+         inconsistent.
+  Behavior: Budget RESETS on failover. FailoverError propagates up from
+            the while(true) loop. The outer wrapper catches it and retries
+            with a different model, creating a NEW IterationBudget.
+  Test:  Difficult to test via the harness because failover happens in
+         the outer runEmbeddedAgent wrapper. Would need to simulate a
+         full failover cycle. Consider deferring to E2E testing.
+  NOTE:  A fresh budget for the failover model is acceptable because
+         pre-failover iterations were wasted (error scenarios).
+
+--- R4: Budget Coexists with MAX_RUN_LOOP_ITERATIONS ---
+  Issue: Budget must not interfere with the existing retry-storm guard.
+  Test:  FILE 4, section 4.9 "budget and MAX_RUN_LOOP_ITERATIONS are
+         independent guards"
+  Guard: Budget is a configurable turn limit; MAX_RUN_LOOP_ITERATIONS is
+         a defensive retry cap. They operate independently.
+
+--- R5: Stale Retry Instruction Cleanup ---
+  Issue: Budget exhaustion summary attempt has conflicting prompt
+         instructions from previous retry iterations.
+  Test:  FILE 4, section 4.4 "clears stale retry instructions before
+         summary attempt"
+  Guard: Budget exhaustion handler clears reasoningOnlyRetryInstruction,
+         emptyResponseRetryInstruction, compactionContinuationRetryInstruction
+         before continuing with summary instruction.
+
+--- R6: Budget with Tool Loop Detection (Both Enabled) ---
+  Issue: Budget counting and tool-loop-detection operating simultaneously
+         might interfere.
+  Test:  With Step 14 changing the default to enabled=true, BOTH guards
+         are on by default. This is the default case for most tests in
+         FILE 4 (V1 FIX #19).
+  Guard: Budget counting and loop detection are independent subsystems.
+         Budget counts iterations; loop detection checks content patterns.
+
+--- R7: No Intermediate Pressure Warnings ---
+  Design: Hermes explicitly chose NOT to emit "you're running low on
+          budget" warnings before exhaustion (agent_init.py lines 530-535):
+          "No intermediate pressure warnings -- they caused models to
+          'give up' prematurely on complex tasks (#7915)."
+  Test:   Not explicitly tested. The IterationBudget class has no
+          warning mechanism. Verified by absence of warning code in
+          implementation.
+
+
+================================================================================
+TEST COVERAGE MATRIX
+================================================================================
+
+  Step | Plan Description                         | Test File(s)
+  -----+------------------------------------------+---------------------------------
+   1   | IterationBudget class                    | FILE 1 (iteration-budget.test.ts)
+   2   | TypeScript config types                  | FILE 2 (zod-schema.agent-defaults.test.ts)
+   3   | Zod schema validation                    | FILE 2 (zod-schema.agent-defaults.test.ts)
+   4   | resolveAgentConfig merge                 | FILE 3 (agent-scope-config.test.ts)
+   5   | Config resolution function               | FILE 3 (agent-scope-config.test.ts)
+   6A  | AgentLoopConfig interface                | FILE 6 (agent-loop.test.ts)
+   6B  | Call callback in inner loop              | FILE 6 (agent-loop.test.ts)
+   6C  | Map in Agent.createLoopConfig            | Compile-time type check only
+   6D  | Map in CoreAgentHarness.createLoopConfig | Compile-time type check only
+   7   | Thread callback through attempt params   | FILE 4 (run.iteration-budget.test.ts)
+   8   | Budget creation/exhaustion in run.ts     | FILE 4 (run.iteration-budget.test.ts)
+   9   | EmbeddedAgentRunMeta error kind          | FILE 4 + FILE 5
+  10   | Budget-exhaustion result builder         | FILE 5 (budget-exhaustion.test.ts)
+  11   | Budget-exhaustion summary injection      | FILE 4 (run.iteration-budget.test.ts)
+  12   | Budget refund for compaction             | FILE 4 (run.iteration-budget.test.ts)
+  13   | Budget metadata in run result            | FILE 4 (run.iteration-budget.test.ts)
+  14   | Enable tool loop detection defaults      | FILE 7 (tool-loop-detection.test.ts)
+  15   | Unit tests for IterationBudget           | FILE 1 (iteration-budget.test.ts)
+  16   | Integration tests for budget             | FILE 4 (run.iteration-budget.test.ts)
+
+
+================================================================================
+TEST FILE SUMMARY
+================================================================================
+
+  #  | File Path                                                         | Type        | Tests | Action
+  ---+-------------------------------------------------------------------+-------------+-------+--------
+  1  | src/agents/iteration-budget.test.ts                              | Unit        | ~14   | NEW
+  2  | src/config/zod-schema.agent-defaults.test.ts                     | Unit        | ~12   | EXTEND
+  3  | src/agents/agent-scope-config.test.ts                            | Unit        | ~11   | NEW
+  4  | src/agents/embedded-agent-runner/run.iteration-budget.test.ts    | Integration | ~25   | NEW
+  5  | src/agents/embedded-agent-runner/run/budget-exhaustion.test.ts   | Unit        | ~7    | NEW
+  6  | packages/agent-core/src/agent-loop.test.ts                      | Unit        | ~4    | EXTEND
+  7  | src/agents/tool-loop-detection.test.ts                          | Unit        | ~1    | EXTEND
+  ---+-------------------------------------------------------------------+-------------+-------+--------
+                                                          TOTAL ESTIMATED:  ~74 tests
+
+  Supporting files: NONE (use existing harness infrastructure)
+
+
+================================================================================
+TESTING INFRASTRUCTURE NOTES
+================================================================================
+
+1. VITEST PROJECT PLACEMENT:
+
+   Files 1, 2, 3, 5, 7 are unit tests:
+     - Included via vitest.agents-core.config.ts (for src/agents/)
+       or vitest scoped configs for their respective directories
+
+   File 4 is an integration test:
+     - Included via vitest.agents-embedded-agent.config.ts
+       (same config as run.compaction-loop-guard.test.ts)
+
+   File 6 is a core package test:
+     - Discovered by root vitest.config.ts
+       (packages/agent-core has no dedicated vitest config)
+
+2. NODE.JS SINGLE-THREADED:
+
+   No thread-safety tests needed. IterationBudget does NOT need a
+   Lock/Mutex. The Hermes thread-safety test
+   (test_iteration_budget_used_is_thread_safe with ThreadPoolExecutor)
+   is correctly excluded.
+
+3. IMPORT EXTENSIONS:
+
+   OpenClaw uses explicit .js extensions in all imports:
+     import { IterationBudget } from "./iteration-budget.js";
+
+4. TEST ISOLATION:
+
+   Each test must be independent:
+     - Use beforeEach() to reset mocks
+     - Never share mutable state between tests
+     - Use mockedRunEmbeddedAttempt.mockResolvedValueOnce() for
+       ordered mock sequences (each call returns next value)
+
+5. ZOD SCHEMA PATTERN:
+
+   Follow the EXISTING pattern in zod-schema.agent-defaults.test.ts:
+     - expectSchemaSuccess(result) for valid inputs
+     - expectSchemaFailurePath(result, "path.to.field") for invalid inputs
+     - Use .safeParse() for validation tests (returns success/error)
+     - Use .parse() for value extraction (throws on failure)
+
+6. AGENT-LOOP TEST PATTERN:
+
+   Follow the EXISTING pattern in agent-loop.test.ts:
+     - Define StreamFn factories inline with closure state (let turn = 0)
+     - Use queueMicrotask() to push events asynchronously if needed
+     - Use collectEvents() for event stream assertion
+     - Use runAgentLoop() for direct loop testing
+     - Track execution order via mutable arrays (executed.push(name))
+
+7. INTEGRATION TEST PATTERN (run.*.test.ts):
+
+   Follow the EXISTING pattern in run.compaction-loop-guard.test.ts:
+     - beforeAll: loadRunOverflowCompactionHarness() -> get runEmbeddedAgent
+     - beforeEach: resetRunOverflowCompactionHarnessMocks()
+     - Mock attempt sequences via mockedRunEmbeddedAttempt.mockResolvedValueOnce()
+     - Use makeAttemptResult() with override objects for deep defaults
+     - Assert on result.meta fields for observable behavior
+     - Inspect mockedRunEmbeddedAttempt.mock.calls for param verification
+
+8. FIXTURE FACTORY PATTERN:
+
+   makeAttemptResult() from run.overflow-compaction.fixture.ts provides
+   deep defaults:
+     aborted: false, externalAbort: false, timedOut: false,
+     idleTimedOut: false, promptError: null, sessionIdUsed: "test-session",
+     assistantTexts: ["Hello!"], toolMetas: [], ...
+
+   Override only what's needed for each test scenario.
+   Key overrides for budget tests:
+     - assistantTexts: [] (no payload -> triggers budget exhaustion)
+     - assistantTexts: ["text"] (has payload -> normal completion)
+     - toolMetas: [{toolName: "..."}] (tool call -> loop continues)
+     - promptError: new Error(...) (error path)
+     - timedOut: true (timeout path)
+     - yieldDetected: true (yield path)
+
+9. MOCK SEQUENCE ORDERING:
+
+   The run loop calls mockedRunEmbeddedAttempt once per iteration.
+   Mock sequences define the scenario:
+     mockedRunEmbeddedAttempt
+       .mockResolvedValueOnce(attempt1)   // iteration 1
+       .mockResolvedValueOnce(attempt2)   // iteration 2
+       .mockResolvedValueOnce(attempt3)   // iteration 3 (budget exhausts)
+       .mockResolvedValueOnce(summary)    // iteration 4 (summary attempt)
+
+   Each mockResolvedValueOnce is consumed in order. After all are consumed,
+   subsequent calls return undefined (which would cause a runtime error --
+   ensure enough mocks are queued).
+
+
+================================================================================
+END OF TEST PLAN V2
+================================================================================

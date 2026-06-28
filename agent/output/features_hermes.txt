@@ -1,0 +1,3920 @@
+================================================================================
+HERMES AGENT (NousResearch) - EXHAUSTIVE FEATURE ANALYSIS
+================================================================================
+Project:        hermes-agent
+Version:        0.17.0
+Language:       Python (>=3.11, <3.14)
+License:        MIT
+Repository:     https://github.com/nousresearch/hermes-agent
+Analysis Date:  2026-06-27
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+Features 1-10:   Core Agent Infrastructure
+Features 11-20:  Communication & Messaging
+Features 21-30:  Tools & Execution
+Features 31-40:  Media & Perception
+Features 41-50:  Memory, Persistence & Search
+Features 51-60:  Multi-Agent & Orchestration
+Features 61-70:  UI, CLI & Desktop
+Features 71-80:  Security & Safety
+Features 81-90:  Configuration & Extensibility
+Features 91-100: Research, Training & Data
+Features 101+:   Integrations & Specialized
+
+================================================================================
+FEATURE #1: Core Agent Conversation Loop
+================================================================================
+Category:       Core / Agent Runtime
+Type:           Core (fundamental to operation)
+
+Description:
+    The central agent runtime that drives all conversations. The AIAgent class
+    in run_agent.py (~5,600 LOC) implements a while-budget-available loop:
+    call LLM, dispatch tool calls, handle results, repeat. Accepts ~60
+    parameters (credentials, routing, callbacks, session context, budget).
+    Exposes two interfaces: chat(message) -> str for simple use, and
+    run_conversation(user_message, system_message, history, task_id) -> dict
+    for the full pipeline.
+
+Key Implementation Files:
+    - run_agent.py                         (248KB, ~5,600 LOC - AIAgent class)
+    - agent/agent_init.py                  (1,836 lines - __init__ extraction)
+    - agent/conversation_loop.py           (2,600+ lines - main turn loop)
+    - agent/turn_context.py                (490 lines - per-turn prologue)
+    - agent/turn_finalizer.py              (turn cleanup, memory sync, stats)
+    - agent/turn_retry_state.py            (per-turn retry counters)
+
+Architecture Notes:
+    - AIAgent.__init__ extracted to agent_init.py to reduce bloat
+    - Per-turn prologue in build_turn_context(): stdio guarding, MCP tool
+      refresh, surrogate sanitization, task/turn ID generation, retry counter
+      resets, system prompt restore, DB session creation, crash-resilience
+      persistence, preflight compression, plugin hooks, memory prefetch
+    - Conversation loop handles: streaming, tool dispatch (sequential/parallel),
+      retry strategies, context overflow recovery, thinking/reasoning budget,
+      interrupt handling, fallback chains, response format validation
+    - Messages follow OpenAI format; reasoning stored in assistant_msg["reasoning"]
+    - Thread-safe interrupt mechanism via shared signals + tool worker tracking
+
+Dependencies:
+    - Provider transports (anthropic, chat_completions, bedrock, codex_responses)
+    - Tool registry & executor
+    - Context compressor
+    - Memory manager
+    - Session DB (hermes_state.py)
+    - Plugin lifecycle hooks
+
+Complexity Estimate: VERY HIGH
+    Massive core file with deep integrations to every subsystem; the heart
+    of the entire agent. Porting requires understanding the full call chain.
+
+Language/Frameworks: Python, openai SDK, anthropic SDK, asyncio, threading
+
+
+================================================================================
+FEATURE #2: Context Compression System
+================================================================================
+Category:       Core / Context Management
+Type:           Core (fundamental to operation)
+
+Description:
+    Automatic context window compression via auxiliary LLM summarization.
+    When conversation history approaches the model's context limit, the
+    compressor runs multi-pass compaction: protects head and tail messages,
+    prunes old tool results, then summarizes the middle via an auxiliary model.
+    Supports iterative updates (merging new turn info into prior summaries).
+
+Key Implementation Files:
+    - agent/context_compressor.py          (1,500+ lines - main orchestrator)
+    - agent/context_engine.py              (200 lines - abstract plugin interface)
+    - agent/conversation_compression.py    (200 lines - high-level orchestration)
+
+Architecture Notes:
+    - ContextCompressor class with: should_compress(prompt_tokens),
+      compress(messages, current_tokens), update_from_response(usage)
+    - Tail protection: preserves last N messages (token budget aware)
+    - Head protection: protects first N non-system messages
+    - Multi-pass: iterates until threshold met or progress < 5% per pass
+    - Tool result pruning before LLM pass
+    - Structured summary with SUMMARY_PREFIX to prevent stale-task confusion
+    - Fallback mode: deterministic handoff when summarizer unavailable
+    - ContextEngine ABC allows pluggable compression engines (compressor, LCM)
+    - Abstract methods: should_compress, compress, on_session_start/end/reset
+    - Optional tools: lcm_grep, lcm_describe for context engine plugins
+    - compress_context() is the main entry point; handles image shrinking too
+    - Constants: _MIN_SUMMARY_TOKENS, _SUMMARY_RATIO, _SUMMARY_TOKENS_CEILING
+
+Dependencies:
+    - Auxiliary LLM client (agent/auxiliary_client.py)
+    - Model metadata (context length resolution)
+    - Session DB for session rotation on compression
+
+Complexity Estimate: HIGH
+    Multi-pass summarization with token budgeting, tail/head protection,
+    and plugin extensibility. Core algorithm is well-isolated but requires
+    auxiliary LLM integration.
+
+Language/Frameworks: Python, openai SDK
+
+
+================================================================================
+FEATURE #3: Prompt Caching (Anthropic)
+================================================================================
+Category:       Core / Cost Optimization
+Type:           Core (fundamental to operation)
+
+Description:
+    Implements Anthropic's prompt caching strategy (system_and_3 layout) that
+    reduces input token costs by ~75% on multi-turn conversations. Places
+    cache_control breakpoints on the system prompt plus the last 3 non-system
+    messages. Supports 5-minute (1.25x cost) and 1-hour (2x cost) TTLs.
+
+Key Implementation Files:
+    - agent/prompt_caching.py              (80 lines)
+
+Architecture Notes:
+    - apply_anthropic_cache_control(messages, cache_ttl, native_anthropic)
+    - 4 cache breakpoints: system prompt + last 3 non-system messages
+    - TTL options: "5m" (default) or "1h" (amortizes across pauses)
+    - Transparent: inserted as message-level or block-level cache_control field
+    - SACRED DESIGN PROPERTY: per-conversation prompt caching must not break;
+      never mutate past context, swap toolsets, or rebuild system prompts
+      mid-conversation (only exception: context compression)
+    - Slash commands mutating system-prompt state must default to deferred
+      invalidation with optional --now flag
+
+Dependencies:
+    - Anthropic provider transport
+    - System prompt builder (stable prefix)
+
+Complexity Estimate: LOW
+    Small, focused module. Concept is simple but the invariant (never break
+    cache) has deep implications across the entire codebase.
+
+Language/Frameworks: Python, anthropic SDK
+
+
+================================================================================
+FEATURE #4: System Prompt Builder (3-Tier Architecture)
+================================================================================
+Category:       Core / Prompt Engineering
+Type:           Core (fundamental to operation)
+
+Description:
+    Assembles the system prompt from three tiers: Stable (identity, tool
+    guidance, skills index, environment hints), Context (context files like
+    AGENTS.md/.cursorrules + caller system_message), and Volatile (memory
+    snapshot, USER.md, external memory provider block, timestamp). Built once
+    per session and cached for prefix cache warmth across turns.
+
+Key Implementation Files:
+    - agent/system_prompt.py               (500+ lines - 3-tier assembly)
+    - agent/prompt_builder.py              (1,000+ lines - fragment generators)
+
+Architecture Notes:
+    - build_system_prompt_parts(agent, system_message) -> {stable, context, volatile}
+    - build_system_prompt(agent, system_message) -> concatenated string
+    - restore_or_build_system_prompt() -> use cached or rebuild
+    - Stable tier: DEFAULT_AGENT_IDENTITY, HERMES_AGENT_HELP_GUIDANCE,
+      MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+      KANBAN_GUIDANCE, TASK_COMPLETION_GUIDANCE, PARALLEL_TOOL_CALL_GUIDANCE,
+      TOOL_USE_ENFORCEMENT_GUIDANCE
+    - Context tier: context files discovery (AGENTS.md, .cursorrules, CLAUDE.md),
+      platform hints per messaging platform
+    - Volatile tier: memory snapshot, USER.md, external memory block, timestamp
+    - load_soul_md() loads ~/.hermes/SOUL.md for primary identity/persona
+    - build_environment_hints() probes Python/Node.js/Ruby toolchain versions
+    - build_context_files_prompt() discovers project context files
+    - PLATFORM_HINTS dict for Telegram, Discord, WhatsApp, Slack, etc.
+    - Invariant: only rebuilt on session start or after context compression
+
+Dependencies:
+    - Memory manager (volatile tier)
+    - Skills system (skills index in stable tier)
+    - Configuration (persona, platform hints)
+    - Context file discovery
+
+Complexity Estimate: MEDIUM
+    Well-structured but many fragments to assemble. Platform hints and
+    context file discovery add breadth.
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #5: Provider Transport Abstraction
+================================================================================
+Category:       Core / LLM Integration
+Type:           Core (fundamental to operation)
+
+Description:
+    Abstract base class (ProviderTransport) with implementations for each
+    API mode: Anthropic Messages, OpenAI chat_completions, Codex Responses,
+    and AWS Bedrock. Converts messages, tools, and responses between Hermes
+    internal format and provider-native formats. Handles auth resolution,
+    max token budgets, thinking modes, and cache stat extraction.
+
+Key Implementation Files:
+    - agent/transports/base.py             (90 lines - ABC)
+    - agent/transports/anthropic.py        (Anthropic Messages transport)
+    - agent/transports/chat_completions.py (OpenAI-compatible transport)
+    - agent/transports/codex_responses.py  (Codex Responses API transport)
+    - agent/transports/bedrock.py          (AWS Bedrock transport)
+    - agent/anthropic_adapter.py           (1,000+ lines - client construction)
+    - agent/chat_completion_helpers.py      (300+ lines - request/response helpers)
+    - agent/bedrock_adapter.py             (Bedrock client caching)
+    - agent/codex_responses_adapter.py     (Codex endpoint classification)
+    - agent/codex_runtime.py               (Codex app-server runtime)
+    - agent/gemini_native_adapter.py       (Gemini-specific handling)
+    - agent/azure_identity_adapter.py      (Azure Entra ID bearer tokens)
+    - agent/copilot_acp_client.py          (GitHub Copilot ACP client)
+    - agent/moa_loop.py                    (Mixture-of-Agents orchestration)
+
+Architecture Notes:
+    - ProviderTransport ABC: convert_messages, convert_tools, build_kwargs,
+      normalize_response, validate_response, extract_cache_stats, map_finish_reason
+    - Anthropic adapter: regular API keys, OAuth setup tokens, Claude Code
+      credentials, Azure Foundry Entra ID, MiniMax OAuth (15-min tokens)
+    - Thinking modes: adaptive (Claude 4.6+, effort levels), manual (budget_tokens)
+    - Max output limits: Claude Opus 4.8 = 128K, Sonnet 4.6 = 64K, MiniMax = 131K
+    - MoAClient for Mixture-of-Agents multi-model routing
+    - Codex runtime: turn execution via Codex backend app server
+
+Dependencies:
+    - openai SDK, anthropic SDK, boto3 (Bedrock)
+    - Model metadata for context/output limits
+    - Credential management
+
+Complexity Estimate: VERY HIGH
+    Many provider-specific adapters with authentication quirks, thinking
+    mode detection, token limit resolution, and format conversion. Each
+    transport is a substantial module.
+
+Language/Frameworks: Python, openai, anthropic, boto3
+
+
+================================================================================
+FEATURE #6: Model Provider Plugin System
+================================================================================
+Category:       Core / Extensibility
+Type:           Core (fundamental to operation)
+
+Description:
+    30+ model providers ship as plugins under plugins/model-providers/. Each
+    provider defines connection parameters, auth requirements, model catalog,
+    and optional override hooks. Lazy discovery system with last-writer-wins
+    override. Users can replace bundled providers by placing custom versions
+    at $HERMES_HOME/plugins/model-providers/<name>/.
+
+Key Implementation Files:
+    - plugins/model-providers/              (30 provider directories)
+    - agent/model_metadata.py              (1,000+ lines - context lengths, catalog)
+
+Architecture Notes:
+    - Provider directories: alibaba, alibaba-coding-plan, anthropic, arcee,
+      azure-foundry, bedrock, copilot, copilot-acp, custom, deepseek, gemini,
+      gmi, huggingface, kilocode, kimi-coding, minimax, nous, novita, nvidia,
+      ollama-cloud, openai-codex, opencode-zen, openrouter, qwen-oauth,
+      stepfun, xai, xiaomi, zai
+    - discover_providers() scans directories, load_provider(name) loads by name
+    - Per-provider customization via override hooks (e.g., OpenRouter extra_body,
+      Gemini thinking_config translation)
+    - Model metadata fallback chain: models.dev hardcoded -> provider /models API
+      -> config.yaml overrides -> custom_providers -> provider defaults ->
+      descending tier probe (256K -> 128K -> ... -> 8K)
+    - MINIMUM_CONTEXT_LENGTH = 64K (required for tool calling)
+
+Dependencies:
+    - Provider transports
+    - Configuration system
+    - Plugin discovery infrastructure
+
+Complexity Estimate: HIGH
+    Each provider has unique quirks. The discovery and override system is
+    well-designed but the breadth of 30+ providers is substantial.
+
+Language/Frameworks: Python, various provider SDKs
+
+
+================================================================================
+FEATURE #7: Error Classification & Fallback Chains
+================================================================================
+Category:       Core / Reliability
+Type:           Core (fundamental to operation)
+
+Description:
+    Classifies API errors by type (rate_limit, model_overloaded, auth,
+    malformed_response, etc.) and recommends retry/fallback actions. Implements
+    decorrelated jittered exponential backoff. Supports ordered fallback chains
+    that automatically switch providers on rate-limit/exhaustion.
+
+Key Implementation Files:
+    - agent/error_classifier.py            (400+ lines)
+    - agent/retry_utils.py                 (130 lines)
+    - hermes_cli/fallback_config.py        (fallback model chain config)
+
+Architecture Notes:
+    - ClassifiedError: error + reason (FailoverReason enum) + recommended_fallback
+    - FailoverReason: rate_limit, model_overloaded, malformed_response, auth, etc.
+    - classify_api_error(): classifies by HTTP status, error code, body text
+    - Provider-specific: OpenAI 429/503, Anthropic 529/401, OpenRouter headers,
+      Bedrock model_not_found/throttling, Z.AI Coding Plan 429s
+    - jittered_backoff(): decorrelated jitter with atomic counter seed
+    - adaptive_rate_limit_backoff(): Z.AI-specific progressive waits (30s->120s)
+    - Fallback chains: ordered list of backup providers, activated on exhaustion
+    - is_zai_coding_overload_error(): detect Z.AI Coding Plan 429s
+
+Dependencies:
+    - Provider transports (error sources)
+    - Agent conversation loop (retry consumer)
+
+Complexity Estimate: MEDIUM
+    Error classification is well-encapsulated. Provider-specific patterns
+    need per-provider knowledge but the framework is clean.
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #8: Streaming & Response Handling
+================================================================================
+Category:       Core / UX
+Type:           Core (fundamental to operation)
+
+Description:
+    Token-by-token streaming from LLM providers with live text assembly,
+    stateful scrubbers for split content blocks (thinking tags, memory context
+    fences), and progressive message updates across all platforms. Supports
+    streaming transports: edit (progressive message edits), draft (native
+    animated preview on Telegram), and auto (prefer draft, fallback to edit).
+
+Key Implementation Files:
+    - agent/conversation_loop.py           (_stream_response, _interruptible_api_call)
+    - agent/think_scrubber.py              (StreamingThinkScrubber)
+    - agent/memory_manager.py              (StreamingContextScrubber)
+    - gateway/stream_consumer.py           (GatewayStreamConsumer)
+    - gateway/stream_events.py             (structured stream event types)
+    - gateway/stream_dispatch.py           (stream routing)
+
+Architecture Notes:
+    - _stream_response(): processes token-by-token from provider, fires callbacks
+    - StreamingThinkScrubber: stateful tag scrubber for <think> blocks split
+      across streaming deltas
+    - StreamingContextScrubber: scrubs <memory-context> fences split across deltas
+    - GatewayStreamConsumer: bridges sync agent callbacks to async platform edits
+    - Buffering: accumulates text, respects edit interval (default 0.6s)
+    - Rate limiting: configurable edit interval, buffer threshold (100 chars)
+    - Cursor animation: "..." cursor appended during streaming
+    - Fresh final: optionally sends fresh message instead of final edit
+    - Stream events: MessageChunk, MessageStop, Commentary, ToolCallChunk
+
+Dependencies:
+    - Provider transports (streaming source)
+    - Platform adapters (edit_message support)
+    - Agent display (CLI streaming)
+
+Complexity Estimate: HIGH
+    Stateful streaming across sync/async boundaries with platform-specific
+    behavior. Split-tag scrubbers are particularly tricky.
+
+Language/Frameworks: Python, asyncio, threading
+
+
+================================================================================
+FEATURE #9: Tool Registry & Discovery System
+================================================================================
+Category:       Core / Tool Management
+Type:           Core (fundamental to operation)
+
+Description:
+    Singleton ToolRegistry that auto-discovers tools by AST-scanning tools/*.py
+    for registry.register() calls, then dynamically imports matching modules.
+    Thread-safe with RLock, TTL-cached check_fn results (~30s), generation
+    counter for cache invalidation. Supports dynamic schema overrides for
+    runtime-computed parameters.
+
+Key Implementation Files:
+    - tools/registry.py                    (ToolRegistry, ToolEntry, discovery)
+    - model_tools.py                       (57KB - tool orchestration, handle_function_call)
+    - toolsets.py                          (32KB - toolset definitions, _HERMES_CORE_TOOLS)
+    - toolset_distributions.py             (12KB - toolset distribution logic)
+
+Architecture Notes:
+    - ToolEntry dataclass: name, toolset, schema, handler, check_fn, requires_env,
+      is_async, description, emoji, max_result_size_chars, dynamic_schema_overrides
+    - discover_builtin_tools(): AST scan -> import -> register
+    - get_definitions(): returns OpenAI-format tool schemas filtered by availability
+    - dispatch(tool_name, args): lookup -> invoke handler -> sanitize result
+    - Async handlers bridged via _run_async()
+    - _HERMES_CORE_TOOLS: 80+ tools shared across CLI and all messaging platforms
+    - _HERMES_WEBHOOK_SAFE_TOOLS: constrained subset for untrusted webhooks
+    - Toolsets: web, terminal, file, browser, vision, image_gen, video, tts,
+      skills, memory, code, cronjob, smart-home, kanban, computer-use, etc.
+    - Gating via check_fn for environment-specific tools (Docker, Modal, etc.)
+    - tool_error() and tool_result() helpers for consistent response format
+
+Dependencies:
+    - Tool implementation files (tools/*.py)
+    - Toolset configuration (enabled/disabled)
+    - Agent conversation loop (dispatch consumer)
+
+Complexity Estimate: HIGH
+    The registry itself is clean, but 54+ tools with diverse schemas, check
+    functions, and dynamic overrides create significant breadth.
+
+Language/Frameworks: Python, AST module
+
+
+================================================================================
+FEATURE #10: Tool Execution Engine
+================================================================================
+Category:       Core / Tool Management
+Type:           Core (fundamental to operation)
+
+Description:
+    Sequential and concurrent tool-call execution with parallelism safety
+    gating. Determines which tools can safely run in parallel (read-only tools,
+    file tools on independent paths) vs. which must be sequential (destructive
+    terminal commands, interactive tools). Max 8 concurrent workers via
+    ThreadPoolExecutor. Includes middleware hooks, interrupt support, and
+    per-context-window result budgeting.
+
+Key Implementation Files:
+    - agent/tool_executor.py               (1,000+ lines)
+    - agent/tool_dispatch_helpers.py        (500+ lines)
+    - agent/tool_guardrails.py             (safety guardrails)
+    - agent/tool_result_classification.py   (result categorization)
+
+Architecture Notes:
+    - execute_tool_calls_sequential(): one at a time
+    - execute_tool_calls_concurrent(): parallel with ThreadPoolExecutor(max_workers=8)
+    - _should_parallelize_tool_batch(): safety gating
+    - _NEVER_PARALLEL_TOOLS: clarify (interactive)
+    - _PARALLEL_SAFE_TOOLS: read-only (web_search, read_file, skill_view, etc.)
+    - _PATH_SCOPED_TOOLS: read_file, write_file, patch (safe if different paths)
+    - _DESTRUCTIVE_PATTERNS: rm, cp, mv, sed -i, git reset, etc.
+    - _budget_for_agent(): scale result budget to context window
+    - _apply_tool_request_middleware_for_agent(): plugin middleware hooks
+    - make_tool_result_message(): construct tool result message dict
+    - _extract_file_mutation_targets(): per-turn file verifier inputs
+    - _trajectory_normalize_msg(): strip image blobs for trajectory saving
+    - ToolCallGuardrailController: enforces execution policies (allow/defer/deny)
+
+Dependencies:
+    - Tool registry
+    - Agent conversation loop
+    - File safety (write-denied paths)
+    - Plugin hooks (pre/post_tool_call)
+
+Complexity Estimate: HIGH
+    Parallelism safety gating with path overlap detection, interrupt handling,
+    and middleware chains. The concurrent execution model is well-isolated
+    but requires careful testing.
+
+Language/Frameworks: Python, concurrent.futures
+
+
+================================================================================
+FEATURE #11: Multi-Platform Messaging Gateway
+================================================================================
+Category:       Communication / Messaging
+Type:           Core (fundamental to operation)
+
+Description:
+    Unified messaging gateway that normalizes inbound messages from 20+
+    platforms into a common MessageEvent format, routes them through the
+    agent, and delivers responses back through platform adapters. Supports
+    streaming progressive updates, media handling, typing indicators,
+    threads/topics, approval prompts with buttons, and cross-platform
+    delivery routing.
+
+Key Implementation Files:
+    - gateway/run.py                       (18,627 lines - main event loop)
+    - gateway/session.py                   (66,744 lines - session management)
+    - gateway/config.py                    (Platform enum, PlatformConfig, GatewayConfig)
+    - gateway/platform_registry.py         (plugin adapter registry)
+    - gateway/platforms/base.py            (2,600+ lines - BasePlatformAdapter ABC)
+    - gateway/delivery.py                  (message delivery routing)
+    - gateway/stream_consumer.py           (progressive message updates)
+    - gateway/authz_mixin.py               (31,338 lines - authorization)
+    - gateway/slash_commands.py            (192,878 lines - slash command routing)
+    - gateway/pairing.py                   (chat pairing / session init)
+    - gateway/hooks.py                     (lifecycle hooks)
+    - gateway/mirror.py                    (message mirroring)
+    - gateway/drain_control.py             (graceful shutdown)
+
+Architecture Notes:
+    - Message pipeline: Inbound -> Normalize -> Authenticate -> Session Key ->
+      Dedup -> Merge (photo bursts) -> Dispatch -> Agent Process -> Send -> Edit
+    - BasePlatformAdapter ABC: connect(), disconnect(), send() (3 required methods)
+    - MessageEvent dataclass: text, message_type, source (SessionSource),
+      media_urls, media_types, reply context, auto-loaded skills, channel prompts
+    - SendResult: success, message_id, error, retry_after, error_kind
+    - DeliveryTarget: platform, chat_id, thread_id, is_origin, is_explicit
+    - Session key: platform:chat_id[:thread_id]
+    - Platform enum: 24+ platforms including plugin-registered ones
+    - Auto-loaded skills via channel_skill_bindings in config
+    - Channel prompts injected at API call time (ephemeral, never persisted)
+
+Dependencies:
+    - Platform adapter plugins (20+)
+    - Agent conversation loop
+    - Session DB
+    - Streaming infrastructure
+    - Authentication/authorization
+
+Complexity Estimate: VERY HIGH
+    Massive codebase (gateway/run.py alone is 18K+ lines). Deep integration
+    with every platform's quirks, session management, and delivery routing.
+
+Language/Frameworks: Python, asyncio, aiohttp
+
+
+================================================================================
+FEATURE #12: Platform Adapters (20+ Messaging Platforms)
+================================================================================
+Category:       Communication / Messaging
+Type:           Integration (connects to external systems)
+
+Description:
+    Individual platform adapters that implement BasePlatformAdapter for each
+    messaging service. Each handles platform-specific authentication, message
+    formatting, media upload/download, rate limiting, and special features
+    (threads, buttons, typing indicators). Adapters are registered via the
+    platform registry and discovered as plugins.
+
+Key Implementation Files:
+    - gateway/platforms/base.py            (BasePlatformAdapter ABC + media cache)
+    - plugins/platforms/telegram/          (Telegram via python-telegram-bot)
+    - plugins/platforms/discord/           (Discord via discord.py)
+    - plugins/platforms/slack/             (Slack via slack-sdk/bolt)
+    - gateway/platforms/whatsapp_cloud.py  (WhatsApp Cloud API - Meta)
+    - gateway/platforms/signal.py          (Signal via signal-cli HTTP daemon)
+    - gateway/platforms/weixin.py          (WeChat via Tencent iLink Bot API)
+    - gateway/platforms/bluebubbles.py     (iMessage via BlueBubbles)
+    - gateway/platforms/qqbot/             (QQ Bot - Official API v2)
+    - gateway/platforms/yuanbao/           (Yuanbao - Tencent, protobuf)
+    - plugins/platforms/matrix/            (Matrix via mautrix, E2EE support)
+    - plugins/platforms/mattermost/        (Mattermost)
+    - plugins/platforms/dingtalk/          (DingTalk)
+    - plugins/platforms/feishu/            (Feishu/Lark)
+    - plugins/platforms/wecom/             (WeChat Work)
+    - plugins/platforms/teams/             (Microsoft Teams)
+    - plugins/platforms/email/             (IMAP/SMTP)
+    - plugins/platforms/sms/              (SMS - Twilio etc.)
+    - plugins/platforms/homeassistant/     (Home Assistant)
+    - plugins/platforms/irc/              (IRC)
+    - plugins/platforms/line/             (LINE Messaging API)
+    - plugins/platforms/simplex/          (Simplex Chat)
+    - plugins/platforms/ntfy/             (ntfy.sh push notifications)
+    - plugins/platforms/google_chat/      (Google Chat - Pub/Sub + REST)
+
+Architecture Notes:
+    - Each adapter normalizes to MessageEvent on inbound, uses send() on outbound
+    - Unified media cache: IMAGE/AUDIO/VIDEO/DOCUMENT_CACHE_DIR under ~/.hermes/cache/
+    - cache_media_bytes() -> CachedMedia with path, media_type, kind, display_name
+    - Supported media: images (png/jpg/gif/webp/bmp/svg), video (mp4/mov/avi/mkv),
+      audio (mp3/wav/ogg/opus/m4a/flac), documents (pdf/docx/xlsx/pptx),
+      archives (zip/tar/gz/7z/rar), web (html/htm)
+    - Max inbound media: 128 MiB (configurable)
+    - Per-platform capability flags: supports_code_blocks, supports_async_delivery,
+      splits_long_messages, supports_draft_streaming, prefers_fresh_final_streaming
+    - Helper classes: MessageDeduplicator (TTL-based), TextBatchAggregator
+
+Dependencies:
+    - Platform SDKs (python-telegram-bot, discord.py, slack-sdk, mautrix, etc.)
+    - Gateway infrastructure (session, delivery, streaming)
+    - Media cache system
+
+Complexity Estimate: VERY HIGH
+    Each platform adapter is a substantial module with unique authentication,
+    message formatting, media handling, and rate limiting. 20+ adapters
+    means enormous surface area.
+
+Language/Frameworks: Python, asyncio, platform-specific SDKs
+
+
+================================================================================
+FEATURE #13: Webhook System
+================================================================================
+Category:       Communication / Messaging
+Type:           Integration (connects to external systems)
+
+Description:
+    Generic inbound webhook receiver that accepts HTTP requests, validates
+    HMAC signatures, renders payloads through Jinja2 prompt templates, and
+    routes to the agent or directly delivers to messaging platforms. Supports
+    dynamic routes, idempotency, rate limiting, profile multiplexing, and
+    deliver-only mode (zero LLM cost).
+
+Key Implementation Files:
+    - gateway/platforms/webhook.py         (WebhookAdapter)
+
+Architecture Notes:
+    - aiohttp.web.TCPSite listening on configurable host:port (default 0.0.0.0:8644)
+    - Per-route HMAC secrets or global secret
+    - Dynamic routes loaded from YAML config at startup
+    - Idempotency: TTL cache prevents duplicate runs on webhook retries
+    - Rate limiting: fixed-window per-route (configurable, default 30/min)
+    - Profile multiplexing: /p/{profile}/hook/{name} URL structure
+    - Prompt templates: Jinja2-style formatting of webhook payload
+    - Deliver-only mode: skip agent, deliver rendered prompt directly
+    - Cross-platform delivery: routes responses to Telegram/Discord/Slack etc.
+    - Events filtering: only process specified event types per route
+
+Dependencies:
+    - Gateway infrastructure
+    - Jinja2 template engine
+    - Platform adapters (for delivery)
+
+Complexity Estimate: MEDIUM
+    Well-contained adapter with clear routing. HMAC validation and Jinja2
+    templating are straightforward patterns.
+
+Language/Frameworks: Python, aiohttp, Jinja2
+
+
+================================================================================
+FEATURE #14: API Server (OpenAI-Compatible)
+================================================================================
+Category:       Communication / API
+Type:           Extension (adds capability)
+
+Description:
+    OpenAI-compatible HTTP API server that exposes Hermes Agent as a standard
+    chat completions endpoint. Supports API key authentication and optional
+    X-Hermes-Session-Id header for session continuity.
+
+Key Implementation Files:
+    - gateway/platforms/api_server.py      (API server adapter)
+
+Architecture Notes:
+    - Implements BasePlatformAdapter
+    - OpenAI chat completions format
+    - API key authentication
+    - Session ID tracking via custom header
+    - Integrates with gateway session management
+
+Dependencies:
+    - FastAPI / uvicorn
+    - Gateway session management
+
+Complexity Estimate: MEDIUM
+    Standard REST API adapter. OpenAI format is well-documented.
+
+Language/Frameworks: Python, FastAPI
+
+
+================================================================================
+FEATURE #15: Relay Adapter (Generic Connector)
+================================================================================
+Category:       Communication / Messaging
+Type:           Extension (adds capability, EXPERIMENTAL)
+
+Description:
+    Generic connector frontend that uses a WebSocket connection to front
+    multiple platforms from a single adapter. Designed for the Team Gateway
+    framework where authorization is enforced upstream. Supports dynamic
+    capability negotiation via platform descriptor.
+
+Key Implementation Files:
+    - gateway/relay/adapter.py             (RelayAdapter)
+    - gateway/relay/transport.py           (abstract transport interface)
+    - gateway/relay/ws_transport.py        (WebSocket transport)
+    - gateway/relay/descriptor.py          (platform capability descriptor)
+    - gateway/relay/auth.py                (relay authentication)
+
+Architecture Notes:
+    - Single adapter fronts N platforms via connector
+    - Dynamic capability surface: descriptor tells gateway platform features
+      (message length, draft streaming, markdown dialect)
+    - Upstream authorization: connector already authorized; gateway skips env-var checks
+    - Auth revocation: watches for 4401 close (opt-out)
+    - Scope tracking: per-chat metadata (guild_id, user_id) learned from inbound
+
+Dependencies:
+    - WebSocket connection
+    - Gateway infrastructure
+
+Complexity Estimate: MEDIUM
+    Clean abstraction but experimental. Requires upstream connector.
+
+Language/Frameworks: Python, websockets
+
+
+================================================================================
+FEATURE #16: Cross-Channel Messaging (send_message tool)
+================================================================================
+Category:       Communication / Messaging
+Type:           Core (fundamental to operation)
+
+Description:
+    Agent tool that sends messages across any connected messaging platform.
+    Supports text, files, images, audio, video attachments. Resolves channels
+    by name or ID. Supports thread/group context.
+
+Key Implementation Files:
+    - tools/send_message.py                (send_message tool)
+
+Architecture Notes:
+    - Toolset: messaging
+    - Targets: Telegram, Discord, Slack, WhatsApp, Signal, SMS, Photon,
+      Email, WeChat, Feishu, Yuanbao
+    - Attachment support: file, image, audio, video
+    - Channel resolution by name or ID
+    - Thread/group support
+    - Integrates with gateway delivery system
+
+Dependencies:
+    - Gateway platform adapters
+    - Delivery routing
+
+Complexity Estimate: MEDIUM
+    Channel resolution and attachment handling across platforms.
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #17: Terminal Execution Backends
+================================================================================
+Category:       Execution / Infrastructure
+Type:           Core (fundamental to operation)
+
+Description:
+    Six interchangeable terminal backends for shell command execution: Local
+    (native process), Docker (container), SSH (remote server), Modal (serverless
+    cloud), Singularity (HPC container), and Daytona (cloud dev environment).
+    All implement a common base interface with execute(), cleanup(), and
+    file synchronization.
+
+Key Implementation Files:
+    - tools/environments/base.py           (base environment class)
+    - tools/environments/local.py          (local execution)
+    - tools/environments/docker.py         (Docker containers)
+    - tools/environments/ssh.py            (SSH remote execution)
+    - tools/environments/modal.py          (Modal cloud sandboxes)
+    - tools/environments/singularity.py    (Singularity containers)
+    - tools/environments/daytona.py        (Daytona environments)
+    - tools/environments/managed_modal.py  (managed Modal integration)
+    - tools/environments/file_sync.py      (cross-environment file syncing)
+
+Architecture Notes:
+    - Common base: execute(command, timeout) -> (stdout, stderr, exit_code)
+    - Terminal tool: 50KB stdout limit, 10KB stderr limit
+    - Background task support
+    - Interrupt handling via signal
+    - Approval system for dangerous commands
+    - File sync between environments
+    - Environment-specific: Docker images, SSH hosts, Modal app IDs,
+      Singularity .sif images, Daytona workspace IDs
+
+Dependencies:
+    - PTY support (ptyprocess on Unix, pywinpty on Windows)
+    - Docker/SSH/Modal/Singularity SDKs
+    - Approval system
+
+Complexity Estimate: HIGH
+    Each backend has unique setup, teardown, and file sync requirements.
+    The abstraction layer is clean but implementation breadth is large.
+
+Language/Frameworks: Python, subprocess, ptyprocess
+
+
+================================================================================
+FEATURE #18: Execute Code (Python RPC)
+================================================================================
+Category:       Execution / Code
+Type:           Extension (adds capability)
+
+Description:
+    Runs Python scripts in a sandboxed environment with RPC access to Hermes
+    tools. Uses Unix domain sockets (local) or file-based RPC (remote) for
+    tool invocation from within user scripts. Allowed tools: web_search,
+    web_extract, read_file, write_file, search_files, patch, terminal.
+
+Key Implementation Files:
+    - tools/execute_code.py                (execute_code tool)
+
+Architecture Notes:
+    - Toolset: code
+    - Local: Unix domain socket RPC
+    - Remote: file-based RPC
+    - Resource limits: 5min timeout, 50 tool calls max
+    - Sandboxed: restricted tool subset
+    - Iteration budget refunded for execute_code calls
+
+Dependencies:
+    - Terminal backend
+    - Tool registry (restricted subset)
+    - Iteration budget
+
+Complexity Estimate: MEDIUM
+    RPC mechanism is the main complexity. Sandboxing is config-driven.
+
+Language/Frameworks: Python, Unix sockets
+
+
+================================================================================
+FEATURE #19: Browser Automation
+================================================================================
+Category:       Tools / Web
+Type:           Extension (adds capability)
+
+Description:
+    Full browser automation with 11 tools: navigate, snapshot (accessibility
+    tree), click, type, scroll, back, press, get_images, vision analysis,
+    console (JavaScript), and raw CDP access. Multiple backends: local
+    Chromium, Browserbase (cloud), Browser Use (cloud), Firecrawl (cloud).
+
+Key Implementation Files:
+    - tools/browser_navigate.py            (browser_navigate tool)
+    - tools/browser_snapshot.py            (accessibility tree)
+    - tools/browser_click.py               (element clicking)
+    - tools/browser_type.py                (text input)
+    - tools/browser_scroll.py              (scrolling)
+    - tools/browser_back.py                (history navigation)
+    - tools/browser_press.py               (keyboard keys)
+    - tools/browser_get_images.py          (image extraction)
+    - tools/browser_vision.py              (LLM-powered vision analysis)
+    - tools/browser_console.py             (JavaScript console)
+    - tools/browser_cdp_tool.py            (raw Chrome DevTools Protocol)
+    - tools/browser_supervisor.py          (session lifecycle management)
+    - plugins/browser/browserbase/         (cloud browser provider)
+    - plugins/browser/browser_use/         (cloud browser provider)
+    - plugins/browser/firecrawl/           (cloud browser provider)
+
+Architecture Notes:
+    - Toolset: browser (14+ browser tools in toolset definition)
+    - Element addressing via @e1, @e2, etc. (accessibility tree refs)
+    - ariaSnapshot for text-based page representation (no vision needed)
+    - Session isolation and task-awareness
+    - Browser supervisor handles lifecycle and cleanup on inactivity
+    - Backend selection via config and availability checks
+
+Dependencies:
+    - Playwright or CDP-compatible browser
+    - Browser provider plugins
+    - Vision analysis (for browser_vision)
+
+Complexity Estimate: HIGH
+    Browser session lifecycle, multiple backends, accessibility tree
+    parsing, and CDP integration create significant complexity.
+
+Language/Frameworks: Python, Playwright, CDP
+
+
+================================================================================
+FEATURE #20: Web Search & Content Extraction
+================================================================================
+Category:       Tools / Web
+Type:           Core (fundamental to operation)
+
+Description:
+    Two core web tools: web_search (internet search with results and excerpts)
+    and web_extract (URL content extraction with markdown conversion and LLM-
+    powered summarization). Multiple search backends: Firecrawl, Exa, Parallel,
+    Tavily, Brave, DuckDuckGo, SearXNG, xAI.
+
+Key Implementation Files:
+    - tools/web_search.py                  (web_search tool)
+    - tools/web_extract.py                 (web_extract tool)
+    - plugins/web/firecrawl/               (Firecrawl backend)
+    - plugins/web/exa/                     (Exa AI backend)
+    - plugins/web/parallel/                (Parallel aggregation)
+    - plugins/web/tavily/                  (Tavily backend)
+    - plugins/web/brave_free/              (Brave Search free tier)
+    - plugins/web/ddgs/                    (DuckDuckGo)
+    - plugins/web/searxng/                 (SearXNG meta-search)
+    - plugins/web/xai/                     (xAI search)
+    - tools/url_safety.py                  (SSRF protection)
+    - tools/website_policy.py              (per-site restrictions)
+
+Architecture Notes:
+    - Toolset: web
+    - web_extract uses LLM-powered extraction (OpenRouter Gemini 3 Flash)
+    - Summary mode for token efficiency
+    - SSRF protection and URL blocklist
+    - Content hash-based dedup
+    - Managed tool gateway: Nous-hosted tool routing for subscribers
+
+Dependencies:
+    - Web search provider plugins (8 backends)
+    - LLM for web_extract summarization
+    - URL safety validation
+
+Complexity Estimate: MEDIUM
+    Clean provider abstraction. Backend diversity adds breadth but each
+    backend is relatively self-contained.
+
+Language/Frameworks: Python, httpx, various search APIs
+
+
+================================================================================
+FEATURE #21: Vision & Image Analysis
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+
+Description:
+    Analyze images from URLs using vision-capable LLMs. Routes through
+    multiple vision providers (OpenRouter, Nous, Codex, Anthropic, custom).
+    Handles base64 encoding, custom prompts, and SSRF protection. Includes
+    image routing logic to detect vision capabilities and choose render mode
+    (render, svg, ascii_art).
+
+Key Implementation Files:
+    - tools/vision_analyze.py              (vision_analyze tool)
+    - agent/image_routing.py               (vision capability detection)
+    - agent/image_gen_provider.py           (image generation provider ABC)
+
+Architecture Notes:
+    - Toolset: vision
+    - Vision router: tries OpenRouter, Nous, Codex, Anthropic, custom
+    - extract_image_refs(): parse inline URLs and file paths
+    - _supports_vision_override(): check model vision capability
+    - _coerce_mode(): choose render mode based on capabilities
+    - SSRF protection via url_safety
+
+Dependencies:
+    - Vision-capable LLM provider
+    - URL safety
+    - Image routing
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, base64, httpx
+
+
+================================================================================
+FEATURE #22: Image Generation
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+
+Description:
+    Generate images via multiple providers: FAL.ai (FLUX 2 Klein/Pro, Nano
+    Banana, GPT Image 1.5, Recraft V3), Krea, OpenAI (GPT Image 2), OpenAI
+    via Codex OAuth, OpenRouter (text-to-image, image-to-image, reference-
+    grounded), and xAI Grok Imagine. Supports aspect ratio presets and
+    optional upscaling.
+
+Key Implementation Files:
+    - tools/image_generate.py              (image_generate tool)
+    - agent/image_gen_provider.py           (provider ABC & registry)
+    - agent/image_gen_registry.py           (provider discovery)
+    - plugins/image_gen/fal/               (FAL.ai backend)
+    - plugins/image_gen/krea/              (Krea backend)
+    - plugins/image_gen/openai/            (OpenAI backend)
+    - plugins/image_gen/openai-codex/      (OpenAI via Codex OAuth)
+    - plugins/image_gen/openrouter/        (OpenRouter backend)
+    - plugins/image_gen/xai/               (xAI Grok Imagine)
+
+Architecture Notes:
+    - Toolset: image_gen
+    - Provider ABC: resolve_aspect_ratio(), normalize_reference_images(),
+      save_url_image()
+    - Multiple models per provider
+    - Optional clarity upscaler
+    - 6 backend plugins
+
+Dependencies:
+    - Image generation provider plugins
+    - File system for output
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, fal_client, openai SDK
+
+
+================================================================================
+FEATURE #23: Video Generation
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+
+Description:
+    Generate videos via FAL.ai (Veo 3.1, Kling, Pixverse - text/image to
+    video) and xAI Grok Imagine (text/image/reference-guided video). Duration
+    control, motion frames, and async queue-based generation.
+
+Key Implementation Files:
+    - tools/video_generate.py              (video_generate tool)
+    - plugins/video_gen/fal/               (FAL.ai backend)
+    - plugins/video_gen/xai/               (xAI backend)
+
+Architecture Notes:
+    - Toolset: video_gen
+    - Async queue API (fal_client)
+    - Duration and motion frame control
+    - Text-to-video and image-to-video modes
+
+Dependencies:
+    - Video generation provider plugins
+    - fal_client SDK
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, fal_client
+
+
+================================================================================
+FEATURE #24: Text-to-Speech (TTS)
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+
+Description:
+    Convert text to speech via 10+ providers: Edge TTS, ElevenLabs, OpenAI,
+    MiniMax, Mistral, Google Gemini, xAI, NeuTTS, KittenTTS, Piper, and
+    custom command providers. Output formats: Opus (.ogg) for Telegram,
+    MP3 (.mp3) for others.
+
+Key Implementation Files:
+    - tools/text_to_speech.py              (text_to_speech tool)
+    - agent/tts_provider.py                (TTS provider ABC)
+    - agent/tts_registry.py                (TTS provider registry)
+
+Architecture Notes:
+    - Toolset: tts
+    - Provider ABC with register/discover pattern
+    - Format auto-selection based on platform
+    - Custom command provider support
+
+Dependencies:
+    - TTS provider libraries (edge-tts, elevenlabs, etc.)
+    - Platform adapter (for output format selection)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, edge-tts, elevenlabs, openai
+
+
+================================================================================
+FEATURE #25: Speech-to-Text (Transcription)
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+
+Description:
+    Transcribe audio using multiple providers: faster-whisper (local), Groq,
+    OpenAI, Mistral, xAI, ElevenLabs. Handles voice memos from messaging
+    platforms. Supports formats: mp3, mp4, mpeg, mpga, m4a, wav, webm, ogg, aac.
+
+Key Implementation Files:
+    - agent/transcription_provider.py      (Transcription provider ABC)
+    - agent/transcription_registry.py      (provider registry)
+
+Architecture Notes:
+    - Provider ABC with pluggable backends
+    - Voice memo transcription from gateway messages
+    - Format detection and conversion
+
+Dependencies:
+    - Transcription provider libraries
+    - ffmpeg (for format conversion)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, faster-whisper, openai
+
+
+================================================================================
+FEATURE #26: Computer Use (Screen Control)
+================================================================================
+Category:       Tools / Automation
+Type:           Extension (adds capability)
+
+Description:
+    Vision-based UI automation for macOS, Windows, and Linux. Uses CUA backend
+    for screen capture, click, type, and scroll operations. Includes permission
+    system and diagnostic tools.
+
+Key Implementation Files:
+    - tools/computer_use/tool.py           (main tool handler)
+    - tools/computer_use/backend.py        (interface abstraction)
+    - tools/computer_use/cua_backend.py    (81KB - CUA implementation)
+    - tools/computer_use/permissions.py    (permission system)
+    - tools/computer_use/schema.py         (tool schema)
+    - tools/computer_use/doctor.py         (diagnostic tools)
+    - tools/computer_use/vision_routing.py (vision provider routing)
+
+Architecture Notes:
+    - Toolset: computer-use
+    - CUA (Computer Use Agent) backend
+    - Vision-based element detection
+    - Permission system for sensitive actions
+    - Gated via CUA_DRIVER env var
+
+Dependencies:
+    - CUA driver
+    - Vision-capable LLM
+    - MCP integration
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, MCP
+
+
+================================================================================
+FEATURE #27: Video Analysis
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+
+Description:
+    Analyze video content via frame extraction and temporal analysis using
+    vision-capable LLMs.
+
+Key Implementation Files:
+    - tools/video_analyze.py               (video_analyze tool)
+
+Architecture Notes:
+    - Toolset: video
+    - Frame extraction from video files
+    - Temporal analysis capabilities
+    - LLM-powered content understanding
+
+Dependencies:
+    - Vision-capable LLM
+    - ffmpeg (for frame extraction)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, ffmpeg
+
+
+================================================================================
+FEATURE #28: File Operations & Safety
+================================================================================
+Category:       Tools / Files
+Type:           Core (fundamental to operation)
+
+Description:
+    Four file tools: read_file (with pagination), write_file (with approval),
+    patch (unified diffs), and search_files (regex with pagination). Includes
+    write-denied paths to prevent modifications to sensitive system files,
+    and safe write roots enforcement.
+
+Key Implementation Files:
+    - tools/read_file.py                   (read_file tool)
+    - tools/write_file.py                  (write_file tool)
+    - tools/patch.py                       (patch tool)
+    - tools/search_files.py                (search_files tool)
+    - tools/file_operations.py             (file I/O backend)
+    - tools/file_state.py                  (file state tracking)
+    - agent/file_safety.py                 (write-denied paths)
+    - tools/write_approval.py              (file write approval)
+
+Architecture Notes:
+    - Toolset: file
+    - Max read result: 100K chars (configurable)
+    - Dangerous file detection (write_approval.py)
+    - Write-denied paths and prefixes (system dirs, etc.)
+    - Safe write roots (project dirs, home)
+    - File state cache for consistency tracking
+    - Pagination support for large files
+
+Dependencies:
+    - Approval system
+    - File safety rules
+    - pathspec (gitignore-aware matching)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, pathspec
+
+
+================================================================================
+FEATURE #29: MCP Client Integration
+================================================================================
+Category:       Tools / Extensibility
+Type:           Extension (adds capability)
+
+Description:
+    Full Model Context Protocol (MCP) client supporting stdio, HTTP, and SSE
+    transports. Dynamically discovers tools from connected MCP servers.
+    Supports server lifecycle management, sampling (server-initiated LLM calls),
+    parallel tool execution opt-in, and thread-safe background event loop.
+
+Key Implementation Files:
+    - tools/mcp_tool.py                    (MCP integration)
+    - optional-mcps/linear/               (Linear MCP manifest)
+    - optional-mcps/n8n/                   (n8n MCP manifest)
+    - optional-mcps/unreal-engine/         (Unreal Engine MCP manifest)
+
+Architecture Notes:
+    - Transports: stdio, HTTP, SSE
+    - Dynamic tool discovery from MCP servers
+    - Server lifecycle: start, stop, refresh
+    - Sampling support (server -> LLM calls)
+    - Parallel tool execution opt-in
+    - Thread-safe with background event loop
+    - Between-turns MCP tool refresh for slow servers
+    - Optional MCP catalog with manifests
+
+Dependencies:
+    - mcp SDK (mcp==1.26.0)
+    - starlette
+    - External MCP servers
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, MCP SDK
+
+
+================================================================================
+FEATURE #30: MCP Server (Expose as MCP)
+================================================================================
+Category:       Tools / Extensibility
+Type:           Extension (adds capability)
+
+Description:
+    Exposes Hermes Agent messaging conversations as MCP tools via stdio server.
+    Compatible with Claude Code, Cursor, Codex, etc. 9-tool surface:
+    conversations_list, conversation_get, messages_read, attachments_fetch,
+    events_poll, events_wait, messages_send, permissions management, channels_list.
+
+Key Implementation Files:
+    - mcp_serve.py                         (32KB - MCP server implementation)
+
+Architecture Notes:
+    - FastMCP server via stdio
+    - Lazy MCP SDK loading
+    - Thread-safe with concurrent operations
+    - Session DB integration for message transcripts
+    - Channel directory for available targets
+    - Gateway sessions.json index loading
+    - Error handling with graceful fallbacks
+
+Dependencies:
+    - FastMCP / MCP SDK
+    - Session DB (hermes_state.py)
+    - Gateway session data
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, FastMCP
+
+
+================================================================================
+FEATURE #31: ACP Adapter (IDE Integration)
+================================================================================
+Category:       Integration / IDE
+Type:           Extension (adds capability)
+
+Description:
+    Agent Client Protocol server for VS Code, Zed, and JetBrains integration.
+    Provides edit approval with context-variable binding, ACP permission
+    bridging (once/session/always/deny), sensitive file auto-approval
+    policies, audit trail via provenance tracking, and session management.
+
+Key Implementation Files:
+    - acp_adapter/entry.py                 (ACP entry point)
+    - acp_adapter/server.py                (ACP server)
+    - acp_adapter/session.py               (session management)
+    - acp_adapter/auth.py                  (authentication)
+    - acp_adapter/events.py                (event dispatch)
+    - acp_adapter/edit_approval.py         (edit approval system)
+    - acp_adapter/permissions.py           (permission bridging)
+    - acp_adapter/provenance.py            (provenance tracking)
+
+Architecture Notes:
+    - EditProposal: tool_name, path, old_text, new_text, arguments
+    - Context variables for approval callback binding
+    - Sensitive auto-approve names: .env, id_rsa, etc.
+    - Permission options: allow_once, allow_session, allow_always, deny, deny_always
+    - Concurrent request ID generation
+    - Integration with Hermes approval system
+
+Dependencies:
+    - ACP protocol
+    - Edit approval infrastructure
+    - Session management
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #32: Memory Management System
+================================================================================
+Category:       Memory / Persistence
+Type:           Core (fundamental to operation)
+
+Description:
+    Two-file persistent curated memory system: MEMORY.md (agent observations)
+    and USER.md (user knowledge). Agent-curated with periodic nudges to review
+    and update. Frozen snapshot at session start for prompt caching consistency,
+    durable writes. Supports add/replace/remove operations with section
+    delimiter (section sign).
+
+Key Implementation Files:
+    - tools/memory.py                      (memory tool)
+    - agent/memory_manager.py              (500+ lines - orchestrator)
+    - agent/memory_provider.py             (provider ABC)
+
+Architecture Notes:
+    - Toolset: memory
+    - MemoryManager: orchestrates ONE external memory provider plugin
+    - Methods: add_provider, build_system_prompt, prefetch_all, sync_all,
+      queue_prefetch_all, on_turn_start, on_session_end, shutdown_all
+    - Memory tool actions: add, replace, remove
+    - Section delimiter: section sign character
+    - Frozen at session start (for prompt caching invariant)
+    - Durable writes to ~/.hermes/memories/
+    - Background async prefetch via queue_prefetch_all()
+    - StreamingContextScrubber: scrubs <memory-context> fences in streaming
+    - normalize_tool_schema(): unwrap already-wrapped tool entries
+    - memory_provider_tools_enabled(): toolset gate check
+    - inject_memory_provider_tools(): append provider tools to agent
+    - sanitize_context(): strip memory-context fence tags
+    - Periodic nudge counter hydration from config
+
+Dependencies:
+    - External memory provider plugin (optional)
+    - System prompt builder (volatile tier)
+    - Session management
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #33: External Memory Provider Plugins
+================================================================================
+Category:       Memory / Persistence
+Type:           Extension (adds capability)
+
+Description:
+    Pluggable external memory backends via MemoryProvider ABC. 9 built-in
+    providers: Honcho, Mem0, Supermemory, ByteRover, Hindsight, Holographic,
+    OpenViking, RetainDB. Only one active at a time. Providers implement
+    sync_turn, prefetch, shutdown, and optional post_setup. New providers
+    must ship as standalone repos (no new in-tree providers policy).
+
+Key Implementation Files:
+    - agent/memory_provider.py             (MemoryProvider ABC)
+    - plugins/memory/honcho/               (Honcho backend)
+    - plugins/memory/mem0/                 (Mem0 backend)
+    - plugins/memory/supermemory/          (Supermemory backend)
+    - plugins/memory/byterover/            (ByteRover backend)
+    - plugins/memory/hindsight/            (Hindsight backend)
+    - plugins/memory/holographic/          (Holographic backend)
+    - plugins/memory/openviking/           (OpenViking backend)
+    - plugins/memory/retaindb/             (RetainDB backend)
+
+Architecture Notes:
+    - MemoryProvider ABC: sync_turn, prefetch, shutdown, optional post_setup
+    - Activation: memory.provider in config.yaml
+    - Discovery: scans plugins/memory/<name>/ and $HERMES_HOME/plugins/<name>/
+    - Bundled takes precedence over user plugins
+    - CLI command registration via register_cli(subparser) in plugin cli.py
+    - Policy (May 2026): no new in-tree providers; ship as standalone repos
+
+Dependencies:
+    - Memory manager orchestrator
+    - Plugin discovery infrastructure
+
+Complexity Estimate: MEDIUM (per provider)
+
+Language/Frameworks: Python, provider-specific SDKs
+
+
+================================================================================
+FEATURE #34: Session Persistence & FTS5 Search
+================================================================================
+Category:       Memory / Persistence
+Type:           Core (fundamental to operation)
+
+Description:
+    SQLite-based session storage with FTS5 full-text search. SessionDB class
+    (~5,300 LOC) manages conversation persistence, session metadata, and
+    searchable history. Supports session search via the session_search tool
+    with LLM summarization of results.
+
+Key Implementation Files:
+    - hermes_state.py                      (233KB, ~5,300 LOC - SessionDB)
+    - tools/session_search.py              (session_search tool, if exists)
+    - agent/trajectory.py                  (JSONL trajectory saving)
+
+Architecture Notes:
+    - SQLite with FTS5 extension for full-text search
+    - Session metadata: ID, title, timestamps, message count, token usage
+    - Per-turn persistence with crash resilience (early user message save)
+    - Session rotation on compression
+    - JSONL trajectory saving to ~/.hermes/sessions/{sid}.jsonl
+    - FTS5 search with LLM summarization of results
+    - Session DB row creation in turn prologue
+    - Checkpoint manager integration
+
+Dependencies:
+    - SQLite3 (standard library)
+    - Agent trajectory saving
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, SQLite, FTS5
+
+
+================================================================================
+FEATURE #35: Skill System & Lifecycle Management
+================================================================================
+Category:       Skills / Extensibility
+Type:           Core (fundamental to operation)
+
+Description:
+    Procedural memory system where the agent creates, uses, and maintains
+    skills as SKILL.md documents. 66 bundled skills in 18 categories and 87
+    optional skills in 20 categories. Skills are loaded via slash commands
+    injected as user messages (preserving prompt caching). Curator system
+    auto-archives stale agent-created skills.
+
+Key Implementation Files:
+    - skills/                              (66 bundled skills, 18 categories)
+    - optional-skills/                     (87 optional skills, 20 categories)
+    - agent/skill_bundles.py               (load bundled skills)
+    - agent/skill_commands.py              (skill command execution)
+    - agent/skill_preprocessing.py         (skill prompt preprocessing)
+    - agent/skill_utils.py                 (metadata extraction, platform matching)
+    - tools/skills_tool.py                 (skill_view, skills_list tools)
+    - tools/skill_manager_tool.py          (skill lifecycle management)
+    - tools/skills_hub.py                  (150KB - Skills Hub integration)
+
+Architecture Notes:
+    - SKILL.md format with YAML frontmatter: name, description (<=60 chars),
+      version, author, license, platforms, metadata.hermes.tags/category/related_skills
+    - Progressive disclosure: metadata in list, full content on view
+    - Support files: references/, templates/, assets/, scripts/
+    - Skill slash commands scanned from ~/.hermes/skills/, injected as user messages
+    - Platform/environment matching via skill_matches_platform/environment
+    - parse_frontmatter() for YAML preamble parsing
+    - Curator: background system tracking usage on agent-created skills
+    - Auto-archives stale skills to ~/.hermes/skills/.archive/ (restorable)
+    - Tracks: use_count, view_count, patch_count, last_activity_at, state, pinned
+    - Config: enabled, interval_hours, min_idle_hours, stale_after_days, archive_after_days
+    - Only touches agent-created skills; bundled + hub-installed are off-limits
+
+Bundled Skill Categories:
+    apple (4), autonomous-ai-agents (4), creative (16), data-science (1),
+    dogfood (2), email (1), github (6), index-cache (1), media (4),
+    mlops (4), note-taking (1), productivity (9), research (5),
+    smart-home (1), social-media (1), software-development (9), yuanbao (1)
+
+Optional Skill Categories:
+    autonomous-ai-agents (5), blockchain (3), communication (1), creative (10),
+    devops (5), dogfood (1), email (1), finance (8), gaming (2), health (2),
+    mcp (2), migration (1), mlops (28), payments (3), productivity (7),
+    research (10), security (4), software-development (3), web-development (2)
+
+Dependencies:
+    - System prompt builder (skills index)
+    - Skill hub (community skills)
+    - Curator (lifecycle management)
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, YAML, Markdown
+
+
+================================================================================
+FEATURE #36: Skills Hub (Community Marketplace)
+================================================================================
+Category:       Skills / Extensibility
+Type:           Extension (adds capability)
+
+Description:
+    Community skill marketplace with multi-source discovery: official optional
+    skills, GitHub repositories, ClawHub, Claude Marketplace, LobeHub.
+    Supports content hash validation, trust levels (builtin/trusted/community),
+    quarantine for scanning, and index caching with 1-hour TTL.
+
+Key Implementation Files:
+    - tools/skills_hub.py                  (150KB - hub integration)
+    - hermes_cli/skills_hub.py             (CLI interface for skills hub)
+
+Architecture Notes:
+    - SkillSource ABC: base interface for registry adapters
+    - OptionalSkillSource: official optional skills
+    - GitHubSource: fetch from any GitHub repo via Contents API
+    - GitHubAuth: multi-method auth (PAT, gh CLI, GitHub App)
+    - SkillMeta: name, description, source, identifier, trust_level
+    - SkillBundle: downloaded skill ready for quarantine/scanning/install
+    - Content hash validation for integrity
+    - Trust levels: builtin, trusted, community
+    - Source types: official, github, clawhub, claude-marketplace, lobehub
+    - Hub state: quarantine dir, audit log, tap registry, index cache
+    - Index cache TTL: 3600s (1 hour)
+    - CLI: hermes skills <subcommand> and /skills <subcommand>
+    - Unified search across all sources
+    - Short name resolution (e.g. 'pptx' -> full identifier)
+
+Dependencies:
+    - GitHub API
+    - Security scanning (skills_guard.py)
+    - Skill manager
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, httpx, GitHub API
+
+
+================================================================================
+FEATURE #37: General Plugin Architecture
+================================================================================
+Category:       Extensibility / Architecture
+Type:           Core (fundamental to operation)
+
+Description:
+    Two-surface plugin system. General plugins discovered from ~/.hermes/plugins/,
+    ./.hermes/plugins/, and pip entry points, exposing register(ctx) function.
+    Can register lifecycle hooks (pre/post_tool_call, pre/post_llm_call,
+    on_session_start/end), tools, and CLI subcommands. Plugins must not modify
+    core files.
+
+Key Implementation Files:
+    - hermes_cli/plugins.py                (plugin discovery & loading)
+    - hermes_cli/plugins_cmd.py            (plugin management CLI)
+    - plugins/                             (92+ plugins across 18 categories)
+
+Architecture Notes:
+    - Discovery: ~/.hermes/plugins/, ./.hermes/plugins/, pip entry points
+    - register(ctx) function for each plugin
+    - Lifecycle hooks: pre_tool_call, post_tool_call, pre_llm_call, post_llm_call,
+      on_session_start, on_session_end, pre_approval_request, post_approval_response
+    - Plugin types: backend, platform, standalone
+    - Plugin manifest: plugin.yaml with kind, version, description, requires_env,
+      optional_env
+    - Module loading: isolated importlib with synthetic parent packages
+    - Registration: ctx.register_*() pattern
+    - CLI extension: optional cli.py with register_cli(subparser)
+    - Rule: plugins MUST NOT modify core files
+    - 92+ plugins across 18 categories
+
+Plugin Categories:
+    kanban, memory (9), model-providers (30), context_engine, image_gen (6),
+    browser (3), observability (2), web (8), security-guidance, platforms (22),
+    cron_providers, google_meet, spotify, disk-cleanup, teams_pipeline,
+    video_gen (2), dashboard_auth (4), hermes-achievements
+
+Dependencies:
+    - Plugin discovery infrastructure
+    - Hook dispatch system
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, importlib
+
+
+================================================================================
+FEATURE #38: Cron Scheduling & Automation
+================================================================================
+Category:       Automation / Scheduling
+Type:           Core (fundamental to operation)
+
+Description:
+    Built-in cron scheduler with natural language task definitions and multi-
+    platform delivery. Supports schedule formats: duration (30m, 2h, 1d),
+    "every" phrases, 5-field cron, ISO timestamps. Per-job fields: skills,
+    model/provider overrides, scripts, context injection, delivery targets.
+    3-minute hard interrupt on cron sessions with catch-up window.
+
+Key Implementation Files:
+    - cron/jobs.py                         (1,748 lines - job storage & management)
+    - cron/scheduler.py                    (job execution engine)
+    - cron/scheduler_provider.py           (pluggable scheduler ABC)
+    - cron/blueprint_catalog.py            (15 curated automation blueprints)
+    - cron/suggestions.py                  (suggestion state management)
+    - cron/suggestion_catalog.py           (starter automation suggestions)
+    - tools/cronjob.py                     (cronjob tool)
+    - hermes_cli/cron.py                   (CLI interface)
+
+Architecture Notes:
+    - Job CRUD: create, get, list, update, remove, pause, resume, trigger
+    - Execution tracking: mark_job_run, advance_next_run, get_due_jobs
+    - claim_job_for_fire(): multi-machine at-most-once atomic claim with TTL
+    - Cross-process safety: file-based advisory locking (fcntl/msvcrt)
+    - Per-profile isolation: jobs in get_hermes_home()/cron/jobs.json
+    - Output retention: default 50 files per job
+    - Ticker heartbeat: liveness signal + health checks
+    - Skill reference rewriting after curator consolidation/pruning
+    - InProcessCronScheduler: 60-second tick daemon thread (default)
+    - Pluggable scheduler via CronScheduler ABC
+    - Chronos plugin: NAS-mediated managed cron (scale-to-zero support)
+    - 15 automation blueprints with fillable slots
+    - Blueprint types: morning briefing, mail monitor, weekly review,
+      reminders, news digest, habit check-in, meal plan, learning drip, etc.
+    - Suggestion lifecycle: add, list, get, accept, dismiss (max 5 pending)
+
+Dependencies:
+    - croniter (cron expression parsing)
+    - Agent conversation loop (for execution)
+    - Gateway delivery system (for output)
+    - Skill system (for per-job skills)
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, croniter
+
+
+================================================================================
+FEATURE #39: Subagent Delegation
+================================================================================
+Category:       Multi-Agent / Orchestration
+Type:           Core (fundamental to operation)
+
+Description:
+    Spawn isolated subagents (child agents) for parallel workstreams. Supports
+    single-goal and batch/parallel task arrays. Subagents have restricted
+    toolsets, isolated context, and independent iteration budgets. Two roles:
+    leaf (no delegation/clarify/memory/send_message) and orchestrator (retains
+    delegation capability).
+
+Key Implementation Files:
+    - tools/delegate_task.py               (delegate_task tool)
+    - tools/async_delegation.py            (async delegation utilities)
+    - agent/iteration_budget.py            (62 lines - thread-safe budget)
+
+Architecture Notes:
+    - Toolset: delegation
+    - Shapes: single (goal string) or batch (tasks array)
+    - Roles: leaf (default, restricted tools) or orchestrator (retains delegation)
+    - Config: max_concurrent_children, max_spawn_depth, child_timeout_seconds,
+      subagent_auto_approve
+    - IterationBudget: thread-safe parent/subagent counter
+    - Parent: max_iterations (default 90)
+    - Subagent: delegation.max_iterations (default 50)
+    - execute_code iterations refunded
+    - Dynamic schema for max_concurrent_children / max_spawn_depth
+    - Auto-approval callbacks for subagents
+
+Dependencies:
+    - Agent conversation loop (spawn new instances)
+    - Tool registry (restricted toolsets)
+    - Iteration budget
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, threading
+
+
+================================================================================
+FEATURE #40: Kanban Multi-Agent Orchestration
+================================================================================
+Category:       Multi-Agent / Orchestration
+Type:           Extension (adds capability)
+
+Description:
+    Durable SQLite-backed kanban board for multi-profile/worker collaboration.
+    Supports task lifecycle (triage -> todo -> ready -> running -> blocked/done
+    -> archived), LLM-driven task decomposition, dependency tracking, swarm
+    orchestration (root + parallel workers + verifier + synthesizer), shared
+    blackboard via structured JSON comments, and a dispatcher daemon.
+
+Key Implementation Files:
+    - hermes_cli/kanban.py                 (CLI subcommand surface)
+    - hermes_cli/kanban_db.py              (SQLite database layer)
+    - hermes_cli/kanban_decompose.py       (LLM task decomposition)
+    - hermes_cli/kanban_swarm.py           (swarm topology)
+    - hermes_cli/kanban_specify.py         (task specification)
+    - hermes_cli/kanban_diagnostics.py     (diagnostics)
+    - gateway/kanban_watchers.py           (board watchers)
+    - plugins/kanban/                      (dashboard + REST API)
+    - tools/kanban_*.py                    (9 kanban tools)
+
+Architecture Notes:
+    - CLI: init, create, list, show, assign, link, comment, complete, block,
+      archive, dispatch, daemon, watch, stats, heartbeat, notify-*
+    - 9 tools: kanban_show, kanban_complete, kanban_block, kanban_heartbeat,
+      kanban_comment, kanban_create, kanban_link, kanban_list, kanban_unblock
+    - Dispatcher: long-lived loop spawning assigned profiles every 60s
+    - Failure limit: 2 (prevents spin loops)
+    - Swarm topology: root (planning/blackboard) + parallel workers (ready) +
+      verifier (waits for all workers) + synthesizer (waits for verifier)
+    - Durable state in task comments (low-tech JSON)
+    - SwarmWorkerSpec: profile, title, body, skills, priority, runtime
+    - create_swarm(): generate graph, atomically create all tasks
+    - latest_blackboard(): read structured JSON comments
+    - Task decomposition: LLM decomposes into 2-6 subtasks with data dependencies
+    - Dashboard REST API: GET /board, POST/PATCH/DELETE tasks, bulk ops,
+      WebSocket live events, diagnostics (hallucination detection, spawn failures,
+      stuck-blocked detection), worker visibility (PID inspection, termination)
+    - Home-channel subscriptions for completion notifications
+    - Profile roster management with auto-description via auxiliary LLM
+    - Orchestration settings: orchestrator profile, default assignee,
+      auto-decompose, auto-promote
+
+Dependencies:
+    - SQLite database
+    - Agent delegation system
+    - Profile system
+    - Dashboard (for UI)
+    - Auxiliary LLM (for decomposition)
+
+Complexity Estimate: VERY HIGH
+
+Language/Frameworks: Python, SQLite, FastAPI (dashboard)
+
+
+================================================================================
+FEATURE #41: Interactive CLI (Command-Line Interface)
+================================================================================
+Category:       UI / Interface
+Type:           Core (fundamental to operation)
+
+Description:
+    Full interactive CLI with multiline editing, slash-command autocomplete,
+    conversation history, interrupt-and-redirect, and streaming tool output.
+    HermesCLI class (~15,600 LOC) orchestrates the entire CLI experience.
+    Rich for banner/panels, prompt_toolkit for input, KawaiiSpinner for
+    animated waiting.
+
+Key Implementation Files:
+    - cli.py                               (714KB, ~15,600 LOC - HermesCLI class)
+    - hermes_cli/main.py                   (CLI entry point)
+    - hermes_cli/commands.py               (slash command registry)
+    - hermes_cli/cli_commands_mixin.py     (command mixin)
+    - hermes_cli/completion.py             (shell completion)
+    - agent/display.py                     (500+ lines - spinner, coloring)
+
+Architecture Notes:
+    - Rich for banner/panels
+    - prompt_toolkit for interactive input with autocomplete
+    - KawaiiSpinner: animated spinner with emoji states
+    - Activity feed with tool call previews
+    - Slash Command Registry: central COMMAND_REGISTRY list powering CLI,
+      Gateway, Telegram, Slack, autocomplete, help
+    - Conversation history navigation
+    - Interrupt: Ctrl+C to cancel agent, redirect to new task
+    - Session management commands: /new, /reset, /model, /personality, etc.
+    - CLI vs Gateway feature parity via central command registry
+
+Dependencies:
+    - Rich library
+    - prompt_toolkit
+    - Agent conversation loop
+    - Skin engine
+
+Complexity Estimate: VERY HIGH
+
+Language/Frameworks: Python, Rich, prompt_toolkit
+
+
+================================================================================
+FEATURE #42: TUI (Terminal UI - Ink/React)
+================================================================================
+Category:       UI / Interface
+Type:           Extension (adds capability)
+
+Description:
+    Modern terminal UI built with Ink (React for terminal). Process model:
+    Node.js (Ink) communicates with Python (tui_gateway) via stdio JSON-RPC.
+    Can be embedded in dashboard via WebSocket PTY using xterm.js + WebGL
+    renderer.
+
+Key Implementation Files:
+    - ui-tui/src/entry.tsx                 (TUI entry point)
+    - ui-tui/src/app.tsx                   (main app component)
+    - ui-tui/src/gatewayClient.ts          (JSON-RPC client)
+    - ui-tui/src/components/               (React components)
+    - ui-tui/src/hooks/                    (React hooks)
+    - ui-tui/src/lib/                      (utilities)
+    - tui_gateway/server.py                (528KB - Python backend)
+    - tui_gateway/entry.py                 (gateway entry point)
+    - tui_gateway/ws.py                    (WebSocket support)
+    - tui_gateway/project_tree.py          (project tree rendering)
+    - tui_gateway/git_probe.py             (git repo detection)
+    - tui_gateway/slash_worker.py          (slash command processing)
+    - tui_gateway/event_publisher.py       (event broadcasting)
+
+Architecture Notes:
+    - Transport: newline-delimited JSON-RPC over stdio
+    - Node.js process spawns Python backend as child process
+    - Embedded in dashboard via WebSocket PTY (/api/pty)
+    - xterm.js + WebGL renderer for web embedding
+    - React component architecture with hooks
+
+Dependencies:
+    - Node.js 20+
+    - Ink (React for terminal)
+    - xterm.js (for web embedding)
+    - Python tui_gateway backend
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: TypeScript, React/Ink, Python, JSON-RPC
+
+
+================================================================================
+FEATURE #43: Desktop App (Electron)
+================================================================================
+Category:       UI / Interface
+Type:           Extension (adds capability)
+
+Description:
+    Electron-based desktop application with React component system and theme
+    support. Includes bootstrap installer for first-time setup.
+
+Key Implementation Files:
+    - apps/desktop/                        (Electron app)
+    - apps/bootstrap-installer/            (installation wizard)
+    - apps/shared/                         (shared utilities)
+
+Architecture Notes:
+    - Electron shell with React component system
+    - Theme/style providers
+    - Assistant UI embeds
+    - Bootstrap installer for guided setup
+
+Dependencies:
+    - Electron
+    - React
+    - Node.js
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: TypeScript, Electron, React
+
+
+================================================================================
+FEATURE #44: Skin/Theme Engine
+================================================================================
+Category:       UI / Customization
+Type:           Extension (adds capability)
+
+Description:
+    Data-driven theme customization via YAML skin files. Built-in presets
+    (default, ares, mono, slate) plus user-created skins at ~/.hermes/skins/.
+    Customizable: banner colors, spinner faces/verbs/wings, tool prefix,
+    response box styling, branding, and tool emojis.
+
+Key Implementation Files:
+    - hermes_cli/skin_engine.py            (skin engine implementation)
+    - hermes_cli/colors.py                 (color utilities)
+
+Architecture Notes:
+    - YAML-based skins in ~/.hermes/skins/<name>.yaml
+    - Built-in presets: default, ares, mono, slate
+    - Customizable properties: banner colors, spinner faces (kawaii emoji sets),
+      spinner verbs, spinner wings, tool prefix, response box, branding
+    - get_active_skin(), set_active_skin(), list_skins()
+    - Skin applied to CLI display, spinner, and tool output
+
+Dependencies:
+    - CLI display system
+    - YAML parser
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, YAML
+
+
+================================================================================
+FEATURE #45: Dashboard & Web UI
+================================================================================
+Category:       UI / Web
+Type:           Extension (adds capability)
+
+Description:
+    Web dashboard (React SPA) with FastAPI backend. Includes authentication
+    (4 providers: basic, drain, Nous OAuth, self-hosted OIDC), session
+    management, and real-time updates via WebSocket.
+
+Key Implementation Files:
+    - web/                                 (React SPA + API)
+    - hermes_cli/dashboard_auth/           (auth middleware)
+    - plugins/dashboard_auth/basic/        (username/password)
+    - plugins/dashboard_auth/drain/        (shared-bearer-secret)
+    - plugins/dashboard_auth/nous/         (OAuth 2.0 via Nous Portal)
+    - plugins/dashboard_auth/self-hosted/  (Generic OIDC)
+
+Architecture Notes:
+    - FastAPI backend + React frontend (SPA)
+    - 4 auth providers: basic (scrypt), drain (bearer token), nous (OAuth PKCE),
+      self-hosted (OIDC with RS256/ES256 ID token verification)
+    - Cookie-based session management
+    - WebSocket for real-time updates
+    - Integrated TUI embedding via xterm.js
+
+Dependencies:
+    - FastAPI, uvicorn
+    - React SPA
+    - Auth provider plugins
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python (FastAPI), TypeScript (React)
+
+
+================================================================================
+FEATURE #46: Slash Command Registry
+================================================================================
+Category:       UI / Command System
+Type:           Core (fundamental to operation)
+
+Description:
+    Central COMMAND_REGISTRY list that powers CLI, Gateway, Telegram, Slack,
+    autocomplete, and help. CommandDef entries define name, handler, help text,
+    and availability (CLI/gateway/both). Ensures feature parity across all
+    interfaces.
+
+Key Implementation Files:
+    - hermes_cli/commands.py               (central COMMAND_REGISTRY)
+    - cli.py                               (process_command handler)
+    - gateway/run.py                       (gateway command handler)
+    - gateway/slash_commands.py            (slash command routing)
+    - gateway/slash_access.py              (access control)
+
+Architecture Notes:
+    - CommandDef: name, handler reference, help text, platform availability
+    - CLI commands: /new, /reset, /model, /personality, /retry, /undo,
+      /compress, /usage, /insights, /skills, /learn, /steer
+    - Gateway additions: /stop, /sethome, /status
+    - Slash command routing in gateway with access control
+    - Autocomplete support via prompt_toolkit
+
+Dependencies:
+    - CLI (process_command)
+    - Gateway (command dispatch)
+    - Agent state management
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #47: Command Approval System
+================================================================================
+Category:       Security / Safety
+Type:           Core (fundamental to operation)
+
+Description:
+    Multi-layer threat detection and approval for dangerous terminal commands.
+    Pattern matching (DANGEROUS_PATTERNS) plus optional auxiliary LLM review.
+    Session-scoped approval state, permanent allowlist in config.yaml,
+    interactive + automatic approval, and plugin hooks (pre_approval_request,
+    post_approval_response). YOLO mode for batch/automation bypass.
+
+Key Implementation Files:
+    - tools/approval.py                    (dangerous command detection)
+    - tools/write_approval.py              (file write approval)
+    - tools/threat_patterns.py             (injection/exfiltration patterns)
+    - tools/tirith_security.py             (security scanning)
+
+Architecture Notes:
+    - DANGEROUS_PATTERNS: rm, cp, mv, sed -i, truncate, git reset, etc.
+    - Session-scoped approval state via contextvars
+    - Permanent allowlist in config.yaml security.command_allowlist
+    - Interactive approval in CLI, async approval in gateway
+    - Auxiliary LLM review for borderline cases
+    - Plugin hooks: pre_approval_request, post_approval_response
+    - YOLO mode: frozen at import time for batch/automation
+    - File write approval: separate system for dangerous file patterns
+    - Threat patterns: shared scanner for memory, cron, context files
+
+Dependencies:
+    - Auxiliary LLM (optional, for review)
+    - Plugin hooks
+    - Configuration (allowlist)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #48: Security Guidance Plugin
+================================================================================
+Category:       Security / Code Quality
+Type:           Extension (adds capability)
+
+Description:
+    Pattern-matched security warnings on file writes. 25 rules (forked from
+    Anthropic claude-plugins-official) covering: eval, pickle.load, yaml.load,
+    os.system, subprocess shell=True, XSS, crypto footguns, XXE, supply chain,
+    CI/CD injection. Modes: warn (default, model can self-correct) or block.
+
+Key Implementation Files:
+    - plugins/security-guidance/__init__.py (hook + scanning)
+    - plugins/security-guidance/patterns.py (25 security rules)
+
+Architecture Notes:
+    - Hook: transform_tool_result - appends security warning to tool result
+    - Tools monitored: write_file, patch, skill_manage
+    - Content scan cap: 256 KB (skip larger blobs)
+    - Path filters: Python rules skip .js, JS rules skip .py, all skip .md/.txt
+    - Warn mode (default): file written, model sees warning
+    - Block mode (SECURITY_GUIDANCE_BLOCK=1): refuses write
+    - Configuration: SECURITY_GUIDANCE_DISABLE env var
+    - Apache-2.0 licensed (forked from Anthropic)
+
+Dependencies:
+    - Plugin hook system
+    - Tool result transformation
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, regex patterns
+
+
+================================================================================
+FEATURE #49: File Safety & Write Guards
+================================================================================
+Category:       Security / Safety
+Type:           Core (fundamental to operation)
+
+Description:
+    Prevents writes to sensitive system paths via write-denied paths/prefixes
+    lists and safe write roots enforcement. Handles credential redaction in
+    error output.
+
+Key Implementation Files:
+    - agent/file_safety.py                 (write-denied paths & safe roots)
+    - agent/redact.py                      (sensitive data redaction)
+    - tools/url_safety.py                  (SSRF protection, URL blocklist)
+
+Architecture Notes:
+    - build_write_denied_paths(): system directories, config files
+    - build_write_denied_prefixes(): broad prefix blocks
+    - get_safe_write_roots(): allowed write locations (project, home)
+    - redact_sensitive_text(): strips passwords, keys, tokens from output
+    - URL safety: SSRF protection for vision/web tools
+    - Per-site restrictions via website_policy
+
+Dependencies:
+    - Tool execution engine
+    - Configuration
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #50: Credential Management
+================================================================================
+Category:       Security / Authentication
+Type:           Core (fundamental to operation)
+
+Description:
+    Multi-layer credential management: persistence for borrowed credentials,
+    credential pools with priorities, credential source removal, and provider-
+    specific auth (Anthropic API keys, OAuth tokens, Claude Code credentials,
+    Azure Entra ID, MiniMax OAuth).
+
+Key Implementation Files:
+    - agent/credential_persistence.py      (persist borrowed credentials)
+    - agent/credential_pool.py             (pool with priorities)
+    - agent/credential_sources.py          (credential removal)
+    - agent/azure_identity_adapter.py      (Azure Entra ID)
+    - hermes_cli/auth.py                   (auth management)
+    - hermes_cli/auth_commands.py          (auth CLI)
+    - hermes_cli/copilot_auth.py           (Copilot auth)
+    - hermes_cli/nous_auth_keepalive.py    (Nous auth keepalive)
+    - hermes_cli/dingtalk_auth.py          (DingTalk auth)
+    - hermes_cli/memory_oauth.py           (memory system OAuth)
+
+Architecture Notes:
+    - PooledCredential: single credential entry with priority
+    - is_borrowed_credential_source(): detect non-owned credentials
+    - _fingerprint_value(): credential identity hashing
+    - RemovalStep/RemovalResult: credential removal interface
+    - Auth types: API keys, OAuth (PKCE), bearer tokens, JWT
+    - Provider-specific: Anthropic (sk-ant-api/oat), Azure (Entra ID),
+      MiniMax (15-min OAuth), Copilot ACP
+
+Dependencies:
+    - Provider adapters
+    - Configuration (.env, auth.json)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, PyJWT
+
+
+================================================================================
+FEATURE #51: Configuration System
+================================================================================
+Category:       Configuration / Management
+Type:           Core (fundamental to operation)
+
+Description:
+    YAML-based configuration (config.yaml) for all settings: model, agent,
+    terminal, compression, display, STT, TTS, memory, security, delegation,
+    and more. Three config loaders: load_cli_config() (CLI), load_config()
+    (tools/setup/subcommands), direct YAML (gateway). Environment variables
+    for secrets only (.env file).
+
+Key Implementation Files:
+    - hermes_cli/config.py                 (~98KB - config management)
+    - cli-config.yaml.example              (66KB - example template)
+    - .env.example                         (23KB - env var reference)
+    - hermes_constants.py                  (37KB - constants, profile paths)
+
+Architecture Notes:
+    - config.yaml at ~/.hermes/config.yaml
+    - YAML with environment variable expansion
+    - Nested config access with defaults
+    - Three loaders for different contexts
+    - .env for secrets only (OPTIONAL_ENV_VARS in config.py)
+    - save_config_value() for persistent settings
+    - hermes_constants: get_hermes_home(), display_hermes_home()
+    - Configuration sections: model, agent, terminal, compression, display,
+      stt, tts, memory, security, delegation, cron, kanban, browser, web, etc.
+
+Dependencies:
+    - pyyaml, ruamel.yaml
+    - python-dotenv
+    - Profile system (for HERMES_HOME)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, YAML
+
+
+================================================================================
+FEATURE #52: Profile System (Multi-Instance)
+================================================================================
+Category:       Configuration / Management
+Type:           Extension (adds capability)
+
+Description:
+    Multiple fully isolated instances with own HERMES_HOME. Each profile gets
+    its own config, memories, skills, sessions, cron jobs. Profile operations
+    anchored at Path.home() / ".hermes" / "profiles".
+
+Key Implementation Files:
+    - hermes_constants.py                  (get_hermes_home, _apply_profile_override)
+
+Architecture Notes:
+    - _apply_profile_override(): sets HERMES_HOME before imports
+    - get_hermes_home(): profile-aware path resolution
+    - display_hermes_home(): user-facing messages
+    - Never hardcode ~/.hermes (breaks profiles)
+    - Profile operations at ~/.hermes/profiles/
+    - Each profile: independent config, memories, skills, sessions, cron
+
+Dependencies:
+    - hermes_constants (path resolution)
+    - All state-persisting modules
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #53: Context References (@-style Expansion)
+================================================================================
+Category:       Input / Preprocessing
+Type:           Extension (adds capability)
+
+Description:
+    Parse and expand @-style context references in user messages. Supports
+    @filename references that are resolved and injected inline as file content.
+
+Key Implementation Files:
+    - agent/context_references.py          (300+ lines)
+
+Architecture Notes:
+    - ContextReference: parsed reference (type, name, range)
+    - ContextReferenceResult: resolution result with content
+    - parse_context_references(): extract @-references from text
+    - preprocess_context_references(): expand references inline
+    - _expand_file_reference(): resolve @filename to file content
+
+Dependencies:
+    - File system access
+    - Message preprocessing pipeline
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #54: Context Files Discovery
+================================================================================
+Category:       Context / Project
+Type:           Extension (adds capability)
+
+Description:
+    Automatic discovery and loading of project context files (AGENTS.md,
+    .cursorrules, CLAUDE.md, etc.) from working directory hierarchy. Loaded
+    into the Context tier of the system prompt.
+
+Key Implementation Files:
+    - agent/prompt_builder.py              (build_context_files_prompt)
+
+Architecture Notes:
+    - Walks up directory hierarchy looking for context files
+    - Recognized files: AGENTS.md, .cursorrules, CLAUDE.md
+    - Loaded into system prompt Context tier
+    - Built once per session (cached)
+
+Dependencies:
+    - System prompt builder
+    - File system
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #55: Clarify Tool (Interactive Questions)
+================================================================================
+Category:       Agent / Interaction
+Type:           Core (fundamental to operation)
+
+Description:
+    Agent tool for asking interactive questions to the user. Supports multiple
+    choice (up to 4 options) or open-ended questions. Platform-agnostic with
+    callbacks for different UI surfaces.
+
+Key Implementation Files:
+    - tools/clarify.py                     (clarify tool)
+
+Architecture Notes:
+    - Toolset: clarify
+    - Multiple choice: up to 4 options
+    - Open-ended: free-form text input
+    - Platform-agnostic with UI callbacks
+    - Never parallel (in _NEVER_PARALLEL_TOOLS)
+
+Dependencies:
+    - Platform adapter (for UI rendering)
+    - Agent conversation loop
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #56: Smart Home (Home Assistant) Integration
+================================================================================
+Category:       Integration / IoT
+Type:           Integration (connects to external systems)
+
+Description:
+    Four Home Assistant tools: list entities, get entity state, list services,
+    and call services. Gated by HASS_TOKEN environment variable.
+
+Key Implementation Files:
+    - tools/ha_*.py                        (4 Home Assistant tools)
+    - plugins/platforms/homeassistant/     (HA platform adapter)
+
+Architecture Notes:
+    - Toolset: smart-home
+    - Tools: ha_list_entities, ha_get_state, ha_list_services, ha_call_service
+    - Gated by HASS_TOKEN env var
+    - Platform adapter for HA notifications
+
+Dependencies:
+    - Home Assistant API
+    - HASS_TOKEN credential
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, REST API
+
+
+================================================================================
+FEATURE #57: Todo Task Management
+================================================================================
+Category:       Tools / Productivity
+Type:           Extension (adds capability)
+
+Description:
+    Simple task management tool for creating, listing, completing, and removing
+    tasks within agent conversations.
+
+Key Implementation Files:
+    - tools/todo.py                        (todo tool)
+
+Architecture Notes:
+    - Task CRUD: create, list, complete, remove
+    - Session-scoped or persistent
+
+Dependencies:
+    - Session management
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #58: Session Search Tool
+================================================================================
+Category:       Tools / Search
+Type:           Extension (adds capability)
+
+Description:
+    Query-based retrieval across past conversation sessions using FTS5
+    full-text search with LLM summarization of results.
+
+Key Implementation Files:
+    - tools/session_search.py              (session_search tool, if exists)
+    - hermes_state.py                      (FTS5 search backend)
+
+Architecture Notes:
+    - FTS5 full-text search across sessions
+    - LLM summarization of search results
+    - Token-efficient result presentation
+
+Dependencies:
+    - Session DB (FTS5)
+    - Auxiliary LLM (for summarization)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, SQLite FTS5
+
+
+================================================================================
+FEATURE #59: Observability & Telemetry
+================================================================================
+Category:       Monitoring / Observability
+Type:           Extension (adds capability)
+
+Description:
+    Plugin-based observability with two backends: Langfuse (traces conversations,
+    LLM calls, tool usage) and NeMo Relay (comprehensive lifecycle hooks).
+    Both integrate via pre/post hooks on API requests, LLM calls, tool calls,
+    session events.
+
+Key Implementation Files:
+    - plugins/observability/langfuse/      (Langfuse integration)
+    - plugins/observability/nemo_relay/    (NeMo Relay integration)
+
+Architecture Notes:
+    - Langfuse hooks: pre/post_api_request, pre/post_llm_call, pre/post_tool_call
+    - NeMo Relay hooks: on_session_start/end/finalize/reset, pre/post_llm_call,
+      pre/post_api_request, api_request_error, pre/post_tool_call,
+      pre/post_approval_request, subagent_start/stop
+    - Env vars: HERMES_LANGFUSE_PUBLIC_KEY, HERMES_LANGFUSE_SECRET_KEY,
+      HERMES_NEMO_RELAY_* env vars
+
+Dependencies:
+    - Plugin hook system
+    - Langfuse SDK or NeMo Relay SDK
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #60: Usage & Billing Tracking
+================================================================================
+Category:       Monitoring / Billing
+Type:           Extension (adds capability)
+
+Description:
+    Usage window tracking (daily, weekly, monthly) and session cost estimation.
+    Includes Nous credits tracking with low-credit warnings, billing view
+    with card info, monthly cap, and auto-reload support.
+
+Key Implementation Files:
+    - agent/account_usage.py               (300+ lines - usage windows)
+    - agent/billing_view.py                (billing display)
+    - agent/usage_pricing.py               (cost estimation)
+    - agent/credits_tracker.py             (200+ lines - Nous credits)
+
+Architecture Notes:
+    - AccountUsageWindow: time period + usage dict
+    - AccountUsageSnapshot: current usage stats
+    - estimate_session_cost() -> float (USD)
+    - CreditsState: credit balance + notice state
+    - AgentNotice: sticky notice for low-credit warnings
+    - CardInfo, MonthlyCap, AutoReload: billing structures
+
+Dependencies:
+    - Provider transports (for token counts)
+    - Configuration
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #61: Rate Limiting & Flow Control
+================================================================================
+Category:       Core / Reliability
+Type:           Core (fundamental to operation)
+
+Description:
+    Tracks x-ratelimit-* response headers from providers. Nous-specific
+    rate-limit guards. Integrates with error classification for retry decisions.
+
+Key Implementation Files:
+    - agent/rate_limit_tracker.py          (RateLimitState)
+    - agent/nous_rate_guard.py             (Nous API guards)
+
+Architecture Notes:
+    - RateLimitState: current limit state from response headers
+    - check_rate_limit(): boolean gate
+    - Integrates with error classifier for retry/fallback decisions
+
+Dependencies:
+    - Provider transports
+    - Error classifier
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #62: Batch Processing & Trajectory Generation
+================================================================================
+Category:       Research / Training
+Type:           Extension (adds capability)
+
+Description:
+    Parallelizes agent execution across multiple prompts from a dataset with
+    checkpointing and fault tolerance. Uses multiprocessing.Pool for parallel
+    batch processing. Outputs ShareGPT-format trajectories with normalized
+    tool statistics. Supports resume via --resume flag.
+
+Key Implementation Files:
+    - batch_runner.py                      (57KB - parallel batch processing)
+    - agent/trajectory.py                  (JSONL trajectory saving)
+
+Architecture Notes:
+    - Multiprocessing Pool for parallel processing
+    - _process_single_prompt(): core worker function
+    - _extract_tool_stats(): tool usage statistics (count, success/failure)
+    - _extract_reasoning_stats(): assistant reasoning tracking
+    - _normalize_tool_stats(): consistent schema across trajectories
+    - Checkpointing for fault tolerance with --resume flag
+    - JSONL output with completed/failed separation
+    - Dataset loading and batching from JSONL files
+    - Rich progress UI
+    - Toolset distribution sampling via toolset_distributions module
+
+Dependencies:
+    - Agent conversation loop
+    - Tool registry (for ALL_POSSIBLE_TOOLS)
+    - Rich (progress UI)
+    - multiprocessing
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, multiprocessing, Rich
+
+
+================================================================================
+FEATURE #63: Trajectory Compression (Training Data Optimization)
+================================================================================
+Category:       Research / Training
+Type:           Extension (adds capability)
+
+Description:
+    Post-processes agent trajectories to compress them under a target token
+    budget while preserving training signal quality. Protects first and last
+    turns, compresses middle turns via API summarization, and tracks per-
+    trajectory and aggregate metrics.
+
+Key Implementation Files:
+    - trajectory_compressor.py             (68KB - compression system)
+
+Architecture Notes:
+    - CompressionConfig: tokenizer, targets, protected turns, API settings
+    - TrajectoryMetrics / AggregateMetrics: compression statistics
+    - Strategy: protect first turns (system, human, first GPT, first tool),
+      protect last N turns, compress ONLY middle turns via summarization API
+    - Token budget: target max 15,250 tokens, summary target 750 tokens
+    - Tokenizer: Kimi-K2-Thinking by default
+    - Summarization API: OpenRouter (Google Gemini 3 Flash)
+    - Retry logic: jittered backoff for API failures
+    - Concurrent processing: max 50 concurrent API requests
+    - Temperature management: fixed contracts for various models
+
+Dependencies:
+    - Tokenizer (Kimi-K2-Thinking or configurable)
+    - OpenRouter API (for summarization)
+    - YAML config
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, httpx
+
+
+================================================================================
+FEATURE #64: Mini SWE Runner
+================================================================================
+Category:       Research / Benchmarking
+Type:           Extension (adds capability)
+
+Description:
+    Runner for executing software engineering tasks using Hermes-Agent's
+    execution environments, outputting trajectories in Hermes format. Supports
+    local, Docker, and Modal environments. Single task or batch mode from JSONL.
+
+Key Implementation Files:
+    - mini_swe_runner.py                   (28KB)
+
+Architecture Notes:
+    - create_environment(): factory for local/docker/modal backends
+    - TERMINAL_TOOL_DEFINITION: single tool interface for sandbox execution
+    - Completion signal: echo "MINI_SWE_AGENT_FINAL_OUTPUT"
+    - Single task mode: --task parameter
+    - Batch mode: --prompts_file for JSONL files
+    - Output: Hermes trajectory format
+    - Filesystem persistence between tool calls
+    - Environment variables from .env file
+
+Dependencies:
+    - Terminal execution backends
+    - Agent conversation loop
+    - .env configuration
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #65: Managed Tool Gateway
+================================================================================
+Category:       Integration / Nous
+Type:           Integration (connects to external systems)
+
+Description:
+    Nous-hosted tool routing for subscribers. Routes web search, image
+    generation, TTS, cloud browser, and other tools through the Nous Portal
+    infrastructure under one subscription.
+
+Key Implementation Files:
+    - tools/managed_tool_gateway.py        (tool gateway integration)
+    - tools/tool_backend_helpers.py        (backend routing, fallbacks)
+
+Architecture Notes:
+    - Tool routing through Nous infrastructure
+    - Single subscription covers multiple tool backends
+    - Fallback to direct provider APIs
+
+Dependencies:
+    - Nous Portal subscription
+    - Tool registry
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, httpx
+
+
+================================================================================
+FEATURE #66: Migration from OpenClaw
+================================================================================
+Category:       Migration / Compatibility
+Type:           Extension (adds capability)
+
+Description:
+    Automatic import of OpenClaw data: SOUL.md (persona), memories, skills,
+    command allowlist, messaging settings, API keys, TTS assets, and workspace
+    instructions. Command: hermes claw migrate [--dry-run] [--preset user-data]
+    [--overwrite].
+
+Key Implementation Files:
+    - hermes_cli/                          (migration commands)
+    - optional-skills/migration/openclaw-migration/ (migration skill)
+
+Architecture Notes:
+    - Imports: SOUL.md, memories, skills, command allowlist, messaging settings,
+      API keys, TTS assets, workspace instructions
+    - --dry-run mode for preview
+    - --preset user-data for selective import
+    - --overwrite for force replace
+    - Skill available for guided migration
+
+Dependencies:
+    - OpenClaw installation (source data)
+    - Configuration system (target)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #67: Logging System
+================================================================================
+Category:       Infrastructure / Monitoring
+Type:           Core (fundamental to operation)
+
+Description:
+    Structured logging system with separate log files: agent.log (agent
+    operations), errors.log (errors only), gateway.log (messaging gateway).
+
+Key Implementation Files:
+    - hermes_logging.py                    (22KB - logging setup)
+
+Architecture Notes:
+    - setup_logging(): configures all log handlers
+    - Log files: agent.log, errors.log, gateway.log
+    - Stored in get_hermes_home()/logs/
+    - Concurrent log handler on Windows (concurrent-log-handler package)
+    - Profile-aware path resolution
+
+Dependencies:
+    - Profile system (for log paths)
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, logging
+
+
+================================================================================
+FEATURE #68: Internationalization (i18n)
+================================================================================
+Category:       Infrastructure / Localization
+Type:           Extension (adds capability)
+
+Description:
+    Internationalization support with YAML-based locale catalogs shipped
+    via MANIFEST.in. README available in English, Spanish, Urdu, and
+    Simplified Chinese.
+
+Key Implementation Files:
+    - locales/                             (i18n catalogs)
+    - README.md, README.es.md, README.ur-pk.md, README.zh-CN.md
+    - CONTRIBUTING.md, CONTRIBUTING.es.md
+    - SECURITY.md, SECURITY.es.md
+
+Architecture Notes:
+    - YAML-based locale catalogs
+    - Documentation in 4 languages
+    - Shipped as package data
+
+Dependencies:
+    - YAML parser
+
+Complexity Estimate: LOW
+
+Language/Frameworks: YAML
+
+
+================================================================================
+FEATURE #69: LSP Integration (Language Server Protocol)
+================================================================================
+Category:       Tools / Development
+Type:           Extension (adds capability)
+
+Description:
+    Background LSP server management for language intelligence. LSPService
+    manages background loop of LSP servers, LSPClient communicates via
+    JSON-RPC.
+
+Key Implementation Files:
+    - agent/lsp/manager.py                 (LSPService - server management)
+    - agent/lsp/client.py                  (LSPClient - JSON-RPC)
+    - agent/lsp/protocol.py                (request/response types)
+    - agent/lsp/workspace.py               (workspace state tracking)
+
+Architecture Notes:
+    - Background event loop for LSP servers
+    - JSON-RPC communication protocol
+    - Workspace state tracking
+    - Server lifecycle management
+
+Dependencies:
+    - LSP-compatible language servers
+    - JSON-RPC
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, JSON-RPC
+
+
+================================================================================
+FEATURE #70: Google Meet Integration
+================================================================================
+Category:       Integration / Communication
+Type:           Integration (connects to external systems)
+
+Description:
+    Join Google Meet calls, transcribe captions, speak in realtime, and follow
+    up. Three modes: v1 (transcribe-only), v2 (realtime duplex audio via
+    OpenAI Realtime + BlackHole/PulseAudio), v3 (remote node host).
+
+Key Implementation Files:
+    - plugins/google_meet/audio_bridge.py  (audio I/O)
+    - plugins/google_meet/meet_bot.py      (join/leave/transcript)
+    - plugins/google_meet/process_manager.py (child process management)
+    - plugins/google_meet/tools.py         (5 meet tools)
+    - plugins/google_meet/realtime/        (OpenAI Realtime v2)
+
+Architecture Notes:
+    - Tools: meet_join, meet_leave, meet_status, meet_transcript, meet_say
+    - Modes: v1 (transcribe), v2 (duplex audio), v3 (remote host)
+    - Node.js helper for browser automation
+    - Hook: on_session_end (cleanup)
+    - Platforms: linux, macos
+
+Dependencies:
+    - Node.js (browser automation)
+    - OpenAI Realtime API (v2 mode)
+    - BlackHole or PulseAudio (audio routing)
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, Node.js, OpenAI Realtime
+
+
+================================================================================
+FEATURE #71: Spotify Integration
+================================================================================
+Category:       Integration / Entertainment
+Type:           Integration (connects to external systems)
+
+Description:
+    Native Spotify integration via Spotify Web API + PKCE OAuth. 7 tools:
+    playback control, device management, queue, search, playlists, albums,
+    library. Auth via hermes auth spotify.
+
+Key Implementation Files:
+    - plugins/spotify/client.py            (Spotify client wrapper)
+    - plugins/spotify/tools.py             (7 tools)
+
+Architecture Notes:
+    - 7 tools: playback, devices, queue, search, playlists, albums, library
+    - PKCE OAuth authentication
+    - Gated by providers.spotify in ~/.hermes/auth.json
+
+Dependencies:
+    - Spotify Web API
+    - OAuth infrastructure
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, Spotify Web API
+
+
+================================================================================
+FEATURE #72: Disk Cleanup Plugin
+================================================================================
+Category:       Maintenance / Automation
+Type:           Extension (adds capability)
+
+Description:
+    Automatically tracks and cleans up ephemeral files (test scripts, temp
+    outputs, cron logs). Runs via hooks (post_tool_call, on_session_end)
+    with no agent action required.
+
+Key Implementation Files:
+    - plugins/disk-cleanup/disk_cleanup.py (cleanup logic)
+
+Architecture Notes:
+    - Hooks: post_tool_call, on_session_end
+    - Automatic: no agent action required
+    - Tracks ephemeral files during session
+
+Dependencies:
+    - Plugin hook system
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #73: Achievement System
+================================================================================
+Category:       Gamification / UX
+Type:           Extension (adds capability)
+
+Description:
+    Badges and achievements system with dashboard UI integration. Tracks
+    agent usage milestones and accomplishments.
+
+Key Implementation Files:
+    - plugins/hermes-achievements/         (achievement system)
+    - plugins/hermes-achievements/dashboard/ (dashboard UI)
+
+Architecture Notes:
+    - Dashboard integration for badge display
+    - Usage tracking for achievement triggers
+
+Dependencies:
+    - Dashboard
+    - Plugin system
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, TypeScript
+
+
+================================================================================
+FEATURE #74: Proxy & Network Support
+================================================================================
+Category:       Infrastructure / Networking
+Type:           Core (fundamental to operation)
+
+Description:
+    Comprehensive proxy support with resolution order: platform-specific proxy
+    (DISCORD_PROXY), standard proxies (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY),
+    macOS system proxy (scutil), NO_PROXY bypasses. SOCKS proxy support via
+    aiohttp-socks with rdns=True for GFW bypass. CIDR range matching for
+    NO_PROXY.
+
+Key Implementation Files:
+    - gateway/platforms/base.py            (resolve_proxy_url, proxy_kwargs_for_aiohttp)
+
+Architecture Notes:
+    - Resolution order: {PLATFORM}_PROXY -> HTTPS_PROXY -> HTTP_PROXY ->
+      ALL_PROXY -> macOS scutil --proxy
+    - SOCKS: aiohttp_socks.ProxyConnector with rdns=True
+    - HTTP: session kwargs {"proxy": url}
+    - NO_PROXY matching: exact hosts, domains, suffixes, IPs, CIDR ranges,
+      host:port, wildcard
+    - should_bypass_proxy(): comprehensive bypass logic
+
+Dependencies:
+    - aiohttp-socks (for SOCKS)
+    - httpx (for HTTP proxy)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, aiohttp
+
+
+================================================================================
+FEATURE #75: Model Metadata & Token Estimation
+================================================================================
+Category:       Core / LLM Integration
+Type:           Core (fundamental to operation)
+
+Description:
+    Context length resolution with multi-tier fallback chain. Rough character-
+    based token estimation for pre-flight checks. Model catalog queries via
+    OpenRouter /models API with caching.
+
+Key Implementation Files:
+    - agent/model_metadata.py              (1,000+ lines)
+
+Architecture Notes:
+    - get_model_context_length(): fallback chain (models.dev hardcoded ->
+      provider /models API -> config.yaml -> custom_providers -> provider
+      defaults -> descending tier probe 256K->128K->...->8K)
+    - estimate_messages_tokens_rough(): char-based estimate (no system/tools)
+    - estimate_request_tokens_rough(): full request estimate
+    - fetch_model_metadata(): OpenRouter API with caching
+    - query_ollama_num_ctx(): Ollama /api/show request
+    - MINIMUM_CONTEXT_LENGTH: 64K (required for tool calling)
+    - DEFAULT_FALLBACK_CONTEXT: 256K
+
+Dependencies:
+    - Provider APIs (for metadata queries)
+    - Configuration
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #76: Reasoning & Thinking Support
+================================================================================
+Category:       Core / LLM Integration
+Type:           Extension (adds capability)
+
+Description:
+    Support for LLM reasoning/thinking modes: adaptive thinking (Claude 4.6+
+    with effort levels low/medium/high/xhigh/max), manual thinking (budget_tokens
+    parameter), timeout guidance, and LMStudio-specific effort mapping.
+
+Key Implementation Files:
+    - agent/thinking_timeout_guidance.py   (timeout budgets)
+    - agent/reasoning_timeouts.py          (timeout config)
+    - agent/lmstudio_reasoning.py          (LMStudio effort mapping)
+
+Architecture Notes:
+    - Adaptive thinking: output_config.effort (Claude 4.6+)
+    - Manual thinking: budget_tokens parameter (older models, third-party)
+    - Timeout guidance: suggest thinking budgets when approaching timeouts
+    - LMStudio: resolve_lmstudio_effort() mapping
+    - StreamingThinkScrubber for <think> tag handling in streaming
+
+Dependencies:
+    - Provider transports
+    - Streaming infrastructure
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #77: Iteration Budget System
+================================================================================
+Category:       Core / Resource Management
+Type:           Core (fundamental to operation)
+
+Description:
+    Thread-safe per-agent iteration counter. Parent agents capped at
+    max_iterations (default 90), subagents at delegation.max_iterations
+    (default 50). execute_code iterations are refunded.
+
+Key Implementation Files:
+    - agent/iteration_budget.py            (62 lines)
+
+Architecture Notes:
+    - IterationBudget: shared parent/subagent counter
+    - consume() -> bool: try to use one iteration
+    - refund(): give back iteration
+    - used/remaining -> int: read counters
+    - Independent budgets for parent and subagents
+
+Dependencies:
+    - Agent conversation loop
+    - Delegation system
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, threading
+
+
+================================================================================
+FEATURE #78: Message Deduplication & Batching
+================================================================================
+Category:       Communication / Reliability
+Type:           Core (fundamental to operation)
+
+Description:
+    TTL-based message deduplication and rapid-fire text event batching for
+    messaging platforms. MessageDeduplicator prevents duplicate processing,
+    TextBatchAggregator merges photo bursts and rapid messages.
+
+Key Implementation Files:
+    - gateway/platforms/helpers.py         (MessageDeduplicator, TextBatchAggregator)
+
+Architecture Notes:
+    - MessageDeduplicator: FIFO cache (max 2000, TTL 300s)
+    - TextBatchAggregator: handler callback, batch_delay (0.6s),
+      split_delay (2.0s), split_threshold (1900 chars)
+    - Used by all platform adapters
+
+Dependencies:
+    - Platform adapters
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #79: Graceful Shutdown & Drain Control
+================================================================================
+Category:       Infrastructure / Reliability
+Type:           Core (fundamental to operation)
+
+Description:
+    Graceful shutdown with drain control, shutdown forensics, and scale-to-zero
+    support. Memory monitoring for OOM prevention.
+
+Key Implementation Files:
+    - gateway/drain_control.py             (graceful shutdown draining)
+    - gateway/shutdown_forensics.py        (shutdown diagnostics)
+    - gateway/scale_to_zero.py             (scale-to-zero handling)
+    - gateway/memory_monitor.py            (memory usage monitoring)
+    - gateway/restart.py                   (gateway restart handling)
+
+Architecture Notes:
+    - Drain control: stop accepting new messages, finish in-flight
+    - Shutdown forensics: diagnostic info at shutdown
+    - Scale-to-zero: gateway can scale down when idle
+    - Memory monitor: OOM prevention
+    - Restart handling: clean gateway restart
+
+Dependencies:
+    - Gateway infrastructure
+    - psutil (process management)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python, asyncio
+
+
+================================================================================
+FEATURE #80: Context Engine Plugins
+================================================================================
+Category:       Extensibility / Context
+Type:           Extension (adds capability)
+
+Description:
+    Pluggable context compression/optimization engines via ContextEngine ABC.
+    One active engine at a time, selected via context.engine in config.yaml.
+    Optional slash command exposure and tool schemas.
+
+Key Implementation Files:
+    - agent/context_engine.py              (200 lines - ABC)
+    - plugins/context_engine/              (plugin directory)
+
+Architecture Notes:
+    - ContextEngine ABC: name, update_from_response, should_compress,
+      compress, on_session_start/end/reset, get_tool_schemas, handle_tool_call
+    - Plugin registration via register(ctx) pattern
+    - Isolated module loading with synthetic parent packages
+    - Optional slash command exposure via register_command()
+    - Conflict detection with built-in commands
+
+Dependencies:
+    - Plugin discovery
+    - Context compression system
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #81: Feishu/Lark Document Tools
+================================================================================
+Category:       Integration / Productivity
+Type:           Integration (connects to external systems)
+
+Description:
+    Feishu/Lark document interaction tools: read documents, list comments,
+    get comment replies, reply to comments, add new comments.
+
+Key Implementation Files:
+    - tools/feishu_*.py                    (5 Feishu tools)
+
+Architecture Notes:
+    - Toolset: feishu
+    - 5 tools: feishu_doc_read, feishu_drive_list_comments,
+      feishu_drive_list_comment_replies, feishu_drive_reply_comment,
+      feishu_drive_add_comment
+
+Dependencies:
+    - Feishu API
+    - Feishu auth credentials
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, REST API
+
+
+================================================================================
+FEATURE #82: Social Media (X/Twitter) Search
+================================================================================
+Category:       Integration / Social
+Type:           Integration (connects to external systems)
+
+Description:
+    Search X (formerly Twitter) content via the x_search tool.
+
+Key Implementation Files:
+    - tools/x_search.py                    (x_search tool)
+
+Architecture Notes:
+    - Toolset: social
+    - X/Twitter search integration
+
+Dependencies:
+    - X/Twitter API or xurl CLI
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #83: Yuanbao Tools
+================================================================================
+Category:       Integration / Platform
+Type:           Integration (connects to external systems)
+
+Description:
+    Yuanbao (Tencent) specific tools for group management: query group info
+    and query group members.
+
+Key Implementation Files:
+    - tools/yuanbao_tools.py               (2 tools)
+
+Architecture Notes:
+    - yb_query_group_info: Yuanbao group queries
+    - yb_query_group_members: member enumeration
+
+Dependencies:
+    - Yuanbao platform adapter
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #84: Discord Admin Tools
+================================================================================
+Category:       Integration / Platform
+Type:           Integration (connects to external systems)
+
+Description:
+    Discord-specific operations and admin functions: server management,
+    role operations, server configuration.
+
+Key Implementation Files:
+    - tools/discord.py                     (discord tool)
+    - tools/discord_admin.py               (discord_admin tool)
+
+Architecture Notes:
+    - Server management and role operations
+    - Server configuration
+
+Dependencies:
+    - Discord platform adapter
+    - discord.py SDK
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, discord.py
+
+
+================================================================================
+FEATURE #85: Project Management Tools
+================================================================================
+Category:       Tools / Projects
+Type:           Extension (adds capability)
+
+Description:
+    Project lifecycle tools: list projects, create new projects, switch active
+    project. Designed for desktop project management (gated by HERMES_DESKTOP).
+
+Key Implementation Files:
+    - tools/project_list.py                (project_list tool)
+    - tools/project_create.py              (project_create tool)
+    - tools/project_switch.py              (project_switch tool)
+
+Architecture Notes:
+    - Toolset: projects
+    - Gated by HERMES_DESKTOP env var
+    - Excluded from CLI toolset (desktop-only)
+
+Dependencies:
+    - Desktop app infrastructure
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #86: Process Management
+================================================================================
+Category:       Tools / System
+Type:           Extension (adds capability)
+
+Description:
+    Manage background processes: list, query, and control long-running
+    processes started by the agent.
+
+Key Implementation Files:
+    - tools/process.py                     (process tool)
+    - tools/process_registry.py            (process state tracking)
+
+Architecture Notes:
+    - Background process tracking
+    - Process state lifecycle
+
+Dependencies:
+    - Terminal backend
+    - psutil
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, psutil
+
+
+================================================================================
+FEATURE #87: Checkpoint Manager
+================================================================================
+Category:       Persistence / Reliability
+Type:           Core (fundamental to operation)
+
+Description:
+    State checkpointing for agent conversations, enabling crash recovery
+    and session persistence.
+
+Key Implementation Files:
+    - tools/checkpoint_manager.py          (state checkpointing)
+
+Architecture Notes:
+    - Agent state persistence
+    - Crash recovery support
+    - Integrates with session management
+
+Dependencies:
+    - Session DB
+    - Agent state
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #88: SSL Guard
+================================================================================
+Category:       Security / Networking
+Type:           Core (fundamental to operation)
+
+Description:
+    SSL/CA bundle verification with fallback to ensure HTTPS connections
+    work across different environments and certificate configurations.
+
+Key Implementation Files:
+    - agent/ssl_guard.py                   (SSL verification)
+
+Architecture Notes:
+    - verify_ca_bundle_with_fallback(): validates SSL setup
+    - Handles custom CA bundles
+    - Graceful fallback on verification failure
+
+Dependencies:
+    - certifi (CA certificates)
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, certifi
+
+
+================================================================================
+FEATURE #89: Subdirectory Hints
+================================================================================
+Category:       Context / Project
+Type:           Extension (adds capability)
+
+Description:
+    Tracks relevant subdirectories for project context, discovering project
+    structure hints that help the agent navigate the codebase.
+
+Key Implementation Files:
+    - agent/subdirectory_hints.py          (SubdirectoryHintTracker)
+
+Architecture Notes:
+    - SubdirectoryHintTracker: discover project structure
+    - _append_subdir_hint_to_multimodal(): add CWD context
+
+Dependencies:
+    - File system
+    - Tool dispatch helpers
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #90: Title Generator
+================================================================================
+Category:       UX / Conversations
+Type:           Extension (adds capability)
+
+Description:
+    Generates human-readable session titles from conversation content for
+    display in session lists and history.
+
+Key Implementation Files:
+    - agent/title_generator.py             (title generation)
+
+Architecture Notes:
+    - Generates titles from conversation context
+    - Used in session management and history display
+
+Dependencies:
+    - Auxiliary LLM (for title generation)
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #91: Learn Command
+================================================================================
+Category:       Agent / Self-Improvement
+Type:           Extension (adds capability)
+
+Description:
+    /learn command that triggers the agent to create or improve skills based
+    on current conversation experience. Builds a specialized prompt for skill
+    authoring.
+
+Key Implementation Files:
+    - agent/learn_prompt.py                (build_learn_prompt)
+
+Architecture Notes:
+    - build_learn_prompt(): constructs skill-authoring prompt
+    - Triggered via /learn slash command
+    - Creates new skills or improves existing ones
+
+Dependencies:
+    - Skill system
+    - Agent conversation loop
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #92: Teams Meeting Pipeline
+================================================================================
+Category:       Integration / Communication
+Type:           Integration (connects to external systems)
+
+Description:
+    Microsoft Teams meeting pipeline with durable runtime state. Graph-backed
+    transcript-first meeting summaries with subscription management.
+
+Key Implementation Files:
+    - plugins/teams_pipeline/pipeline.py   (pipeline orchestration)
+    - plugins/teams_pipeline/meetings.py   (meeting state)
+    - plugins/teams_pipeline/runtime.py    (runtime execution)
+    - plugins/teams_pipeline/store.py      (durable state)
+    - plugins/teams_pipeline/subscriptions.py (subscription management)
+
+Architecture Notes:
+    - Standalone plugin
+    - Graph-backed transcript processing
+    - Durable runtime state
+    - Subscription management for events
+    - CLI integration
+
+Dependencies:
+    - Microsoft Graph API
+    - Graph webhook adapter
+
+Complexity Estimate: HIGH
+
+Language/Frameworks: Python, Microsoft Graph
+
+
+================================================================================
+FEATURE #93: Docker & Container Support
+================================================================================
+Category:       Infrastructure / Deployment
+Type:           Extension (adds capability)
+
+Description:
+    Production Docker image with s6-overlay process supervision, Docker Compose
+    configuration (including Windows variant), and Nix flake for declarative
+    environment setup.
+
+Key Implementation Files:
+    - Dockerfile                           (21KB - production image)
+    - docker-compose.yml                   (3.4KB)
+    - docker-compose.windows.yml           (1.1KB)
+    - docker/                              (cont-init.d, s6-rc.d)
+    - flake.nix                            (1.1KB - Nix flake)
+    - nix/                                 (packages, overlays, modules)
+
+Architecture Notes:
+    - s6-overlay for process supervision
+    - Multi-stage Docker build
+    - Container-init scripts
+    - NixOS module support
+    - Windows-specific compose
+
+Dependencies:
+    - Docker
+    - s6-overlay
+    - Nix (optional)
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Docker, s6, Nix
+
+
+================================================================================
+FEATURE #94: Installer & Setup System
+================================================================================
+Category:       Infrastructure / Setup
+Type:           Core (fundamental to operation)
+
+Description:
+    Cross-platform installer (curl one-liner for Linux/macOS/WSL2/Termux,
+    PowerShell for Windows). Installs uv, Python 3.11, Node.js, ripgrep,
+    ffmpeg, portable Git Bash. Includes hermes setup wizard, hermes doctor
+    diagnostics, and bootstrap installer app.
+
+Key Implementation Files:
+    - scripts/install.sh                   (Unix installer)
+    - scripts/install.ps1                  (Windows installer)
+    - setup-hermes.sh                      (18KB - setup script)
+    - hermes_bootstrap.py                  (8.4KB - bootstrap)
+    - apps/bootstrap-installer/            (GUI installer)
+    - hermes_cli/main.py                   (hermes setup, hermes doctor)
+
+Architecture Notes:
+    - Installs dependencies: uv, Python 3.11, Node.js, ripgrep, ffmpeg
+    - Windows: bundled MinGit, no admin required
+    - Setup wizard: hermes setup (interactive)
+    - Portal setup: hermes setup --portal (Nous Portal one-command)
+    - Doctor: hermes doctor (diagnostics)
+    - Update: hermes update (self-update)
+    - Bootstrap installer for first-time GUI setup
+
+Dependencies:
+    - curl/PowerShell (for download)
+    - System package managers
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Bash, PowerShell, Python
+
+
+================================================================================
+FEATURE #95: Automation Blueprints
+================================================================================
+Category:       Automation / Templates
+Type:           Extension (adds capability)
+
+Description:
+    15 curated automation blueprints with fillable slots. Templates for common
+    recurring tasks: morning briefing, mail monitor, weekly review, reminders,
+    news digest, habit check-in, hydration nudge, meal plan, learning drip,
+    gratitude journal, on-this-day discovery, and more.
+
+Key Implementation Files:
+    - cron/blueprint_catalog.py            (15 blueprints)
+
+Architecture Notes:
+    - AutomationBlueprint: key, schedule_template, prompt_template, slots,
+      deliver_default, skills, tags
+    - Slot types: time (HH:MM), enum (closed/open), text, weekdays
+    - blueprint_form_schema(): JSON for form renderers
+    - blueprint_slash_command(): CLI command string
+    - blueprint_deeplink(): hermes:// deep-link URL
+    - fill_blueprint(): validate inputs -> create_job kwargs
+
+Dependencies:
+    - Cron scheduling system
+    - Delivery system
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #96: Cron Suggestions System
+================================================================================
+Category:       Automation / UX
+Type:           Extension (adds capability)
+
+Description:
+    Pre-configured automation suggestions offered to users. Suggestion lifecycle:
+    add, list, get, accept (creates job), dismiss (latches dedup_key). Max 5
+    pending suggestions.
+
+Key Implementation Files:
+    - cron/suggestions.py                  (suggestion state management)
+    - cron/suggestion_catalog.py           (starter suggestions)
+
+Architecture Notes:
+    - CatalogEntry: pre-configured job spec
+    - Dedup key prevents re-offering dismissed suggestions
+    - Accept: creates job via consensus API (no second schema)
+    - Max 5 pending (cap prevents nag wall)
+    - Per-profile storage: ~/.hermes/cron/suggestions.json
+
+Dependencies:
+    - Cron job system
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #97: Message Sanitization & Content Handling
+================================================================================
+Category:       Core / Data Processing
+Type:           Core (fundamental to operation)
+
+Description:
+    Message content sanitization including surrogate character replacement,
+    control character removal, and multimodal content text extraction.
+
+Key Implementation Files:
+    - agent/message_content.py             (51 lines - text extraction)
+    - agent/message_sanitization.py        (sanitization)
+
+Architecture Notes:
+    - flatten_message_text(): visible text from any content shape
+    - Supports: plain strings, OpenAI multipart (text, image_url, audio),
+      Anthropic multipart (image, input_text, output_text)
+    - sanitize_surrogates(): replace unpaired UTF-16 surrogates
+    - sanitize_message(): full message cleanup
+
+Dependencies:
+    - Agent conversation loop
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #98: Sensitive Data Redaction
+================================================================================
+Category:       Security / Privacy
+Type:           Core (fundamental to operation)
+
+Description:
+    Redacts sensitive data (passwords, API keys, tokens) from agent output
+    and error messages before display or logging.
+
+Key Implementation Files:
+    - agent/redact.py                      (redaction)
+
+Architecture Notes:
+    - redact_sensitive_text(): pattern-based redaction
+    - Applied to error messages, tool output, logs
+
+Dependencies:
+    - None (standalone utility)
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, regex
+
+
+================================================================================
+FEATURE #99: Schema Sanitizer
+================================================================================
+Category:       Core / Tool Management
+Type:           Core (fundamental to operation)
+
+Description:
+    Tool schema cleanup for token efficiency: token estimation, framing
+    removal, and schema normalization before sending to LLM.
+
+Key Implementation Files:
+    - tools/schema_sanitizer.py            (schema cleanup)
+
+Architecture Notes:
+    - Token estimation for tool schemas
+    - Framing removal (strip unnecessary wrappers)
+    - Schema normalization for consistency
+
+Dependencies:
+    - Tool registry
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #100: Jiter Preload (Performance Optimization)
+================================================================================
+Category:       Infrastructure / Performance
+Type:           Core (fundamental to operation)
+
+Description:
+    Pre-loads jiter JSON parser extension at startup for faster JSON
+    deserialization throughout the agent lifecycle.
+
+Key Implementation Files:
+    - agent/jiter_preload.py               (preload logic)
+
+Architecture Notes:
+    - Performance optimization for JSON parsing
+    - Loaded at agent startup
+
+Dependencies:
+    - jiter (optional, graceful degradation)
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, jiter
+
+
+================================================================================
+FEATURE #101: Chronos Managed Cron (Scale-to-Zero)
+================================================================================
+Category:       Integration / Infrastructure
+Type:           Integration (connects to external systems)
+
+Description:
+    NAS-mediated managed cron that delegates "wake me at time T" to Nous
+    infrastructure. Enables gateway scale-to-zero while still firing cron
+    jobs via authenticated webhook callback.
+
+Key Implementation Files:
+    - plugins/cron_providers/chronos/      (Chronos provider)
+
+Architecture Notes:
+    - Delegates scheduling to Nous infrastructure
+    - Gateway can scale to zero
+    - Authenticated webhook callback at fire time
+    - Activation: cron.provider=chronos in config.yaml
+
+Dependencies:
+    - Nous infrastructure
+    - Webhook handling
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #102: Video Analysis Tool
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+
+Description:
+    Analyze video content through frame extraction and temporal analysis
+    using vision-capable LLMs.
+
+Key Implementation Files:
+    - tools/video_analyze.py               (video_analyze tool)
+
+Architecture Notes:
+    - Toolset: video
+    - Frame extraction and temporal analysis
+    - Vision LLM integration
+
+Dependencies:
+    - Vision LLM
+    - ffmpeg
+
+Complexity Estimate: MEDIUM
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #103: Verification & Evidence System
+================================================================================
+Category:       Core / Quality
+Type:           Extension (adds capability)
+
+Description:
+    Verification result tracking and early-stop mechanisms for quality
+    assurance during agent task execution.
+
+Key Implementation Files:
+    - agent/verification_evidence.py       (result tracking)
+    - agent/verification_stop.py           (early stop)
+
+Architecture Notes:
+    - Verification evidence collection
+    - Stop verification early if thresholds met
+    - Quality gates for agent output
+
+Dependencies:
+    - Agent conversation loop
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #104: Shell Hooks
+================================================================================
+Category:       Integration / Shell
+Type:           Extension (adds capability)
+
+Description:
+    Shell integration hooks for embedding Hermes Agent into shell workflows.
+
+Key Implementation Files:
+    - agent/shell_hooks.py                 (shell integration)
+
+Architecture Notes:
+    - Shell integration for workflow embedding
+
+Dependencies:
+    - Shell environment
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #105: Runtime CWD Management
+================================================================================
+Category:       Core / Environment
+Type:           Core (fundamental to operation)
+
+Description:
+    Resolve agent working directory with awareness of CLI vs gateway contexts.
+    CLI uses process CWD; messaging uses terminal.cwd from config.yaml.
+
+Key Implementation Files:
+    - agent/runtime_cwd.py                 (CWD resolution)
+
+Architecture Notes:
+    - resolve_agent_cwd(): context-aware CWD
+    - resolve_context_cwd(): context file search CWD
+    - CLI: process CWD
+    - Gateway: terminal.cwd from config.yaml
+
+Dependencies:
+    - Configuration
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #106: Process Bootstrap & Safe stdio
+================================================================================
+Category:       Infrastructure / Reliability
+Type:           Core (fundamental to operation)
+
+Description:
+    Process startup setup including safe stdio installation to prevent
+    crashes from broken pipes and unexpected I/O conditions.
+
+Key Implementation Files:
+    - agent/process_bootstrap.py           (_install_safe_stdio)
+
+Architecture Notes:
+    - Guards against OSError from broken pipes
+    - Safe stdio installation at process startup
+
+Dependencies:
+    - None (standalone)
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #107: Markdown Table Rendering
+================================================================================
+Category:       UI / Formatting
+Type:           Extension (adds capability)
+
+Description:
+    Markdown table rendering utilities for structured data display in
+    agent responses.
+
+Key Implementation Files:
+    - agent/markdown_tables.py             (table rendering)
+
+Architecture Notes:
+    - Markdown table formatting
+    - Used in various output contexts
+
+Dependencies:
+    - None (standalone utility)
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #108: Lazy Dependency Loading
+================================================================================
+Category:       Infrastructure / Performance
+Type:           Core (fundamental to operation)
+
+Description:
+    Lazy dependency loading system for optional packages, enabling graceful
+    degradation when optional dependencies are not installed.
+
+Key Implementation Files:
+    - tools/lazy_deps.py                   (lazy loading)
+
+Architecture Notes:
+    - Graceful degradation for optional packages
+    - Import on first use, not at module load time
+    - Error handling for missing dependencies
+
+Dependencies:
+    - None (infrastructure)
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python, importlib
+
+
+================================================================================
+FEATURE #109: Stream Diagnostics
+================================================================================
+Category:       Infrastructure / Debugging
+Type:           Extension (adds capability)
+
+Description:
+    Streaming diagnostics for debugging token-by-token output from LLM
+    providers.
+
+Key Implementation Files:
+    - agent/stream_diag.py                 (streaming diagnostics)
+
+Architecture Notes:
+    - Debug tooling for streaming issues
+    - Token flow analysis
+
+Dependencies:
+    - Streaming infrastructure
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+FEATURE #110: Toolset Distribution Sampling
+================================================================================
+Category:       Research / Training
+Type:           Extension (adds capability)
+
+Description:
+    Sample toolsets from named distributions for batch trajectory generation,
+    enabling diverse tool usage patterns in training data.
+
+Key Implementation Files:
+    - toolset_distributions.py             (12KB)
+
+Architecture Notes:
+    - Named distributions for tool availability
+    - Sampling for training data diversity
+    - Integrates with batch runner
+
+Dependencies:
+    - Toolset definitions
+    - Batch runner
+
+Complexity Estimate: LOW
+
+Language/Frameworks: Python
+
+
+================================================================================
+SUMMARY STATISTICS
+================================================================================
+
+Total Features Identified:    110
+Core Features:                ~40  (fundamental to agent operation)
+Extension Features:           ~45  (add capability, not required)
+Integration Features:         ~25  (connect to external systems)
+
+By Category:
+  Core Agent Infrastructure:     10
+  Communication & Messaging:     10
+  Tools & Execution:             10
+  Media & Perception:             7
+  Memory, Persistence & Search:   4
+  Multi-Agent & Orchestration:    3
+  UI, CLI & Desktop:              6
+  Security & Safety:              6
+  Configuration & Extensibility:  8
+  Research, Training & Data:      5
+  Integrations & Specialized:    20+
+  Infrastructure & Reliability:  20+
+
+Complexity Distribution:
+  LOW:        ~45 features
+  MEDIUM:     ~35 features
+  HIGH:       ~22 features
+  VERY HIGH:   ~8 features
+
+Key Porting Challenges (VERY HIGH complexity):
+  1. Core Agent Conversation Loop (run_agent.py - 5,600+ LOC)
+  2. Provider Transport Abstraction (30+ providers)
+  3. Multi-Platform Messaging Gateway (18K+ LOC gateway/run.py)
+  4. Platform Adapters (20+ platforms)
+  5. Kanban Multi-Agent Orchestration
+  6. Interactive CLI (15,600 LOC)
+  7. Tool Execution Engine (parallelism safety)
+  8. Model Provider Plugin System (30 providers)
+
+Technology Stack:
+  Language:     Python 3.11+
+  Web:          FastAPI, uvicorn, aiohttp
+  UI:           Rich, prompt_toolkit, Ink (React for terminal), Electron
+  Database:     SQLite with FTS5
+  LLM SDKs:    openai, anthropic, boto3
+  Async:        asyncio, threading, multiprocessing
+  Template:     Jinja2
+  Config:       YAML (pyyaml, ruamel.yaml)
+  Auth:         PyJWT, OAuth 2.0, PKCE
+  Scheduling:   croniter
+  Testing:      pytest, pytest-asyncio
+
+================================================================================
+END OF ANALYSIS
+================================================================================

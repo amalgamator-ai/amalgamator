@@ -1,0 +1,274 @@
+================================================================================
+TEST PLAN REVIEW SUMMARY V1
+Iteration Budget & Agent Loop Safety -- Hermes -> OpenClaw
+================================================================================
+
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+20 issues were identified. 8 are critical (would cause test failures or
+incorrect coverage), 7 are moderate (confusion or incomplete coverage),
+and 5 are minor (style/precision).
+
+
+--- CRITICAL ISSUES ---
+
+FIX #1: Removed phantom snapshot() method tests
+  SEVERITY: Critical (test references API that doesn't exist)
+  V1 BUG: Section 1.6 tested a snapshot() method on IterationBudget.
+  ACTUAL: Hermes's IterationBudget (62 lines) has only: __init__, consume,
+    refund, used property, remaining property. No snapshot() method.
+    The port plan Step 13 reads used/remaining directly.
+  FIX: Removed section 1.6. Step 13 metadata coverage is in FILE 4
+    integration tests via result.meta.iterationBudget assertions.
+
+FIX #2: Corrected Zod schema test file location
+  SEVERITY: Critical (violates OpenClaw convention)
+  V1 BUG: Proposed new file: src/config/zod-schema.iteration-budget.test.ts
+  ACTUAL: OpenClaw convention is one test file per schema file. All agent
+    defaults schema tests go in zod-schema.agent-defaults.test.ts. There
+    are NO separate section-specific test files in the config/ directory.
+  FIX: Changed to EXTEND existing zod-schema.agent-defaults.test.ts.
+
+FIX #3: Corrected Zod schema default value assumptions
+  SEVERITY: Critical (tests would fail -- schema doesn't apply defaults)
+  V1 BUG: Section 2.4 tested that AgentDefaultsSchema.parse() applies
+    default values (maxIterations=90, subagentMaxIterations=50, etc.).
+  ACTUAL: AgentDefaultsSchema uses .optional() NOT .default(). Calling
+    .parse({iterationBudget: {enabled: true}}) returns the input as-is
+    without filling in maxIterations=90. The entire schema ends with
+    .strict().optional() (line 274). Default merging happens in
+    resolveAgentConfig(), not in the Zod schema.
+  FIX: Removed default tests from FILE 2. Moved to FILE 3 (config
+    resolution tests) where defaults are actually applied.
+
+FIX #5: Corrected config resolution test file location
+  SEVERITY: Critical (wrong file, wrong function)
+  V1 BUG: Placed config resolution tests in run/helpers.test.ts testing
+    a function named resolveIterationBudgetConfig().
+  ACTUAL: OpenClaw uses resolveAgentConfig() from
+    src/agents/agent-scope-config.ts for config merging. The function uses
+    the pattern: entry.field ?? agentDefaults?.field for ~20 fields.
+    The port plan Step 4 says "Extend resolveAgentConfig with
+    iterationBudget merge logic".
+  FIX: Changed to FILE 3: src/agents/agent-scope-config.test.ts. Tests
+    the merge logic where it actually lives.
+
+FIX #8: Corrected config injection for integration tests
+  SEVERITY: Critical (tests wouldn't inject config correctly)
+  V1 BUG: Assumed config is passed as a parameter in baseRunParams.
+  ACTUAL: run.ts loads config via:
+    const config = paramsInput.config ?? (getRuntimeConfigSnapshot() ?? undefined);
+    The harness's overflowBaseRunParams does NOT include a config field.
+    Config comes from getRuntimeConfigSnapshot() which is mockable.
+  FIX: Added guidance that tests must either pass config via
+    paramsInput.config (if RunEmbeddedAgentParams supports it) or mock
+    getRuntimeConfigSnapshot() to return budget config.
+
+FIX #9: Fixed infeasible callback capture tests
+  SEVERITY: Critical (tests can't pre-set internal budget state)
+  V1 BUG: Tests 4.7.2 and 4.7.3 said "Setup: Config maxIterations=5,
+    budget used=2" and "Call the captured callback". But the budget's
+    internal used count is encapsulated inside run.ts -- tests cannot
+    pre-set it from outside.
+  FIX: Removed direct callback state tests. Callback return behavior
+    is tested INDIRECTLY: (a) callback presence is verified by inspecting
+    mockedRunEmbeddedAttempt params, (b) callback behavior is tested via
+    budget exhaustion integration tests and agent-loop tests (FILE 6).
+
+FIX #15: Corrected agent-core test file location
+  SEVERITY: Critical (violates existing convention)
+  V1 BUG: Proposed new file: agent-loop.iteration-budget.test.ts
+  ACTUAL: packages/agent-core/src/agent-loop.test.ts already exists
+    (1124 lines) with comprehensive tests for the agent loop. New callback
+    tests should extend this file as a new describe() block.
+  FIX: Changed to EXTEND existing agent-loop.test.ts.
+
+FIX #16: Removed infeasible createLoopConfig mapping tests
+  SEVERITY: Critical (would require complex dependency graph instantiation)
+  V1 BUG: Tests 6.3 and 6.4 proposed testing Agent.createLoopConfig() and
+    CoreAgentHarness.createLoopConfig() property mapping. These require
+    instantiating Agent (needs session, tools, hooks) and CoreAgentHarness
+    (needs Session, hook emitters).
+  ACTUAL: Existing agent-loop.test.ts tests use runAgentLoop() directly
+    with AgentLoopConfig objects -- they never instantiate Agent or
+    CoreAgentHarness. The mapping is ~1 line of code per class.
+  FIX: Removed createLoopConfig mapping tests. Test callback BEHAVIOR
+    via runAgentLoop() instead (matching existing patterns). Property
+    mapping correctness is a TypeScript compile-time concern.
+
+
+--- MODERATE ISSUES ---
+
+FIX #4: Clarified .strict() scope for nested iterationBudget schema
+  SEVERITY: Moderate (test may not detect what it claims to)
+  V1 BUG: Test 2.3 "rejects unknown properties in strict mode" assumed
+    .strict() catches unknowns inside nested objects.
+  ACTUAL: AgentDefaultsSchema.strict() catches unknowns at the TOP level.
+    For the test to work at the iterationBudget sub-schema level, the
+    sub-schema itself must also use .strict().
+  FIX: Added clarifying note that the sub-schema needs .strict() too.
+
+FIX #6: Moved default value tests to config resolution
+  SEVERITY: Moderate (4 tests in wrong location)
+  V1 BUG: Default value tests (maxIterations=90, subagentMaxIterations=50,
+    forceSummaryOnExhaustion=true, enabled=false) were in FILE 2 (schema).
+  FIX: Moved to FILE 3 (config resolution) where defaults are applied.
+    Added 4 tests: "applies default maxIterations of 90", "applies default
+    subagentMaxIterations of 50", "defaults forceSummaryOnExhaustion to
+    true", "defaults enabled to false".
+
+FIX #7: Simplified harness strategy
+  SEVERITY: Moderate (unnecessary complexity)
+  V1 BUG: Proposed creating 2 new infrastructure files:
+    run.iteration-budget.harness.ts and run.iteration-budget.fixture.ts.
+    The harness would duplicate ~40 mocks from the existing harness.
+  FIX: Use the EXISTING run.overflow-compaction.harness.ts directly.
+    Define budget config helpers inline. Removed 2 support files from plan.
+
+FIX #10: Clarified emptyAssistantReplyIsSilent setup
+  SEVERITY: Moderate (test setup may not produce expected state)
+  V1 BUG: Test said "emptyAssistantReplyIsSilent = true" as a mock setup.
+  ACTUAL: emptyAssistantReplyIsSilent is COMPUTED by
+    shouldTreatEmptyAssistantReplyAsSilent() based on payloadCount=0,
+    stop reason != "error", allowEmptyAssistantReplyAsSilent param, and
+    other conditions. Can't be set directly.
+  FIX: Added guidance that the test must set up conditions (mock attempt
+    result + params) that cause the function to return true.
+
+FIX #18: Added missing Step 14 test coverage
+  SEVERITY: Moderate (step completely untested)
+  V1 BUG: Step 14 "Enable tool loop detection warnings by default" was
+    marked "N/A (config change, tested by FILE 2)". FILE 2 only tests
+    iterationBudget schema, not tool loop detection defaults.
+  FIX: Added FILE 7 (tool-loop-detection.test.ts extension) with 1 test
+    verifying DEFAULT_LOOP_DETECTION_CONFIG.enabled === true.
+
+FIX #20: Corrected agent-core vitest config assumption
+  SEVERITY: Moderate (wrong config reference)
+  V1 BUG: Said FILE 6 uses "packages/agent-core vitest config (separate
+    package)".
+  ACTUAL: packages/agent-core does NOT have a dedicated vitest.config.ts.
+    Tests are discovered by the root vitest.config.ts.
+  FIX: Corrected note in Testing Infrastructure section.
+
+FIX #19: Clarified R6 regression scenario with Step 14 change
+  SEVERITY: Moderate (test premise changed)
+  FIX: With Step 14 changing loop detection default to enabled=true, the
+    "both enabled" scenario becomes the DEFAULT case. Updated description.
+
+
+--- MINOR ISSUES ---
+
+FIX #11: Clarified how to verify summary instruction injection
+  SEVERITY: Minor (V1 said "verify" without specifying how)
+  FIX: Added concrete guidance: inspect
+    mockedRunEmbeddedAttempt.mock.calls[3] for the 4th call's params.
+
+FIX #12: Clarified budget consumption model
+  SEVERITY: Minor (implicit assumption could confuse implementors)
+  V1 assumed retries consume budget without stating this explicitly.
+  ACTUAL: run.ts has a SINGLE counter (runLoopIterations) that increments
+    for every loop pass. No productive/retry distinction.
+  FIX: Added explicit note that all iterations consume budget equally.
+
+FIX #13: Clarified budget-exhaustion module location uncertainty
+  SEVERITY: Minor (file path may need adjustment)
+  FIX: Added note that budget-exhaustion.ts may not be a separate module.
+    Tests are valid regardless of location; import path adjusts.
+
+FIX #14: Relaxed brittle instruction content assertion
+  SEVERITY: Minor (false negative risk)
+  V1 BUG: Test checked instruction does NOT contain "tool" or "function".
+  FIX: Removed negative assertion. Instruction may contain "tool-calling
+    iterations" or similar phrases. Keep only positive assertion (contains
+    summarize/summary keywords).
+
+FIX #17: Clarified "round" semantics in onBeforeToolCallingRound
+  SEVERITY: Minor (ambiguous terminology)
+  FIX: Clarified that "round" = one LLM call that produces tool calls,
+    not per-individual-tool-call within a response. Added note about
+    implementation-dependent semantics.
+
+
+================================================================================
+2. CHANGES SUMMARY
+================================================================================
+
+  V1 -> Review V1 changes:
+
+  FILES CHANGED:
+    - FILE 2: MOVED from new zod-schema.iteration-budget.test.ts to
+      EXTENDING existing zod-schema.agent-defaults.test.ts
+    - FILE 3: MOVED from run/helpers.test.ts to
+      agent-scope-config.test.ts (new or extend)
+    - FILE 6: MOVED from new agent-loop.iteration-budget.test.ts to
+      EXTENDING existing agent-loop.test.ts
+    - FILE 7: ADDED (tool-loop-detection.test.ts extend for Step 14)
+
+  TESTS REMOVED:
+    - Section 1.6: snapshot() method tests (API doesn't exist)
+    - Section 2.4: 4 default value tests (schema doesn't apply defaults)
+    - Tests 4.7.2-4.7.3: callback return value tests (can't pre-set state)
+    - Tests 6.3-6.4: createLoopConfig mapping tests (infeasible)
+    - Test 5.1.3: "does not instruct model to use tools" (too brittle)
+
+  TESTS ADDED:
+    - Section 3.1: 4 default value tests (moved from FILE 2 to FILE 3)
+    - Section 3.2: 2 missing/undefined config tests
+    - FILE 7: 1 test for DEFAULT_LOOP_DETECTION_CONFIG.enabled === true
+
+  SUPPORT FILES REMOVED:
+    - run.iteration-budget.harness.ts (use existing harness)
+    - run.iteration-budget.fixture.ts (inline helpers instead)
+
+  NET EFFECT:
+    V1:     77-92 tests across 6 files + 2 support files
+    Review: ~78 tests across 7 files + 0 support files
+
+  Test count is similar but distribution is more accurate and all tests
+  are now implementable against the actual OpenClaw codebase.
+
+
+================================================================================
+3. ITERATION EVOLUTION
+================================================================================
+
+--- Iteration 0 -> Iteration 1 (V1) ---
+
+  Initial test plan created from:
+    - Hermes code trace and test files
+    - OpenClaw code trace and testing conventions
+    - Code port plan V3 (corrected)
+
+  Produced 6 test files with ~85 estimated tests.
+
+--- Iteration 1 -> Iteration 1 Review ---
+
+  Critical review against ACTUAL OpenClaw source code revealed 20 issues:
+    8 Critical, 7 Moderate, 5 Minor
+
+  Key corrections:
+    1. Schema tests don't apply defaults (Zod .optional() not .default())
+    2. Test file locations must match OpenClaw's existing conventions
+       (extend existing files, don't create parallel section-specific files)
+    3. Config resolution lives in agent-scope-config.ts, not helpers.ts
+    4. Integration test config injection requires mocking
+       getRuntimeConfigSnapshot(), not passing via params
+    5. Agent-core tests use runAgentLoop() directly, not Agent/Harness
+       class instantiation
+    6. Step 14 (loop detection defaults) was untested -- added FILE 7
+
+  All corrections are grounded in verified facts from the actual codebase:
+    - AgentDefaultsSchema.strict().optional() at line 274
+    - resolveAgentConfig() in agent-scope-config.ts at line 113
+    - overflowBaseRunParams has no config field (harness lines 289-297)
+    - agent-loop.test.ts exists with 1124 lines of established patterns
+    - packages/agent-core has no dedicated vitest.config.ts
+
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

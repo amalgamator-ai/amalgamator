@@ -1,0 +1,257 @@
+================================================================================
+TEST PLAN SUMMARY V2
+Iteration Budget & Agent Loop Safety -- Hermes -> OpenClaw
+================================================================================
+
+
+================================================================================
+1. EXPLANATION OF THE V2 TEST PLAN
+================================================================================
+
+The V2 test plan is a comprehensive testing strategy for porting Hermes's
+IterationBudget feature to OpenClaw. It covers all 16 steps of the
+code_port_plan_review_V3.txt across 7 test files with ~74 estimated tests.
+
+--- 1.1 Scope ---
+
+  The feature being tested is: per-agent iteration budget with consume/refund
+  semantics, budget-exhaustion forced summary, and configuration. This maps
+  to Hermes's 62-line IterationBudget class and its integration into the
+  agent conversation loop.
+
+  The test plan covers:
+    - Core IterationBudget class (consume/refund/used/remaining)
+    - Zod schema validation for the new config section
+    - Config resolution with global defaults and per-agent overrides
+    - Integration with the run.ts main loop (budget creation, consumption,
+      exhaustion detection, forced summary flow)
+    - Budget-exhaustion result builder and summary instruction
+    - Agent-core loop callback (onBeforeToolCallingRound)
+    - Tool loop detection default change (enabled: false -> true)
+    - Regression scenarios for known issues
+
+--- 1.2 Test File Distribution ---
+
+  7 test files organized by concern:
+
+  FILE 1: iteration-budget.test.ts (NEW, ~14 tests)
+    Pure unit tests for the IterationBudget class. No dependencies.
+
+  FILE 2: zod-schema.agent-defaults.test.ts (EXTEND, ~12 tests)
+    Schema validation using existing expectSchemaSuccess/expectSchemaFailurePath
+    helpers. No default value tests (schema uses .optional()).
+
+  FILE 3: agent-scope-config.test.ts (NEW, ~11 tests)
+    Config resolution including default value application (maxIterations=90,
+    subagentMaxIterations=50, forceSummaryOnExhaustion=true). Object spread
+    merge pattern for per-agent overrides.
+
+  FILE 4: run.iteration-budget.test.ts (NEW, ~25 tests)
+    Integration tests using the existing overflow-compaction harness. Covers
+    budget creation, consumption, exhaustion detection with 8 guard conditions,
+    forced summary flow, compaction refund, result metadata, callback threading,
+    error kind extension, and interaction with existing retry mechanisms.
+
+  FILE 5: budget-exhaustion.test.ts (NEW, ~7 tests)
+    Unit tests for the result builder and summary instruction constant.
+
+  FILE 6: agent-loop.test.ts (EXTEND, ~4 tests)
+    Callback contract tests using existing runAgentLoop() infrastructure.
+
+  FILE 7: tool-loop-detection.test.ts (EXTEND, ~1 test)
+    Default config change verification.
+
+--- 1.3 Key Design Decisions ---
+
+  A) USE EXISTING HARNESS: V2 reuses the run.overflow-compaction.harness.ts
+     with its 50+ mocks rather than creating separate infrastructure. This
+     follows the pattern established by run.compaction-loop-guard.test.ts.
+
+  B) NO THREAD-SAFETY TESTS: Node.js is single-threaded. The Hermes
+     ThreadPoolExecutor test is correctly excluded.
+
+  C) DEFAULTS IN CONFIG RESOLUTION, NOT SCHEMA: Because AgentDefaultsSchema
+     uses .optional() (not .default()), default value tests are in FILE 3
+     (config resolution), not FILE 2 (schema validation).
+
+  D) INDIRECT CALLBACK TESTING: Cannot pre-set internal budget state from
+     outside run.ts. Callback behavior is tested indirectly through
+     observable outputs (result metadata, attempt count, error kinds).
+
+  E) COMPILE-TIME TYPE CHECKS: createLoopConfig property mapping tests
+     are excluded because they require instantiating full Agent/Harness
+     dependency graphs. Property mapping correctness is a TypeScript
+     compile-time concern (~1 line of code per class).
+
+--- 1.4 What V2 Adds Over V1 (Review) ---
+
+  V2 is written from scratch but incorporates all 20 fixes from the V1
+  review plus additional insights from deeper code exploration:
+
+  New in V2:
+    1. Precise awareness of the error kind union type (7 existing values +
+       "budget_exhausted") for FILE 4 and FILE 5 assertions
+    2. Exact understanding of makeAttemptResult() factory defaults
+       (assistantTexts=["Hello!"] means payloadCount>=1 by default)
+    3. Explicit payloadCount computation awareness -- tests carefully
+       control assistantTexts=[] vs ["text"] to set payloadCount
+    4. Awareness of 5+ existing retry mechanisms (reasoning-only,
+       empty-response, missing-assistant, compaction-continuation,
+       before-agent-finalize) and how budget interacts with each
+    5. Confirmed agent-scope-config.test.ts does NOT exist yet (NEW file)
+    6. Confirmed ResolvedAgentConfig type shape and merge pattern
+    7. Exact config injection strategy (paramsInput.config vs
+       getRuntimeConfigSnapshot mock)
+    8. More specific fixture factories for budget test scenarios
+       (makeToolCallAttempt, makePayloadAttempt, makeEmptyAttempt)
+    9. Better regression scenario documentation with R7 (no intermediate
+       pressure warnings design choice from Hermes issue #7915)
+
+
+================================================================================
+2. ITERATION EVOLUTION
+================================================================================
+
+--- Iteration 0 -> Iteration 1 (V1) ---
+
+  INITIAL CREATION:
+    The V1 test plan was created from the Hermes code trace, OpenClaw code
+    trace, and code port plan V3. It produced 6 test files with ~85 estimated
+    tests covering all 16 port plan steps.
+
+  V1 CHARACTERISTICS:
+    - Comprehensive coverage of IterationBudget unit tests
+    - Schema validation tests with default value verification
+    - Config resolution tests (placed in helpers.test.ts)
+    - Integration tests with run.ts loop
+    - Agent-core callback tests
+    - 2 separate support files proposed (harness + fixtures)
+
+  V1 ISSUES: Several assumptions were incorrect due to limited exploration
+  of the actual OpenClaw codebase:
+    - Assumed Zod schema uses .default() for default values
+    - Assumed separate test files per schema section
+    - Assumed config resolution lives in helpers.ts
+    - Assumed callback state can be pre-set from outside
+    - Assumed Agent/Harness classes can be easily instantiated
+    - Proposed a phantom snapshot() method on IterationBudget
+
+--- Iteration 1 (V1) -> Iteration 1 Review ---
+
+  CRITICAL REVIEW:
+    Deep review against actual OpenClaw source code identified 20 issues:
+      8 Critical, 7 Moderate, 5 Minor
+
+  KEY CORRECTIONS:
+    1. Schema uses .optional() not .default() -> moved default tests to
+       config resolution
+    2. Test file locations matched to OpenClaw conventions (extend existing
+       files, don't create parallel ones)
+    3. Config resolution lives in agent-scope-config.ts, not helpers.ts
+    4. Integration test config injection via getRuntimeConfigSnapshot() mock
+    5. Callback return behavior tested indirectly, not directly
+    6. Removed infeasible createLoopConfig mapping tests
+    7. Simplified harness strategy (reuse existing, no new files)
+    8. Added missing Step 14 coverage (tool loop detection default)
+
+  RESULT:
+    V1 Review: ~78 tests across 7 files + 0 support files
+    (down from ~85 tests across 6 files + 2 support files)
+
+--- Iteration 1 Review -> Iteration 2 (V2, THIS DOCUMENT) ---
+
+  FROM-SCRATCH REWRITE incorporating all V1 Review learnings plus deeper
+  code exploration. V2 is NOT an incremental patch on V1 -- it's a fresh
+  plan that avoids V1's mistakes from the start.
+
+  V2 IMPROVEMENTS OVER V1 REVIEW:
+
+    A) DEEPER CODE EXPLORATION:
+       - Read actual test helper implementations (expectSchemaSuccess,
+         expectSchemaFailurePath function bodies)
+       - Read exact makeAttemptResult factory defaults and override patterns
+       - Read resolveAgentConfig merge implementation (line-by-line)
+       - Read EmbeddedAgentRunMeta error kind union type
+       - Read run.ts main loop structure with all 5+ retry mechanisms
+       - Confirmed agent-scope-config.test.ts does NOT exist
+       - Confirmed ResolvedAgentConfig type shape (18 fields currently)
+
+    B) MORE PRECISE TEST PATTERNS:
+       - Fixture helpers (makeToolCallAttempt, makePayloadAttempt) use
+         exact override patterns from makeAttemptResult factory
+       - Config injection strategy based on actual paramsInput.config vs
+         getRuntimeConfigSnapshot flow
+       - Mock sequences match exact mockedRunEmbeddedAttempt usage pattern
+       - Error kind assertions match exact union type values
+
+    C) BETTER INTERACTION COVERAGE:
+       - Explicit test for budget + reasoning-only retries
+       - Explicit test for budget vs MAX_RUN_LOOP_ITERATIONS independence
+       - Explicit test for budget + compaction refund
+       - All 8 guard conditions in budget exhaustion detection enumerated
+         and individually tested
+
+    D) ADDITIONAL INSIGHTS:
+       - R7 regression scenario: no intermediate pressure warnings
+         (Hermes design choice from issue #7915)
+       - payloadCount computation awareness -- tests explicitly control
+         assistantTexts arrays to set payloadCount=0 vs >=1
+       - Exact Vitest project placement per file
+       - Mock sequence ordering documentation
+
+  V2 METRICS:
+    ~74 tests across 7 files + 0 support files
+    Distribution: 4 NEW files, 3 EXTEND existing files
+    Ratio: ~49 unit tests (~66%), ~25 integration tests (~34%)
+
+--- Summary of Changes Across Iterations ---
+
+  Metric               | V1 Original | V1 Review | V2
+  ---------------------+-------------+-----------+---------
+  Test files           | 6           | 7         | 7
+  Support files        | 2           | 0         | 0
+  Estimated tests      | ~85         | ~78       | ~74
+  Unit tests           | ~52         | ~50       | ~49
+  Integration tests    | ~33         | ~28       | ~25
+  Incorrect locations  | 3 files     | 0 files   | 0 files
+  Phantom APIs tested  | 1 (snapshot)| 0         | 0
+  Wrong default model  | 4 tests     | 0         | 0
+  Issues found (total) | N/A         | 20        | N/A
+
+  Key trend: Test count decreased from ~85 to ~74 as incorrect/infeasible
+  tests were removed and coverage was tightened to what's actually
+  testable against the real codebase. Quality increased as each iteration
+  grounded assumptions in verified facts.
+
+
+================================================================================
+3. RISK AREAS AND DEFERRED TESTS
+================================================================================
+
+  A) FAILOVER BUDGET RESET (R3):
+     Testing budget reset on FailoverError requires simulating a full
+     failover cycle (outer wrapper catches error, retries with new model).
+     The harness may not support this. Defer to E2E if needed.
+
+  B) BUDGET + TOOL LOOP DETECTION COEXISTENCE (R6):
+     With both guards enabled by default (Step 14), most FILE 4 tests
+     implicitly exercise this scenario. If the harness mocks out the
+     before-tool-call hook chain, explicit coexistence testing may need
+     an E2E test.
+
+  C) SUBAGENT BUDGET CREATION:
+     The port plan focuses on parent agent budget. Subagent budget
+     (subagentMaxIterations=50) is configured but the actual creation
+     path for subagents (delegation/spawn) is complex. Config resolution
+     is tested in FILE 3, but runtime creation may need additional tests
+     when the delegation integration is implemented.
+
+  D) BUDGET-EXHAUSTION MODULE LOCATION:
+     FILE 5 tests assume a standalone budget-exhaustion.ts module.
+     If the implementation inlines the result builder in run.ts or
+     helpers.ts, FILE 5 tests should be relocated accordingly.
+
+
+================================================================================
+END OF SUMMARY
+================================================================================

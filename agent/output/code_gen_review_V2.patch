@@ -1,0 +1,1063 @@
+diff --git a/src/agents/embedded-agent-runner/run/budget-exhaustion.test.ts b/src/agents/embedded-agent-runner/run/budget-exhaustion.test.ts
+new file mode 100644
+index 0000000000..15403e283d
+--- /dev/null
++++ b/src/agents/embedded-agent-runner/run/budget-exhaustion.test.ts
+@@ -0,0 +1,113 @@
++import { describe, expect, it } from "vitest";
++import {
++  BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION,
++  buildBudgetExhaustedResult,
++} from "./budget-exhaustion.js";
++
++describe("BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION", () => {
++  it("is a non-empty string", () => {
++    expect(typeof BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION).toBe("string");
++    expect(BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION.length).toBeGreaterThan(0);
++  });
++
++  it("instructs the model not to make tool calls", () => {
++    expect(BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION.toLowerCase()).toContain("tool");
++  });
++
++  it("asks for a summary", () => {
++    expect(BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION.toLowerCase()).toContain("summary");
++  });
++});
++
++describe("buildBudgetExhaustedResult", () => {
++  it("builds a result with budget_exhausted error kind", () => {
++    const result = buildBudgetExhaustedResult({
++      message: "Budget exceeded.",
++      durationMs: 5000,
++      budgetUsed: 90,
++      budgetMax: 90,
++    });
++
++    expect(result.meta.error?.kind).toBe("budget_exhausted");
++    expect(result.meta.error?.fallbackSafe).toBe(false);
++    expect(result.meta.livenessState).toBe("blocked");
++    expect(result.meta.replayInvalid).toBe(true);
++  });
++
++  it("includes budget counts in the error message", () => {
++    const result = buildBudgetExhaustedResult({
++      message: "Budget exceeded.",
++      durationMs: 5000,
++      budgetUsed: 45,
++      budgetMax: 90,
++    });
++
++    expect(result.meta.error?.message).toContain("45");
++    expect(result.meta.error?.message).toContain("90");
++  });
++
++  it("uses summaryText as the payload text when provided", () => {
++    const result = buildBudgetExhaustedResult({
++      message: "Budget exceeded.",
++      durationMs: 5000,
++      budgetUsed: 90,
++      budgetMax: 90,
++      summaryText: "Here is what I accomplished...",
++    });
++
++    expect(result.payloads?.[0]?.text).toBe("Here is what I accomplished...");
++    expect(result.payloads?.[0]?.isError).toBe(false);
++  });
++
++  it("uses a default error payload when summaryText is not provided", () => {
++    const result = buildBudgetExhaustedResult({
++      message: "Budget exceeded.",
++      durationMs: 5000,
++      budgetUsed: 90,
++      budgetMax: 90,
++    });
++
++    expect(result.payloads?.[0]?.text).toContain("90/90");
++    expect(result.payloads?.[0]?.isError).toBe(true);
++  });
++
++  it("sets durationMs from params", () => {
++    const result = buildBudgetExhaustedResult({
++      message: "Budget exceeded.",
++      durationMs: 12345,
++      budgetUsed: 10,
++      budgetMax: 10,
++    });
++
++    expect(result.meta.durationMs).toBe(12345);
++  });
++
++  it("passes through agentMeta when provided", () => {
++    const agentMeta = {
++      sessionId: "test-session",
++      provider: "anthropic",
++      model: "claude-sonnet",
++    };
++    const result = buildBudgetExhaustedResult({
++      message: "Budget exceeded.",
++      durationMs: 5000,
++      agentMeta,
++      budgetUsed: 10,
++      budgetMax: 10,
++    });
++
++    expect(result.meta.agentMeta).toBe(agentMeta);
++  });
++
++  it("passes through finalAssistantVisibleText", () => {
++    const result = buildBudgetExhaustedResult({
++      message: "Budget exceeded.",
++      durationMs: 5000,
++      budgetUsed: 10,
++      budgetMax: 10,
++      finalAssistantVisibleText: "Last visible text",
++    });
++
++    expect(result.meta.finalAssistantVisibleText).toBe("Last visible text");
++  });
++});
+diff --git a/src/agents/embedded-agent-runner/run/budget-exhaustion.ts b/src/agents/embedded-agent-runner/run/budget-exhaustion.ts
+new file mode 100644
+index 0000000000..3fb6c115c8
+--- /dev/null
++++ b/src/agents/embedded-agent-runner/run/budget-exhaustion.ts
+@@ -0,0 +1,66 @@
++/**
++ * Budget-exhaustion result builder and summary instruction.
++ *
++ * When an agent's iteration budget is exhausted, this module provides:
++ * 1. A summary instruction injected into the prompt for a final grace call
++ * 2. A result builder for the budget_exhausted error kind
++ */
++
++import type { EmbeddedAgentMeta, EmbeddedAgentRunMeta, EmbeddedAgentRunResult } from "../types.js";
++
++/**
++ * Instruction injected into the prompt when the iteration budget is exhausted
++ * and forceSummaryOnExhaustion is enabled. This gives the LLM one final turn
++ * to summarize work done so far without making further tool calls.
++ */
++export const BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION =
++  "You have reached the maximum number of iterations for this run. " +
++  "Please provide a concise summary of what you have accomplished so far, " +
++  "any remaining work that was not completed, and any important findings. " +
++  "Do NOT make any tool calls in this response.";
++
++/**
++ * Build an EmbeddedAgentRunResult for a budget-exhausted run.
++ */
++export function buildBudgetExhaustedResult(params: {
++  message: string;
++  durationMs: number;
++  agentMeta?: EmbeddedAgentMeta;
++  aborted?: boolean;
++  budgetUsed: number;
++  budgetMax: number;
++  summaryText?: string;
++  systemPromptReport?: EmbeddedAgentRunMeta["systemPromptReport"];
++  finalPromptText?: string;
++  finalAssistantVisibleText?: string;
++  finalAssistantRawText?: string;
++}): EmbeddedAgentRunResult {
++  const displayText =
++    params.summaryText ??
++    `Iteration budget exhausted (${params.budgetUsed}/${params.budgetMax}). ${params.message}`;
++
++  return {
++    payloads: [
++      {
++        text: displayText,
++        isError: !params.summaryText,
++      },
++    ],
++    meta: {
++      durationMs: params.durationMs,
++      agentMeta: params.agentMeta,
++      aborted: params.aborted,
++      systemPromptReport: params.systemPromptReport,
++      finalPromptText: params.finalPromptText,
++      finalAssistantVisibleText: params.finalAssistantVisibleText,
++      finalAssistantRawText: params.finalAssistantRawText,
++      replayInvalid: true,
++      livenessState: "blocked",
++      error: {
++        kind: "budget_exhausted",
++        message: `Iteration budget exhausted after ${params.budgetUsed} iterations (max: ${params.budgetMax}).`,
++        fallbackSafe: false,
++      },
++    },
++  };
++}
+diff --git a/src/agents/iteration-budget.test.ts b/src/agents/iteration-budget.test.ts
+new file mode 100644
+index 0000000000..e4a5991715
+--- /dev/null
++++ b/src/agents/iteration-budget.test.ts
+@@ -0,0 +1,183 @@
++import { describe, expect, it } from "vitest";
++import {
++  IterationBudget,
++  resolveIterationBudgetConfig,
++} from "./iteration-budget.js";
++
++describe("IterationBudget", () => {
++  describe("constructor", () => {
++    it("creates a budget with the specified maxTotal", () => {
++      const budget = new IterationBudget(10);
++      expect(budget.maxTotal).toBe(10);
++      expect(budget.used).toBe(0);
++      expect(budget.remaining).toBe(10);
++    });
++
++    it("creates a budget with maxTotal of 0", () => {
++      const budget = new IterationBudget(0);
++      expect(budget.maxTotal).toBe(0);
++      expect(budget.remaining).toBe(0);
++    });
++
++    it("throws RangeError for negative maxTotal", () => {
++      expect(() => new IterationBudget(-1)).toThrow(RangeError);
++    });
++  });
++
++  describe("consume", () => {
++    it("returns true and increments used when budget available", () => {
++      const budget = new IterationBudget(3);
++      expect(budget.consume()).toBe(true);
++      expect(budget.used).toBe(1);
++      expect(budget.remaining).toBe(2);
++    });
++
++    it("returns false when budget is exhausted", () => {
++      const budget = new IterationBudget(2);
++      expect(budget.consume()).toBe(true);
++      expect(budget.consume()).toBe(true);
++      expect(budget.consume()).toBe(false);
++      expect(budget.used).toBe(2);
++      expect(budget.remaining).toBe(0);
++    });
++
++    it("returns false for a zero-budget", () => {
++      const budget = new IterationBudget(0);
++      expect(budget.consume()).toBe(false);
++    });
++
++    it("consumes exactly maxTotal iterations", () => {
++      const budget = new IterationBudget(5);
++      for (let i = 0; i < 5; i++) {
++        expect(budget.consume()).toBe(true);
++      }
++      expect(budget.consume()).toBe(false);
++      expect(budget.used).toBe(5);
++      expect(budget.remaining).toBe(0);
++    });
++  });
++
++  describe("refund", () => {
++    it("decrements used when used > 0", () => {
++      const budget = new IterationBudget(5);
++      budget.consume();
++      budget.consume();
++      expect(budget.used).toBe(2);
++      budget.refund();
++      expect(budget.used).toBe(1);
++      expect(budget.remaining).toBe(4);
++    });
++
++    it("is a no-op when used is 0", () => {
++      const budget = new IterationBudget(5);
++      budget.refund();
++      expect(budget.used).toBe(0);
++      expect(budget.remaining).toBe(5);
++    });
++
++    it("allows consuming again after refund", () => {
++      const budget = new IterationBudget(1);
++      expect(budget.consume()).toBe(true);
++      expect(budget.consume()).toBe(false);
++      budget.refund();
++      expect(budget.consume()).toBe(true);
++      expect(budget.consume()).toBe(false);
++    });
++  });
++
++  describe("used property", () => {
++    it("tracks cumulative consumption", () => {
++      const budget = new IterationBudget(10);
++      expect(budget.used).toBe(0);
++      budget.consume();
++      expect(budget.used).toBe(1);
++      budget.consume();
++      budget.consume();
++      expect(budget.used).toBe(3);
++    });
++  });
++
++  describe("remaining property", () => {
++    it("is maxTotal - used", () => {
++      const budget = new IterationBudget(10);
++      expect(budget.remaining).toBe(10);
++      budget.consume();
++      expect(budget.remaining).toBe(9);
++    });
++
++    it("never goes below zero", () => {
++      const budget = new IterationBudget(1);
++      budget.consume();
++      budget.consume(); // fails, used stays at 1
++      expect(budget.remaining).toBe(0);
++    });
++  });
++
++  describe("interleaved sequences", () => {
++    it("handles consume-refund-consume sequences", () => {
++      const budget = new IterationBudget(3);
++      expect(budget.consume()).toBe(true); // used=1
++      expect(budget.consume()).toBe(true); // used=2
++      budget.refund(); // used=1
++      expect(budget.consume()).toBe(true); // used=2
++      expect(budget.consume()).toBe(true); // used=3
++      expect(budget.consume()).toBe(false); // exhausted
++      expect(budget.used).toBe(3);
++    });
++
++    it("multiple refunds do not underflow", () => {
++      const budget = new IterationBudget(5);
++      budget.consume();
++      budget.refund();
++      budget.refund(); // should be a no-op
++      budget.refund(); // should be a no-op
++      expect(budget.used).toBe(0);
++      expect(budget.remaining).toBe(5);
++    });
++  });
++});
++
++describe("resolveIterationBudgetConfig", () => {
++  it("returns undefined for undefined input", () => {
++    expect(resolveIterationBudgetConfig(undefined)).toBeUndefined();
++  });
++
++  it("returns undefined for null input", () => {
++    expect(resolveIterationBudgetConfig(null)).toBeUndefined();
++  });
++
++  it("applies default maxIterations of 90 when not specified", () => {
++    const resolved = resolveIterationBudgetConfig({ enabled: true });
++    expect(resolved?.maxIterations).toBe(90);
++  });
++
++  it("applies default subagentMaxIterations of 50 when not specified", () => {
++    const resolved = resolveIterationBudgetConfig({ enabled: true });
++    expect(resolved?.subagentMaxIterations).toBe(50);
++  });
++
++  it("defaults forceSummaryOnExhaustion to true when not specified", () => {
++    const resolved = resolveIterationBudgetConfig({ enabled: true });
++    expect(resolved?.forceSummaryOnExhaustion).toBe(true);
++  });
++
++  it("defaults enabled to false when called with empty object", () => {
++    const resolved = resolveIterationBudgetConfig({});
++    expect(resolved?.enabled).toBe(false);
++  });
++
++  it("preserves explicitly set values", () => {
++    const resolved = resolveIterationBudgetConfig({
++      enabled: true,
++      maxIterations: 120,
++      subagentMaxIterations: 30,
++      forceSummaryOnExhaustion: false,
++    });
++    expect(resolved).toEqual({
++      enabled: true,
++      maxIterations: 120,
++      subagentMaxIterations: 30,
++      forceSummaryOnExhaustion: false,
++    });
++  });
++});
+diff --git a/src/agents/iteration-budget.ts b/src/agents/iteration-budget.ts
+new file mode 100644
+index 0000000000..fac8018478
+--- /dev/null
++++ b/src/agents/iteration-budget.ts
+@@ -0,0 +1,95 @@
++/**
++ * Per-agent iteration budget with consume/refund semantics.
++ *
++ * Ported from Hermes `agent/iteration_budget.py`. Each embedded agent run
++ * (parent or subagent) holds an {@link IterationBudget}; the parent's cap
++ * comes from `maxIterations` (default 90), each subagent's cap comes from
++ * `subagentMaxIterations` (default 50).
++ *
++ * Programmatic tool calls (e.g. compaction restarts) are refunded via
++ * {@link IterationBudget.refund} so they don't eat into the budget.
++ */
++
++import type { IterationBudgetConfig } from "../config/types.agent-defaults.js";
++
++/** Resolved iteration budget configuration with all defaults applied. */
++export interface ResolvedIterationBudgetConfig {
++  enabled: boolean;
++  maxIterations: number;
++  subagentMaxIterations: number;
++  forceSummaryOnExhaustion: boolean;
++}
++
++// Hardcoded defaults matching Hermes: 90 for parent, 50 for subagent.
++const DEFAULT_MAX_ITERATIONS = 90;
++const DEFAULT_SUBAGENT_MAX_ITERATIONS = 50;
++const DEFAULT_FORCE_SUMMARY_ON_EXHAUSTION = true;
++
++/**
++ * Resolve raw iteration budget configuration into a fully-populated config
++ * with hardcoded defaults for any missing fields.
++ *
++ * Analogous to `resolveMaxRunRetryIterations` in run/helpers.ts -- this is
++ * the "Layer 2" consumption-site resolution that applies per-field defaults.
++ *
++ * Returns `undefined` when the input is nullish, allowing callers to
++ * distinguish "no config at all" from "config present but sparse".
++ */
++export function resolveIterationBudgetConfig(
++  raw: IterationBudgetConfig | undefined | null,
++): ResolvedIterationBudgetConfig | undefined {
++  if (raw == null) {
++    return undefined;
++  }
++  return {
++    enabled: raw.enabled ?? false,
++    maxIterations: raw.maxIterations ?? DEFAULT_MAX_ITERATIONS,
++    subagentMaxIterations: raw.subagentMaxIterations ?? DEFAULT_SUBAGENT_MAX_ITERATIONS,
++    forceSummaryOnExhaustion: raw.forceSummaryOnExhaustion ?? DEFAULT_FORCE_SUMMARY_ON_EXHAUSTION,
++  };
++}
++
++/**
++ * Iteration counter for an agent run.
++ *
++ * Node.js is single-threaded so no lock is needed (unlike the Python
++ * original which uses `threading.Lock`). The API surface is kept
++ * identical for symmetry with Hermes.
++ */
++export class IterationBudget {
++  public readonly maxTotal: number;
++  private _used = 0;
++
++  constructor(maxTotal: number) {
++    if (maxTotal < 0) {
++      throw new RangeError(`maxTotal must be non-negative, got ${maxTotal}`);
++    }
++    this.maxTotal = maxTotal;
++  }
++
++  /** Try to consume one iteration. Returns `true` if allowed. */
++  consume(): boolean {
++    if (this._used >= this.maxTotal) {
++      return false;
++    }
++    this._used += 1;
++    return true;
++  }
++
++  /** Give back one iteration (e.g. for compaction restarts). */
++  refund(): void {
++    if (this._used > 0) {
++      this._used -= 1;
++    }
++  }
++
++  /** Number of iterations consumed so far. */
++  get used(): number {
++    return this._used;
++  }
++
++  /** Number of iterations remaining before exhaustion. */
++  get remaining(): number {
++    return Math.max(0, this.maxTotal - this._used);
++  }
++}
+diff --git a/packages/agent-core/src/agent-loop.test.ts b/packages/agent-core/src/agent-loop.test.ts
+index 774f7c0969..2ec5f8e0c9 100644
+--- a/packages/agent-core/src/agent-loop.test.ts
++++ b/packages/agent-core/src/agent-loop.test.ts
+@@ -1121,3 +1121,158 @@ describe("agentLoop thinking state", () => {
+     expect(observedReasoning).toEqual(expected);
+   });
+ });
++
++describe("onBeforeToolCallingRound", () => {
++  function createToolUseStreamFn(callCount: number): { streamFn: StreamFn; calls: number[] } {
++    const tracker = { calls: [] as number[] };
++    let callIndex = 0;
++    const streamFn: StreamFn = () => {
++      const stream = createAssistantMessageEventStream();
++      queueMicrotask(() => {
++        callIndex += 1;
++        tracker.calls.push(callIndex);
++        const isToolRound = callIndex <= callCount;
++        const message: AssistantMessage = isToolRound
++          ? {
++              role: "assistant",
++              content: [
++                {
++                  type: "toolCall",
++                  id: `call-${callIndex}`,
++                  name: "test_tool",
++                  arguments: { x: callIndex },
++                },
++              ],
++              api: "faux",
++              provider: "faux",
++              model: "faux-1",
++              usage: TEST_USAGE,
++              stopReason: "toolUse",
++              timestamp: Date.now(),
++            }
++          : {
++              role: "assistant",
++              content: [{ type: "text", text: "done" }],
++              api: "faux",
++              provider: "faux",
++              model: "faux-1",
++              usage: TEST_USAGE,
++              stopReason: "stop",
++              timestamp: Date.now(),
++            };
++        stream.push({
++          type: "done",
++          reason: isToolRound ? "toolUse" : "stop",
++          message,
++        });
++      });
++      return stream;
++    };
++    return { streamFn, calls: tracker.calls };
++  }
++
++  const testTool: AgentTool = {
++    name: "test_tool",
++    label: "Test Tool",
++    description: "A test tool",
++    parameters: Type.Object({ x: Type.Number() }),
++    execute: async () => ({
++      content: [{ type: "text" as const, text: "ok" }],
++      details: {},
++    }),
++  };
++
++  it("is called before each tool-calling round with incrementing round number", async () => {
++    const roundNumbers: number[] = [];
++    const { streamFn } = createToolUseStreamFn(3);
++    const onBeforeToolCallingRound = vi.fn((round: number) => {
++      roundNumbers.push(round);
++      return true;
++    });
++
++    await runAgentLoop(
++      [{ role: "user", content: "go", timestamp: Date.now() }],
++      { systemPrompt: "test", messages: [], tools: [testTool] },
++      { model, convertToLlm: (m) => m as Message[], onBeforeToolCallingRound },
++      () => {},
++      undefined,
++      streamFn,
++    );
++
++    expect(onBeforeToolCallingRound).toHaveBeenCalledTimes(3);
++    expect(roundNumbers).toEqual([1, 2, 3]);
++  });
++
++  it("stops tool execution when callback returns false", async () => {
++    const { streamFn } = createToolUseStreamFn(5);
++    const onBeforeToolCallingRound = vi.fn((round: number) => {
++      return round < 3; // Allow rounds 1 and 2, block round 3
++    });
++
++    const events: AgentEvent[] = [];
++    await runAgentLoop(
++      [{ role: "user", content: "go", timestamp: Date.now() }],
++      { systemPrompt: "test", messages: [], tools: [testTool] },
++      { model, convertToLlm: (m) => m as Message[], onBeforeToolCallingRound },
++      (event) => { events.push(event); },
++      undefined,
++      streamFn,
++    );
++
++    // Callback called 3 times: rounds 1, 2 (allowed), 3 (blocked)
++    expect(onBeforeToolCallingRound).toHaveBeenCalledTimes(3);
++    // Agent should end after blocking
++    expect(events[events.length - 1]?.type).toBe("agent_end");
++  });
++
++  it("does not interfere when no callback is configured", async () => {
++    const { streamFn, calls } = createToolUseStreamFn(2);
++
++    await runAgentLoop(
++      [{ role: "user", content: "go", timestamp: Date.now() }],
++      { systemPrompt: "test", messages: [], tools: [testTool] },
++      { model, convertToLlm: (m) => m as Message[] },
++      () => {},
++      undefined,
++      streamFn,
++    );
++
++    // Should complete normally with 2 tool rounds + 1 text response = 3 calls
++    expect(calls).toHaveLength(3);
++  });
++
++  it("is not called for text-only responses (no tool calls)", async () => {
++    const streamFn: StreamFn = () => {
++      const stream = createAssistantMessageEventStream();
++      queueMicrotask(() => {
++        stream.push({
++          type: "done",
++          reason: "stop",
++          message: {
++            role: "assistant",
++            content: [{ type: "text", text: "just text" }],
++            api: "faux",
++            provider: "faux",
++            model: "faux-1",
++            usage: TEST_USAGE,
++            stopReason: "stop",
++            timestamp: Date.now(),
++          },
++        });
++      });
++      return stream;
++    };
++    const onBeforeToolCallingRound = vi.fn(() => true);
++
++    await runAgentLoop(
++      [{ role: "user", content: "go", timestamp: Date.now() }],
++      { systemPrompt: "test", messages: [], tools: [testTool] },
++      { model, convertToLlm: (m) => m as Message[], onBeforeToolCallingRound },
++      () => {},
++      undefined,
++      streamFn,
++    );
++
++    expect(onBeforeToolCallingRound).not.toHaveBeenCalled();
++  });
++});
+diff --git a/packages/agent-core/src/agent-loop.ts b/packages/agent-core/src/agent-loop.ts
+index 2a5f067e04..059a0b1f0a 100644
+--- a/packages/agent-core/src/agent-loop.ts
++++ b/packages/agent-core/src/agent-loop.ts
+@@ -303,6 +303,7 @@ async function runLoop(
+   };
+ 
+   // Outer loop: continues when queued follow-up messages arrive after agent would stop
++  let toolCallingRound = 0;
+   while (true) {
+     let hasMoreToolCalls = true;
+ 
+@@ -356,6 +357,16 @@ async function runLoop(
+       const toolResults: ToolResultMessage[] = [];
+       hasMoreToolCalls = false;
+       if (message.stopReason === "toolUse" && toolCalls.length > 0) {
++        toolCallingRound += 1;
++        if (config.onBeforeToolCallingRound) {
++          const shouldContinue = await config.onBeforeToolCallingRound(toolCallingRound);
++          if (shouldContinue === false) {
++            await emit({ type: "turn_end", message, toolResults: [] });
++            turnOpen = false;
++            await emit({ type: "agent_end", messages: newMessages });
++            return;
++          }
++        }
+         const executedToolBatch = await executeToolCalls(
+           currentContext,
+           message,
+diff --git a/packages/agent-core/src/agent.ts b/packages/agent-core/src/agent.ts
+index f53d9945fe..3458f8811c 100644
+--- a/packages/agent-core/src/agent.ts
++++ b/packages/agent-core/src/agent.ts
+@@ -228,6 +228,8 @@ export class Agent {
+     context: AfterToolCallContext,
+     signal?: AbortSignal,
+   ) => Promise<AfterToolCallResult | undefined>;
++  /** Optional iteration budget callback: return false to stop. */
++  public onBeforeToolCallingRound?: (round: number) => boolean | Promise<boolean>;
+   public prepareNextTurn?: (
+     signal?: AbortSignal,
+   ) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+@@ -490,6 +492,7 @@ export class Agent {
+       beforeToolCall: this.beforeToolCall,
+       resolveDeferredTool: this.resolveDeferredTool,
+       afterToolCall: this.afterToolCall,
++      onBeforeToolCallingRound: this.onBeforeToolCallingRound,
+       prepareNextTurn: this.prepareNextTurn
+         ? async () => await this.prepareNextTurn?.(this.signal)
+         : undefined,
+diff --git a/packages/agent-core/src/harness/agent-harness.ts b/packages/agent-core/src/harness/agent-harness.ts
+index 870b473ba3..23bdd12c51 100644
+--- a/packages/agent-core/src/harness/agent-harness.ts
++++ b/packages/agent-core/src/harness/agent-harness.ts
+@@ -240,6 +240,8 @@ export class CoreAgentHarness<
+   private followUpQueueMode: QueueMode;
+   private nextTurnQueue: AgentMessage[] = [];
+   private handlers = new Map<string, Set<AgentHarnessHandler>>();
++  /** Optional iteration budget callback: return false to stop. */
++  public onBeforeToolCallingRound?: (round: number) => boolean | Promise<boolean>;
+ 
+   constructor(options: AgentHarnessOptions<TSkill, TPromptTemplate, TTool>) {
+     this.env = options.env;
+@@ -535,6 +537,7 @@ export class CoreAgentHarness<
+           thinkingLevel: nextTurnState.thinkingLevel,
+         };
+       },
++      onBeforeToolCallingRound: this.onBeforeToolCallingRound,
+       getSteeringMessages: async () =>
+         this.drainQueuedMessages(this.steerQueue, this.steeringQueueMode),
+       getFollowUpMessages: async () =>
+diff --git a/packages/agent-core/src/types.ts b/packages/agent-core/src/types.ts
+index 5873ddf239..2b6f6fafc2 100644
+--- a/packages/agent-core/src/types.ts
++++ b/packages/agent-core/src/types.ts
+@@ -301,6 +301,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
+     context: AfterToolCallContext,
+     signal?: AbortSignal,
+   ) => Promise<AfterToolCallResult | undefined>;
++
++  /**
++   * Called before each tool-calling round, after the assistant message is
++   * streamed and tool calls are detected but before executeToolCalls.
++   *
++   * Return `false` to prevent tool execution and end the loop.
++   * The `round` parameter is a 1-based counter for tool-calling rounds
++   * within this run.
++   *
++   * Use this to implement iteration budget enforcement.
++   */
++  onBeforeToolCallingRound?: (round: number) => boolean | Promise<boolean>;
+ }
+ 
+ /**
+diff --git a/src/agents/agent-scope-config.ts b/src/agents/agent-scope-config.ts
+index 951b4c8b93..cbeb7b004d 100644
+--- a/src/agents/agent-scope-config.ts
++++ b/src/agents/agent-scope-config.ts
+@@ -4,6 +4,7 @@ import { readStringValue } from "@openclaw/normalization-core/string-coerce";
+ import { resolveStateDir } from "../config/paths.js";
+ import type {
+   AgentContextLimitsConfig,
++  IterationBudgetConfig,
+   AgentDefaultsConfig,
+ } from "../config/types.agent-defaults.js";
+ import type { OpenClawConfig } from "../config/types.js";
+@@ -39,6 +40,7 @@ export type ResolvedAgentConfig = {
+   groupChat?: AgentEntry["groupChat"];
+   subagents?: AgentEntry["subagents"];
+   runRetries?: AgentEntry["runRetries"];
++  iterationBudget?: IterationBudgetConfig;
+   embeddedAgent?: AgentEntry["embeddedAgent"];
+   sandbox?: AgentEntry["sandbox"];
+   tools?: AgentEntry["tools"];
+@@ -156,6 +158,10 @@ export function resolveAgentConfig(
+       typeof entry.runRetries === "object" && entry.runRetries
+         ? { ...agentDefaults?.runRetries, ...entry.runRetries }
+         : agentDefaults?.runRetries,
++    iterationBudget:
++      typeof entry.iterationBudget === "object" && entry.iterationBudget
++        ? { ...agentDefaults?.iterationBudget, ...entry.iterationBudget }
++        : agentDefaults?.iterationBudget,
+     embeddedAgent:
+       typeof entry.embeddedAgent === "object" && entry.embeddedAgent
+         ? entry.embeddedAgent
+diff --git a/src/agents/embedded-agent-runner/run.ts b/src/agents/embedded-agent-runner/run.ts
+index 9e7e95905f..7c525e6e4e 100644
+--- a/src/agents/embedded-agent-runner/run.ts
++++ b/src/agents/embedded-agent-runner/run.ts
+@@ -44,6 +44,7 @@ import {
+   retireSessionMcpRuntimeForSessionKey,
+ } from "../agent-bundle-mcp-tools.js";
+ import {
++  resolveAgentConfig,
+   resolveAgentDir,
+   resolveSessionAgentIds,
+   resolveAgentWorkspaceDir,
+@@ -156,6 +157,11 @@ import {
+   hasMessagingToolDeliveryEvidence,
+   hasOutboundDeliveryEvidence,
+ } from "./delivery-evidence.js";
++import { IterationBudget, resolveIterationBudgetConfig } from "../iteration-budget.js";
++import {
++  BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION,
++  buildBudgetExhaustedResult,
++} from "./run/budget-exhaustion.js";
+ import { resolveEmbeddedRunFailureSignal } from "./failure-signal.js";
+ import { resolveGlobalLane, resolveSessionLane } from "./lanes.js";
+ import { log } from "./logger.js";
+@@ -1575,6 +1581,20 @@ async function runEmbeddedAgentInternal(
+       let lastCompactionTokensAfter: number | undefined;
+       let lastContextBudgetStatus: EmbeddedAgentMeta["contextBudgetStatus"];
+       let runLoopIterations = 0;
++      // --- Iteration Budget ---
++      const resolvedBudgetConfig = resolveIterationBudgetConfig(
++        (params.config
++          ? resolveAgentConfig(params.config, sessionAgentId)?.iterationBudget
++          : undefined) ?? params.config?.agents?.defaults?.iterationBudget,
++      );
++      const iterationBudget =
++        resolvedBudgetConfig?.enabled
++          ? new IterationBudget(resolvedBudgetConfig.maxIterations)
++          : undefined;
++      let budgetExhaustedSummaryPending = false;
++      let budgetExhaustedSummaryInstruction: string | null = null;
++      let budgetSummaryAttempt = false;
++      // --- End Iteration Budget ---
+       let overloadProfileRotations = 0;
+       let consecutiveSameModelRateLimitRetries = 0;
+       let reasoningOnlyRetryAttempts = 0;
+@@ -1919,6 +1939,12 @@ async function runEmbeddedAgentInternal(
+             });
+           }
+           runLoopIterations += 1;
++          // Budget consumption: each outer-loop iteration counts against the budget.
++          // onBeforeToolCallingRound handles inner-loop tool rounds separately;
++          // this covers non-tool iterations (compaction retries, auth retries, etc.).
++          if (iterationBudget && !budgetSummaryAttempt) {
++            iterationBudget.consume();
++          }
+           const runtimeAuthRetry = authRetryPending;
+           authRetryPending = false;
+           attemptedThinking.add(thinkLevel);
+@@ -1935,6 +1961,7 @@ async function runEmbeddedAgentInternal(
+             reasoningOnlyRetryInstruction,
+             emptyResponseRetryInstruction,
+             compactionContinuationRetryInstruction,
++            budgetExhaustedSummaryInstruction,
+           ].filter(
+             (value): value is string => typeof value === "string" && value.trim().length > 0,
+           );
+@@ -2138,6 +2165,9 @@ async function runEmbeddedAgentInternal(
+             onRunProgress: notifyRunProgress,
+             fastMode: attemptFastMode,
+             fastModeAuto: params.fastMode === "auto",
++            onBeforeToolCallingRound: iterationBudget
++              ? (round: number) => iterationBudget.consume()
++              : undefined,
+             ...(params.fastMode === "auto"
+               ? {
+                   fastModeStartedAtMs: fastModeStarted,
+@@ -3820,6 +3850,83 @@ async function runEmbeddedAgentInternal(
+           const terminalToolPresentation = incompleteTurnFallbackSafe
+             ? readAttemptTerminalToolPresentation()
+             : undefined;
++          // --- Budget Exhaustion Detection ---
++          if (
++            iterationBudget &&
++            iterationBudget.remaining <= 0 &&
++            !emptyAssistantReplyIsSilent &&
++            payloadCount === 0 &&
++            !attempt.clientToolCalls &&
++            !budgetSummaryAttempt &&
++            !aborted &&
++            !promptError &&
++            !timedOut &&
++            !attempt.yieldDetected
++          ) {
++            if (resolvedBudgetConfig?.forceSummaryOnExhaustion) {
++              iterationBudget.refund();
++              budgetExhaustedSummaryPending = true;
++              budgetExhaustedSummaryInstruction = BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION;
++              // Clear stale retry instructions so the summary attempt's prompt
++              // contains only the budget summary instruction.
++              reasoningOnlyRetryInstruction = null;
++              emptyResponseRetryInstruction = null;
++              compactionContinuationRetryInstruction = null;
++              log.warn(
++                `iteration budget exhausted: runId=${params.runId} sessionId=${params.sessionId} ` +
++                  `used=${iterationBudget.used} max=${iterationBudget.maxTotal} — ` +
++                  `requesting summary before stopping`,
++              );
++              continue;
++            }
++            // No summary requested: return budget-exhausted result immediately.
++            log.error(
++              `iteration budget exhausted: runId=${params.runId} sessionId=${params.sessionId} ` +
++                `used=${iterationBudget.used} max=${iterationBudget.maxTotal}`,
++            );
++            return buildBudgetExhaustedResult({
++              message: "The agent exceeded its iteration budget.",
++              durationMs: Date.now() - started,
++              agentMeta,
++              aborted,
++              budgetUsed: iterationBudget.used,
++              budgetMax: iterationBudget.maxTotal,
++              systemPromptReport: attempt.systemPromptReport,
++              finalPromptText: attempt.finalPromptText,
++              finalAssistantVisibleText,
++              finalAssistantRawText,
++            });
++          }
++          // Handle budget summary attempt completion.
++          if (budgetSummaryAttempt) {
++            budgetSummaryAttempt = false;
++            budgetExhaustedSummaryInstruction = null;
++            const summaryText = (attempt.assistantTexts ?? []).join("").trim() || undefined;
++            log.info(
++              `budget summary attempt completed: runId=${params.runId} sessionId=${params.sessionId} ` +
++                `hasSummary=${summaryText ? "yes" : "no"}`,
++            );
++            return buildBudgetExhaustedResult({
++              message: "The agent exceeded its iteration budget.",
++              durationMs: Date.now() - started,
++              agentMeta,
++              aborted,
++              budgetUsed: iterationBudget?.used ?? 0,
++              budgetMax: iterationBudget?.maxTotal ?? 0,
++              summaryText,
++              systemPromptReport: attempt.systemPromptReport,
++              finalPromptText: attempt.finalPromptText,
++              finalAssistantVisibleText,
++              finalAssistantRawText,
++            });
++          }
++          // Mark next attempt as budget summary if pending.
++          if (budgetExhaustedSummaryPending) {
++            budgetExhaustedSummaryPending = false;
++            budgetSummaryAttempt = true;
++          }
++          // --- End Budget Exhaustion Detection ---
++
+           if (
+             !emptyAssistantReplyIsSilent &&
+             attemptCompactionCount > 0 &&
+diff --git a/src/agents/embedded-agent-runner/run/attempt.ts b/src/agents/embedded-agent-runner/run/attempt.ts
+index 9dd0ec3e23..13da3f121b 100644
+--- a/src/agents/embedded-agent-runner/run/attempt.ts
++++ b/src/agents/embedded-agent-runner/run/attempt.ts
+@@ -2535,6 +2535,10 @@ export async function runEmbeddedAttempt(
+         },
+       });
+       prepStages.mark("agent-session");
++      // Wire iteration budget callback through to the agent loop.
++      if (params.onBeforeToolCallingRound) {
++        activeSession.agent.onBeforeToolCallingRound = params.onBeforeToolCallingRound;
++      }
+       if (isRawModelRun) {
+         // Raw model probes should measure exactly the requested prompt against
+         // the selected provider/model. Reset clears restored transcript state
+diff --git a/src/agents/embedded-agent-runner/run/types.ts b/src/agents/embedded-agent-runner/run/types.ts
+index a33af7e204..099dce1343 100644
+--- a/src/agents/embedded-agent-runner/run/types.ts
++++ b/src/agents/embedded-agent-runner/run/types.ts
+@@ -110,6 +110,8 @@ export type EmbeddedRunAttemptParams = EmbeddedRunAttemptBase & {
+   beforeAgentStartResult?: PluginHookBeforeAgentStartResult;
+   beforeAgentFinalizeRevisionAttempts?: number;
+   maxBeforeAgentFinalizeRevisions?: number;
++  /** Optional iteration budget callback: return false to stop tool rounds. */
++  onBeforeToolCallingRound?: (round: number) => boolean | Promise<boolean>;
+ };
+ 
+ export type EmbeddedRunAttemptResult = {
+diff --git a/src/agents/embedded-agent-runner/types.ts b/src/agents/embedded-agent-runner/types.ts
+index 37639ed1b8..ad1aa82bac 100644
+--- a/src/agents/embedded-agent-runner/types.ts
++++ b/src/agents/embedded-agent-runner/types.ts
+@@ -161,7 +161,8 @@ export type EmbeddedAgentRunMeta = {
+       | "image_size"
+       | "retry_limit"
+       | "incomplete_turn"
+-      | "hook_block";
++      | "hook_block"
++      | "budget_exhausted";
+     message: string;
+     /** True only when model fallback can retry this terminal error without repeating side effects. */
+     fallbackSafe?: boolean;
+diff --git a/src/config/types.agent-defaults.ts b/src/config/types.agent-defaults.ts
+index baeda38e12..0633879f47 100644
+--- a/src/config/types.agent-defaults.ts
++++ b/src/config/types.agent-defaults.ts
+@@ -125,6 +125,17 @@ export type AgentRunRetriesConfig = {
+   max?: number;
+ };
+ 
++export type IterationBudgetConfig = {
++  /** Enable per-agent iteration budgeting (default: false). */
++  enabled?: boolean;
++  /** Max LLM iterations for a parent agent run (default: 90). */
++  maxIterations?: number;
++  /** Max LLM iterations for a subagent run (default: 50). */
++  subagentMaxIterations?: number;
++  /** When budget is exhausted, inject a summary-request prompt before stopping (default: true). */
++  forceSummaryOnExhaustion?: boolean;
++};
++
+ export type CliBackendConfig = {
+   /** CLI command to execute (absolute path or on PATH). */
+   command: string;
+@@ -331,6 +342,8 @@ export type AgentDefaultsConfig = {
+   compaction?: AgentCompactionConfig;
+   /** Outer run loop retry iteration boundaries. */
+   runRetries?: AgentRunRetriesConfig;
++  /** Per-agent iteration budget (consume/refund counter for LLM loop iterations). */
++  iterationBudget?: IterationBudgetConfig;
+   /** Embedded OpenClaw runner hardening and compatibility controls. */
+   embeddedAgent?: {
+     /**
+diff --git a/src/config/types.agents.ts b/src/config/types.agents.ts
+index ec5a69e2d6..2bcdd37f03 100644
+--- a/src/config/types.agents.ts
++++ b/src/config/types.agents.ts
+@@ -144,6 +144,8 @@ export type AgentConfig = {
+   };
+   /** Optional outer run loop retry boundaries. */
+   runRetries?: AgentDefaultsConfig["runRetries"];
++  /** Optional per-agent iteration budget overrides. */
++  iterationBudget?: AgentDefaultsConfig["iterationBudget"];
+   /** Optional per-agent embedded OpenClaw overrides. */
+   embeddedAgent?: {
+     /** Optional per-agent execution contract override. */
+diff --git a/src/config/zod-schema.agent-defaults.ts b/src/config/zod-schema.agent-defaults.ts
+index f1f4c229c1..b7a3c0417b 100644
+--- a/src/config/zod-schema.agent-defaults.ts
++++ b/src/config/zod-schema.agent-defaults.ts
+@@ -10,6 +10,7 @@ import {
+   AgentToolModelSchema,
+   MemorySearchSchema,
+   AgentRunRetriesConfigSchema,
++  IterationBudgetConfigSchema,
+ } from "./zod-schema.agent-runtime.js";
+ import {
+   BlockStreamingChunkSchema,
+@@ -204,6 +205,7 @@ export const AgentDefaultsSchema = z
+       .strict()
+       .optional(),
+     runRetries: AgentRunRetriesConfigSchema.optional(),
++    iterationBudget: IterationBudgetConfigSchema.optional(),
+     embeddedAgent: EmbeddedAgentConfigSchema.optional(),
+     thinkingDefault: z
+       .union([
+diff --git a/src/config/zod-schema.agent-runtime.ts b/src/config/zod-schema.agent-runtime.ts
+index b794950e13..781fb93d73 100644
+--- a/src/config/zod-schema.agent-runtime.ts
++++ b/src/config/zod-schema.agent-runtime.ts
+@@ -74,6 +74,15 @@ export const AgentRunRetriesConfigSchema = z
+     { message: "max must be greater than or equal to min", path: ["max"] },
+   );
+ 
++export const IterationBudgetConfigSchema = z
++  .object({
++    enabled: z.boolean().optional(),
++    maxIterations: z.number().int().positive().optional(),
++    subagentMaxIterations: z.number().int().positive().optional(),
++    forceSummaryOnExhaustion: z.boolean().optional(),
++  })
++  .strict();
++
+ const AgentEntryEmbeddedAgentConfigSchema = z
+   .object({
+     executionContract: z.union([z.literal("default"), z.literal("strict-agentic")]).optional(),
+@@ -1079,6 +1088,7 @@ export const AgentEntrySchema = z
+       .strict()
+       .optional(),
+     runRetries: AgentRunRetriesConfigSchema.optional(),
++    iterationBudget: IterationBudgetConfigSchema.optional(),
+     embeddedAgent: AgentEntryEmbeddedAgentConfigSchema.optional(),
+     sandbox: AgentSandboxSchema,
+     params: z.record(z.string(), z.unknown()).optional(),

@@ -1,0 +1,792 @@
+================================================================================
+HERMES CODE TRACE: Iteration Budget & Agent Loop Safety
+================================================================================
+
+Feature: Per-agent iteration budgets with thread-safe counters and tool-call
+         loop guardrails that detect repeated failures / non-progressing calls.
+
+Traced from: https://github.com/nousresearch/hermes-agent
+Local path:  /home/alexm-redhat/code/exper/hermes-agent
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1. Architecture Overview
+  2. Component #1: IterationBudget (Core Counter)
+  3. Component #2: ToolCallGuardrailController (Loop Detection)
+  4. Component #3: Agent Initialization (Wiring)
+  5. Component #4: Conversation Loop Integration (Budget Consumption)
+  6. Component #5: Turn Context (Per-Turn Reset)
+  7. Component #6: Tool Executor (Guardrail Enforcement)
+  8. Component #7: Turn Finalizer (Budget Exhaustion Handling)
+  9. Component #8: Budget-Exhaustion Summary (handle_max_iterations)
+  10. Component #9: Delegation / Subagent Budget
+  11. Component #10: Configuration System
+  12. Component #11: Observability (Activity Summary)
+  13. External Dependencies
+  14. Test Coverage
+  15. Data Flow Summary
+
+================================================================================
+1. ARCHITECTURE OVERVIEW
+================================================================================
+
+The feature has two orthogonal subsystems that work together:
+
+  A) IterationBudget — a thread-safe counter that caps the total number of
+     LLM API calls per agent turn. Parent agents default to 90 iterations;
+     subagents default to 50. Each agent gets an independent budget.
+
+  B) ToolCallGuardrailController — a per-turn state machine that tracks
+     tool-call signatures and results. It detects three failure patterns:
+       - Exact repeated failures (same tool + same args)
+       - Same-tool failures with varying args
+       - Idempotent no-progress (read-only tools returning identical results)
+     It issues warnings (injected into tool results) or hard stops (blocking
+     execution + halting the turn) depending on configuration.
+
+Both subsystems are held as instance attributes on the AIAgent class, wired
+during init_agent(), reset at the start of each turn, and enforced inside the
+conversation loop and tool executor.
+
+Key design principles:
+  - IterationBudget is side-effect free (pure counter)
+  - ToolCallGuardrailController is side-effect free (returns decisions)
+  - Runtime code (conversation_loop, tool_executor, run_agent) owns all
+    side effects: injecting messages, blocking execution, halting turns
+  - Warnings are always-on by default; hard stops are opt-in
+  - execute_code iterations are refunded (don't eat budget)
+  - Compression-restart iterations are refunded
+
+================================================================================
+2. COMPONENT #1: IterationBudget (Core Counter)
+================================================================================
+
+File: agent/iteration_budget.py (62 lines)
+Re-exported from: run_agent.py (line 116)
+
+Purpose: Thread-safe per-agent iteration counter with consume/refund semantics.
+
+class IterationBudget:
+    """Thread-safe iteration counter for an agent."""
+
+    def __init__(self, max_total: int)
+        - max_total: The cap (90 for parent, 50 for subagent by default)
+        - _used: int = 0 (consumed count)
+        - _lock: threading.Lock() (thread safety)
+
+    def consume(self) -> bool
+        - Acquires lock, increments _used if _used < max_total
+        - Returns True if allowed, False if budget exhausted
+        - Called once per loop iteration in conversation_loop.py
+
+    def refund(self) -> None
+        - Acquires lock, decrements _used (floor at 0)
+        - Called for execute_code-only iterations (cheap RPC)
+        - Called on compression restarts (retry, not new work)
+        - Called on Ollama context-limit early exits
+
+    @property used -> int
+        - Thread-safe read of _used (acquires lock)
+
+    @property remaining -> int
+        - Thread-safe: max(0, max_total - _used)
+
+State Management:
+  - Held as agent.iteration_budget on each AIAgent instance
+  - Recreated at the start of each turn: IterationBudget(agent.max_iterations)
+  - Thread-safe via threading.Lock for concurrent subagent scenarios
+
+Invariants:
+  - _used never goes below 0 (floor in refund)
+  - _used never exceeds max_total (guard in consume)
+  - All reads and writes hold the lock
+
+================================================================================
+3. COMPONENT #2: ToolCallGuardrailController (Loop Detection)
+================================================================================
+
+File: agent/tool_guardrails.py (476 lines)
+
+Purpose: Side-effect-free controller that tracks per-turn tool-call patterns
+and returns decisions (allow/warn/block/halt). Runtime code owns enforcement.
+
+--- 3.1 Configuration ---
+
+@dataclass(frozen=True)
+class ToolCallGuardrailConfig:
+    warnings_enabled: bool = True          # Soft warnings always on
+    hard_stop_enabled: bool = False        # Hard stops are opt-in
+    exact_failure_warn_after: int = 2      # Warn after N identical failures
+    exact_failure_block_after: int = 5     # Block after N (hard_stop only)
+    same_tool_failure_warn_after: int = 3  # Warn after N same-tool failures
+    same_tool_failure_halt_after: int = 8  # Halt after N (hard_stop only)
+    no_progress_warn_after: int = 2        # Warn after N identical results
+    no_progress_block_after: int = 5       # Block after N (hard_stop only)
+    idempotent_tools: frozenset[str]       # Tools treated as read-only
+    mutating_tools: frozenset[str]         # Tools treated as mutating
+
+    @classmethod from_mapping(data) -> ToolCallGuardrailConfig
+        - Parses the `tool_loop_guardrails` section from config.yaml
+        - Supports nested `warn_after` / `hard_stop_after` sub-objects
+        - Falls back to defaults for missing/invalid values
+
+Idempotent tools (frozen set, 18 entries):
+    read_file, search_files, web_search, web_extract, session_search,
+    browser_snapshot, browser_console, browser_get_images,
+    mcp_filesystem_read_file, mcp_filesystem_read_text_file,
+    mcp_filesystem_read_multiple_files, mcp_filesystem_list_directory,
+    mcp_filesystem_list_directory_with_sizes, mcp_filesystem_directory_tree,
+    mcp_filesystem_get_file_info, mcp_filesystem_search_files
+
+Mutating tools (frozen set, 16 entries):
+    terminal, execute_code, write_file, patch, todo, memory, skill_manage,
+    browser_click, browser_type, browser_press, browser_scroll,
+    browser_navigate, send_message, cronjob, delegate_task, process
+
+--- 3.2 ToolCallSignature ---
+
+@dataclass(frozen=True)
+class ToolCallSignature:
+    tool_name: str
+    args_hash: str  # SHA-256 of canonical JSON
+
+    @classmethod from_call(tool_name, args) -> ToolCallSignature
+        - Canonical JSON: sorted keys, compact separators, default=str
+        - SHA-256 hash for non-reversible identity
+        - Prevents raw argument values from leaking into metadata
+
+--- 3.3 ToolGuardrailDecision ---
+
+@dataclass(frozen=True)
+class ToolGuardrailDecision:
+    action: str = "allow"  # allow | warn | block | halt
+    code: str = "allow"
+    message: str = ""
+    tool_name: str = ""
+    count: int = 0
+    signature: ToolCallSignature | None = None
+
+    @property allows_execution -> bool: action in {"allow", "warn"}
+    @property should_halt -> bool: action in {"block", "halt"}
+    def to_metadata() -> dict  # For result dict / diagnostics
+
+--- 3.4 Controller ---
+
+class ToolCallGuardrailController:
+    def __init__(self, config: ToolCallGuardrailConfig | None = None)
+
+    def reset_for_turn(self) -> None
+        - Clears all per-turn state:
+          _exact_failure_counts: dict[ToolCallSignature, int]
+          _same_tool_failure_counts: dict[str, int]
+          _no_progress: dict[ToolCallSignature, tuple[str, int]]
+          _halt_decision: ToolGuardrailDecision | None
+
+    def before_call(tool_name, args) -> ToolGuardrailDecision
+        - Pre-execution check (only blocks when hard_stop_enabled)
+        - Checks exact_failure_block_after threshold
+        - Checks idempotent no_progress_block_after threshold
+        - Returns "block" decision to prevent execution
+
+    def after_call(tool_name, args, result, *, failed=None) -> ToolGuardrailDecision
+        - Post-execution observation
+        - If failed is None, auto-classifies via classify_tool_failure()
+        - On failure: increments exact + same-tool counters
+        - On success: clears exact + same-tool counters for that signature
+        - For idempotent tools on success: tracks result hash for no-progress
+        - Returns warn/halt decisions based on thresholds
+
+--- 3.5 Helper Functions ---
+
+def canonical_tool_args(args: Mapping) -> str
+    - Sorted compact JSON for stable hashing
+
+def classify_tool_failure(tool_name, result) -> tuple[bool, str]
+    - Safety fallback when callers don't pass explicit `failed=`
+    - Special handling: terminal (exit_code != 0), memory (exceed limit)
+    - file_mutation_result_landed() check (write_file bytes_written,
+      patch success=True are NOT failures even with lint errors)
+    - Generic: checks for "error"/"failed" in first 500 chars
+
+def toolguard_synthetic_result(decision) -> str
+    - JSON error blob for blocked tool calls (injected as tool result)
+
+def append_toolguard_guidance(result, decision) -> str
+    - Appends "[Tool loop warning: ...]" suffix to real tool results
+    - Only for warn/halt actions with a message
+
+def _tool_failure_recovery_hint(tool_name, count) -> str
+    - Action-oriented guidance for recovering from repeated failures
+    - Special terminal-specific hints (pwd && ls -la, absolute paths)
+    - Generic hints (different arguments, narrower query, different tool)
+    - Key constraint: "Do not switch to text-only replies; keep using tools"
+
+--- 3.6 Utility Dependencies ---
+
+File: agent/tool_result_classification.py (27 lines)
+    FILE_MUTATING_TOOL_NAMES = frozenset({"write_file", "patch"})
+    def file_mutation_result_landed(tool_name, result) -> bool
+        - write_file: checks for "bytes_written" key
+        - patch: checks for success=True
+        - Prevents lint errors from being classified as tool failures
+
+File: utils.py (function at line 329)
+    def safe_json_loads(text, default=None) -> Any
+        - json.loads() with graceful error handling
+
+================================================================================
+4. COMPONENT #3: Agent Initialization (Wiring)
+================================================================================
+
+File: agent/agent_init.py
+
+--- 4.1 Function Signature ---
+
+def init_agent(
+    agent,
+    max_iterations: int = 90,          # line 177
+    iteration_budget: "IterationBudget" = None,  # line 230
+    ...
+)
+
+--- 4.2 Budget Initialization (lines 290-294) ---
+
+    agent.model = model
+    agent.max_iterations = max_iterations
+    # Shared iteration budget — parent creates, children inherit.
+    agent.iteration_budget = iteration_budget or IterationBudget(max_iterations)
+
+--- 4.3 Guardrail Initialization (lines 450-451) ---
+
+    agent._tool_guardrails = ToolCallGuardrailController()
+    agent._tool_guardrail_halt_decision: ToolGuardrailDecision | None = None
+
+--- 4.4 Budget Grace Call Flags (lines 536-537) ---
+
+    agent._budget_exhausted_injected = False
+    agent._budget_grace_call = False
+
+    Design note (line 530-535): "No intermediate pressure warnings — they
+    caused models to 'give up' prematurely on complex tasks (#7915)."
+
+--- 4.5 Config-Driven Guardrail Override (lines 1145-1151) ---
+
+    _agent_cfg = load_config().get("agent", {})
+    agent._tool_guardrails = ToolCallGuardrailController(
+        ToolCallGuardrailConfig.from_mapping(
+            _agent_cfg.get("tool_loop_guardrails", {})
+        )
+    )
+
+Imports:
+    from agent.iteration_budget import IterationBudget          # line 34
+    from agent.tool_guardrails import (                         # line 45
+        ToolCallGuardrailConfig,
+        ToolCallGuardrailController,
+        ToolGuardrailDecision,
+    )
+
+================================================================================
+5. COMPONENT #4: Conversation Loop Integration (Budget Consumption)
+================================================================================
+
+File: agent/conversation_loop.py
+
+--- 5.1 Main Loop Condition (line 605) ---
+
+    while (api_call_count < agent.max_iterations
+           and agent.iteration_budget.remaining > 0
+          ) or agent._budget_grace_call:
+
+    This is a dual-guard:
+      - api_call_count < max_iterations (legacy counter)
+      - iteration_budget.remaining > 0 (thread-safe counter)
+      - _budget_grace_call allows one extra iteration after budget exhaustion
+
+--- 5.2 Budget Consumption (lines 624-630) ---
+
+    if agent._budget_grace_call:
+        agent._budget_grace_call = False     # consume grace, exit next iter
+    elif not agent.iteration_budget.consume():
+        _turn_exit_reason = "budget_exhausted"
+        agent._safe_print(f"⚠️  Iteration budget exhausted "
+            f"({agent.iteration_budget.used}/{agent.iteration_budget.max_total})")
+        break
+
+--- 5.3 Refund: execute_code-only iterations (lines 4269-4271) ---
+
+    _tc_names = {tc.function.name for tc in assistant_message.tool_calls}
+    if _tc_names == {"execute_code"}:
+        agent.iteration_budget.refund()
+
+--- 5.4 Refund: compression restart (lines 3733-3734) ---
+
+    if _retry.restart_with_compressed_messages:
+        api_call_count -= 1
+        agent.iteration_budget.refund()
+
+--- 5.5 Refund: Ollama context limit (lines 936-941) ---
+
+    _runtime_context_error = _ollama_context_limit_error(agent, approx_request_tokens)
+    if _runtime_context_error:
+        api_call_count -= 1
+        agent.iteration_budget.refund()
+        break
+
+--- 5.6 Guardrail Halt Check (lines 4230-4251) ---
+
+    agent._execute_tool_calls(assistant_message, messages, ...)
+
+    if agent._tool_guardrail_halt_decision is not None:
+        decision = agent._tool_guardrail_halt_decision
+        _turn_exit_reason = "guardrail_halt"
+        final_response = agent._toolguard_controlled_halt_response(decision)
+        agent._emit_status(f"⚠️ Tool guardrail halted {decision.tool_name}")
+        messages.append({"role": "assistant", "content": final_response})
+        # Also push through stream_delta_callback for SSE clients
+        break
+
+--- 5.7 Near-Limit Error Exit (lines 4756-4758) ---
+
+    if api_call_count >= agent.max_iterations - 1:
+        _turn_exit_reason = f"error_near_max_iterations({error_msg[:80]})"
+        final_response = f"I apologize, but I encountered repeated errors: ..."
+        break
+
+================================================================================
+6. COMPONENT #5: Turn Context (Per-Turn Reset)
+================================================================================
+
+File: agent/turn_context.py
+
+Purpose: Per-turn setup that resets both the iteration budget and the
+guardrail controller state at the start of each user turn.
+
+--- 6.1 Guardrail Reset (lines 224-225) ---
+
+    agent._tool_guardrails.reset_for_turn()
+    agent._tool_guardrail_halt_decision = None
+
+--- 6.2 Budget Recreate (line 245) ---
+
+    agent.iteration_budget = IterationBudget(agent.max_iterations)
+
+Note: The budget is recreated (not reset) each turn, giving a fresh cap.
+This is consistent with each turn being an independent unit of work.
+
+Other per-turn resets in the same function:
+    agent._invalid_tool_retries = 0
+    agent._invalid_json_retries = 0
+    agent._empty_content_retries = 0
+    agent._incomplete_scratchpad_retries = 0
+    agent._codex_incomplete_retries = 0
+    agent._thinking_prefill_retries = 0
+    agent._post_tool_empty_retried = False
+
+================================================================================
+7. COMPONENT #6: Tool Executor (Guardrail Enforcement)
+================================================================================
+
+File: agent/tool_executor.py
+File: run_agent.py (AIAgent methods)
+
+--- 7.1 Concurrent Execution Path (tool_executor.py, lines 425-428) ---
+
+    # Before execution:
+    guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
+    if not guardrail_decision.allows_execution:
+        block_result = agent._guardrail_block_result(guardrail_decision)
+        blocked_by_guardrail = True
+
+--- 7.2 Sequential Execution Path (tool_executor.py, lines 945-954) ---
+
+    # Before execution:
+    guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
+    if not guardrail_decision.allows_execution:
+        _guardrail_block_decision = guardrail_decision
+
+    _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
+
+    # Plugin blocks take priority over guardrail blocks
+
+--- 7.3 Post-Execution Observation (run_agent.py, lines 5196-5214) ---
+
+    def _append_guardrail_observation(self, tool_name, function_args, function_result,
+                                       *, failed: bool) -> str:
+        decision = self._tool_guardrails.after_call(
+            tool_name, function_args, function_result, failed=failed,
+        )
+        if decision.action in {"warn", "halt"}:
+            function_result = append_toolguard_guidance(function_result, decision)
+        if decision.should_halt:
+            self._set_tool_guardrail_halt(decision)
+        return function_result
+
+--- 7.4 Block Result Generation (run_agent.py, lines 5216-5218) ---
+
+    def _guardrail_block_result(self, decision: ToolGuardrailDecision) -> str:
+        self._set_tool_guardrail_halt(decision)
+        return toolguard_synthetic_result(decision)
+
+--- 7.5 Halt State Recording (run_agent.py, lines 5182-5185) ---
+
+    def _set_tool_guardrail_halt(self, decision: ToolGuardrailDecision) -> None:
+        if decision.should_halt and self._tool_guardrail_halt_decision is None:
+            self._tool_guardrail_halt_decision = decision
+
+    Only the FIRST halt decision is recorded (subsequent ones ignored).
+
+--- 7.6 Halt Response Generation (run_agent.py, lines 5187-5193) ---
+
+    def _toolguard_controlled_halt_response(self, decision) -> str:
+        tool = decision.tool_name or "a tool"
+        return (
+            f"I stopped retrying {tool} because it hit the tool-call guardrail "
+            f"({decision.code}) after {decision.count} repeated non-progressing "
+            "attempts. The last tool result explains the blocker; the next step is "
+            "to change strategy instead of repeating the same call."
+        )
+
+================================================================================
+8. COMPONENT #7: Turn Finalizer (Budget Exhaustion Handling)
+================================================================================
+
+File: agent/turn_finalizer.py
+
+--- 8.1 Budget-Exhaustion Detection (lines 53-70) ---
+
+    if final_response is None and (
+        api_call_count >= agent.max_iterations
+        or agent.iteration_budget.remaining <= 0
+    ):
+        _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
+        agent._emit_status(
+            f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations})"
+        )
+        final_response = agent._handle_max_iterations(messages, api_call_count)
+
+    This fires AFTER the main loop exits, as a fallback when the loop
+    exhausted its budget without producing a final text response.
+
+--- 8.2 Completion Determination (lines 124-133) ---
+
+    normal_text_response = str(_turn_exit_reason).startswith("text_response(")
+    completed = (
+        final_response is not None
+        and not failed
+        and (
+            api_call_count < agent.max_iterations
+            or normal_text_response
+        )
+    )
+
+--- 8.3 Kanban Worker Integration (lines 85-117) ---
+
+    When running as a kanban worker and budget is exhausted, records a
+    "timed_out" failure via _record_task_failure() so the dispatcher's
+    failure_limit circuit breaker can fire. Without this, budget-exhausted
+    tasks would silently block and retry forever.
+
+--- 8.4 Guardrail Halt in Result Dict (lines 403-404) ---
+
+    if agent._tool_guardrail_halt_decision is not None:
+        result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
+
+--- 8.5 Turn Diagnostics Logging (lines 213-235) ---
+
+    _budget_used = agent.iteration_budget.used
+    _budget_max = agent.iteration_budget.max_total
+    logger.info(
+        "Turn ended: reason=%s model=%s api_calls=%d/%d budget=%d/%d ..."
+    )
+
+================================================================================
+9. COMPONENT #8: Budget-Exhaustion Summary (handle_max_iterations)
+================================================================================
+
+File: agent/chat_completion_helpers.py (lines 1356-1580)
+Forwarded from: run_agent.py line 5329
+
+def handle_max_iterations(agent, messages, api_call_count) -> str:
+    - Prints "⚠️ Reached maximum iterations" warning
+    - Injects a user message: "You've reached the maximum number of
+      tool-calling iterations allowed. Please provide a final response
+      summarizing what you've found..."
+    - Makes ONE final API call with NO tools (forces text response)
+    - Sanitizes messages (remove internal fields, repair tool-call pairing)
+    - Returns the summary text or an error fallback
+
+    Error fallback (line 1580):
+        f"I reached the maximum iterations ({agent.max_iterations}) but
+        couldn't summarize. Error: {str(e)}"
+
+================================================================================
+10. COMPONENT #9: Delegation / Subagent Budget
+================================================================================
+
+File: tools/delegate_tool.py
+File: hermes_cli/config.py (delegation defaults)
+
+--- 10.1 Default Subagent Budget ---
+
+    DEFAULT_MAX_ITERATIONS = 50  (delegate_tool.py, line 603)
+
+    Config path: delegation.max_iterations (config.py, line 2045)
+        "max_iterations": 50,  # per-subagent iteration cap
+                               # (each subagent gets its own budget,
+                               # independent of the parent's max_iterations)
+
+--- 10.2 Subagent Budget Creation (delegate_tool.py, lines 1163-1166) ---
+
+    # Each subagent gets its own iteration budget capped at max_iterations
+    # (configurable via delegation.max_iterations, default 50).  This means
+    # total iterations across parent + subagents can exceed the parent's
+    # max_iterations.
+
+--- 10.3 Config Authority (delegate_tool.py, lines 2189-2203) ---
+
+    cfg = _load_config()
+    default_max_iter = cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
+    # Model-supplied max_iterations is IGNORED — config value is authoritative
+    # so users get predictable budgets.
+    effective_max_iter = default_max_iter
+
+    This prevents a model from shrinking its own budget via tool arguments.
+
+--- 10.4 Budget Independence ---
+
+    Parent and subagent budgets are completely independent:
+    - Parent: IterationBudget(90) by default
+    - Each subagent: IterationBudget(50) by default
+    - Total iterations = parent budget + (N × subagent budget)
+    - No shared counter — each agent tracks its own usage
+
+================================================================================
+11. COMPONENT #10: Configuration System
+================================================================================
+
+--- 11.1 Parent Agent Budget ---
+
+Source of truth: config.yaml → agent.max_turns (default: 90)
+Env var bridge: HERMES_MAX_ITERATIONS
+Resolution priority (CLI, cli.py lines 3620-3626):
+    1. config.yaml agent.max_turns
+    2. Root-level max_turns (legacy compat)
+    3. HERMES_MAX_ITERATIONS env var
+    4. Default: 90
+
+Gateway bridge (gateway/run.py lines 1369-1403):
+    def _bridge_max_turns_from_config(home):
+        # Reads config.yaml agent.max_turns → sets HERMES_MAX_ITERATIONS
+    def _current_max_iterations() -> int:
+        return int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
+
+    Gateway refreshes on each turn to pick up config changes.
+
+--- 11.2 Subagent Budget ---
+
+Source of truth: config.yaml → delegation.max_iterations (default: 50)
+Applied in: tools/delegate_tool.py → _load_config()
+
+--- 11.3 Tool Loop Guardrails ---
+
+Source of truth: config.yaml → tool_loop_guardrails
+Default config (hermes_cli/config.py, lines 1274-1287):
+    "tool_loop_guardrails": {
+        "warnings_enabled": True,
+        "hard_stop_enabled": False,
+        "warn_after": {
+            "exact_failure": 2,
+            "same_tool_failure": 3,
+            "idempotent_no_progress": 2,
+        },
+        "hard_stop_after": {
+            "exact_failure": 5,
+            "same_tool_failure": 8,
+            "idempotent_no_progress": 5,
+        },
+    }
+
+Applied in: agent_init.py → ToolCallGuardrailConfig.from_mapping()
+
+--- 11.4 Config Ghost Detection ---
+
+hermes_cli/doctor.py (lines 969-1010):
+    - Detects stale HERMES_MAX_ITERATIONS in .env that shadows config.yaml
+    - Warns user and auto-fixes with `hermes doctor --fix`
+
+================================================================================
+12. COMPONENT #11: Observability (Activity Summary)
+================================================================================
+
+File: run_agent.py (lines 3038-3054)
+
+def get_activity_summary(self) -> dict:
+    return {
+        "last_activity_ts": self._last_activity_ts,
+        "last_activity_desc": self._last_activity_desc,
+        "seconds_since_activity": round(elapsed, 1),
+        "current_tool": self._current_tool,
+        "api_call_count": self._api_call_count,
+        "max_iterations": self.max_iterations,
+        "budget_used": self.iteration_budget.used,
+        "budget_max": self.iteration_budget.max_total,
+    }
+
+Consumers:
+    - Gateway timeout handler: checks if agent is idle
+    - Gateway "still working" notifications: shows iteration/max_iterations
+    - Cron scheduler inactivity timeout: kills stuck agents
+    - Gateway busy-session ACK: reports progress to waiting users
+    - Gateway stale session evictor: detects abandoned sessions
+
+================================================================================
+13. EXTERNAL DEPENDENCIES
+================================================================================
+
+Standard library only:
+    - threading (Lock for thread safety in IterationBudget)
+    - hashlib (SHA-256 for tool call signatures)
+    - json (canonical serialization, result parsing)
+    - dataclasses (frozen dataclasses for config and decisions)
+    - time (activity timestamps in get_activity_summary)
+    - typing (type annotations)
+
+Internal dependencies:
+    - utils.safe_json_loads (graceful JSON parsing)
+    - agent.tool_result_classification.file_mutation_result_landed
+      (prevents lint errors from being classified as tool failures)
+
+No external packages required for the core iteration budget and guardrails.
+
+================================================================================
+14. TEST COVERAGE
+================================================================================
+
+--- 14.1 IterationBudget Tests ---
+
+File: tests/run_agent/test_iteration_budget_race.py (107 lines)
+
+    test_iteration_budget_used_is_thread_safe()
+        - 10 threads × 200 ops, concurrent consume + refund + used reads
+        - Verifies no crashes or data races
+
+    test_iteration_budget_consume_returns_false_when_exhausted()
+        - Budget(3): 3× True, then False
+
+    test_iteration_budget_refund_restores_consume()
+        - Budget(2): exhaust → refund → can consume again
+
+    test_iteration_budget_used_reflects_consume_and_refund()
+        - Verifies used property tracks consume/refund accurately
+
+    test_iteration_budget_remaining()
+        - Verifies remaining = max_total - used
+
+--- 14.2 ToolCallGuardrailController Tests ---
+
+File: tests/agent/test_tool_guardrails.py (259 lines, 11 tests)
+
+    test_tool_call_signature_hashes_canonical_nested_unicode_args_without_exposing_raw_args()
+    test_default_config_is_soft_warning_only_with_hard_stop_disabled()
+    test_config_parses_nested_warn_and_hard_stop_thresholds()
+    test_default_repeated_identical_failed_call_warns_without_blocking()
+    test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution()
+    test_success_resets_exact_signature_failure_streak()
+    test_file_mutation_lint_error_result_is_not_a_tool_failure()
+    test_same_tool_varying_args_warns_by_default_without_halting()
+    test_hard_stop_enabled_halts_same_tool_varying_args_failure_streak()
+    test_idempotent_no_progress_repeated_result_warns_without_blocking_by_default()
+    test_hard_stop_enabled_blocks_idempotent_no_progress_future_repeat()
+    test_mutating_or_unknown_tools_are_not_blocked_for_repeated_identical_success_output_by_default()
+    test_reset_for_turn_clears_bounded_guardrail_state()
+
+--- 14.3 Runtime Integration Tests ---
+
+File: tests/run_agent/test_tool_call_guardrail_runtime.py (356 lines, 8 tests)
+
+    test_default_sequential_path_warns_repeated_exact_failure_without_blocking_execution()
+    test_config_enabled_hard_stop_blocks_repeated_exact_failure_before_execution()
+    test_sequential_after_call_appends_guidance_to_tool_result_without_extra_messages()
+    test_same_tool_failure_warning_tells_model_to_recover_with_tools()
+    test_config_enabled_hard_stop_concurrent_path_does_not_submit_blocked_calls_and_preserves_result_order()
+    test_plugin_pre_tool_block_wins_without_counting_as_toolguard_block()
+    test_default_run_conversation_warns_without_guardrail_halt()
+    test_config_enabled_hard_stop_run_conversation_returns_controlled_guardrail_halt_without_top_level_error()
+    test_guardrail_halt_emits_final_response_through_stream_delta_callback()
+
+--- 14.4 Other Related Tests ---
+
+    tests/run_agent/test_run_agent.py
+        - test_budget_grace_call_flags (line 5717)
+        - _handle_max_iterations tests (lines 3356-3422)
+
+    tests/agent/test_turn_context.py
+        - Turn context setup including budget reset
+
+    tests/agent/test_turn_finalizer_cleanup_guard.py
+        - Stub includes _tool_guardrail_halt_decision = None
+
+    tests/gateway/test_cached_agent_max_iterations.py
+        - Gateway refresh of max_iterations on cached agents
+
+================================================================================
+15. DATA FLOW SUMMARY
+================================================================================
+
+Entry Point → Flow:
+
+1. USER MESSAGE ARRIVES
+   ↓
+2. build_turn_context() [agent/turn_context.py]
+   → agent._tool_guardrails.reset_for_turn()
+   → agent._tool_guardrail_halt_decision = None
+   → agent.iteration_budget = IterationBudget(agent.max_iterations)
+   ↓
+3. MAIN LOOP [agent/conversation_loop.py]
+   while (api_call_count < max_iterations AND budget.remaining > 0)
+         OR _budget_grace_call:
+   ↓
+   3a. budget.consume() → False? → break (budget_exhausted)
+   ↓
+   3b. API CALL → response
+   ↓
+   3c. Has tool_calls?
+       → YES: _execute_tool_calls() [agent/tool_executor.py]
+              ↓
+              For each tool call:
+                before_call() → block? → synthetic error result
+                                         + _set_tool_guardrail_halt()
+                execute tool → result
+                after_call(result, failed=) → warn? → append guidance
+                                            → halt? → _set_tool_guardrail_halt()
+              ↓
+              Check _tool_guardrail_halt_decision → set? → break (guardrail_halt)
+              ↓
+              execute_code only? → budget.refund()
+       → NO (text response): final_response = content → break
+   ↓
+   3d. Compression restart? → api_call_count -= 1; budget.refund()
+   ↓
+   3e. Ollama context error? → budget.refund(); break
+   ↓
+4. LOOP EXIT
+   ↓
+5. finalize_turn() [agent/turn_finalizer.py]
+   → budget exhausted + no response?
+     → _handle_max_iterations() → inject summary request → 1 more API call
+   → Build result dict with budget/guardrail metadata
+   → Persist session, save trajectory
+   → Return result to caller
+
+Config hierarchy:
+    config.yaml → agent.max_turns (90)     → agent.max_iterations
+    config.yaml → delegation.max_iterations (50) → subagent.max_iterations
+    config.yaml → tool_loop_guardrails     → ToolCallGuardrailConfig
+    env: HERMES_MAX_ITERATIONS             → fallback for gateway
+
+================================================================================
+END OF TRACE
+================================================================================

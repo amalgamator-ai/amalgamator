@@ -1,0 +1,185 @@
+================================================================================
+CODE PORT PLAN SUMMARY V1
+================================================================================
+
+Feature: Iteration Budget & Agent Loop Safety
+Source:  Hermes Agent (Python) → Target: OpenClaw (TypeScript)
+Date:    2026-06-27
+Version: V1 (Initial)
+
+================================================================================
+1. WORK DONE TO GENERATE THIS PLAN
+================================================================================
+
+1.1  SOURCE ANALYSIS (Hermes Agent)
+─────────────────────────────────────
+
+  Read and analyzed the complete Hermes code trace covering 15 components:
+  - agent/iteration_budget.py (62 lines) — the core IterationBudget class
+  - agent/tool_guardrails.py (476 lines) — ToolCallGuardrailController
+  - agent/agent_init.py — budget and guardrail wiring during initialization
+  - agent/conversation_loop.py — budget consumption in the main loop
+  - agent/turn_context.py — per-turn budget reset
+  - agent/tool_executor.py — guardrail enforcement in tool execution
+  - agent/turn_finalizer.py — budget exhaustion detection and handling
+  - agent/chat_completion_helpers.py — handle_max_iterations summary logic
+  - tools/delegate_tool.py — subagent budget (50 default)
+  - hermes_cli/config.py — configuration defaults and parsing
+  - gateway/run.py — gateway bridge for max_iterations
+  - Test files (4 test suites, 24+ test cases)
+
+  Read the actual Python source of agent/iteration_budget.py to verify the
+  code trace accuracy and understand exact implementation details.
+
+1.2  TARGET ANALYSIS (OpenClaw)
+────────────────────────────────
+
+  Read and analyzed the complete OpenClaw code trace covering 14 components
+  plus comprehensive analysis of integration points.
+
+  Read actual source files:
+  - src/config/types.agent-defaults.ts — config type patterns and conventions
+  - src/config/types.agents.ts — per-agent config structure
+  - src/config/types.tools.ts — tool config patterns (ToolLoopDetectionConfig)
+  - src/agents/embedded-agent-runner/run/helpers.ts — full 262 lines for
+    resolveMaxRunRetryIterations() pattern (the template for budget resolver)
+  - src/agents/embedded-agent-runner/run/retry-limit.ts — full 54 lines for
+    handleRetryLimitExhaustion() pattern (template for budget exhaustion)
+  - src/agents/embedded-agent-runner/post-compaction-loop-guard.ts — guard
+    pattern (factory function returning observation API)
+  - src/logging/diagnostic-session-state.ts — session state types
+  - src/agents/stable-stringify.ts — existing utility (reusable)
+  - src/agents/embedded-agent-runner/run.ts — main loop sections:
+    - Lines 1540-1700 (initialization before loop)
+    - Lines 1850-2000 (while(true) entry and retry check)
+    - Lines 2500-2600 (compaction handling)
+    - Lines 3800-3900 (compaction continuation)
+  - src/agents/agent-tools.before-tool-call.ts — loop detection integration
+  - src/agents/tool-loop-detection.ts — existing loop detection types
+  - src/agents/embedded-agent-runner/types.ts — EmbeddedAgentRunResult type
+  - Zod schema files for validation patterns
+
+  Searched for:
+  - All usages of runLoopIterations, MAX_RUN_LOOP_ITERATIONS
+  - handleRetryLimitExhaustion consumers
+  - Productive turn tracking (found NONE — confirming the gap)
+  - Config naming conventions (Config suffix, Zod Schema suffix)
+  - Error handling patterns (error.kind discriminated unions)
+
+1.3  GAP ANALYSIS
+──────────────────
+
+  Identified 8 specific gaps where Hermes has capabilities OpenClaw lacks:
+  1. Per-agent turn counter (IterationBudget class)
+  2. Budget-aware loop condition (productive iteration tracking)
+  3. Budget exhaustion → forced summary (handle_max_iterations)
+  4. Configurable per-agent iteration caps
+  5. Budget refund for compaction restarts
+  6. Grace call mechanism
+  7. Activity observability with budget fields
+  8. Tool loop detection disabled by default
+
+  Assessed which gaps to port (6 of 8) and which to skip for V1 (2 of 8:
+  grace call mechanism and execute_code refund, because they don't have
+  direct OpenClaw equivalents).
+
+1.4  DESIGN DECISIONS
+──────────────────────
+
+  Made the following key design decisions:
+
+  a) DON'T port ToolCallGuardrailController — OpenClaw already has a
+     sophisticated tool-loop-detection.ts with 5 detector kinds. The
+     architectures differ (sliding window vs per-turn state machine)
+     but both solve the same problem. Replacing would be higher risk
+     and lower value than adding the missing iteration budget.
+
+  b) DON'T add threading.Lock — Node.js is single-threaded, so the
+     IterationBudget class needs no synchronization.
+
+  c) DO use the "consume after productive response" integration strategy
+     rather than "consume at loop top" — this has a single integration
+     point and avoids modifying the 22 continue paths in run.ts.
+
+  d) DO add config flag (enabled: true by default) for safe rollback
+     without code changes.
+
+  e) DO enable tool loop detection warnings by default — aligns with
+     Hermes's design principle and addresses documented OpenClaw issues.
+
+  f) DO use a callback pattern for the summary LLM call in budget
+     exhaustion handler — avoids tight coupling with provider layer.
+
+
+================================================================================
+2. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+ITERATION 1 (V1) — Current
+────────────────────────────
+
+  This is the initial iteration. The plan was generated from scratch by:
+
+  1. Deep analysis of both source (Hermes) and target (OpenClaw) codebases,
+     reading actual source files — not just trace summaries — to understand
+     exact TypeScript conventions, config patterns, type naming, and
+     integration points.
+
+  2. Careful scoping to maximize impact while minimizing risk:
+     - Core IterationBudget class: 62 Python lines → ~45 TypeScript lines
+     - Config types + Zod schema: ~60 lines across 4 files
+     - Config resolver: ~40 lines (following existing pattern exactly)
+     - Run loop integration: ~20 lines inserted into run.ts
+     - Budget exhaustion handler: ~100 lines (new file)
+     - Diagnostic state: ~6 lines added to existing type
+     - Loop detection default: 1 line changed
+     - Tests: ~100 lines across 2 test files
+
+  3. Risk analysis covering:
+     - Productive vs retry iteration disambiguation (the trickiest part)
+     - Budget interaction with failover/model switching
+     - Subagent budget wiring
+     - Memory/performance impact (negligible)
+     - Rollback plan (config flag, no code change needed)
+
+  Total estimated new/modified code: ~400 lines across 10 files
+  (2 new modules, 2 new test files, 6 modified existing files)
+
+  No prior iterations exist. Future iterations would address:
+  - Refinements based on implementation experience
+  - Subagent budget wiring for non-A2A delegation
+  - Potential execute_code-equivalent refund if OpenClaw adds such tools
+  - Intermediate budget pressure warnings (Hermes deliberately removed these
+    per issue #7915, so we skip them initially and can revisit)
+
+
+================================================================================
+3. PLAN STRUCTURE
+================================================================================
+
+  The plan consists of 11 incremental steps:
+
+  Step  1: Create IterationBudget class (NEW: iteration-budget.ts)
+  Step  2: Add configuration types (MODIFY: types.agent-defaults.ts, types.agents.ts)
+  Step  3: Add Zod schema validation (MODIFY: zod-schema.agent-defaults.ts)
+  Step  4: Add config resolution function (MODIFY: run/helpers.ts)
+  Step  5: Integrate budget into the main run loop (MODIFY: run.ts) ← most complex
+  Step  6: Add budget-exhaustion summary handler (NEW: run/budget-exhaustion.ts)
+  Step  7: Add budget fields to diagnostic session state (MODIFY: diagnostic-session-state.ts)
+  Step  8: Add budget refund for compaction restarts (MODIFY: run.ts)
+  Step  9: Enable tool loop detection warnings by default (MODIFY: tool-loop-detection.ts)
+  Step 10: Add unit tests for IterationBudget (NEW: iteration-budget.test.ts)
+  Step 11: Add integration tests (NEW: run.iteration-budget.test.ts)
+
+  Steps are ordered so each builds on the previous. Steps 1-4 are pure additions
+  (no behavioral change). Steps 5-8 add the runtime behavior. Step 9 is an
+  independent improvement. Steps 10-11 verify everything.
+
+  Risk: LOW for steps 1-4, 7, 9-10. MEDIUM for steps 5-6, 8, 11.
+
+  New external dependencies: NONE
+  Rollback: Config flag (iterationBudget.enabled: false)
+
+================================================================================
+END OF SUMMARY
+================================================================================

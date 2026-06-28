@@ -1,0 +1,20 @@
+SUCCESS
+
+Feature: Iteration Budget & Agent Loop Safety
+Runtime Iteration: V1
+Date: 2026-06-28
+
+Build: PASS
+Ported Feature Tests: 193/193 PASS
+Relevant Shard Tests: 1,814+ PASS (2 full shards clean)
+
+All ~59 test failures across 8 shards are pre-existing OpenClaw issues
+(provider catalog compat, plugin mock gaps, timing flakes, SDK budget drift)
+with zero overlap to the 20 files in our patch.
+
+Patch: code_gen_runtime_V1.patch
+Files: 20 (16 modified, 4 new)
+Lines: +1,020 / -1
+
+No code fixes were required. The ported code from code_gen_review_V3.patch
+is correct as-is.

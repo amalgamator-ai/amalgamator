@@ -1,0 +1,667 @@
+================================================================================
+CODE PORT PLAN REVIEW V2 (CORRECTED)
+Iteration Budget & Agent Loop Safety -- Hermes -> OpenClaw
+================================================================================
+
+Source:  Hermes Agent (Python)  -> Target: OpenClaw (TypeScript)
+Feature: Per-agent iteration budget with consume/refund semantics,
+         budget-exhaustion forced summary, and configuration.
+Porting Complexity: LOW-MEDIUM (core module 62 lines; integration touches
+                    ~14 files across 2 packages due to inner-loop threading)
+
+This is the CORRECTED plan produced by reviewing V2 against the actual
+OpenClaw source code.  Every issue identified during review is marked with
+[FIX #N] to cross-reference the review summary.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  PART A -- SCOPE & STRATEGY
+    A.1  What We Port (In Scope)
+    A.2  What We Don't Port (Out of Scope)
+    A.3  Key Language/Platform Differences
+    A.4  Reuse of Existing OpenClaw Infrastructure
+    A.5  CRITICAL ARCHITECTURAL FINDING (V2-only)
+
+  PART B -- STEP-BY-STEP IMPLEMENTATION PLAN
+    Step 1:  Create IterationBudget class
+    Step 2:  Add configuration types
+    Step 3:  Add Zod schema validation
+    Step 4:  Extend resolveAgentConfig with iterationBudget merge logic
+    Step 5:  Add config resolution function
+    Step 6:  Add onBeforeToolCallingRound callback to agent-core
+    Step 7:  Thread budget callback from attempt.ts to agent-core
+    Step 8:  Integrate budget creation and exhaustion detection in run.ts
+    Step 9:  Extend EmbeddedAgentRunMeta error kind union
+    Step 10: Add budget-exhaustion result builder
+    Step 11: Add budget-exhaustion summary injection in run.ts
+    Step 12: Add budget refund for compaction restarts
+    Step 13: Add budget metadata to run result
+    Step 14: Enable tool loop detection warnings by default
+    Step 15: Add unit tests for IterationBudget
+    Step 16: Add integration tests for budget in run loop
+
+  PART C -- RISK ANALYSIS
+
+
+================================================================================
+PART A -- SCOPE & STRATEGY
+================================================================================
+
+  [Parts A.1 through A.4 are unchanged from V2. Omitted for brevity.
+   Refer to the original V2 plan for full text.]
+
+
+A.5  CRITICAL ARCHITECTURAL FINDING (V2-only)
+-----------------------------------------------
+
+  [Unchanged from V2. The two-level loop architecture finding is correct
+   and verified against actual source code. The inner loop in
+   agent-core/agent-loop.ts (lines 306-437) is confirmed as the
+   tool-calling loop with the while(hasMoreToolCalls) structure.]
+
+  [FIX #6] ADDITIONAL FINDING: shouldStopAfterTurn ALTERNATIVE
+
+    The existing AgentLoopConfig ALREADY has a shouldStopAfterTurn callback
+    (types.ts line 218) that is ALREADY invoked in agent-loop.ts (lines
+    409-419) after each turn. It is called after every assistant turn
+    INCLUDING tool-calling turns. It receives ShouldStopAfterTurnContext
+    with the assistant message, tool results, context, and newMessages.
+
+    shouldStopAfterTurn is NOT currently in AgentOptions (lines 104-153
+    of agent.ts) and is NOT mapped in createLoopConfig (lines 474-508).
+
+    Using shouldStopAfterTurn for budget enforcement would eliminate
+    changes to agent-core/types.ts and agent-core/agent-loop.ts (2 of 3
+    agent-core files). Only agent.ts would need changes (add to
+    AgentOptions and map in createLoopConfig).
+
+    However, the V2 plan's onBeforeToolCallingRound is PREFERRED because:
+    - It's a dedicated callback with clear purpose separation
+    - It won't conflict with future uses of shouldStopAfterTurn
+    - It prevents the next LLM call BEFORE it happens (saves API cost)
+    - shouldStopAfterTurn is async-capable; sync onBeforeToolCallingRound
+      avoids unnecessary async overhead in the hot loop
+
+    The shouldStopAfterTurn approach is documented as a viable fallback
+    if modifying agent-core/types.ts and agent-core/agent-loop.ts is
+    rejected during code review.
+
+
+================================================================================
+PART B -- STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+
+--------------------------------------------------------------------------------
+STEP 1: Create IterationBudget class
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The class implementation is correct.]
+
+
+--------------------------------------------------------------------------------
+STEP 2: Add configuration types
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The type definitions and patterns are correct.]
+
+
+--------------------------------------------------------------------------------
+STEP 3: Add Zod schema validation
+--------------------------------------------------------------------------------
+
+  [FIX #2] CORRECTED: Schema defined in the WRONG file
+  [FIX #3] CORRECTED: .optional() at wrong level
+
+  The V2 plan places IterationBudgetSchema in zod-schema.agent-defaults.ts.
+  The actual established pattern places shared schemas in
+  zod-schema.agent-runtime.ts:
+
+    - AgentRunRetriesConfigSchema is DEFINED in zod-schema.agent-runtime.ts
+      (line 59), WITHOUT .optional()
+    - It is IMPORTED in zod-schema.agent-defaults.ts (line 12)
+    - It is USED as: AgentRunRetriesConfigSchema.optional() (line 206)
+    - It is also used in the per-agent schema inside the same
+      zod-schema.agent-runtime.ts file (line 1081)
+
+  CORRECTED CHANGES:
+
+  TARGET FILE (MODIFY):
+    src/config/zod-schema.agent-runtime.ts
+
+    1. Add and EXPORT IterationBudgetSchema (alongside
+       AgentRunRetriesConfigSchema at ~line 59):
+
+      export const IterationBudgetSchema = z
+        .object({
+          enabled: z.boolean().optional(),
+          maxIterations: z.number().int().positive().optional(),
+          forceSummaryOnExhaustion: z.boolean().optional(),
+        })
+        .strict();
+
+       NOTE: NO .optional() on the schema definition. The .optional()
+       is applied at each USAGE SITE, matching the AgentRunRetriesConfigSchema
+       pattern exactly.
+
+    2. In the per-agent schema object (AgentEntrySchema, alongside
+       runRetries at ~line 1081):
+
+      iterationBudget: IterationBudgetSchema.optional(),
+
+
+  TARGET FILE (MODIFY):
+    src/config/zod-schema.agent-defaults.ts
+
+    1. Add import (alongside AgentRunRetriesConfigSchema at ~line 12):
+
+      import {
+        AgentRunRetriesConfigSchema,
+        IterationBudgetSchema,           // ADD
+      } from "./zod-schema.agent-runtime.js";
+
+    2. Add iterationBudget field to the AgentDefaultsSchema object
+       (alongside runRetries at ~line 206):
+
+      iterationBudget: IterationBudgetSchema.optional(),
+
+
+  TARGET FILE: src/config/zod-schema.agents.ts
+    No direct changes needed. The per-agent schema references
+    AgentEntrySchema from zod-schema.agent-runtime.ts, which already
+    includes iterationBudget from change (2) above.
+
+  OPENCLAW PATTERNS FOLLOWED:
+    - Schema defined in zod-schema.agent-runtime.ts (same as AgentRunRetriesConfigSchema)
+    - Schema exported WITHOUT .optional()
+    - .optional() applied at each usage site
+    - .strict() to reject unknown keys
+    - z.number().int().positive() for iteration counts
+
+
+--------------------------------------------------------------------------------
+STEP 4: Extend resolveAgentConfig with iterationBudget merge logic
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The merge pattern is correct.]
+
+
+--------------------------------------------------------------------------------
+STEP 5: Add config resolution function
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The resolver pattern is correct.]
+
+
+--------------------------------------------------------------------------------
+STEP 6: Add onBeforeToolCallingRound callback to agent-core
+--------------------------------------------------------------------------------
+
+  [Mostly unchanged from V2, with the following clarifications.]
+
+  TARGET FILE (MODIFY):
+    packages/agent-core/src/types.ts
+
+  CHANGES:
+
+    1. Add to AgentLoopConfig interface (alongside shouldStopAfterTurn
+       at ~line 218):
+
+      /**
+       * Called before each tool-calling round in the inner loop.
+       * Return false to stop the loop (budget exhausted, external signal).
+       *
+       * Called synchronously for minimal overhead in the hot loop.
+       * The first invocation is round 1 (before the initial LLM call).
+       *
+       * @param round - 1-based round number within this attempt
+       * @returns true to continue, false to stop before the next LLM call
+       */
+      onBeforeToolCallingRound?: (round: number) => boolean;
+
+
+  TARGET FILE (MODIFY):
+    packages/agent-core/src/agent-loop.ts
+
+  CHANGES:
+
+    1. Inside runAgentLoop(), before the inner while loop (~line 307),
+       add a counter:
+
+      let toolCallingRound = 0;
+
+    2. Inside the inner while loop body, AFTER the abort check (line 313)
+       and BEFORE the turn_start event (line 315), add:
+
+      toolCallingRound += 1;
+      if (
+        config.onBeforeToolCallingRound &&
+        !config.onBeforeToolCallingRound(toolCallingRound)
+      ) {
+        // Caller-signaled stop (e.g. budget exhausted)
+        hasMoreToolCalls = false;
+        break;
+      }
+
+    PRECISE PLACEMENT (verified against actual code):
+      The inner loop body at lines 310-424 has this structure:
+
+        line 310: while (hasMoreToolCalls || pendingMessages.length > 0) {
+        line 311:   if (await stopIfAborted()) { return; }
+        line 315-320: turn_start event
+        line 322-330: pending messages drain
+        line 332-334: abort check
+        line 337-344: streamAssistantResponse()
+        ...
+
+      The callback goes between line 313 (abort check return) and
+      line 315 (turn_start). This ensures:
+      - Aborted runs exit before the budget check
+      - Budget check happens before any new LLM call
+      - Turn events still fire for the interrupted turn
+
+    3. The counter resets to 0 for each outer-loop iteration (line 307).
+       This is fine because the budget callback captures the
+       IterationBudget via closure, and the IterationBudget maintains
+       cumulative state across all rounds and attempts.
+
+  [FIX #7] ADDITIONAL NOTE: agent-harness.ts
+
+    Verification found that agent-harness.ts also has a createLoopConfig
+    method (around line 486). If the embedded agent runner code path goes
+    through AgentHarness instead of Agent, the callback must also be
+    threaded through the harness's createLoopConfig.
+
+    During implementation, verify which createLoopConfig is actually
+    used in the embedded agent path. If both are used, thread the
+    callback through both.
+
+
+--------------------------------------------------------------------------------
+STEP 7: Thread budget callback from attempt.ts to agent-core
+--------------------------------------------------------------------------------
+
+  [FIX #4] CORRECTED: Misleading threading guidance
+  [FIX #5] CORRECTED: Wrong file for EmbeddedRunAttemptParams
+
+  DESCRIPTION:
+    Thread the onBeforeToolCallingRound callback from the attempt setup
+    through the agent session to the agent-core loop config.
+
+  CALL CHAIN (with change points):
+
+    run.ts
+      -> creates IterationBudget, creates callback closure
+      -> passes callback via attempt params
+
+    run/backend.ts (runEmbeddedAttemptWithBackend)
+      -> passes through to runAgentHarnessAttempt -> runEmbeddedAttempt
+
+    run/attempt.ts (runEmbeddedAttempt)
+      -> creates agent session via createEmbeddedAgentSessionWithResourceLoader
+      -> sets callback on agent instance AFTER session creation
+
+    agent-core/agent.ts (Agent class)
+      -> createLoopConfig() includes the callback in AgentLoopConfig
+
+    agent-core/agent-loop.ts (runAgentLoop)
+      -> calls callback before each inner-loop round
+
+
+  CHANGES:
+
+  [FIX #5] TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run/types.ts
+
+    NOTE: The V2 plan said to modify attempt.ts for the params type, but
+    EmbeddedRunAttemptParams is defined in run/types.ts (lines 54-113).
+
+    1. Add onBeforeToolCallingRound to EmbeddedRunAttemptParams:
+
+      // Add alongside other callback fields (~line 95):
+      /** Budget callback: return false to stop tool-calling loop. */
+      onBeforeToolCallingRound?: (round: number) => boolean;
+
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run/attempt.ts
+
+    [FIX #4] IMPORTANT: Do NOT follow the beforeToolCall threading pattern!
+
+    The V2 plan said "follow the beforeToolCall pattern." This is WRONG.
+    beforeToolCall is set via AgentOptions in the Agent constructor
+    (line 255 of agent.ts) but is then OVERWRITTEN by
+    AgentSession.installAgentToolHooks() (lines 498-519 of
+    agent-session.ts). Following this pattern for our callback would
+    risk the callback being silently lost.
+
+    Our onBeforeToolCallingRound callback is NOT overwritten by
+    installAgentToolHooks() (which only touches beforeToolCall and
+    afterToolCall). But the correct approach is to set it DIRECTLY on
+    the agent instance AFTER session creation, rather than relying on
+    the AgentOptions constructor path.
+
+    1. After createEmbeddedAgentSessionWithResourceLoader() returns
+       (~line 2522 area), set the callback on the agent:
+
+      // Set budget callback on agent instance.
+      // This is NOT overwritten by installAgentToolHooks() which only
+      // touches beforeToolCall and afterToolCall.
+      if (params.onBeforeToolCallingRound) {
+        activeSession.agent.onBeforeToolCallingRound =
+          params.onBeforeToolCallingRound;
+      }
+
+       Where `activeSession` is the created AgentSession whose `agent`
+       property is the Agent instance.
+
+
+  TARGET FILE (MODIFY):
+    packages/agent-core/src/agent.ts
+
+    1. Add onBeforeToolCallingRound as public property on Agent class
+       (alongside beforeToolCall at ~line 222):
+
+      /** Budget / iteration callback: return false to stop inner loop. */
+      public onBeforeToolCallingRound?: (round: number) => boolean;
+
+    2. Optionally add to AgentOptions interface (~line 104) for callers
+       who create Agent directly (not through AgentSession):
+
+      /** Called before each tool-calling round. Return false to stop. */
+      onBeforeToolCallingRound?: (round: number) => boolean;
+
+    3. In constructor (~line 255), set from options:
+
+      this.onBeforeToolCallingRound = options.onBeforeToolCallingRound;
+
+    4. In createLoopConfig() (~line 490), map to AgentLoopConfig:
+
+      onBeforeToolCallingRound: this.onBeforeToolCallingRound,
+
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run/backend.ts
+
+    1. Pass onBeforeToolCallingRound through from the outer params
+       to runEmbeddedAttempt. This is a simple pass-through since
+       backend.ts passes the full params object:
+
+       // backend.ts already passes params through:
+       // return runAgentHarnessAttempt(params);
+       // No explicit change needed IF the harness passes params through.
+       // Verify during implementation.
+
+
+  NOTES:
+    - The callback is a CLOSURE over the IterationBudget in run.ts.
+    - The callback is set DIRECTLY on the Agent instance, bypassing
+      the AgentOptions constructor path to avoid any risk of overwriting.
+    - TypeScript will catch missing property declarations (the Agent
+      class must declare the public property).
+    - Integration tests in Step 16 will verify end-to-end threading.
+
+
+--------------------------------------------------------------------------------
+STEP 8: Integrate budget creation and exhaustion detection in run.ts
+--------------------------------------------------------------------------------
+
+  [FIX #1] CORRECTED: Missing payloadCount check in exhaustion detection
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run.ts
+
+  CHANGES:
+
+    Items 1-4 are unchanged from V2. (Imports, budget initialization,
+    tracking variables, attempt dispatch.)
+
+    [FIX #1] Item 5: CORRECTED budget exhaustion detection.
+
+    After the attempt result is processed, in the "Successful Completion"
+    section (~line 3508), BEFORE the existing retry checks
+    (reasoning-only, empty-response), add budget exhaustion detection:
+
+      // --- Budget Exhaustion Detection ---
+      if (
+        iterationBudget &&
+        iterationBudget.remaining <= 0 &&
+        payloadCount === 0 &&            // [FIX #1] CRITICAL: only trigger
+                                         //   if no text response produced.
+                                         //   If model exhausted budget but
+                                         //   naturally finished with text on
+                                         //   the last allowed round, return
+                                         //   the text response normally.
+        !attempt.clientToolCalls &&       // [FIX #1] Not a client tool call
+        !budgetSummaryAttempt &&
+        !aborted &&
+        !promptError
+      ) {
+        // Budget exhausted during this attempt's inner loop.
+        // The inner loop broke because budget.consume() returned false.
+        if (budgetConfig.forceSummaryOnExhaustion) {
+          budgetExhaustedSummaryPending = true;
+          // Continue to the next outer-loop iteration, which will inject
+          // the summary prompt (Step 11).
+          continue;
+        } else {
+          // Return error immediately
+          return buildBudgetExhaustionResult({
+            budget: iterationBudget,
+            durationMs: Date.now() - started,
+            agentMeta,
+            livenessState: resolveRunLivenessState({
+              payloadCount: 0,
+              aborted,
+              timedOut,
+              attempt,
+              incompleteTurnText: null,
+            }),
+          });
+        }
+      }
+
+    WHY payloadCount === 0 IS CRITICAL:
+
+      Without this check, the following scenario is mishandled:
+
+      Budget=90. Model uses 89 rounds of tool calling, then on round 90
+      (last allowed), the model produces a TEXT response instead of
+      tool calls. The inner loop exits naturally (hasMoreToolCalls=false).
+      Budget.remaining=0, but there IS a text response.
+
+      Without the fix: run.ts would trigger the budget exhaustion handler
+      and either request a summary (wasteful) or return an error
+      (incorrect -- the model already answered).
+
+      With the fix: payloadCount > 0, so the budget exhaustion check is
+      skipped. The text response flows through the normal success path.
+      Budget metadata (budgetUsed/budgetMax) is still included in the
+      result meta (Step 13).
+
+    Item 6: Handle summary attempt completion.
+
+    [FIX #8] CORRECTED: The summary attempt return should include all
+    standard result fields for consistency with the normal success path.
+
+      // --- Budget Summary Attempt Result ---
+      if (budgetSummaryAttempt) {
+        budgetSummaryAttempt = false;
+        const summaryText = resolveFinalAssistantVisibleText(
+          sessionLastAssistant,
+        );
+        if (summaryText) {
+          // Summary produced -- return as result with budget metadata.
+          // Include standard result fields alongside budget-specific ones.
+          return {
+            payloads: [{ text: summaryText }],
+            meta: {
+              durationMs: Date.now() - started,
+              agentMeta,
+              aborted,
+              finalAssistantVisibleText: summaryText,
+              ...(iterationBudget
+                ? {
+                    budgetUsed: iterationBudget.used,
+                    budgetMax: iterationBudget.maxTotal,
+                  }
+                : {}),
+              error: {
+                kind: "budget_exhausted" as const,
+                message: `Budget exhausted: ${iterationBudget!.used}/${iterationBudget!.maxTotal}`,
+              },
+            },
+            didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+            didDeliverSourceReplyViaMessageTool:
+              attempt.didDeliverSourceReplyViaMessageTool === true,
+            messagingToolSentTexts: attempt.messagingToolSentTexts,
+            messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
+            messagingToolSentTargets: attempt.messagingToolSentTargets,
+            messagingToolSourceReplyPayloads:
+              attempt.messagingToolSourceReplyPayloads,
+            heartbeatToolResponse: attempt.heartbeatToolResponse,
+            successfulCronAdds: attempt.successfulCronAdds,
+            acceptedSessionSpawns: attempt.acceptedSessionSpawns,
+          };
+        }
+        // Fallback if summary didn't produce text
+        return buildBudgetExhaustionResult({
+          budget: iterationBudget!,
+          durationMs: Date.now() - started,
+          agentMeta,
+          summaryError: "Summary call did not produce visible text",
+        });
+      }
+
+
+--------------------------------------------------------------------------------
+STEP 9: Extend EmbeddedAgentRunMeta error kind union
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The error kind extension is correct.]
+
+
+--------------------------------------------------------------------------------
+STEP 10: Add budget-exhaustion result builder
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The result builder pattern is correct.]
+
+
+--------------------------------------------------------------------------------
+STEP 11: Add budget-exhaustion summary injection in run.ts
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The summary injection pattern is correct.
+   Follows the compactionContinuationRetryInstruction pattern exactly.]
+
+
+--------------------------------------------------------------------------------
+STEP 12: Add budget refund for compaction restarts
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The refund pattern is correct at all three
+   armPostCompaction() locations (lines 2554, 2804, 3843).]
+
+
+--------------------------------------------------------------------------------
+STEP 13: Add budget metadata to run result
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The metadata fields are correct.]
+
+
+--------------------------------------------------------------------------------
+STEP 14: Enable tool loop detection warnings by default
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The default change and test update are correct.]
+
+
+--------------------------------------------------------------------------------
+STEP 15: Add unit tests for IterationBudget
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The test cases are correct and comprehensive.]
+
+
+--------------------------------------------------------------------------------
+STEP 16: Add integration tests for budget in run loop
+--------------------------------------------------------------------------------
+
+  [Unchanged from V2. The test cases cover the right scenarios.]
+
+
+================================================================================
+PART C -- RISK ANALYSIS
+================================================================================
+
+  [Largely unchanged from V2. The following additions address new findings.]
+
+C.2  MEDIUM RISK (additions)
+-----------------------------
+
+  [FIX #4] Callback threading (Step 7)
+    REVISED RISK: The beforeToolCall threading pattern should NOT be
+    followed because beforeToolCall is overwritten by
+    AgentSession.installAgentToolHooks(). The corrected approach sets the
+    callback directly on the Agent instance after session creation.
+
+    - Risk: Setting the property after session creation might not persist
+      if the session recreates or replaces the agent.
+    - Mitigation: AgentSession does not recreate the agent after initial
+      construction. The property persists.
+
+  [FIX #7] Agent-harness.ts createLoopConfig
+    ADDITIONAL RISK: agent-harness.ts has its own createLoopConfig method.
+    If the embedded agent code path goes through AgentHarness instead of
+    Agent directly, the callback must also be threaded there.
+
+    - Risk: Missing the harness path silently disables the budget.
+    - Mitigation: During implementation, trace the exact code path from
+      runEmbeddedAttempt to runAgentLoop and verify which createLoopConfig
+      is called.
+
+
+C.5  DEPENDENCY SUMMARY (corrections)
+----------------------------------------
+
+  [FIX #2] Modified files (main source) - corrections:
+    - src/config/zod-schema.agent-runtime.ts (define + export schema)
+      NOT src/config/zod-schema.agent-defaults.ts for schema definition
+    - src/config/zod-schema.agent-defaults.ts (import + use schema)
+    - src/agents/embedded-agent-runner/run/types.ts (add callback param)
+      NOT src/agents/embedded-agent-runner/run/attempt.ts for type changes
+
+  Full corrected file list:
+
+  New files:
+    - src/agents/iteration-budget.ts (core module)
+    - src/agents/embedded-agent-runner/run/budget-exhaustion.ts (result builder)
+    - src/agents/iteration-budget.test.ts (unit tests)
+    - src/agents/embedded-agent-runner/run.iteration-budget.test.ts (integration)
+
+  Modified files (main source):
+    - src/config/types.agent-defaults.ts (add type)
+    - src/config/types.agents.ts (add type)
+    - src/config/zod-schema.agent-runtime.ts (define + export schema)
+    - src/config/zod-schema.agent-defaults.ts (import + use schema)
+    - src/agents/agent-scope-config.ts (add merge logic)
+    - src/agents/embedded-agent-runner/run/helpers.ts (add resolver)
+    - src/agents/embedded-agent-runner/run/types.ts (add callback param)
+    - src/agents/embedded-agent-runner/types.ts (extend error kind + meta)
+    - src/agents/embedded-agent-runner/run.ts (main integration)
+    - src/agents/embedded-agent-runner/run/attempt.ts (set callback on agent)
+    - src/agents/tool-loop-detection.ts (default change)
+
+  Modified files (agent-core package):
+    - packages/agent-core/src/types.ts (add callback to AgentLoopConfig)
+    - packages/agent-core/src/agent.ts (add property + AgentOptions + createLoopConfig)
+    - packages/agent-core/src/agent-loop.ts (call callback in loop)
+
+
+================================================================================
+END OF CORRECTED PLAN
+================================================================================

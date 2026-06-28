@@ -1,0 +1,199 @@
+================================================================================
+CODE GENERATION REVIEW SUMMARY V1
+Iteration Budget & Agent Loop Safety -- Hermes -> OpenClaw
+================================================================================
+
+REVIEW ITERATION: 1 (Review of code_gen_V1.patch)
+DATE: 2026-06-28
+
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+
+ISSUE #1 [CRITICAL] — Missing imports in run.ts
+--------------------------------------------------------------------------
+AFFECTED CODE:
+  src/agents/embedded-agent-runner/run.ts
+
+WHAT IS WRONG:
+  The V1 patch uses four symbols without importing them:
+    - IterationBudget (class, from ../iteration-budget.js)
+    - resolveIterationBudgetConfig (function, from ../iteration-budget.js)
+    - BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION (constant, from ./run/budget-exhaustion.js)
+    - buildBudgetExhaustedResult (function, from ./run/budget-exhaustion.js)
+  The patch only added `resolveAgentConfig` to the existing `../agent-scope.js`
+  import, but never added import statements for the new modules.
+
+WHY IT MATTERS:
+  This is a compilation error. The code would fail with
+  "Cannot find name 'IterationBudget'" etc. at TypeScript compilation.
+  The V1 summary noted that full tsc could not run due to memory limits
+  in the build environment, so this was not caught.
+
+HOW FIXED:
+  Added two import statements:
+    import { IterationBudget, resolveIterationBudgetConfig }
+      from "../iteration-budget.js";
+    import { BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION, buildBudgetExhaustedResult }
+      from "./run/budget-exhaustion.js";
+
+
+ISSUE #2 [MEDIUM] — Dead code / no-op if block in run.ts
+--------------------------------------------------------------------------
+AFFECTED CODE:
+  src/agents/embedded-agent-runner/run.ts, lines ~1938-1941:
+    if (iterationBudget && !budgetSummaryAttempt) {
+      // Consume is already called via onBeforeToolCallingRound for tool rounds.
+      // This is an additional top-level check for the outer run loop.
+    }
+
+WHAT IS WRONG:
+  The if block body is empty. The comment claims consumption is handled
+  elsewhere, but `onBeforeToolCallingRound` only fires during *tool-calling
+  rounds* inside the inner agent loop. The outer run.ts loop iterates for
+  many non-tool-call reasons (compaction retries, auth retries, empty
+  response retries, timeout retries, rate-limit backoffs, etc.), and those
+  iterations are never counted against the budget.
+
+WHY IT MATTERS:
+  With only `onBeforeToolCallingRound` consuming budget, a run that loops
+  due to compaction retries, auth failures, or empty responses would never
+  exhaust its budget — defeating the core purpose of the feature. The
+  outer-loop counter is the primary budget enforcement point (matching
+  Hermes's conversation_loop.py which counts every LLM call, not just
+  tool rounds).
+
+HOW FIXED:
+  Changed the empty block to actually consume from the budget:
+    if (iterationBudget && !budgetSummaryAttempt) {
+      iterationBudget.consume();
+    }
+
+
+ISSUE #3 [LOW] — Duplicate IterationBudgetConfig type definition
+--------------------------------------------------------------------------
+AFFECTED CODE:
+  src/agents/iteration-budget.ts (lines 22-27):
+    export interface IterationBudgetConfig { ... }
+  src/config/types.agent-defaults.ts (lines 128-137):
+    export type IterationBudgetConfig = { ... };
+
+WHAT IS WRONG:
+  Two identical type definitions exist in different files. The config type
+  in types.agent-defaults.ts is the canonical one (imported by
+  agent-scope-config.ts, referenced by AgentDefaultsConfig). The copy in
+  iteration-budget.ts creates a maintenance burden: changing one without
+  the other causes silent structural drift.
+
+WHY IT MATTERS:
+  While TypeScript structural typing makes the two currently compatible,
+  adding a field to one without the other would cause subtle type errors.
+  OpenClaw's convention is single-source-of-truth for config types.
+
+HOW FIXED:
+  Removed the duplicate interface from iteration-budget.ts and replaced
+  it with an import:
+    import type { IterationBudgetConfig } from "../config/types.agent-defaults.js";
+
+
+ISSUE #4 [LOW] — Schema pattern inconsistency: .optional() baked into schema
+--------------------------------------------------------------------------
+AFFECTED CODE:
+  src/config/zod-schema.agent-runtime.ts:
+    export const IterationBudgetConfigSchema = z.object({...}).strict().optional();
+  src/config/zod-schema.agent-defaults.ts:
+    iterationBudget: IterationBudgetConfigSchema,  // no .optional()
+  src/config/zod-schema.agent-runtime.ts (AgentEntrySchema):
+    iterationBudget: IterationBudgetConfigSchema,  // no .optional()
+
+WHAT IS WRONG:
+  The existing pattern (AgentRunRetriesConfigSchema) does NOT bake
+  .optional() into the schema constant. Instead, usage sites add it:
+    export const AgentRunRetriesConfigSchema = z.object({...}).strict();
+    // usage: runRetries: AgentRunRetriesConfigSchema.optional(),
+
+  The V1 patch bakes .optional() into IterationBudgetConfigSchema itself
+  and then uses it without .optional() at usage sites. This is functionally
+  equivalent but inconsistent with the established project convention.
+
+WHY IT MATTERS:
+  Inconsistency confuses developers following the pattern. Someone adding
+  a new config field who copies the IterationBudgetConfigSchema pattern
+  would break other usage sites that expect to control optionality.
+
+HOW FIXED:
+  Removed .optional() from IterationBudgetConfigSchema definition:
+    export const IterationBudgetConfigSchema = z.object({...}).strict();
+  Added .optional() at usage sites:
+    iterationBudget: IterationBudgetConfigSchema.optional(),
+
+
+================================================================================
+2. ADDITIONAL REVIEW OBSERVATIONS (No fixes needed)
+================================================================================
+
+OBSERVATION A: Core IterationBudget class is correct.
+  The consume/refund/used/remaining semantics match the Hermes Python
+  original faithfully. The RangeError guard for negative maxTotal is a
+  good TypeScript addition. No threading.Lock is needed since Node.js
+  is single-threaded.
+
+OBSERVATION B: Agent-loop onBeforeToolCallingRound callback is well-designed.
+  The round counter placement (outside the outer while, counting only
+  toolUse + length>0 branches) matches the plan. The false-return
+  cleanup (turn_end + agent_end) is correct. The async support
+  (Promise<boolean>) is appropriate.
+
+OBSERVATION C: Budget-exhaustion detection guards are correct.
+  The condition includes all guards from the corrected plan:
+    !emptyAssistantReplyIsSilent, !timedOut, !attempt.yieldDetected,
+    !aborted, !promptError, !attempt.clientToolCalls, !budgetSummaryAttempt
+  These prevent misclassification of timeouts, silent completions, and
+  voluntary yields as budget exhaustion.
+
+OBSERVATION D: Stale instruction cleanup is correct.
+  When entering the forced-summary flow, the code correctly clears
+  reasoningOnlyRetryInstruction, emptyResponseRetryInstruction, and
+  compactionContinuationRetryInstruction to prevent conflicting prompts.
+
+OBSERVATION E: Test coverage is adequate for the current implementation.
+  - 22 unit tests for IterationBudget class and resolveIterationBudgetConfig
+  - 10 tests for budget-exhaustion result builder and instruction
+  - 4 tests for onBeforeToolCallingRound callback in agent loop
+  Total: 36 new tests (running as 84 across 2 vitest project configs)
+
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+V1 (code_gen_V1.patch): Initial implementation
+  - Core IterationBudget class, configuration layer, agent-core callback,
+    run.ts integration, budget-exhaustion helpers, error kind extension
+  - 4 new files + 14 modified files = 18 total files
+  - Tests: 36 new tests (running as 84 across vitest projects)
+
+V1-REVIEW (code_gen_review_V1.patch): Bug fixes and consistency
+  FIXES:
+    #1 [CRITICAL] Added missing imports in run.ts — compilation would fail
+    #2 [MEDIUM]   Fixed dead-code empty if block — budget consumption for
+                  non-tool-call iterations was silently skipped
+    #3 [LOW]      Removed duplicate IterationBudgetConfig type — single
+                  source of truth in config types
+    #4 [LOW]      Fixed Zod schema .optional() pattern to match convention
+
+  NO NEW FILES added. Same 18 files (4 new + 14 modified).
+  ALL TESTS PASS:
+    - iteration-budget.test.ts: 44 passed (2 projects)
+    - budget-exhaustion.test.ts: 20 passed (2 projects)
+    - agent-loop.test.ts: 20 passed
+    - agent-scope.test.ts: 88 passed (regression)
+    - zod-schema.agent-defaults.test.ts: 30 passed (regression)
+    TOTAL: 202 tests, 0 failures
+
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

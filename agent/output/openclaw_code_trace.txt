@@ -1,0 +1,695 @@
+================================================================================
+OPENCLAW CODE TRACE: Iteration Budget & Agent Loop Safety
+================================================================================
+
+Feature Status: PARTIALLY IMPLEMENTED (loop detection heuristics exist;
+                per-agent iteration budget is MISSING)
+
+Traced from: https://github.com/openclaw/openclaw
+Local path:  /home/alexm-redhat/code/exper/openclaw
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1. Architecture Overview & Gap Analysis
+  2. Component #1: Tool Loop Detection (Heuristic-Based)
+  3. Component #2: Post-Compaction Loop Guard
+  4. Component #3: Channel Bot-Pair Loop Protection
+  5. Component #4: Run Retry Limit (MAX_RUN_LOOP_ITERATIONS)
+  6. Component #5: Agent Runner Main Loop (run.ts)
+  7. Component #6: Before-Tool-Call Hook (Integration Point)
+  8. Component #7: Configuration System
+  9. Component #8: Diagnostic Session State (State Storage)
+  10. Component #9: Stable Stringify (Utility)
+  11. Component #10: Agent-to-Agent maxTurns
+  12. Test Coverage
+  13. MISSING: Iteration Budget (Gap Analysis)
+  14. Integration Points for Porting
+
+================================================================================
+1. ARCHITECTURE OVERVIEW & GAP ANALYSIS
+================================================================================
+
+OpenClaw has NO equivalent of Hermes's IterationBudget class. Instead, it has:
+
+A) Tool Loop Detection — a content-hash-based heuristic (tool-loop-detection.ts)
+   that watches for repeated tool calls with identical arguments and results.
+   DISABLED by default (enabled: false). Detects specific patterns (repeated
+   failures, ping-pong, polling loops, unknown tools) but does NOT count total
+   iterations. Fails when volatile messageIds defeat content-hash dedup (#89090).
+
+B) Post-Compaction Loop Guard — detects tool-call loops that persist after
+   context compaction. Only watches a small window post-compaction.
+
+C) Channel Bot-Pair Loop Protection — prevents bot-to-bot reply loops in
+   messaging channels. Rate-limit style (events per window), not iteration-based.
+
+D) Run Retry Limit (MAX_RUN_LOOP_ITERATIONS) — caps the outer retry loop
+   around LLM API calls. This is NOT an iteration budget; it guards against
+   retry storms (rate limits, overloads, auth failures). Default: 24 base +
+   8 per profile candidate, min 32, max 160.
+
+What is MISSING compared to Hermes:
+  - Per-agent turn counter (Hermes: 90 parent, 50 subagent)
+  - Thread-safe consume/refund semantics
+  - Budget-exhaustion summary (forcing model to summarize)
+  - Configurable per-agent iteration caps
+  - Refund for execute_code/compression restarts
+  - Grace call mechanism
+  - The tool loop detection is DISABLED by default
+
+================================================================================
+2. COMPONENT #1: Tool Loop Detection (Heuristic-Based)
+================================================================================
+
+File: src/agents/tool-loop-detection.ts (821 lines)
+
+Purpose: Watches recent tool-call history for repeated no-progress patterns
+and triggers warning/blocking decisions. This is the closest OpenClaw analog
+to Hermes's ToolCallGuardrailController.
+
+--- 2.1 Detection Patterns ---
+
+Five detector kinds:
+  - generic_repeat:       Same tool + same args repeated N times
+  - unknown_tool_repeat:  Repeated calls to a tool that doesn't exist
+  - known_poll_no_progress: Polling tools (command_status, process poll/log)
+  - global_circuit_breaker: Any tool repeated 30+ times with no progress
+  - ping_pong:            Alternating A-B-A-B pattern between two tools
+
+--- 2.2 Thresholds (DEFAULT — disabled by default!) ---
+
+  const DEFAULT_LOOP_DETECTION_CONFIG = {
+    enabled: false,                          // ← DISABLED
+    historySize: 30,                         // sliding window
+    warningThreshold: 10,                    // emit "warning" level
+    unknownToolThreshold: 10,                // block unknown tool
+    criticalThreshold: 20,                   // emit "critical" / block
+    globalCircuitBreakerThreshold: 30,       // absolute circuit breaker
+    detectors: {
+      genericRepeat: true,
+      knownPollNoProgress: true,
+      pingPong: true,
+    },
+  };
+
+--- 2.3 Key Functions ---
+
+function detectToolCallLoop(
+  state: SessionState,
+  toolName: string,
+  params: unknown,
+  config?: ToolLoopDetectionConfig,
+  scope?: ToolLoopDetectionScope,
+): LoopDetectionResult
+  - Returns { stuck: false } or { stuck: true, level, detector, count, message }
+  - Checks all detectors in priority order
+  - "critical" level → blocks tool execution
+  - "warning" level → emits guidance message but allows execution
+
+function recordToolCall(
+  state: SessionState,
+  toolName: string,
+  params: unknown,
+  toolCallId?: string,
+  config?: ToolLoopDetectionConfig,
+  scope?: ToolLoopDetectionScope,
+): void
+  - Records tool call in sliding-window history
+  - Maintains toolCallHistory[] on SessionState
+  - Caps at historySize entries
+
+function recordToolCallOutcome(
+  state: SessionState,
+  params: {
+    toolName, toolParams, toolCallId, result, error, config, runId
+  },
+): ToolCallRecord | undefined
+  - Records the outcome (result hash) of a completed tool call
+  - Enables no-progress detection (same result = no progress)
+  - Special handling for volatile send results (#89090 fix)
+
+function hashToolCall(toolName: string, params: unknown): string
+  - SHA-256 of stable JSON serialization of tool name + params
+
+--- 2.4 Volatile Send Result Handling ---
+
+Problem: Messaging tool results contain per-call volatile IDs (messageId,
+timestamps) that defeat content-hash dedup (#89090).
+
+Solution: stripVolatileSendIds() removes known volatile keys before hashing.
+  VOLATILE_SEND_RESULT_KEYS: messageId, message_id, messageIds, platformMessageId,
+    fileId, pollId, receipt, runId, idempotencyKey, ts, timestamp, sentAt, etc.
+
+--- 2.5 Streak Detection Logic ---
+
+getNoProgressStreak(): Walks history backward counting consecutive calls with
+  the same toolName + argsHash + identical resultHash. Breaks on any result
+  change. Returns count + latestResultHash.
+
+getPingPongStreak(): Detects alternating A-B-A-B patterns in the tail of
+  history. Requires noProgressEvidence (all results within each side are
+  identical) for critical-level blocking.
+
+getUnknownToolRepeatStreak(): Counts consecutive calls to the same tool
+  where the error message indicates "unknown tool".
+
+--- 2.6 Loop Veto Handling ---
+
+The detector's own "blocked" result (deniedReason: "tool-loop") is treated
+specially: isLoopVetoResult() returns true, and the result gets NO hash.
+This prevents the loop block from "resetting" the streak (the block result
+itself would otherwise count as a different outcome).
+
+================================================================================
+3. COMPONENT #2: Post-Compaction Loop Guard
+================================================================================
+
+File: src/agents/embedded-agent-runner/post-compaction-loop-guard.ts (152 lines)
+
+Purpose: Detects identical tool-call loops that persist after automatic
+context compaction. If compaction didn't break the loop, abort to prevent
+unbounded token spending.
+
+--- 3.1 API ---
+
+function createPostCompactionLoopGuard(
+  config?: ToolLoopPostCompactionGuardConfig,
+  options?: { enabled?: boolean },
+): PostCompactionLoopGuard
+
+Returns object with:
+  armPostCompaction(): void
+    - Arms the guard for windowSize attempts (default: 3)
+    - Called after every automatic compaction in run.ts
+
+  observe(call: { toolName, argsHash, resultHash }): PostCompactionGuardVerdict
+    - Called on each tool outcome via observeToolOutcome callback
+    - If armed, counts matching (tool + args + result) entries
+    - If matches >= windowSize → returns shouldAbort: true
+
+  snapshot(): { armed, remainingAttempts }
+
+--- 3.2 Error Class ---
+
+class PostCompactionLoopPersistedError extends Error
+  - Carries detector, count, toolName
+  - Static fromVerdict() factory
+  - Used to abort the run via AbortController
+
+--- 3.3 Integration in run.ts (lines 1599-1628) ---
+
+  const postCompactionGuard = createPostCompactionLoopGuard(
+    resolvedLoopDetectionConfig?.postCompactionGuard,
+    { enabled: resolvedLoopDetectionConfig?.enabled !== false },
+  );
+
+  // After each compaction:
+  postCompactionGuard.armPostCompaction();  // lines 2554, 2804, 3843
+
+  // On each tool outcome (via observeToolOutcome callback):
+  const verdict = postCompactionGuard.observe(observation);
+  if (verdict.shouldAbort) {
+    postCompactionAbortError ??= PostCompactionLoopPersistedError.fromVerdict(verdict);
+    laneTaskAbortController.abort(postCompactionAbortError);
+  }
+
+================================================================================
+4. COMPONENT #3: Channel Bot-Pair Loop Protection
+================================================================================
+
+File: src/channels/turn/bot-loop-protection.ts (45 lines)
+File: src/plugin-sdk/pair-loop-guard-runtime.ts (280 lines)
+
+Purpose: Prevents bot-to-bot reply loops in messaging channels using
+rate-limit-style suppression.
+
+--- 4.1 Mechanism ---
+
+  - Tracks bidirectional bot pairs (sender+receiver sorted for symmetry)
+  - Counts events in a rolling window (default: 60s)
+  - When maxEventsPerWindow (default: 20) exceeded → cooldown
+  - During cooldown (default: 60s) → suppress replies
+
+--- 4.2 Types ---
+
+type PairLoopGuardConfig = {
+  enabled?: boolean;
+  maxEventsPerWindow?: number;   // default: 20
+  windowSeconds?: number;        // default: 60
+  cooldownSeconds?: number;      // default: 60
+};
+
+type PairLoopGuardResult =
+  | { suppressed: false }
+  | { suppressed: true; cooldownUntilMs: number };
+
+--- 4.3 Integration ---
+
+Channel turn adapters call:
+  recordChannelBotPairLoopAndCheckSuppression(facts)
+before delivering a bot reply. If suppressed, reply is dropped.
+
+Global singleton: channelBotPairLoopGuard created once per process.
+
+================================================================================
+5. COMPONENT #4: Run Retry Limit (MAX_RUN_LOOP_ITERATIONS)
+================================================================================
+
+File: src/agents/embedded-agent-runner/run/helpers.ts (lines 106-128)
+
+Purpose: Defensive cap on the outer run loop across ALL retry branches
+(rate limits, overloads, auth failures, compaction retries, empty response
+retries, etc.). NOT an iteration budget — it's a retry-storm breaker.
+
+--- 5.1 Constants ---
+
+  const BASE_RUN_RETRY_ITERATIONS = 24;
+  const RUN_RETRY_ITERATIONS_PER_PROFILE = 8;
+  const MIN_RUN_RETRY_ITERATIONS = 32;
+  const MAX_RUN_RETRY_ITERATIONS = 160;
+
+--- 5.2 Resolution ---
+
+function resolveMaxRunRetryIterations(
+  profileCandidateCount: number,
+  cfg?: OpenClawConfig,
+  agentId?: string,
+): number
+  - Reads config: agents.defaults.runRetries or per-agent runRetries
+  - Formula: base + max(1, profileCount) * perProfile
+  - Clamped to [min, max] range
+  - Default effective: 24 + 1*8 = 32 (with 1 profile)
+
+--- 5.3 Config Type ---
+
+type AgentRunRetriesConfig = {
+  base?: number;       // default: 24
+  perProfile?: number; // default: 8
+  min?: number;        // default: 32
+  max?: number;        // default: 160
+};
+
+--- 5.4 Exhaustion Handling ---
+
+File: src/agents/embedded-agent-runner/run/retry-limit.ts (54 lines)
+
+function handleRetryLimitExhaustion(params): EmbeddedAgentRunResult
+  - If failover decision = "fallback_model" → throw FailoverError
+  - Otherwise → return error payload:
+    "Request failed after repeated internal retries. Please try again..."
+
+NOTE: This DOES NOT ask the model to summarize (unlike Hermes's
+handle_max_iterations). It just returns an error message.
+
+================================================================================
+6. COMPONENT #5: Agent Runner Main Loop (run.ts)
+================================================================================
+
+File: src/agents/embedded-agent-runner/run.ts (~4100 lines)
+File: src/agents/embedded-agent-runner/run/attempt.ts (~5800 lines)
+
+--- 6.1 Outer Loop (run.ts, line 1885) ---
+
+  while (true) {
+    if (runLoopIterations >= MAX_RUN_LOOP_ITERATIONS) {
+      // Exceeded retry limit → handleRetryLimitExhaustion()
+      break;
+    }
+    runLoopIterations += 1;
+    // ... dispatch one LLM attempt ...
+    const result = await runEmbeddedAttempt({ ... });
+    // ... handle result, retry decisions, compaction, failover ...
+  }
+
+This loop increments on every LLM API call attempt, including retries
+for errors, compaction restarts, auth rotation, etc. It is NOT the same
+as an iteration budget — it does not count productive tool-calling turns.
+
+--- 6.2 What Is Tracked ---
+
+  runLoopIterations           — total loop iterations (retry guard)
+  overflowCompactionAttempts  — compaction retries
+  reasoningOnlyRetryAttempts  — reasoning-only response retries
+  emptyResponseRetryAttempts  — empty response retries
+  compactionContinuationRetries — continuation after compaction
+  autoCompactionCount         — number of auto-compactions
+
+--- 6.3 What Is NOT Tracked ---
+
+  - Total number of productive tool-calling turns
+  - Per-turn iteration count
+  - Agent-level budget consumption
+  - Subagent vs parent budget differentiation
+
+--- 6.4 Attempt Dispatch (attempt.ts) ---
+
+Each runEmbeddedAttempt() call:
+  1. Builds the LLM prompt with system message + history
+  2. Calls the provider API (streaming or non-streaming)
+  3. Processes the response (tool calls, text, errors)
+  4. Returns the result to the outer loop
+
+The attempt function processes ALL tool calls from a single LLM response,
+then returns. There is no inner tool-calling loop within attempt.ts;
+the outer run.ts loop manages the turn cycle.
+
+================================================================================
+7. COMPONENT #6: Before-Tool-Call Hook (Integration Point)
+================================================================================
+
+File: src/agents/agent-tools.before-tool-call.ts
+
+Purpose: Runs the full before_tool_call policy chain for each pending tool
+call. This is where tool loop detection is integrated.
+
+--- 7.1 Main Hook Entry ---
+
+async function runBeforeToolCallHook(args: {
+  toolName: string;
+  params: unknown;
+  toolCallId?: string;
+  ctx?: HookContext;
+  ...
+}): Promise<HookOutcome>
+
+--- 7.2 Loop Detection Integration (lines 1057-1122) ---
+
+  1. Load runtime: getDiagnosticSessionState, detectToolCallLoop, recordToolCall
+  2. Call detectToolCallLoop() with current tool name + params
+  3. If stuck + critical → return { blocked: true, deniedReason: "tool-loop" }
+  4. If stuck + warning → emit warning via logToolLoopAction()
+  5. Always: recordToolCall() into session state history
+
+--- 7.3 Outcome Recording (lines 1006-1033) ---
+
+async function recordLoopOutcome(args: {
+  ctx?, toolName, toolParams, toolCallId, result, error
+}): Promise<void>
+  - Calls recordToolCallOutcome() to store result hash
+  - Fires ctx.onToolOutcome() callback for post-compaction guard
+
+--- 7.4 Warning Dedup (lines 977-994) ---
+
+function shouldEmitLoopWarning(state, warningKey, count): boolean
+  - Bucketed dedup: only emits one warning per LOOP_WARNING_BUCKET_SIZE
+  - Prevents log spam from continuous loop warnings
+  - Caps tracked warning keys at MAX_LOOP_WARNING_KEYS
+
+--- 7.5 Runtime Module Seam ---
+
+File: src/agents/agent-tools.before-tool-call.runtime.ts (22 lines)
+  - Lazily-loaded module providing loop detection functions
+  - Tests can replace without loading the full runtime graph
+  - Exports: { getDiagnosticSessionState, logToolLoopAction,
+    detectToolCallLoop, recordToolCall, recordToolCallOutcome }
+
+================================================================================
+8. COMPONENT #7: Configuration System
+================================================================================
+
+--- 8.1 Tool Loop Detection Config ---
+
+Config path: tools.loopDetection (global) or agents.list[].tools.loopDetection
+
+Type: ToolLoopDetectionConfig (src/config/types.tools.ts, lines 183-200)
+  enabled?: boolean                       // default: false
+  historySize?: number                    // default: 30
+  warningThreshold?: number               // default: 10
+  unknownToolThreshold?: number           // default: 10
+  criticalThreshold?: number              // default: 20
+  globalCircuitBreakerThreshold?: number  // default: 30
+  detectors?: ToolLoopDetectionDetectorConfig
+  postCompactionGuard?: ToolLoopPostCompactionGuardConfig
+
+Resolver: resolveToolLoopDetectionConfig()
+  - Overlays per-agent config on global defaults
+  - Merges nested detectors and postCompactionGuard objects
+
+--- 8.2 Run Retry Config ---
+
+Config path: agents.defaults.runRetries or agents.list[].runRetries
+
+Type: AgentRunRetriesConfig (src/config/types.agent-defaults.ts, lines 117-126)
+  base?: number        // default: 24
+  perProfile?: number  // default: 8
+  min?: number         // default: 32
+  max?: number         // default: 160
+
+--- 8.3 Bot-Pair Loop Guard Config ---
+
+Config path: (per-channel plugin config)
+
+Type: PairLoopGuardConfig (src/plugin-sdk/pair-loop-guard-runtime.ts)
+  enabled?: boolean            // default: true
+  maxEventsPerWindow?: number  // default: 20
+  windowSeconds?: number       // default: 60
+  cooldownSeconds?: number     // default: 60
+
+--- 8.4 MISSING Configuration ---
+
+There is NO config for:
+  - maxIterations (per-agent turn budget)
+  - delegation.maxIterations (subagent budget)
+  - Budget refund rules
+  - Budget exhaustion behavior (summarize vs error)
+
+================================================================================
+9. COMPONENT #8: Diagnostic Session State (State Storage)
+================================================================================
+
+File: src/logging/diagnostic-session-state.ts
+
+Purpose: Process-local state tracker for diagnostic stuck-session detection,
+including tool call history used by loop detection.
+
+--- 9.1 Types ---
+
+type SessionState = {
+  sessionId?: string;
+  sessionKey?: string;
+  sessionFile?: string;
+  lastActivity: number;
+  generation?: number;
+  lastStuckWarnAgeMs?: number;
+  lastLongRunningWarnAgeMs?: number;
+  state: SessionStateValue;              // "idle" | "processing" | "waiting"
+  queueDepth: number;
+  activeQueuedTurn?: boolean;
+  toolCallHistory?: ToolCallRecord[];    // ← loop detection history
+  toolLoopWarningBuckets?: Map<string, number>;  // ← warning dedup
+  commandPollCounts?: Map<string, { count: number; lastPollAt: number }>;
+};
+
+type ToolCallRecord = {
+  toolName: string;
+  argsHash: string;
+  toolCallId?: string;
+  runId?: string;
+  resultHash?: string;          // filled by recordToolCallOutcome
+  unknownToolName?: string;     // filled when error indicates unknown tool
+  timestamp: number;
+};
+
+--- 9.2 Storage ---
+
+Shared in-memory Map: diagnosticSessionStates (global singleton)
+  - Max 2000 entries, pruned every 60s
+  - TTL: 30 minutes for idle entries
+  - Keyed by sessionKey (preferred) or sessionId
+
+--- 9.3 Access Functions ---
+
+getDiagnosticSessionState(ref: SessionRef): SessionState
+  - Gets or creates a SessionState entry
+  - Handles sessionKey/sessionId migration
+
+peekDiagnosticSessionState(ref: SessionRef): SessionState | undefined
+  - Read-only peek without creating entries
+
+NOTE: This state is per-process and NOT thread-safe (Node.js is single-threaded,
+so this is acceptable). Hermes uses threading.Lock because Python agents can
+run concurrently; OpenClaw doesn't need this.
+
+================================================================================
+10. COMPONENT #9: Stable Stringify (Utility)
+================================================================================
+
+File: src/agents/stable-stringify.ts (72 lines)
+
+Purpose: Deterministic JSON serialization for cache keys and hash inputs.
+
+function stableStringify(value: unknown): string
+  - Sorted keys (Object.keys().toSorted())
+  - Handles: null, undefined, NaN, Infinity, bigint, Uint8Array
+  - Circular reference detection via WeakSet
+  - Error objects → { name, message, stack }
+
+Used by: hashToolCall() in tool-loop-detection.ts for stable arg hashing.
+
+Analogous to: canonical_tool_args() in Hermes's tool_guardrails.py,
+but more comprehensive (handles errors, binary data, cycles).
+
+================================================================================
+11. COMPONENT #10: Agent-to-Agent maxTurns
+================================================================================
+
+File: src/agents/tools/sessions-send-helpers.ts (lines 87-106)
+File: src/agents/tools/sessions-send-tool.a2a.ts (line 163)
+
+Purpose: Bounded ping-pong turn limit for agent-to-agent (A2A) messaging.
+This is the only place in OpenClaw where a turn count is enforced.
+
+function buildAgentToAgentReplyContext(params: {
+  turn: number;
+  maxTurns: number;
+  ...
+})
+  - Injects "Turn {turn} of {maxTurns}" into the A2A context
+  - Model can reply with REPLY_SKIP_TOKEN to end early
+
+Usage in sessions-send-tool.a2a.ts:
+  maxTurns: params.maxPingPongTurns
+
+This is NOT a general iteration budget — it only applies to the A2A
+ping-pong protocol and is passed as a parameter, not as a per-agent config.
+
+================================================================================
+12. TEST COVERAGE
+================================================================================
+
+--- 12.1 Tool Loop Detection ---
+
+File: src/agents/tool-loop-detection.test.ts
+  - recordToolCall: history recording, timestamps, runId scoping, history cap
+  - detectToolCallLoop: disabled config, warning threshold, critical threshold,
+    polling loops, exec tool outcomes, unknown tool repeats, ping-pong detection,
+    volatile send result stripping, loop veto handling
+
+--- 12.2 Post-Compaction Loop Guard ---
+
+File: src/agents/embedded-agent-runner/post-compaction-loop-guard.test.ts
+  - createPostCompactionLoopGuard basic operation
+  - Arming and observing with windowSize
+  - Abort verdict generation
+
+File: src/agents/embedded-agent-runner/run.compaction-loop-guard.test.ts
+  - Integration test: compaction + guard arming + tool outcomes
+
+--- 12.3 Before-Tool-Call Integration ---
+
+File: src/agents/agent-tools.before-tool-call.e2e.test.ts
+  - End-to-end hook chain with loop detection enabled
+
+--- 12.4 Bot-Pair Loop Guard ---
+
+File: src/plugin-sdk/pair-loop-guard-runtime.test.ts
+  - Window counting, cooldown behavior, pair key symmetry
+
+--- 12.5 Subagent Loop Guard ---
+
+File: src/agents/subagent-registry.announce-loop-guard.test.ts
+  - Subagent announcement loop prevention
+
+--- 12.6 Other Related Tests ---
+
+File: src/agents/embedded-agent-runner/run/idle-timeout-breaker.test.ts
+File: src/cron/service.armtimer-tight-loop.test.ts
+File: src/channels/turn/kernel.test.ts
+
+================================================================================
+13. MISSING: Iteration Budget (Gap Analysis)
+================================================================================
+
+What Hermes has that OpenClaw LACKS:
+
+  1. IterationBudget class
+     - Thread-safe per-agent turn counter
+     - consume() / refund() semantics
+     - Separate budgets: parent=90, subagent=50
+     → OpenClaw has NO equivalent. No code counts total LLM API calls
+       per user turn or per agent run.
+
+  2. Budget-aware loop condition
+     - Hermes: while (api_call_count < max_iterations AND budget.remaining > 0)
+     → OpenClaw: while (true) with only runLoopIterations as a retry guard
+       (not a productive-turn counter)
+
+  3. Budget exhaustion → forced summary
+     - Hermes: handle_max_iterations() injects summary request, strips tools
+     → OpenClaw: retry limit → generic error message, no summary
+
+  4. Per-agent configurable iteration caps
+     - Hermes: config.yaml → agent.max_turns (parent), delegation.max_iterations (sub)
+     → OpenClaw: runRetries config only controls the retry storm guard,
+       not productive iterations
+
+  5. Budget refund for cheap operations
+     - Hermes: execute_code, compression restarts → refund()
+     → OpenClaw: N/A (no budget to refund against)
+
+  6. Grace call mechanism
+     - Hermes: _budget_grace_call allows one extra iteration after exhaustion
+     → OpenClaw: N/A
+
+  7. Activity observability
+     - Hermes: get_activity_summary() includes budget_used/budget_max
+     → OpenClaw: diagnostic session state has no budget fields
+
+  8. Tool loop detection is DISABLED by default
+     - Hermes: warnings always-on, hard stops opt-in
+     → OpenClaw: entire loop detection system is opt-in (enabled: false)
+
+================================================================================
+14. INTEGRATION POINTS FOR PORTING
+================================================================================
+
+Where an IterationBudget would integrate in OpenClaw:
+
+  A) CREATION: src/agents/embedded-agent-runner/run.ts
+     - After resolving config (~line 1562)
+     - Create budget with resolved maxIterations config value
+
+  B) CONSUMPTION: src/agents/embedded-agent-runner/run.ts
+     - In the while(true) loop (~line 1885)
+     - Call budget.consume() alongside existing runLoopIterations check
+     - Differentiate: retry iterations vs productive-turn iterations
+
+  C) REFUND: src/agents/embedded-agent-runner/run.ts
+     - After compaction restarts
+     - After certain retry categories that aren't productive turns
+
+  D) EXHAUSTION: src/agents/embedded-agent-runner/run.ts
+     - When budget exhausted → inject summary request + strip tools
+     - Make a final LLM call for summary
+
+  E) CONFIGURATION: src/config/types.agent-defaults.ts
+     - Add maxIterations to AgentDefaultsConfig
+     - Add per-agent override in AgentConfig
+     - Add subagent budget in delegation/spawn config
+
+  F) OBSERVABILITY: src/logging/diagnostic-session-state.ts
+     - Add budgetUsed / budgetMax fields to SessionState
+
+  G) INTEGRATION WITH EXISTING LOOP DETECTION:
+     - tool-loop-detection.ts remains for pattern-based detection
+     - IterationBudget adds an independent counting guard
+     - Both can coexist — budget for hard limits, loop detection for patterns
+
+  H) SUBAGENT BUDGET: src/agents/tools/sessions-send-tool.a2a.ts
+     - maxPingPongTurns is already tracked
+     - Would need to be generalized to all subagent types
+
+Key files that would need modification:
+  - src/agents/embedded-agent-runner/run.ts (main loop)
+  - src/agents/embedded-agent-runner/run/helpers.ts (config resolution)
+  - src/config/types.agent-defaults.ts (config types)
+  - src/config/types.agents.ts (per-agent config)
+  - src/config/zod-schema.agent-runtime.ts (validation)
+  - src/logging/diagnostic-session-state.ts (state fields)
+  - NEW: src/agents/iteration-budget.ts (the budget class itself)
+
+================================================================================
+END OF TRACE
+================================================================================

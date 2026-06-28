@@ -1,0 +1,411 @@
+================================================================================
+CODE PORT PLAN REVIEW SUMMARY V1
+================================================================================
+
+Feature: Iteration Budget & Agent Loop Safety
+Source:  Hermes Agent (Python) → Target: OpenClaw (TypeScript)
+Date:    2026-06-27
+Review:  V1 Plan → V1 Corrected Plan
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+12 issues were identified during the review. Each was verified against actual
+OpenClaw source code. Issues are ordered by severity (critical first).
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #1 — CRITICAL: Wrong message type "ChatMessage"
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 6 (budget-exhaustion handler)
+
+  WHAT WAS WRONG:
+    V1 plan used `ChatMessage[]` as the type for the messages parameter in
+    handleBudgetExhaustion(). This type does not exist in OpenClaw's primary
+    type system. OpenClaw uses `AgentMessage` from `@openclaw/agent-core`
+    (re-exported via runtime/index.js). `ChatMessage` only appears as local
+    type aliases in unrelated modules (cron-tool.ts, commands-subagents-text.ts).
+
+  WHY IT MATTERS:
+    The code would not compile. TypeScript would report "Cannot find name
+    'ChatMessage'" or resolve to an unrelated local type.
+
+  HOW FIXED:
+    Removed the makeCompletionCall callback entirely (see FIX #8). The new
+    budget-exhaustion result builder uses only correct types:
+    EmbeddedAgentMeta, EmbeddedAgentRunResult, EmbeddedRunLivenessState,
+    IterationBudget — all verified to exist at exact import paths.
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #2 — CRITICAL: Error kind union type not extended
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 6 (budget-exhaustion handler), types.ts
+
+  WHAT WAS WRONG:
+    V1 plan used error kind "budget_exhausted" but did not mention modifying
+    the EmbeddedAgentRunMeta type. The error.kind field is a string literal
+    union with exactly 7 values:
+      "context_overflow" | "compaction_failure" | "role_ordering" |
+      "image_size" | "retry_limit" | "incomplete_turn" | "hook_block"
+    TypeScript would reject "budget_exhausted" as not assignable to this union.
+
+  WHY IT MATTERS:
+    Compilation error. Every return path using kind: "budget_exhausted"
+    would fail type checking.
+
+  HOW FIXED:
+    Added Step 6 (new numbering) to explicitly extend the union in
+    src/agents/embedded-agent-runner/types.ts. Verified no existing code
+    references "budget_exhausted" — no conflicts.
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #3 — CRITICAL: Diagnostic session state not accessible from run.ts
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 7 (budget observability)
+
+  WHAT WAS WRONG:
+    V1 plan assumed run.ts has a `diagnosticState` variable that can be
+    updated with budgetUsed/budgetMax. Investigation confirmed run.ts has
+    NO direct access to the diagnostic session state system. The diagnostic
+    information flows through `attempt.diagnosticTrace` (a frozen trace
+    context), not the mutable SessionState used by tool-loop-detection.
+
+    The plan's proposed code:
+      if (iterationBudget && diagnosticState) {
+        diagnosticState.budgetUsed = iterationBudget.used;
+      }
+    would not compile — `diagnosticState` is not defined in run.ts scope.
+
+  WHY IT MATTERS:
+    The entire observability step (V1 Step 7) was unfeasible as written.
+    Referencing a non-existent variable would cause compilation failure.
+
+  HOW FIXED:
+    Replaced diagnostic session state approach with run result metadata.
+    New Step 11 adds budgetUsed/budgetMax fields to EmbeddedAgentRunMeta
+    and populates them in the result construction at the end of run.ts.
+    This is feasible because run.ts owns the result construction and the
+    iterationBudget variable is in scope at that point.
+
+    Diagnostic session state integration deferred to V2 as a known limitation.
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #4 — HIGH: FailoverError causes budget state loss (unresolved)
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 5/8 (run loop integration), Risk Analysis
+
+  WHAT WAS WRONG:
+    V1 plan identified this risk but provided no concrete resolution.
+    Investigation confirmed: FailoverError is thrown INSIDE the while(true)
+    loop, propagates through a try-finally (which only does cleanup), and
+    exits run.ts entirely. If the outer caller catches it and re-invokes
+    runEmbeddedAgent with a different model, ALL loop-level state is lost —
+    including the iteration budget.
+
+  WHY IT MATTERS:
+    If model failover occurs after 80 of 90 iterations, the new model run
+    gets a fresh budget of 90, effectively allowing 170 total iterations.
+
+  HOW FIXED:
+    Documented as an accepted V1 limitation with concrete V2 resolution path
+    (pass budget through RunEmbeddedAgentParams). Added to risk analysis
+    section C.3 "Known Limitations" with impact assessment: LOW — failover
+    is rare, and a fresh budget for a new model is arguably reasonable.
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #5 — HIGH: resolveAgentConfig not extended for iterationBudget
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 4 (config resolution) — MISSING STEP
+
+  WHAT WAS WRONG:
+    V1 plan's config resolver calls resolveAgentConfig(cfg, agentId)?.iterationBudget
+    but never modifies agent-scope-config.ts. The resolveAgentConfig function
+    EXPLICITLY lists each field with its merge strategy. Without adding
+    iterationBudget to both the ResolvedAgentConfig type and the merge
+    logic body, the lookup would always return undefined.
+
+    Verified: resolveAgentConfig at lines 113-166 of agent-scope-config.ts
+    has explicit merge for runRetries (using { ...defaults, ...entry }),
+    and iterationBudget would need the same treatment.
+
+  WHY IT MATTERS:
+    Per-agent config overrides would silently fail. All agents would use
+    global defaults regardless of per-agent configuration. This would be
+    a subtle, hard-to-debug issue.
+
+  HOW FIXED:
+    Added new Step 4 to extend both ResolvedAgentConfig type and the
+    resolveAgentConfig function body. Uses the identical shallow-merge
+    pattern as runRetries: { ...agentDefaults?.iterationBudget, ...entry.iterationBudget }.
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #6 — MEDIUM: subagentMaxIterations wiring underspecified
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 2 (config types), Step 4 (config resolver)
+
+  WHAT WAS WRONG:
+    V1 plan included subagentMaxIterations as a config field but had no
+    mechanism to apply it. Investigation confirmed: subagent runs go through
+    the exact same runEmbeddedAgent function with their own agentId. There is
+    no isSubagent flag or spawnedBy-based budget differentiation. The
+    resolver cannot know whether to use maxIterations or subagentMaxIterations.
+
+  WHY IT MATTERS:
+    A configurable field that can never take effect is confusing and wasteful.
+    Users would set subagentMaxIterations expecting it to work, and nothing
+    would change.
+
+  HOW FIXED:
+    Removed subagentMaxIterations entirely from V1. Each subagent agent ID
+    can have its own iterationBudget.maxIterations via per-agent config
+    (agents.list[].iterationBudget). This is more flexible and aligned with
+    OpenClaw's existing per-agent config model. Subagent-specific budget
+    defaults via spawnedBy detection deferred to V2.
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #7 — MEDIUM: Zod superRefine validation semantically wrong
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 3 (Zod schema)
+
+  WHAT WAS WRONG:
+    V1 plan validated subagentMaxIterations <= maxIterations. This is
+    semantically incorrect — subagent budgets are independent of parent
+    budgets. In Hermes, parent=90 and subagent=50, but these are independent
+    counters. Total iterations = parent + N * subagent, not subdivisions.
+    Having subagentMaxIterations > maxIterations is valid.
+
+  WHY IT MATTERS:
+    Would reject valid configurations. Operators who want subagents to have
+    more budget than the parent would get a config validation error.
+
+  HOW FIXED:
+    Removed the superRefine validation entirely (field was also removed
+    per FIX #6). The Zod schema now uses a simple .strict().optional()
+    pattern matching other config schemas.
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #8 — MEDIUM: Budget-exhaustion makeCompletionCall callback impractical
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 6 (budget-exhaustion handler)
+
+  WHAT WAS WRONG:
+    V1 plan proposed a makeCompletionCall callback to abstract the LLM call.
+    Inside run.ts, making an LLM call requires complex state management:
+    auth profile rotation, usage accumulation, context engine, session state,
+    abort controllers, and provider dispatch. Creating a callback that
+    encapsulates all of this at the call site is extremely difficult.
+
+  WHY IT MATTERS:
+    The callback would either be impractically complex (defeating its
+    purpose) or incomplete (missing auth/usage/error handling), creating
+    a fragile integration point.
+
+  HOW FIXED:
+    Replaced with in-loop summary approach (Step 9). When budget exhaustion
+    is detected, a flag (budgetExhaustedSummaryPending) is set. On the next
+    loop iteration, this flag triggers a summary prompt injection with tools
+    stripped, using the existing runEmbeddedAttempt infrastructure. This
+    mirrors the compaction-continuation-retry pattern already in run.ts,
+    reusing all existing LLM call plumbing.
+
+    The budget-exhaustion.ts file was simplified to a pure result builder
+    (buildBudgetExhaustionResult) — no async, no callbacks.
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #9 — MEDIUM: Step 5 integration strategy too ambiguous
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 5 (run loop integration)
+
+  WHAT WAS WRONG:
+    V1 plan presented TWO different strategies and recommended one, but
+    didn't specify exact code locations or the precise approach. The
+    "consume after productive response, check at loop top" recommendation
+    was sound but left open WHERE exactly "after productive response" is.
+
+  WHY IT MATTERS:
+    The most complex step in the plan was the most ambiguous. An implementer
+    would need to re-analyze the 4100-line run.ts to find the right spots.
+
+  HOW FIXED:
+    Step 8 (new numbering) now specifies the exact integration approach:
+    - "Consume at loop top for the PREVIOUS iteration's productivity"
+    - lastIterationWasProductive flag set at specific points
+    - Single consumption point at loop top
+    - Explicit table of which iteration types consume budget vs not
+    - Exact placement described relative to existing code landmarks
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #10 — LOW: extractAssistantVisibleText called with potentially undefined
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 6 (budget-exhaustion handler)
+
+  WHAT WAS WRONG:
+    V1 plan called extractAssistantVisibleText(summaryResponse) where
+    summaryResponse was typed as AssistantMessage | undefined. The actual
+    function signature takes AssistantMessage (non-optional).
+
+  WHY IT MATTERS:
+    TypeScript type error — Argument of type 'AssistantMessage | undefined'
+    is not assignable to parameter of type 'AssistantMessage'.
+
+  HOW FIXED:
+    The in-loop summary approach (Step 9) uses resolveFinalAssistantVisibleText()
+    from helpers.ts, which already handles undefined (returns undefined if
+    lastAssistant is undefined). This is the correct utility to use.
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #11 — LOW: Enabling loop detection will break existing test
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 9 (enable loop detection)
+
+  WHAT WAS WRONG:
+    V1 plan noted this risk but didn't specify which test would break or
+    what changes were needed. Investigation confirmed: the test at ~line 317
+    titled "is disabled by default" explicitly verifies that 20 repeated
+    identical calls return { stuck: false } when no config is passed.
+
+  WHY IT MATTERS:
+    CI would fail after the default change.
+
+  HOW FIXED:
+    Step 12 (new numbering) now includes explicit test update instructions:
+    rename the test, update expectations, and add a new "can be disabled
+    via config" test to preserve coverage of the opt-out path.
+
+
+──────────────────────────────────────────────────────────────────────────────
+FIX #12 — LOW: Budget-exhaustion handler diverges from retry-limit.ts pattern
+──────────────────────────────────────────────────────────────────────────────
+
+  AFFECTED: Step 6 (budget-exhaustion handler)
+
+  WHAT WAS WRONG:
+    V1 plan's handleBudgetExhaustion() had a completely different signature
+    and pattern from the existing handleRetryLimitExhaustion(). The existing
+    function takes { message, decision, provider, model, durationMs, agentMeta,
+    livenessState } and returns EmbeddedAgentRunResult synchronously.
+
+  WHY IT MATTERS:
+    Inconsistency with established patterns makes the code harder to
+    maintain and review. Two functions doing similar things (build an error
+    result for a loop-exit condition) should follow the same shape.
+
+  HOW FIXED:
+    Step 7 (new numbering) defines buildBudgetExhaustionResult() as a
+    synchronous function with a parameter shape matching
+    handleRetryLimitExhaustion() as closely as possible. Removed async,
+    removed callback, simplified to a pure result builder.
+
+
+================================================================================
+2. STRUCTURAL CHANGES TO THE PLAN
+================================================================================
+
+V1 Plan Steps (11)              Corrected Plan Steps (14)
+───────────────────              ─────────────────────────
+Step 1:  IterationBudget class   Step 1:  IterationBudget class (unchanged)
+Step 2:  Config types            Step 2:  Config types (FIX #6: removed subagent field)
+Step 3:  Zod schema              Step 3:  Zod schema (FIX #7: removed superRefine)
+                                 Step 4:  Extend resolveAgentConfig (FIX #5: NEW)
+Step 4:  Config resolver         Step 5:  Config resolver (FIX #6: simplified)
+                                 Step 6:  Extend error kind union (FIX #2: NEW)
+Step 6:  Budget exhaustion       Step 7:  Budget exhaustion result builder (FIX #1,8,12)
+Step 5:  Run loop integration    Step 8:  Run loop integration (FIX #9: more precise)
+                                 Step 9:  In-loop budget summary (FIX #8: NEW approach)
+Step 8:  Compaction refund       Step 10: Compaction refund (refined)
+Step 7:  Diagnostic state        Step 11: Run result metadata (FIX #3: replaced approach)
+Step 9:  Enable loop detection   Step 12: Enable loop detection (FIX #11: test update)
+Step 10: Unit tests              Step 13: Unit tests (unchanged + extra edge case)
+Step 11: Integration tests       Step 14: Integration tests (refined assertions)
+
+Key changes:
+  - 3 new steps added (Steps 4, 6, 9) for previously missing work
+  - 1 step fundamentally replaced (Step 7 → Step 11: session state → result meta)
+  - 1 step split into two (old Step 6 → Steps 7 + 9: result builder + in-loop summary)
+  - Step order adjusted for dependency correctness
+
+Files changed:
+  V1: 8 modified, 2 new modules, 2 new test files = 12 files total
+  V1-corrected: 10 modified, 2 new modules, 2 new test files = 14 files total
+  Added: agent-scope-config.ts, types.ts (error kind), tool-loop-detection.test.ts
+
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+ITERATION 1 — V1 (Original Plan)
+──────────────────────────────────
+
+  Generated a comprehensive 11-step porting plan based on analysis of both
+  Hermes and OpenClaw codebases. Core design decisions were sound:
+  - IterationBudget as a simple class (correct)
+  - Budget orthogonal to existing loop detection (correct)
+  - Config-driven rollback via enabled flag (correct)
+  - No threading.Lock for Node.js (correct)
+
+  However, several assumptions about OpenClaw's internals were wrong:
+  - Assumed ChatMessage type exists (it doesn't)
+  - Assumed error.kind accepts any string (it's a union)
+  - Assumed run.ts accesses diagnostic session state (it doesn't)
+  - Assumed resolveAgentConfig auto-discovers new fields (it doesn't)
+  - Proposed impractical callback for summary LLM call
+
+ITERATION 1 — V1 Review (This Document)
+─────────────────────────────────────────
+
+  Systematically verified every assumption against actual source code:
+  - Read 15+ source files in full
+  - Grepped for types, variables, and patterns across the codebase
+  - Verified function signatures, type definitions, and import chains
+  - Traced FailoverError propagation path through run.ts
+  - Confirmed diagnostic session state access patterns
+  - Verified resolveAgentConfig merge behavior
+
+  Found 12 issues (3 critical, 2 high, 4 medium, 3 low).
+  Produced corrected 14-step plan with all issues resolved.
+
+  Key improvements in corrected plan:
+  1. All types verified to exist at correct import paths
+  2. resolveAgentConfig explicitly extended (critical missing step)
+  3. Budget observability moved from session state to result meta
+  4. Summary call uses in-loop approach instead of impractical callback
+  5. FailoverError limitation documented with V2 path
+  6. subagentMaxIterations deferred to V2 (no wiring mechanism in V1)
+  7. Integration strategy specified with exact code locations
+  8. Test updates for default change explicitly documented
+
+  Estimated scope:
+  V1:          ~400 lines across 12 files
+  V1-corrected: ~450 lines across 14 files (3 additional modification targets)
+
+  No further iterations needed for the plan itself — the corrected plan
+  is ready for implementation. Implementation may surface additional
+  refinements, particularly around the in-loop summary injection (Step 9)
+  which depends on how compaction-continuation-retry is implemented.
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

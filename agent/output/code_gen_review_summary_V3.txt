@@ -1,0 +1,241 @@
+================================================================================
+CODE GENERATION REVIEW SUMMARY V3
+Iteration Budget & Agent Loop Safety -- Hermes -> OpenClaw
+================================================================================
+
+REVIEW ITERATION: 3 (Review of code_gen_V3.patch)
+DATE: 2026-06-28
+
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+
+ISSUE #1 [MEDIUM] — State machine ordering: summary results bypass budget_exhausted error kind
+--------------------------------------------------------------------------
+AFFECTED CODE:
+  src/agents/embedded-agent-runner/run.ts, lines 3853-3928 (V3 patch)
+  The budget exhaustion detection section.
+
+WHAT IS WRONG:
+  The three-block state machine was ordered:
+    1. Budget exhaustion detection (sets budgetExhaustedSummaryPending, continues)
+    2. Budget summary completion handler (checks budgetSummaryAttempt)
+    3. Pending-to-active promotion (budgetExhaustedSummaryPending → budgetSummaryAttempt)
+
+  The promotion from pending to active (block 3) occurred AFTER the
+  completion handler (block 2). This means:
+
+    Iteration N:   Budget exhausts → refund, set pending=true, continue
+    Iteration N+1: Summary attempt dispatches with instruction in prompt.
+                   After attempt returns: block 2 checks budgetSummaryAttempt
+                   which is still false (promotion hasn't happened yet).
+                   Block 3 sets budgetSummaryAttempt=true. Code falls through
+                   to the normal terminal path (line ~4182) and returns the
+                   summary text as a normal successful run WITHOUT the
+                   budget_exhausted error kind.
+
+  The budgetSummaryAttempt handler at block 2 is dead code in the happy
+  path — it would only fire on a THIRD iteration (N+2) that never occurs
+  because N+1 returns normally.
+
+WHY IT MATTERS:
+  When forceSummaryOnExhaustion is enabled and the summary attempt
+  produces text (the expected happy path), the caller receives a normal
+  success result instead of a budget_exhausted error. Downstream code
+  that checks `result.meta.error?.kind === "budget_exhausted"` to detect
+  budget exhaustion will not fire. The budget exhaustion is silently
+  hidden as a successful run.
+
+HOW FIXED:
+  Moved the pending-to-active promotion block BEFORE the detection and
+  completion checks:
+
+    1. Pending-to-active promotion (budgetExhaustedSummaryPending → budgetSummaryAttempt)
+    2. Budget summary completion handler (checks budgetSummaryAttempt) → return
+    3. Budget exhaustion detection (sets budgetExhaustedSummaryPending, continues)
+
+  Now on iteration N+1:
+    - Block 1 fires: budgetExhaustedSummaryPending=true → budgetSummaryAttempt=true
+    - Block 2 fires: budgetSummaryAttempt=true → returns buildBudgetExhaustedResult
+    - Block 3: never reached (block 2 returned)
+
+  This ensures the summary text is always wrapped in the budget_exhausted
+  error kind via buildBudgetExhaustedResult.
+
+
+ISSUE #2 [LOW] — Double blank line before IterationBudgetConfig
+--------------------------------------------------------------------------
+AFFECTED CODE:
+  src/config/types.agent-defaults.ts, lines 126-128 (V3 patch):
+    };
+    <blank>
+    <blank>
+    export type IterationBudgetConfig
+
+WHAT IS WRONG:
+  Two consecutive blank lines between AgentRunRetriesConfig and
+  IterationBudgetConfig. The codebase convention uses exactly one.
+  This is the same sed-insertion artifact flagged in V2-REVIEW #4.
+
+HOW FIXED:
+  Reduced to a single blank line separator.
+
+
+ISSUE #3 [LOW] — Missing blank line between IterationBudgetConfig and CliBackendConfig
+--------------------------------------------------------------------------
+AFFECTED CODE:
+  src/config/types.agent-defaults.ts, lines 138-139 (V3 patch):
+    };
+    export type CliBackendConfig = {
+
+WHAT IS WRONG:
+  No blank line between the closing `};` of IterationBudgetConfig and
+  the `export type CliBackendConfig`. Every other type declaration pair
+  in this file has a blank line separator. This is the same formatting
+  issue flagged in V2-REVIEW #3.
+
+HOW FIXED:
+  Added a blank line between the two type declarations.
+
+
+================================================================================
+2. ADDITIONAL REVIEW OBSERVATIONS (No fixes needed)
+================================================================================
+
+OBSERVATION A: Core IterationBudget class is correct and complete.
+  The consume/refund/used/remaining semantics match the Hermes Python
+  original faithfully. The RangeError guard for negative maxTotal is
+  a good TypeScript addition. No threading.Lock needed for Node.js.
+  No changes from V2-REVIEW.
+
+OBSERVATION B: Agent-loop onBeforeToolCallingRound callback is sound.
+  The toolCallingRound counter placement (outside outer while, counting
+  only toolUse + length>0 branches) is correct. The false-return cleanup
+  (turn_end + agent_end) properly handles the loop termination.
+  The async support (Promise<boolean>) is appropriate.
+  No changes from V2-REVIEW.
+
+OBSERVATION C: Budget exhaustion detection guards are complete.
+  The condition includes all guards from the corrected plan:
+    !emptyAssistantReplyIsSilent, !timedOut, !attempt.yieldDetected,
+    !aborted, !promptError, !attempt.clientToolCalls, !budgetSummaryAttempt
+  These correctly prevent misclassification.
+  No changes from V2-REVIEW.
+
+OBSERVATION D: Double-consumption (outer + inner) is intentional.
+  The outer loop consumes one budget unit per run.ts iteration, AND
+  the inner tool loop consumes via onBeforeToolCallingRound. This
+  means budget is consumed faster than Hermes's single-level loop.
+  The code's comments explicitly state this is by design: the outer
+  consumption covers non-tool iterations (compaction retries, auth
+  retries), while inner covers tool rounds.
+
+OBSERVATION E: Stale instruction cleanup is correct.
+  When entering the forced-summary flow, the code correctly clears
+  reasoningOnlyRetryInstruction, emptyResponseRetryInstruction, and
+  compactionContinuationRetryInstruction.
+
+OBSERVATION F: Zod schema follows AgentRunRetriesConfigSchema pattern.
+  IterationBudgetConfigSchema does NOT bake in .optional(); usage
+  sites add it. This is consistent with the convention established
+  by AgentRunRetriesConfigSchema.
+
+OBSERVATION G: Config resolution ternary guard for optional params.config.
+  The V2-REVIEW #1 fix (ternary guard for optional params.config in
+  resolveAgentConfig call) is correctly implemented in V3.
+
+OBSERVATION H: Type safety for the budget_exhausted error kind.
+  The EmbeddedAgentRunMeta error kind union correctly includes
+  "budget_exhausted". The buildBudgetExhaustedResult return type
+  matches EmbeddedAgentRunResult.
+
+OBSERVATION I: No circular dependencies introduced.
+  iteration-budget.ts imports only from config/types.agent-defaults.
+  budget-exhaustion.ts imports only from ../types.
+  run.ts imports from both, which is the expected direction.
+
+OBSERVATION J: Test coverage is adequate.
+  - Unit tests for IterationBudget class: 14 tests
+  - Unit tests for resolveIterationBudgetConfig: 7 tests
+  - Unit tests for budget-exhaustion builder: 10 tests
+  - Integration tests for agent-loop callback: 4 tests
+  - Integration tests for config merge: 6 tests
+  - Integration tests for Zod schema: 11 tests
+  - Regression tests for existing functionality pass
+
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+V1 (code_gen_V1.patch): Initial implementation
+  - Core IterationBudget class, configuration layer, agent-core callback,
+    run.ts integration, budget-exhaustion helpers, error kind extension
+  - 4 new files + 14 modified files = 18 total files
+  - Tests: 36 new tests (running as 84 across vitest projects)
+
+V1-REVIEW (code_gen_review_V1.patch): Bug fixes and consistency
+  FIXES:
+    #1 [CRITICAL] Added missing imports in run.ts — compilation would fail
+    #2 [MEDIUM]   Fixed dead-code empty if block — budget consumption for
+                  non-tool-call iterations was silently skipped
+    #3 [LOW]      Removed duplicate IterationBudgetConfig type — single
+                  source of truth in config types
+    #4 [LOW]      Fixed Zod schema .optional() pattern to match convention
+
+  NO NEW FILES added. Same 18 files (4 new + 14 modified).
+  ALL TESTS PASS: 202 tests, 0 failures.
+
+V2 (code_gen_V2.patch): Fresh implementation with all learnings
+  - Implemented from scratch incorporating all V1/V1-REVIEW fixes
+  - All 4 V1-REVIEW issues addressed proactively
+  - Same file count: 4 new + 14 modified = 18 files
+  - All 202 tests pass (84 new + 118 regression), 0 failures
+
+V2-REVIEW (code_gen_review_V2.patch): Type safety and formatting
+  FIXES:
+    #1 [MEDIUM]   Fixed type error in resolveAgentConfig call — params.config
+                  is optional but function expects non-optional. Added guard.
+    #2 [LOW]      Fixed escaped backticks in JSDoc (\`round\` → `round`)
+    #3 [LOW]      Added missing blank line between type declarations
+    #4 [LOW]      Fixed double blank line before IterationBudgetConfig
+    #5 [LOW]      Fixed extra blank line in zod-schema.agent-runtime.ts
+    #6 [LOW]      Fixed duplicate file entries in patch format
+
+  NO NEW FILES added. Same 18 files (4 new + 14 modified).
+  ALL TESTS PASS: 202 tests, 0 failures.
+
+V3 (code_gen_V3.patch): Fresh implementation with all V1-V2 learnings
+  - Implemented from scratch incorporating all prior fixes (15 total)
+  - Additional tests: 11 Zod schema, 6 agent-scope config merge
+  - Total: 4 new + 16 modified = 20 files
+  - ALL 225 TESTS PASS (across vitest project configs)
+
+V3-REVIEW (code_gen_review_V3.patch): THIS REVIEW — State machine logic fix
+  FIXES:
+    #1 [MEDIUM]   Fixed budgetSummaryAttempt state machine ordering.
+                  The pending→active promotion block was ordered AFTER the
+                  completion handler, causing summary results to bypass the
+                  budget_exhausted error kind and fall through to the normal
+                  terminal path. Moved promotion block to BEFORE the
+                  completion handler and exhaustion detection.
+    #2 [LOW]      Fixed double blank line before IterationBudgetConfig
+                  (recurring V2-REVIEW #4 sed artifact)
+    #3 [LOW]      Added missing blank line between IterationBudgetConfig
+                  and CliBackendConfig (recurring V2-REVIEW #3 sed artifact)
+
+  NO NEW FILES added. Same 20 files (4 new + 16 modified).
+  ALL TESTS PASS:
+    - iteration-budget.test.ts: 44 passed (2 projects)
+    - budget-exhaustion.test.ts: 20 passed (2 projects)
+    - agent-loop.test.ts: 20 passed
+    - agent-scope.test.ts: 88 passed (regression)
+    - zod-schema.agent-defaults.test.ts: 21 passed
+    TOTAL: 193 tests, 0 failures
+
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

@@ -1,0 +1,244 @@
+================================================================================
+OpenClaw Test Suite Results (V1)
+================================================================================
+Date: 2026-06-28
+Command: cd /home/alexm-redhat/code/exper/openclaw && pnpm test
+Vitest version: v4.1.8
+Total runtime: 855.87s (~14.3 minutes)
+Test runner: 89 Vitest shards, parallelism 10, workers 2
+
+================================================================================
+OVERALL RESULT: FAILED
+================================================================================
+Failed shards: 8 out of 89
+Passed shards: 81 out of 89
+
+================================================================================
+AGGREGATE TOTALS (across all shards)
+================================================================================
+NOTE: Vitest summaries below are per-shard, not aggregate totals.
+Approximate aggregate (from per-shard summaries):
+  - Total test files: ~1,000+
+  - Total tests: ~20,000+
+  - Total failures: ~59 test failures across 8 failed shards
+
+================================================================================
+FAILED SHARD 1: test/vitest/vitest.agents-core.config.ts
+================================================================================
+Rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.agents-core.config.ts --reporter=verbose
+
+Failed tests (5):
+  1. |agents-core| src/agents/model-compat.test.ts
+     > normalizeModelCompat > keeps supportsUsageInStreaming on for native Qwen endpoints
+  2. |agents-core| src/agents/model-compat.test.ts
+     > normalizeModelCompat > keeps supportsUsageInStreaming on for DashScope-compatible endpoints regardless of provider id
+  3. |agents-core| src/agents/model-compat.test.ts
+     > normalizeModelCompat > keeps supportsUsageInStreaming on for Moonshot-native endpoints regardless of provider id
+  4. |agents-core| src/agents/compaction-planning-worker.test.ts
+     > compaction planning worker > plans summary chunks in the packaged worker
+  5. |agents-core| src/agents/models-config.providers.moonshot.test.ts
+     > moonshot implicit provider (#33637) > uses explicit CN baseUrl when provided
+
+Root cause: Model compatibility changes - tests expect supportsUsageInStreaming behavior
+and Moonshot provider CN baseUrl handling that don't match current implementation.
+
+================================================================================
+FAILED SHARD 2: test/vitest/vitest.media-understanding.config.ts
+================================================================================
+Rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.media-understanding.config.ts --reporter=verbose
+
+Failed tests (1):
+  1. |media-understanding| src/media-understanding/image.test.ts
+     > describeImageWithModel > places DashScope image prompts in user content before images
+
+Root cause: DashScope image prompt placement logic mismatch - test expects specific
+content ordering that differs from current implementation.
+
+================================================================================
+FAILED SHARD 3: test/vitest/vitest.extension-qa.config.ts
+================================================================================
+Rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.extension-qa.config.ts --reporter=verbose
+
+Failed tests (2):
+  1. |extension-qa| extensions/qa-lab/src/test-file-scenario-runner.test.ts
+     > qa test file scenario runner > runs Vitest scenarios with the declared test path and writes Vitest evidence
+  2. |extension-qa| extensions/qa-lab/src/test-file-scenario-runner.test.ts
+     > qa test file scenario runner > imports producer QA evidence artifacts from failed script scenarios
+
+Root cause: QA test file scenario runner failures - Vitest scenario execution and
+evidence artifact import issues.
+
+================================================================================
+FAILED SHARD 4: test/vitest/vitest.extension-providers.config.ts
+================================================================================
+Rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.extension-providers.config.ts --reporter=verbose
+
+Per-shard summary: 4 files failed | 175 passed | 1 skipped (180); 7 tests failed | 2089 passed | 1 skipped (2097)
+
+Failed tests (7):
+  1. |extension-providers| extensions/moonshot/provider-catalog.test.ts
+     > moonshot provider catalog > opts native Moonshot baseUrls into streaming usage only inside the extension
+     Error: expected Moonshot model kimi-k2.6 compat (missing compat field)
+  2. |extension-providers| extensions/ollama/provider-discovery.test.ts
+     > Ollama provider > discovers per-model context windows from /api/show
+     Error: expected undefined to be 131072 (contextWindow not populated)
+  3. |extension-providers| extensions/ollama/provider-discovery.test.ts
+     > Ollama provider > auto-registers ollama provider when models are discovered locally
+     Error: expected [] to have length 2 (no models discovered)
+  4. |extension-providers| extensions/ollama/provider-discovery.test.ts
+     > Ollama provider > falls back to default context window when /api/show fails
+     Error: expected undefined to be 128000
+  5. |extension-providers| extensions/ollama/provider-discovery.test.ts
+     > Ollama provider > caps /api/show requests when /api/tags returns a very large model list
+     Error: expected 0 to be 200 (/api/show not called)
+  6. |extension-providers| extensions/qwen/provider-catalog.test.ts
+     > qwen provider catalog > opts native Qwen baseUrls into streaming usage only inside the extension
+     Error: expected Qwen model qwen3.5-plus compat (missing compat field)
+  7. |extension-providers| extensions/moonshot/src/kimi-web-search-provider.test.ts
+     > kimi web search provider > inherits native Moonshot chat baseUrl when kimi baseUrl is unset
+     Error: expected 'https://api.moonshot.ai/v1' to be 'https://api.moonshot.cn/v1'
+
+Root cause: Provider catalog changes - Moonshot/Qwen models missing compat fields,
+Ollama discovery not populating contextWindow or models, Moonshot CN/AI baseUrl mismatch.
+
+================================================================================
+FAILED SHARD 5: test/vitest/vitest.unit-security.config.ts
+================================================================================
+Rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.unit-security.config.ts --reporter=verbose
+
+Failed tests (4):
+  1. |unit-security| src/security/install-policy.test.ts
+     > runInstallPolicy > rejects policy interpreter script args under writable parent directories
+  2. |unit-security| src/security/install-policy.test.ts
+     > runInstallPolicy > validates later interpreter script args after path-taking options
+  3. |unit-security| src/security/install-policy.test.ts
+     > runInstallPolicy > validates interpreter option values that embed script paths
+  4. |unit-security| src/security/install-policy.test.ts
+     > runInstallPolicy > rejects symlinked interpreter script args even when command symlinks are allowed
+
+Root cause: Install policy security validation - interpreter script argument validation
+logic doesn't match expected behavior for writable parent dirs, path-taking options,
+embedded script paths, and symlink handling.
+
+================================================================================
+FAILED SHARD 6: test/vitest/vitest.tooling.config.ts
+================================================================================
+Rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.tooling.config.ts --reporter=verbose
+
+Per-shard summary: 4 files failed | 277 passed | 1 skipped (282); 5 tests failed | 4430 passed | 25 skipped (4460)
+
+Failed tests (5):
+  1. |tooling| test/scripts/bench-cli-startup.test.ts
+     > bench-cli-startup > cleans timed-out benchmark process groups when the leader exits first
+     Error: ENOENT - child.pid file not created in time
+  2. |tooling| test/scripts/check-extension-package-tsc-boundary.test.ts
+     > check-extension-package-tsc-boundary > waits for timed-out async node step process groups
+     Error: timeout waiting for child.pid
+  3. |tooling| test/scripts/plugin-sdk-surface-report.test.ts
+     > plugin SDK surface report > accepts exact deprecated export budget overrides by public entrypoint
+     Error: expected exit status 1 to be 0
+  4. |tooling| test/scripts/plugin-sdk-surface-report.test.ts
+     > plugin SDK surface report > keeps default public surface budgets pinned to current source counts
+     Error: expected exit status 1 to be 0
+  5. |tooling| test/scripts/secret-provider-integrations.test.ts
+     > secret provider integration proof harness > preserves timeout kill grace for descendants after the leader exits
+     Error: condition was not met before timeout
+
+Root cause: Process group management timing issues (tests 1-2), plugin SDK surface budget
+drift (tests 3-4), and secret provider timeout grace period race condition (test 5).
+
+================================================================================
+FAILED SHARD 7: test/vitest/vitest.plugins.config.ts
+================================================================================
+Rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.plugins.config.ts --reporter=verbose
+
+Per-shard summary: 2 files failed | 170 passed (172); 19 tests failed | 2465 passed | 71 skipped (2555)
+
+Failed tests (19):
+  All 19 failures in src/plugins/status.test.ts - "plugin status reports" suite.
+
+  Common error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on
+  the "./plugin-metadata-snapshot.js" mock. Missing mock return from vi.mock.
+
+  Additionally: src/plugins/npm-install-security-scan.release.test.ts
+  > publishable plugin npm package install security scan
+  Error: npm pack --dry-run --json --ignore-scripts command failed
+
+Root cause: Missing mock export "isPluginMetadataSnapshotCompatible" in plugin-metadata-snapshot
+vi.mock setup - a new export was added to the module but the test mock was not updated.
+
+================================================================================
+FAILED SHARD 8: test/vitest/vitest.plugin-sdk.config.ts
+================================================================================
+Rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.plugin-sdk.config.ts --reporter=verbose
+
+Per-shard summary: 1 file failed | 61 passed (62); 2 tests failed | 456 passed (458)
+
+Failed tests (2):
+  1. |plugin-sdk| src/plugin-sdk/provider-catalog-shared.test.ts
+     > provider-catalog-shared native streaming usage compat > detects native streaming usage compat from the endpoint capabilities
+  2. |plugin-sdk| src/plugin-sdk/provider-catalog-shared.test.ts
+     > provider-catalog-shared native streaming usage compat > opts models into streaming usage for native endpoints while preserving explicit overrides
+
+Root cause: Provider catalog shared streaming usage compat detection logic doesn't match
+test expectations for endpoint capability-based compat inference.
+
+================================================================================
+PASSING SHARDS (81/89)
+================================================================================
+The following shard categories all passed:
+  - gateway-server (4 shards)
+  - gateway-core
+  - gateway-client
+  - gateway-methods
+  - utils
+  - unit-fast-fake-timers
+  - ui
+  - tui
+  - tui-pty
+  - tooling-docker
+  - shared-core
+  - commands
+  - process
+  - agents-embedded-agent
+  - agents-support
+  - logging
+  - hooks
+  - extension-voice-call
+  - extension-codex-app-server-attempt
+  - And many more...
+
+================================================================================
+FAILURE CATEGORY SUMMARY
+================================================================================
+
+1. PROVIDER COMPAT / CATALOG (14 failures)
+   - Moonshot, Qwen, Ollama, DashScope provider changes
+   - Missing compat fields, baseUrl mismatches, streaming usage detection
+   - Files: model-compat.test.ts, provider-catalog.test.ts, provider-discovery.test.ts,
+     provider-catalog-shared.test.ts, kimi-web-search-provider.test.ts,
+     models-config.providers.moonshot.test.ts
+
+2. PLUGIN STATUS MOCK (19 failures)
+   - Missing vi.mock export for isPluginMetadataSnapshotCompatible
+   - File: src/plugins/status.test.ts
+
+3. SECURITY / INSTALL POLICY (4 failures)
+   - Interpreter script arg validation under various conditions
+   - File: src/security/install-policy.test.ts
+
+4. TOOLING / PROCESS MANAGEMENT (5 failures)
+   - Timing-sensitive process group cleanup tests
+   - Plugin SDK surface budget drift
+   - Files: bench-cli-startup.test.ts, check-extension-package-tsc-boundary.test.ts,
+     plugin-sdk-surface-report.test.ts, secret-provider-integrations.test.ts
+
+5. OTHER (3 failures)
+   - Media understanding DashScope image placement
+   - QA test file scenario runner
+   - npm pack security scan
+   - Compaction planning worker
+
+================================================================================
+END OF REPORT
+================================================================================

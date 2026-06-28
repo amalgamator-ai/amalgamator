@@ -1,0 +1,16 @@
+FAILED
+
+8 of 89 Vitest shards failed.
+~59 individual test failures across 8 shards.
+81 shards passed successfully.
+
+Primary failure categories:
+1. Provider catalog compat changes (Moonshot/Qwen/Ollama/DashScope) - 14 failures
+2. Plugin status test mock missing export (isPluginMetadataSnapshotCompatible) - 19 failures
+3. Security install-policy interpreter validation - 4 failures
+4. Tooling process management timing + SDK surface budget - 5 failures
+5. Miscellaneous (media-understanding, QA runner, compaction worker, npm pack) - ~4 failures
+
+Most failures appear to be pre-existing issues in the OpenClaw codebase (provider catalog
+schema changes, missing test mock updates, timing-sensitive process tests) rather than
+issues introduced by ported features.

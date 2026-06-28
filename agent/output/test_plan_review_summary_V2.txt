@@ -1,0 +1,311 @@
+================================================================================
+TEST PLAN REVIEW SUMMARY V2
+Iteration Budget & Agent Loop Safety -- Hermes -> OpenClaw
+================================================================================
+
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+8 issues were identified. 3 are critical (would cause test compilation
+failures or placement violations), 2 are moderate (incorrect config shapes
+or unexportable constants), and 3 are minor (clarifications for
+implementability).
+
+
+--- CRITICAL ISSUES ---
+
+FIX #1: FILE 3 test file location wrong -- must EXTEND existing file
+  SEVERITY: Critical (violates OpenClaw convention, duplicates existing tests)
+
+  V2 BUG: V2 proposed creating a NEW file:
+    src/agents/agent-scope-config.test.ts
+
+  V2 also stated in insight #23: "agent-scope-config.test.ts does NOT
+  exist yet -- FILE 3 is entirely NEW."
+
+  ACTUAL: src/agents/agent-scope.test.ts ALREADY EXISTS and ALREADY tests
+  resolveAgentConfig(). The existing file:
+    - Imports resolveAgentConfig from "./agent-scope.js"
+    - Has describe("resolveAgentConfig", ...) with tests for:
+      . Returns undefined when no agents config
+      . Returns undefined when agent ID doesn't exist
+      . Merges contextLimits (verified at test lines 97-126)
+      . Merges experimental flags (verified at lines 128-150)
+      . Merges runRetries (verified at lines 152-180, exact assert:
+        defaults {base:24,perProfile:8,min:32,max:160},
+        agent {max:50} -> result {base:24,perProfile:8,min:32,max:50})
+      . Handles sandbox and tools config (lines 1059-1139)
+      . Normalizes agent IDs (lines 1141-1150)
+
+  Creating a parallel agent-scope-config.test.ts would:
+    a) Violate OpenClaw's one-test-per-module convention
+    b) Duplicate the existing describe("resolveAgentConfig") structure
+    c) Test the same function from a different import path
+
+  FIX: Changed FILE 3 from NEW agent-scope-config.test.ts to EXTEND
+  existing agent-scope.test.ts. New iterationBudget config resolution
+  tests are appended as a new describe() block inside the existing file.
+
+
+FIX #2: FILE 3 import path wrong
+  SEVERITY: Critical (would fail to compile)
+
+  V2 BUG: V2 used:
+    import { resolveAgentConfig } from "./agent-scope-config.js";
+
+  ACTUAL: The existing test file imports from "./agent-scope.js"
+  (NOT "./agent-scope-config.js"). agent-scope.ts re-exports
+  resolveAgentConfig from agent-scope-config.ts. Tests must import from
+  the public barrel module.
+
+  FIX: Changed import to:
+    import { resolveAgentConfig } from "./agent-scope.js";
+
+
+FIX #6: FILE 6 runAgentLoop call signature wrong
+  SEVERITY: Critical (would fail to compile -- wrong argument order)
+
+  V2 BUG: All 4 tests in FILE 6 used:
+    await runAgentLoop([], context, loopConfig, streamFn)
+  Passing 4 arguments with streamFn as the 4th argument.
+
+  ACTUAL: runAgentLoop has 7 parameters. The 4th is emit: AgentEventSink,
+  NOT streamFn. streamFn is the 6th parameter. Verified at
+  packages/agent-core/src/agent-loop.ts lines 172-196:
+
+    export async function runAgentLoop(
+      prompts: AgentMessage[],
+      context: AgentContext,
+      config: AgentLoopConfig,
+      emit: AgentEventSink,       // <-- 4th is event callback
+      signal?: AbortSignal,
+      streamFn?: StreamFn,        // <-- 6th is stream function
+      runtime?: AgentCoreStreamRuntimeDeps,
+    ): Promise<AgentMessage[]>
+
+  All 7 existing test calls (verified at lines 354, 426, 492, 571, 677,
+  924, 988) use this pattern:
+    runAgentLoop(messages, context, config, (_event) => {}, undefined, streamFn)
+
+  FIX: Corrected all 4 test calls to pass 6 arguments:
+    await runAgentLoop(
+      [{ role: "user", content: "test", timestamp: Date.now() }],
+      { systemPrompt: "test", messages: [], tools: [tool] },
+      configWithCallback,
+      (_event: AgentEvent) => {},    // 4th: emit (no-op)
+      undefined,                      // 5th: signal
+      streamFn,                       // 6th: stream function
+    )
+
+
+--- MODERATE ISSUES ---
+
+FIX #4: FILE 4 makeBudgetConfig returns wrong config shape
+  SEVERITY: Moderate (would produce invalid config at runtime)
+
+  V2 BUG: V2's makeBudgetConfig returned:
+    { iterationBudget: { enabled: true, maxIterations: 10, ... } }
+
+  This is NOT a valid OpenClawConfig shape. The config field on
+  RunEmbeddedAgentParams is typed as `config?: OpenClawConfig`.
+  OpenClawConfig nests agent settings under `agents.defaults` and
+  per-agent entries in `agents.list`.
+
+  Verified: run.ts does NOT currently call resolveAgentConfig() directly
+  (grep returned 0 hits). The port plan Step 8 will add budget config
+  resolution. The config shape must be valid OpenClawConfig regardless
+  of which resolution approach is used.
+
+  FIX: Changed makeBudgetConfig to return correctly nested shape:
+    {
+      agents: {
+        defaults: {
+          iterationBudget: { enabled: true, maxIterations: 10, ... }
+        }
+      }
+    } as OpenClawConfig
+
+
+FIX #8: FILE 7 DEFAULT_LOOP_DETECTION_CONFIG is not exported
+  SEVERITY: Moderate (test cannot import the constant directly)
+
+  V2 BUG: V2 proposed:
+    Import: DEFAULT_LOOP_DETECTION_CONFIG from "./tool-loop-detection.js"
+    Assert: expect(DEFAULT_LOOP_DETECTION_CONFIG.enabled).toBe(true)
+
+  ACTUAL: DEFAULT_LOOP_DETECTION_CONFIG is declared as `const` (NOT
+  `export const`) at tool-loop-detection.ts line 44. It is NOT exported.
+  resolveLoopDetectionConfig() is also NOT exported. The test CANNOT
+  import DEFAULT_LOOP_DETECTION_CONFIG directly.
+
+  Only exported items:
+    - 5 threshold constants (TOOL_CALL_HISTORY_SIZE, WARNING_THRESHOLD, etc.)
+    - 4 functions (hashToolCall, detectToolCallLoop, recordToolCall,
+      recordToolCallOutcome)
+
+  FIX: Added OPTION A (preferred: Step 14 adds `export` to the constant)
+  and OPTION B (fallback: test indirectly via detectToolCallLoop() with
+  no config argument, verifying detection fires with default settings).
+  Plan recommends implementation also export the constant.
+
+
+--- MINOR ISSUES ---
+
+FIX #3: FILE 3 fixture helper pattern
+  SEVERITY: Minor (style/convention)
+
+  V2's makeConfig() helper is acceptable but should match the existing
+  test file's inline config object pattern (verified at agent-scope.test.ts
+  lines 97-180). The corrected plan notes this convention.
+
+
+FIX #5: FILE 2 AgentEntrySchema import source
+  SEVERITY: Minor (implicit assumption that may cause confusion)
+
+  V2 stated "No New Imports Needed" for FILE 2. This is correct because
+  the existing test file already imports AgentEntrySchema, but from a
+  DIFFERENT file:
+    import { AgentEntrySchema } from "./zod-schema.agent-runtime.js";
+  (line 5 of the test file)
+
+  AgentEntrySchema is defined in zod-schema.agent-runtime.ts (NOT
+  zod-schema.agent-defaults.ts). For test 2.1.5 to work, the port plan
+  Step 3 must add iterationBudget to BOTH AgentDefaultsSchema AND
+  AgentEntrySchema. If Step 3 only modifies AgentDefaultsSchema, test
+  2.1.5 will fail.
+
+  FIX: Added clarifying note to FILE 2 section.
+
+
+FIX #7: FILE 6 context parameter not specified
+  SEVERITY: Minor (omission that could confuse implementers)
+
+  V2 referenced `context` in FILE 6 tests without showing how it's
+  constructed. The verified pattern (from agent-loop.test.ts line 354) is:
+    { systemPrompt: "test", messages: [], tools: [tool] }
+
+  Tools must be in context.tools for the loop to execute them.
+
+  FIX: Added explicit context construction in all FILE 6 test code.
+
+
+================================================================================
+2. CHANGES SUMMARY
+================================================================================
+
+  V2 -> Review V2 changes:
+
+  FILES CHANGED:
+    - FILE 3: MOVED from NEW agent-scope-config.test.ts to
+      EXTENDING existing agent-scope.test.ts (FIX #1)
+
+  IMPORTS CORRECTED:
+    - FILE 3: Changed from "./agent-scope-config.js" to
+      "./agent-scope.js" (FIX #2)
+
+  CALL SIGNATURES CORRECTED:
+    - FILE 6: All 4 runAgentLoop calls corrected from 4-arg to 6-arg
+      pattern with emit callback as 4th arg (FIX #6)
+
+  CONFIG SHAPES CORRECTED:
+    - FILE 4: makeBudgetConfig now returns valid OpenClawConfig shape
+      with iterationBudget nested under agents.defaults (FIX #4)
+
+  TEST APPROACH CORRECTED:
+    - FILE 7: Added OPTION A/B for testing DEFAULT_LOOP_DETECTION_CONFIG
+      since the constant is not exported (FIX #8)
+
+  CLARIFICATIONS ADDED:
+    - FILE 2: AgentEntrySchema import source noted (FIX #5)
+    - FILE 6: context parameter construction shown (FIX #7)
+    - FILE 3: Fixture pattern note (FIX #3)
+
+  NET EFFECT:
+    V2:     ~74 tests across 7 files (4 NEW + 3 EXTEND)
+    Review: ~74 tests across 7 files (3 NEW + 4 EXTEND)
+
+  Test count unchanged. One file changed from NEW to EXTEND (FILE 3).
+  All tests are now verified as implementable against the actual codebase.
+
+
+================================================================================
+3. ITERATION EVOLUTION
+================================================================================
+
+--- Iteration 0 -> Iteration 1 (V1) ---
+
+  INITIAL CREATION. 6 test files, ~85 tests, 2 support files.
+  Several incorrect assumptions about OpenClaw internals.
+
+--- Iteration 1 -> Iteration 1 Review ---
+
+  Deep review found 20 issues (8 critical, 7 moderate, 5 minor).
+  Key: schema .optional() not .default(), wrong file locations, infeasible
+  API tests, separate harness files unnecessary.
+  Result: 7 test files, ~78 tests, 0 support files.
+
+--- Iteration 1 Review -> Iteration 2 (V2) ---
+
+  From-scratch rewrite incorporating all 20 V1 fixes plus deeper code
+  exploration. Added awareness of error kind union, payloadCount,
+  makeAttemptResult factory, 5+ retry mechanisms.
+  Result: 7 test files, ~74 tests, 0 support files.
+
+--- Iteration 2 (V2) -> Iteration 2 Review (THIS DOCUMENT) ---
+
+  Targeted verification against actual source code revealed 8 issues:
+    3 Critical, 2 Moderate, 3 Minor
+
+  Root causes of remaining issues:
+
+  A) INCOMPLETE FILE DISCOVERY: V2 searched for "agent-scope-config.test.ts"
+     and didn't find it, concluding no test file exists. But the actual
+     test file has a slightly different name: "agent-scope.test.ts".
+     Lesson: When checking if a test file exists, search for the
+     function name being tested, not just the assumed file name.
+
+  B) FUNCTION SIGNATURE NOT VERIFIED: V2 described runAgentLoop() calls
+     with 4 arguments but the function actually takes 7 (with emit as
+     4th). Lesson: Always read the actual function signature and verify
+     against existing test call patterns.
+
+  C) EXPORT STATUS NOT VERIFIED: V2 assumed DEFAULT_LOOP_DETECTION_CONFIG
+     was importable. It's not exported. Lesson: Verify `export` keyword
+     on constants before writing import-based tests.
+
+  D) CONFIG SHAPE NOT VERIFIED: V2's makeBudgetConfig returned a flat
+     structure that doesn't match OpenClawConfig's nested agents.defaults
+     shape. Lesson: Check the actual type definition for config parameters,
+     not just the existence of the config field.
+
+
+--- Summary of Changes Across All Iterations ---
+
+  Metric               | V1 Orig | V1 Rev | V2    | V2 Rev
+  ---------------------+---------+--------+-------+--------
+  Test files           | 6       | 7      | 7     | 7
+  Support files        | 2       | 0      | 0     | 0
+  Estimated tests      | ~85     | ~78    | ~74   | ~74
+  NEW files            | 6       | 4      | 4     | 3
+  EXTEND files         | 0       | 3      | 3     | 4
+  Incorrect locations  | 3       | 0      | 1     | 0
+  Wrong call signatures| 0       | 0      | 4     | 0
+  Wrong config shapes  | 0       | 0      | 1     | 0
+  Unexportable imports | 0       | 0      | 1     | 0
+  Issues found         | N/A     | 20     | N/A   | 8
+
+  Convergence trend: Issues decreased from 20 (V1 review) to 8 (V2 review).
+  The 8 remaining issues are narrower in scope (call signatures, file
+  names, export status) compared to V1's broad architectural errors
+  (wrong schema semantics, wrong module ownership, infeasible APIs).
+
+  The plan is approaching convergence. The core test structure, coverage
+  matrix, and test logic are sound. The remaining corrections are
+  implementability fixes verified against actual source code.
+
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

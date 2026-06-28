@@ -1,0 +1,278 @@
+{
+  "detected_features": [
+    {
+      "rank": 1,
+      "feature_name": "Multi-Pass Context Compaction",
+      "category": "Core / Context Management",
+      "hermes_status": "IMPLEMENTED",
+      "openclaw_status": "INADEQUATE",
+      "community_demand_score": 8,
+      "gap_severity_score": 8,
+      "impact_score": 9,
+      "feasibility_score": 7,
+      "independence_score": 9,
+      "overall_score": 8.0,
+      "key_hermes_files": [
+        "agent/context_compressor.py",
+        "agent/context_engine.py",
+        "agent/conversation_compression.py"
+      ],
+      "openclaw_issues": [
+        { "number": 37057, "title": "feat: RTK exec proxy — compress tool output to save context tokens", "reactions": 21 },
+        { "number": 2254, "title": "[Bug]: Large session files", "reactions": 20 },
+        { "number": 5771, "title": "[Bug]: Context overflow error", "reactions": 11 },
+        { "number": 64250, "title": "[Bug]: Context limit exceeded. I've reset our conversation to start fresh", "reactions": 5 },
+        { "number": 84857, "title": "[Bug] Compaction preflight throws MissingAgentHarnessError", "reactions": 4 },
+        { "number": 60213, "title": "[Bug]: compaction after context_window_exceeded silently kills session", "reactions": 0 },
+        { "number": 92043, "title": "Bug: 180s compaction timeout is a single wall clock over the whole chunk pipeline with no partial-progress reuse", "reactions": 2 },
+        { "number": 77780, "title": "compaction: reserveTokens default (15000) leaves insufficient headroom for structured summarization", "reactions": 2 },
+        { "number": 58398, "title": "Adopt Claude Code's multi-layer compaction architecture", "reactions": 1 },
+        { "number": 51612, "title": "Built-in persistent memory system with compaction tree", "reactions": 3 }
+      ],
+      "porting_complexity": "MEDIUM",
+      "summary": "OpenClaw's compaction is single-pass with a rigid 180s timeout. Hermes's multi-pass system iterates until the token threshold is met or progress drops below 5%, with head/tail protection, tool result pruning, and summary prefix disambiguation. Multiple OpenClaw issues document context loss, timeout failures, and direct requests for multi-layer compaction. The existing compaction infrastructure provides a solid foundation to extend."
+    },
+    {
+      "rank": 2,
+      "feature_name": "Iteration Budget & Agent Loop Safety",
+      "category": "Core / Resource Management",
+      "hermes_status": "IMPLEMENTED",
+      "openclaw_status": "MISSING",
+      "community_demand_score": 7,
+      "gap_severity_score": 9,
+      "impact_score": 8,
+      "feasibility_score": 8,
+      "independence_score": 9,
+      "overall_score": 7.6,
+      "key_hermes_files": [
+        "agent/iteration_budget.py",
+        "agent/tool_guardrails.py"
+      ],
+      "openclaw_issues": [
+        { "number": 6890, "title": "[Feature]: Add Ralph Loop feature and add max iteration number into the agent configuration", "reactions": 3 },
+        { "number": 75468, "title": "[Feature]: Agent safeguards - content hash dedup for file writes + general-purpose max iteration limit", "reactions": 2 },
+        { "number": 89090, "title": "Bug: loopDetection cannot block message tool loops — volatile messageId in result defeats all critical-level detection paths", "reactions": 2 },
+        { "number": 79301, "title": "Feature Request: Tool-use loop detection to prevent repeated writes to same path", "reactions": 2 },
+        { "number": 75355, "title": "Bug: Circuit breaker blocks tool but not agent turn; exec loop only warns, never blocks", "reactions": 2 },
+        { "number": 77625, "title": "[Bug]: reasoningDefault=stream causes feedback loop / infinite reasoning recursion", "reactions": 2 },
+        { "number": 74859, "title": "[Bug]: abortable(activeSession.prompt()) creates zombie Agent loop when signal is pre-aborted", "reactions": 2 },
+        { "number": 82518, "title": "[Bug]: Gateway OOM-killed during tool-heavy interactive session", "reactions": 2 }
+      ],
+      "porting_complexity": "LOW",
+      "summary": "Hermes has a clean 62-line IterationBudget class providing thread-safe per-agent turn counters (default 90 for parent, 50 for subagent). OpenClaw has only heuristic loop detection that fails when volatile messageIds defeat content-hash dedup. Multiple issues document runaway loops, OOM kills, and direct requests for configurable iteration limits. This is a small, high-impact module to port."
+    },
+    {
+      "rank": 3,
+      "feature_name": "Persistent Curated Memory (MEMORY.md / USER.md)",
+      "category": "Memory / Persistence",
+      "hermes_status": "IMPLEMENTED",
+      "openclaw_status": "INADEQUATE",
+      "community_demand_score": 7,
+      "gap_severity_score": 7,
+      "impact_score": 8,
+      "feasibility_score": 6,
+      "independence_score": 7,
+      "overall_score": 7.4,
+      "key_hermes_files": [
+        "tools/memory.py",
+        "agent/memory_manager.py",
+        "agent/memory_provider.py"
+      ],
+      "openclaw_issues": [
+        { "number": 14049, "title": "[Feature]: Qdrant-based Persistent Memory for OpenClaw Agents", "reactions": 17 },
+        { "number": 8185, "title": "[Feature]: Memory flush on /new and /reset (pre-reset memory save)", "reactions": 7 },
+        { "number": 45608, "title": "[Feature]: Pre-reset agentic memory flush — /new and daily reset should get the same memory flush as compaction", "reactions": 4 },
+        { "number": 43524, "title": "Daily reset doesn't trigger session-memory hook flush", "reactions": 4 },
+        { "number": 56434, "title": "Feature Request: Built-in periodic memory consolidation (daily → MEMORY.md)", "reactions": 2 },
+        { "number": 50096, "title": "Long-Term Memory & Knowledge Management", "reactions": 0 },
+        { "number": 70513, "title": "[Feature request]: Advanced Persistent Memory & Knowledge Management System", "reactions": 0 },
+        { "number": 21902, "title": "[Feature]: Rolling Context Archival — Continuous Memory-First Compaction", "reactions": 2 },
+        { "number": 13991, "title": "[Proposal] Associative Hierarchical Memory: Human-Like Recall", "reactions": 0 },
+        { "number": 28930, "title": "Suggestions for Memory v2: Associative Traversal, Salience Weighting", "reactions": 0 }
+      ],
+      "porting_complexity": "MEDIUM",
+      "summary": "Hermes provides simple file-based agent-curated memory (MEMORY.md + USER.md) with periodic nudges, section delimiters, and frozen snapshots at session start. OpenClaw's memory plugins (Active Memory, LanceDB, Wiki) are heavyweight/complex. Multiple issues request simpler persistent memory, MEMORY.md-style consolidation, and memory flush on session reset. This fills a gap between 'no memory' and 'complex vector DB memory'."
+    },
+    {
+      "rank": 4,
+      "feature_name": "Session Full-Text Search (FTS5)",
+      "category": "Memory / Search",
+      "hermes_status": "IMPLEMENTED",
+      "openclaw_status": "MISSING",
+      "community_demand_score": 6,
+      "gap_severity_score": 9,
+      "impact_score": 7,
+      "feasibility_score": 7,
+      "independence_score": 9,
+      "overall_score": 7.2,
+      "key_hermes_files": [
+        "hermes_state.py"
+      ],
+      "openclaw_issues": [
+        { "number": 2254, "title": "[Bug]: Large session files", "reactions": 20 },
+        { "number": 12297, "title": "Feature Request: sessions_kill and sessions_cleanup tools", "reactions": 9 },
+        { "number": 76804, "title": "WebChat: assistant text responses not persisted to session transcript", "reactions": 6 },
+        { "number": 47862, "title": "sessions_spawn in OpenClaw — Complete Troubleshooting Guide", "reactions": 6 },
+        { "number": 44184, "title": "[Bug]: Context usage always shows 0% in status", "reactions": 6 }
+      ],
+      "porting_complexity": "MEDIUM",
+      "summary": "Hermes uses SQLite FTS5 for full-text search across all past sessions with LLM summarization of results. OpenClaw stores sessions as JSONL files with no search capability — users cannot find past conversations. The sessions_list/sessions_history tools only enumerate sessions by metadata, not search content. OpenClaw already uses SQLite for state, making FTS5 addition natural."
+    },
+    {
+      "rank": 5,
+      "feature_name": "Theme / Skin Customization Engine",
+      "category": "UI / Customization",
+      "hermes_status": "IMPLEMENTED",
+      "openclaw_status": "MISSING",
+      "community_demand_score": 7,
+      "gap_severity_score": 8,
+      "impact_score": 6,
+      "feasibility_score": 8,
+      "independence_score": 10,
+      "overall_score": 7.0,
+      "key_hermes_files": [
+        "hermes_cli/skin_engine.py",
+        "hermes_cli/colors.py"
+      ],
+      "openclaw_issues": [
+        { "number": 28300, "title": "Theme Customization System — Preset Themes + Custom Theme Studio", "reactions": 8 },
+        { "number": 8865, "title": "Feature Request: TUI Light Theme / Color Customization Support", "reactions": 6 },
+        { "number": 7126, "title": "Feature Request: Option to disable TUI color overrides when using SSH", "reactions": 5 },
+        { "number": 78504, "title": "Control UI CSP blocks tweakcn theme import fetch", "reactions": 4 },
+        { "number": 66733, "title": "Control UI: No streaming/typing indicator while AI generates response", "reactions": 4 }
+      ],
+      "porting_complexity": "LOW",
+      "summary": "Hermes has a YAML-based skin engine with 4 built-in presets (default, ares, mono, slate) covering banner colors, spinner faces, branding, and tool emojis. OpenClaw has no theming system at all. Issue #28300 with 8 reactions directly requests 'Theme Customization System — Preset Themes + Custom Theme Studio'. This is a low-complexity, high-community-demand feature with zero dependencies."
+    },
+    {
+      "rank": 6,
+      "feature_name": "Subagent Delegation Tool",
+      "category": "Multi-Agent / Orchestration",
+      "hermes_status": "IMPLEMENTED",
+      "openclaw_status": "INADEQUATE",
+      "community_demand_score": 5,
+      "gap_severity_score": 8,
+      "impact_score": 8,
+      "feasibility_score": 5,
+      "independence_score": 5,
+      "overall_score": 6.9,
+      "key_hermes_files": [
+        "tools/delegate_task.py",
+        "tools/async_delegation.py",
+        "agent/iteration_budget.py"
+      ],
+      "openclaw_issues": [
+        { "number": 78096, "title": "[Feature]: Explore per-agent worker isolation, VFS scratch storage, and host filesystem capabilities", "reactions": 6 },
+        { "number": 47862, "title": "sessions_spawn troubleshooting guide (9 problems and solutions)", "reactions": 6 },
+        { "number": 35272, "title": "[BUG] Sub-agents cannot access shared skills from ~/.openclaw/skills", "reactions": 4 },
+        { "number": 93425, "title": "feat(agents): per-agent env injection into spawned subprocesses", "reactions": 1 }
+      ],
+      "porting_complexity": "HIGH",
+      "summary": "Hermes has delegate_task tool enabling single-goal or batch parallel subagent spawning with leaf/orchestrator roles, restricted toolsets, and independent iteration budgets. OpenClaw has context engine hooks for subagent lifecycle but no user-facing delegation tool. sessions_spawn exists but has documented usability problems. Requires iteration budget (Rank #2) as prerequisite."
+    },
+    {
+      "rank": 7,
+      "feature_name": "Computer Use (Vision-Based Screen Control)",
+      "category": "Tools / Automation",
+      "hermes_status": "IMPLEMENTED",
+      "openclaw_status": "MISSING",
+      "community_demand_score": 6,
+      "gap_severity_score": 8,
+      "impact_score": 7,
+      "feasibility_score": 4,
+      "independence_score": 7,
+      "overall_score": 6.7,
+      "key_hermes_files": [
+        "tools/computer_use/tool.py",
+        "tools/computer_use/cua_backend.py",
+        "tools/computer_use/permissions.py",
+        "tools/computer_use/schema.py",
+        "tools/computer_use/vision_routing.py"
+      ],
+      "openclaw_issues": [
+        { "number": 41024, "title": "feat: Native Computer Use UI Integration (GPT-5.4 Style)", "reactions": 5 },
+        { "number": 87317, "title": "[Bug]: Native Codex PreToolUse hook relay becomes unavailable and blocks all native tools", "reactions": 7 }
+      ],
+      "porting_complexity": "VERY HIGH",
+      "summary": "Hermes has a comprehensive CUA (Computer Use Agent) backend (81KB) enabling vision-based desktop automation: screen capture, mouse/keyboard control, and element detection across macOS/Windows/Linux. OpenClaw has browser automation only. Issue #41024 directly requests 'Native Computer Use UI Integration'. Very high porting complexity due to OS-level native screen capture requirements in Node.js."
+    },
+    {
+      "rank": 8,
+      "feature_name": "Security Guidance Plugin (Runtime Code Scanning)",
+      "category": "Security / Code Quality",
+      "hermes_status": "IMPLEMENTED",
+      "openclaw_status": "MISSING",
+      "community_demand_score": 5,
+      "gap_severity_score": 7,
+      "impact_score": 7,
+      "feasibility_score": 8,
+      "independence_score": 10,
+      "overall_score": 6.5,
+      "key_hermes_files": [
+        "plugins/security-guidance/__init__.py",
+        "plugins/security-guidance/patterns.py"
+      ],
+      "openclaw_issues": [
+        { "number": 8776, "title": "[Bug][Security Risk]: OpenClaw ships with a bundled hook called soul-evil that can silently hijack the agent", "reactions": 11 },
+        { "number": 1796, "title": "Argus Security - Comprehensive 6-Phase Analysis: 512 Findings (8 CRITICAL)", "reactions": 8 },
+        { "number": 6615, "title": "Feature: Add denylist support for exec-approvals", "reactions": 10 },
+        { "number": 58976, "title": "Telegram bot not practically usable with per-command exec approvals — need durable approval scopes", "reactions": 5 }
+      ],
+      "porting_complexity": "LOW",
+      "summary": "Hermes scans file writes at runtime against 25 security patterns (eval, pickle.load, shell injection, XSS, crypto footguns, XXE, CI/CD injection) and warns the model. OpenClaw relies on CI-only scanning (CodeQL/Semgrep), with no runtime protection. Security awareness issues demonstrate community concern. Forked from Anthropic claude-plugins-official (Apache-2.0). Low complexity: regex pattern matching in a plugin hook."
+    },
+    {
+      "rank": 9,
+      "feature_name": "Automation Blueprints & Cron Suggestions",
+      "category": "Automation / Scheduling",
+      "hermes_status": "IMPLEMENTED",
+      "openclaw_status": "MISSING",
+      "community_demand_score": 5,
+      "gap_severity_score": 7,
+      "impact_score": 7,
+      "feasibility_score": 7,
+      "independence_score": 8,
+      "overall_score": 6.4,
+      "key_hermes_files": [
+        "cron/blueprint_catalog.py",
+        "cron/suggestions.py",
+        "cron/suggestion_catalog.py"
+      ],
+      "openclaw_issues": [
+        { "number": 10164, "title": "Feature: Native Temporal integration for durable workflows and scheduling", "reactions": 13 },
+        { "number": 18160, "title": "[Feature]: Direct Exec Mode for Cron Jobs", "reactions": 11 },
+        { "number": 88087, "title": "Poor UX for long-running background tasks + silent cron wake failures", "reactions": 2 }
+      ],
+      "porting_complexity": "LOW",
+      "summary": "Hermes provides 15 curated automation blueprints (morning briefing, mail monitor, weekly review, etc.) with fillable slots (time, weekdays, enum, text) and a suggestion lifecycle (add/list/accept/dismiss). OpenClaw's cron system works but offers no templates or guided onboarding. Multiple issues highlight cron UX friction and scheduling demand. Low complexity: data-driven templates over existing cron infrastructure."
+    },
+    {
+      "rank": 10,
+      "feature_name": "Parallel Tool Execution with Safety Gating",
+      "category": "Core / Tool Management",
+      "hermes_status": "IMPLEMENTED",
+      "openclaw_status": "INADEQUATE",
+      "community_demand_score": 5,
+      "gap_severity_score": 6,
+      "impact_score": 7,
+      "feasibility_score": 6,
+      "independence_score": 8,
+      "overall_score": 6.2,
+      "key_hermes_files": [
+        "agent/tool_executor.py",
+        "agent/tool_dispatch_helpers.py"
+      ],
+      "openclaw_issues": [
+        { "number": 73501, "title": "[BLOCKER] OpenClaw 4.22 to 4.26 significantly slower - regression bug", "reactions": 10 },
+        { "number": 9157, "title": "Performance: Workspace file injection wastes 93.5% of token budget", "reactions": 13 },
+        { "number": 76562, "title": "High CPU, extreme control-plane RPC latency, and unstable polling", "reactions": 6 },
+        { "number": 75650, "title": "embedded agent reply latency ~40-47s before stream-ready", "reactions": 5 },
+        { "number": 75290, "title": "core-plugin-tools prep stage takes ~11s on every embedded run", "reactions": 3 }
+      ],
+      "porting_complexity": "MEDIUM",
+      "summary": "Hermes classifies tools as parallel-safe (read-only), never-parallel (interactive), or path-scoped (safe if independent paths) and runs up to 8 concurrent workers with path overlap detection and destructive pattern recognition. OpenClaw has a basic parallel extension but lacks sophisticated safety gating. Multiple performance regression issues indicate tool execution latency is a real user pain point."
+    }
+  ],
+  "total_candidates_analyzed": 25,
+  "total_candidates_with_demand": 10
+}

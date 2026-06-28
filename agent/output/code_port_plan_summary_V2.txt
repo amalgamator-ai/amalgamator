@@ -1,0 +1,263 @@
+================================================================================
+CODE PORT PLAN SUMMARY V2
+================================================================================
+
+Feature: Iteration Budget & Agent Loop Safety
+Source:  Hermes Agent (Python) -> Target: OpenClaw (TypeScript)
+Date:    2026-06-27
+Review:  V2 Plan (ground-up rewrite incorporating V1 review learnings)
+
+================================================================================
+1. WORK DONE TO GENERATE THE V2 PLAN
+================================================================================
+
+The V2 plan was generated through a multi-phase investigation that went
+significantly deeper than V1 into the actual runtime architecture of both
+Hermes and OpenClaw.
+
+
+PHASE 1: Prior Iteration Analysis
+-----------------------------------
+Read and analyzed the V1 corrected plan (code_port_plan_review_V1.txt) and
+its review summary (code_port_plan_review_summary_V1.txt). Catalogued all
+12 issues found and their fixes. Identified the key V1 design decisions
+to preserve and the assumptions to re-verify.
+
+
+PHASE 2: Parallel Deep-Dive Investigation
+-------------------------------------------
+Launched 4 concurrent exploration agents to investigate:
+
+  1. Run.ts loop structure: Mapped all 18 `continue` paths and all `return`
+     paths. Identified that the while(true) loop has NO path that naturally
+     falls through to loop back -- every path either continues, returns, or
+     throws. Documented the promptAdditions mechanism used for retry
+     instruction injection (lines 1934-1944).
+
+  2. Config patterns: Verified exact patterns for types, Zod schemas,
+     resolveAgentConfig merge strategy, and resolveMaxRunRetryIterations
+     implementation. Confirmed indexed access types for per-agent overrides.
+
+  3. Types and retry-limit pattern: Verified EmbeddedAgentRunMeta error.kind
+     union (7 values), EmbeddedAgentRunResult payload shape, and the exact
+     handleRetryLimitExhaustion function signature and return structure.
+
+  4. Hermes implementation: Verified the exact IterationBudget class (62
+     lines), the handle_max_iterations summary prompt, the main while
+     condition with dual guard, and all refund locations.
+
+
+PHASE 3: Critical Architectural Discovery
+-------------------------------------------
+Discovered that OpenClaw has a TWO-LEVEL LOOP ARCHITECTURE that V1 missed:
+
+  OUTER LOOP (run.ts):
+    - Handles retries, compaction, auth rotation, failover
+    - Each iteration dispatches ONE ATTEMPT
+    - Typically runs 1x for normal requests
+
+  INNER LOOP (agent-core/agent-loop.ts):
+    - Handles the agentic tool-calling cycle
+    - while(hasMoreToolCalls): streamAssistantResponse -> executeToolCalls
+    - This is where the model iterates: LLM -> tools -> LLM -> tools -> ...
+    - NO existing iteration limit
+
+This was confirmed by tracing the full call chain:
+  run.ts -> backend.ts -> attempt.ts -> agent-session -> agent.ts -> agent-loop.ts
+
+And verified by reading agent-loop.ts directly, finding the inner
+while(hasMoreToolCalls) loop with streamAssistantResponse() and
+executeToolCalls() calls.
+
+
+PHASE 4: Agent-Core Interface Analysis
+----------------------------------------
+Investigated the agent-core package to understand how to thread a budget
+callback without invasive changes:
+
+  - Found AgentLoopConfig type with existing callbacks:
+    shouldStopAfterTurn, prepareNextTurn, beforeToolCall, afterToolCall
+  - Found the createLoopConfig() method that builds AgentLoopConfig from
+    AgentOptions
+  - Found the exact Agent.prompt() -> runPromptMessages() -> runAgentLoop()
+    call chain
+  - Identified the callback threading pattern (same for all existing callbacks)
+
+This led to the V2 design: a lightweight onBeforeToolCallingRound callback
+added to AgentLoopConfig, threaded from run.ts through the existing chain,
+with IterationBudget.consume() called via closure.
+
+
+PHASE 5: Plan Synthesis
+-------------------------
+Synthesized all findings into a 16-step plan that:
+  - Incorporates all 12 V1 review fixes (no regressions)
+  - Adds the agent-core callback mechanism (Steps 6-7)
+  - Restructures run.ts integration for the callback approach (Step 8)
+  - Preserves the summary injection mechanism (Steps 10-11)
+  - Adds budget refund for compaction restarts (Step 12)
+  - Keeps the rollback strategy via config flag
+
+
+================================================================================
+2. ITERATION EVOLUTION (V1 -> V1 Review -> V2)
+================================================================================
+
+
+ITERATION 1 -- V1 (Original Plan)
+-----------------------------------
+
+  Generated an 11-step porting plan. Core design decisions were sound:
+  - IterationBudget as a simple class (correct)
+  - Budget orthogonal to existing loop detection (correct)
+  - Config-driven rollback via enabled flag (correct)
+  - No threading.Lock for Node.js (correct)
+
+  However, several assumptions about OpenClaw's internals were wrong:
+  - Assumed ChatMessage type exists (it doesn't)
+  - Assumed error.kind accepts any string (it's a union)
+  - Assumed run.ts accesses diagnostic session state (it doesn't)
+  - Assumed resolveAgentConfig auto-discovers new fields (it doesn't)
+  - Proposed impractical callback for summary LLM call
+
+  Scope: ~400 lines across 12 files
+
+
+ITERATION 1 -- V1 Review (Corrected Plan)
+-------------------------------------------
+
+  Verified every assumption against actual source code. Found 12 issues:
+  - 3 critical (wrong types, missing union extension, inaccessible state)
+  - 2 high (missing resolveAgentConfig step, FailoverError state loss)
+  - 4 medium (unused config field, wrong validation, impractical callback,
+    ambiguous integration points)
+  - 3 low (undefined handling, test failure, pattern divergence)
+
+  Produced corrected 14-step plan with all issues resolved. Key improvements:
+  1. All types verified to exist at correct import paths
+  2. resolveAgentConfig explicitly extended (critical missing step)
+  3. Budget observability moved from session state to result meta
+  4. Summary call uses in-loop approach instead of callback
+  5. Integration strategy specified with exact code locations
+
+  Scope: ~450 lines across 14 files
+
+  REMAINING BLIND SPOT (discovered in V2):
+    V1 corrected plan still assumed run.ts's while(true) was the
+    tool-calling loop. It was NOT. The tool-calling loop is in
+    agent-core/agent-loop.ts. This made the entire outer-loop budget
+    integration approach (Steps 8-10 of V1 corrected) architecturally
+    incorrect -- the budget would have counted outer-loop RETRIES, not
+    inner-loop TOOL-CALLING ROUNDS.
+
+
+ITERATION 2 -- V2 (This Plan, Ground-Up Rewrite)
+--------------------------------------------------
+
+  Discovered the two-level loop architecture through deep investigation
+  of attempt.ts (5800 lines) and agent-core/agent-loop.ts. This changed
+  the fundamental approach:
+
+  V1 approach (outer-loop budget):
+    - Counted outer-loop iterations in run.ts
+    - Set a "productive" flag at specific continue points
+    - Budget consumed at the top of each outer-loop iteration
+    - PROBLEM: Outer loop typically runs 1x for normal requests.
+      All tool-calling happens inside agent-core's inner loop.
+      A budget of 90 at the outer level would almost never be reached.
+      The budget would NOT prevent runaway tool-calling loops.
+
+  V2 approach (inner-loop callback):
+    - Threads a callback from run.ts to agent-core's inner loop
+    - Budget consumed before each tool-calling round in agent-loop.ts
+    - Budget persists across outer-loop attempts via closure
+    - Correctly counts individual LLM tool-calling rounds (matches Hermes)
+    - Actually prevents the reported problem (runaway tool-calling loops)
+
+  Key V2 improvements over V1 corrected:
+  1. Architecturally correct budget enforcement (inner loop, not outer)
+  2. onBeforeToolCallingRound callback in AgentLoopConfig (~10 lines)
+  3. Budget threading via existing callback pattern (beforeToolCall etc.)
+  4. Budget persists across attempts via closure (not recreated)
+  5. Summary attempt uses simpler mechanism (no budget callback for
+     the summary, allowing 1 round)
+  6. Removed the fragile "lastIterationWasProductive" flag approach
+     (unnecessary with inner-loop callback)
+  7. Simplified compaction refund (1 refund per compaction, not 3 points)
+
+  Trade-off: V2 touches agent-core (3 files, ~15 lines). This is in a
+  separate package in the monorepo. However:
+  - The change follows existing patterns (same as beforeToolCall threading)
+  - It's optional (guarded by callback presence)
+  - It's ~15 lines total across 3 files
+  - Without it, the budget doesn't actually work
+
+  Scope: ~500 lines across 17 files (3 additional agent-core files)
+
+
+PROGRESSION SUMMARY
+--------------------
+
+  Iteration   Steps  Files  Key Fix
+  ---------   -----  -----  -------
+  V1 orig     11     12     Initial plan (5 wrong assumptions)
+  V1 review   14     14     Fixed 12 issues (types, state access, callbacks)
+  V2          16     17     Fixed fundamental architecture (inner vs outer loop)
+
+  Total issues found and fixed across all iterations:
+  - V1 review: 12 issues (type errors, missing steps, wrong approaches)
+  - V2: 1 critical architectural issue (budget enforcement location)
+
+  The V2 plan preserves ALL V1 review fixes:
+  - Correct types (EmbeddedAgentMeta, not ChatMessage)
+  - Error kind union extended
+  - Observability via result meta (not diagnostic session state)
+  - resolveAgentConfig explicitly extended
+  - Zod schema without superRefine
+  - No subagentMaxIterations (per-agent config instead)
+  - Test updates for loop detection default change
+
+  And adds:
+  - Agent-core inner-loop callback mechanism
+  - Budget callback threading through 4-level call chain
+  - Simplified run.ts integration (detect exhaustion, not track productivity)
+  - More robust summary mechanism
+
+
+================================================================================
+3. CONFIDENCE ASSESSMENT
+================================================================================
+
+  HIGH CONFIDENCE:
+  - IterationBudget class (direct translation, trivial logic)
+  - Configuration system (verified patterns, exact replication)
+  - Error kind extension (additive, backward-compatible)
+  - Budget-exhaustion result builder (follows verified pattern)
+  - Unit tests (standard Vitest patterns)
+
+  MEDIUM CONFIDENCE:
+  - Agent-core callback mechanism (clean design, but touches separate package)
+  - Callback threading (follows existing pattern, but 4 levels deep)
+  - Summary injection (mirrors compaction continuation pattern)
+  - Compaction refund (verified armPostCompaction locations)
+
+  NEEDS VERIFICATION DURING IMPLEMENTATION:
+  - Exact location in attempt.ts where callback is threaded to agent session
+    (the 5800-line file has complex setup logic; grep for beforeToolCall
+    threading to find the exact pattern)
+  - Whether createLoopConfig() in agent.ts picks up new options automatically
+    or needs explicit addition
+  - Whether the summary instruction effectively prevents tool calls without
+    strict tool suppression (model-dependent; may need follow-up)
+  - Whether budget.remaining <= 0 is reliably detectable after the attempt
+    returns (depends on callback being called synchronously)
+
+  NOT NEEDED:
+  - Further plan iterations. The V2 plan addresses the correct architectural
+    level (inner loop) with a clean callback mechanism. Implementation may
+    surface minor adjustments, but the fundamental approach is sound.
+
+
+================================================================================
+END OF SUMMARY
+================================================================================

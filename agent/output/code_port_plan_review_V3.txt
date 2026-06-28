@@ -1,0 +1,561 @@
+================================================================================
+CODE PORT PLAN REVIEW V3 (CORRECTED)
+Iteration Budget & Agent Loop Safety -- Hermes -> OpenClaw
+================================================================================
+
+Source:  Hermes Agent (Python)  -> Target: OpenClaw (TypeScript)
+Feature: Per-agent iteration budget with consume/refund semantics,
+         budget-exhaustion forced summary, and configuration.
+Porting Complexity: LOW-MEDIUM (core module 62 lines; integration touches
+                    ~18 files across 2 packages)
+
+This is the CORRECTED plan produced by reviewing V3 against the actual
+OpenClaw source code.  Every issue identified during review is marked with
+[FIX #N] to cross-reference the review summary.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  PART A -- SCOPE & STRATEGY
+    A.1-A.4  [Unchanged from V3 -- refer to original plan]
+    A.5      Architecture: Two-Level Loop & Harness Resolution
+             [Minor correction to harness property access path]
+
+  PART B -- STEP-BY-STEP IMPLEMENTATION PLAN
+    Steps 1-5   [Unchanged from V3]
+    Step 6      [FIX #1: Corrected harness property access in 6D]
+    Step 7      [FIX #6: Clarified harness access in attempt.ts]
+    Step 8      [FIX #2, #3, #4: Corrected budget exhaustion condition
+                 and stale instruction cleanup]
+    Steps 9-13  [Unchanged from V3]
+    Steps 14-16 [Unchanged from V3]
+
+  PART C -- RISK ANALYSIS
+    [FIX #5: Corrected FailoverError budget claim]
+
+
+================================================================================
+PART A -- SCOPE & STRATEGY
+================================================================================
+
+  [Parts A.1 through A.4 are unchanged from V3. Omitted for brevity.
+   Refer to the original V3 plan for full text.]
+
+
+A.5  Architecture: Two-Level Loop & Harness Resolution
+---------------------------------------------------------
+
+  [Outer/inner loop description unchanged from V3.]
+
+  [FIX #1] CORRECTED HARNESS RESOLUTION:
+
+    The embedded agent runner call chain:
+
+      run.ts
+        -> runEmbeddedAttemptWithBackend(params)  [run/backend.ts]
+          -> runAgentHarnessAttempt(params)        [run/backend.ts]
+            -> ...
+              -> creates AgentSession with Agent instance
+              -> Agent or CoreAgentHarness calls runAgentLoop(config)
+
+    TWO createLoopConfig implementations exist:
+
+      1. Agent.createLoopConfig (agent-core/agent.ts, lines 474-507)
+         - Maps: beforeToolCall, afterToolCall, prepareNextTurn, etc.
+         - Does NOT map: shouldStopAfterTurn, onBeforeToolCallingRound (new)
+
+      2. CoreAgentHarness.createLoopConfig (agent-core/harness/agent-harness.ts,
+         lines 486-542)
+         - Does NOT extend Agent -- standalone class
+         - Has `private session: Session` (NOT `this.agent`)
+         - Maps: beforeToolCall (via hook emit), afterToolCall (via hook emit),
+           transformContext, prepareNextTurn, getSteeringMessages,
+           getFollowUpMessages
+         - Does NOT map: shouldStopAfterTurn, onBeforeToolCallingRound
+
+    [FIX #1] CRITICAL CORRECTION: The V3 plan stated
+    "CoreAgentHarness wraps an Agent, so it can access the Agent's
+    properties" and suggested `this.agent?.onBeforeToolCallingRound`.
+    This is WRONG. CoreAgentHarness has:
+
+        private session: Session;   // line 223
+
+    NOT `this.agent`. The harness wraps a Session, which in turn may
+    contain an Agent. But the harness's createLoopConfig does NOT read
+    any Agent properties. It builds all callbacks from its own methods
+    (emitHook, drainQueuedMessages, etc.).
+
+    CORRECTED APPROACH for onBeforeToolCallingRound in the harness:
+    Add a dedicated public property to CoreAgentHarness and map it
+    directly in createLoopConfig. Set it from the outside in attempt.ts.
+    (This was the V3 plan's "fallback" approach; it is now the PRIMARY.)
+
+  [shouldStopAfterTurn ALTERNATIVE section unchanged from V3.]
+
+
+================================================================================
+PART B -- STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+
+================================================================================
+LAYER 1 -- CORE MODULE
+================================================================================
+
+--------------------------------------------------------------------------------
+STEP 1: Create IterationBudget class
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+================================================================================
+LAYER 2 -- CONFIGURATION
+================================================================================
+
+--------------------------------------------------------------------------------
+STEP 2: Add TypeScript config types
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+--------------------------------------------------------------------------------
+STEP 3: Add Zod schema validation
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+--------------------------------------------------------------------------------
+STEP 4: Extend resolveAgentConfig with iterationBudget merge logic
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+--------------------------------------------------------------------------------
+STEP 5: Add config resolution function
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+================================================================================
+LAYER 3 -- AGENT-CORE INTEGRATION
+================================================================================
+
+
+--------------------------------------------------------------------------------
+STEP 6: Add onBeforeToolCallingRound callback to agent-core
+--------------------------------------------------------------------------------
+
+  --- 6A: Add to AgentLoopConfig interface ---
+
+  [Unchanged from V3.]
+
+
+  --- 6B: Call in the inner loop ---
+
+  [Unchanged from V3.]
+
+
+  --- 6C: Map in Agent.createLoopConfig ---
+
+  [Unchanged from V3.]
+
+
+  --- 6D: Map in CoreAgentHarness.createLoopConfig ---
+
+  [FIX #1] CORRECTED: Primary approach replaced.
+
+  TARGET FILE (MODIFY):
+    packages/agent-core/src/harness/agent-harness.ts
+
+  CHANGES:
+
+    [FIX #1] CoreAgentHarness does NOT have `this.agent`. It has
+    `private session: Session` (line 223). The createLoopConfig method
+    (lines 486-542) builds all callbacks from its own methods (emitHook,
+    drainQueuedMessages, etc.), not from Agent properties.
+
+    The V3 plan's primary suggestion of
+    `this.agent?.onBeforeToolCallingRound` is INCORRECT and will not
+    compile.
+
+    CORRECTED APPROACH (promoted from V3's fallback):
+
+    1. Add a public property to CoreAgentHarness class (alongside other
+       state properties):
+
+      /** Optional iteration budget callback: return false to stop. */
+      public onBeforeToolCallingRound?: (round: number) => boolean;
+
+    2. In CoreAgentHarness.createLoopConfig() (~line 490, after the
+       return { ... } object opening), add:
+
+      onBeforeToolCallingRound: this.onBeforeToolCallingRound,
+
+    3. Set the property from the outside (in attempt.ts or wherever
+       the CoreAgentHarness is instantiated). See Step 7 for threading.
+
+  VERIFICATION DURING IMPLEMENTATION:
+    [Unchanged from V3 -- still grep for createLoopConfig and trace
+     the actual call path.]
+
+
+================================================================================
+LAYER 4 -- RUNNER INTEGRATION
+================================================================================
+
+
+--------------------------------------------------------------------------------
+STEP 7: Thread budget callback through attempt params
+--------------------------------------------------------------------------------
+
+  [V2 FIX #4, #5 handling unchanged from V3.]
+  [FIX #6] CLARIFIED: Harness instance access in attempt.ts.
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run/types.ts
+
+  CHANGES:
+    [Unchanged from V3: add onBeforeToolCallingRound to
+     EmbeddedRunAttemptParams.]
+
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run/attempt.ts
+
+  CHANGES:
+
+    1. After createEmbeddedAgentSessionWithResourceLoader() returns
+       (~line 2528 area), set the callback on the Agent instance:
+
+      if (params.onBeforeToolCallingRound) {
+        activeSession.agent.onBeforeToolCallingRound =
+          params.onBeforeToolCallingRound;
+      }
+
+    [FIX #6] CORRECTED: Harness instance access.
+
+    2. If the code path goes through CoreAgentHarness, ALSO set the
+       property on the harness. The harness instance is NOT directly
+       accessible from attempt.ts -- it is created inside
+       runAgentHarnessAttempt (the function that backend.ts delegates to).
+
+       Two approaches:
+
+       (a) PREFERRED: If runAgentHarnessAttempt creates the harness
+           internally, the harness creation code needs to read
+           onBeforeToolCallingRound from the attempt params and set
+           it on the harness instance. This change goes in whichever
+           file defines runAgentHarnessAttempt (likely in the agent-core
+           harness package). Grep for `runAgentHarnessAttempt` to find
+           the definition.
+
+           // Inside runAgentHarnessAttempt, after creating the harness:
+           if (params.onBeforeToolCallingRound) {
+             harness.onBeforeToolCallingRound =
+               params.onBeforeToolCallingRound;
+           }
+
+       (b) ALTERNATIVE: If the Agent instance's createLoopConfig is
+           the one actually invoked (not the harness's), then only
+           setting it on activeSession.agent (step 1 above) is needed.
+           The harness change (Step 6D) becomes defense-in-depth.
+
+       During implementation, trace the exact call path from
+       runEmbeddedAttemptWithBackend to runAgentLoop to determine
+       which createLoopConfig is invoked and which instance needs
+       the property set.
+
+
+  TARGET FILE (VERIFY):
+    src/agents/embedded-agent-runner/run/backend.ts
+
+    [Unchanged from V3: backend.ts passes full params through.]
+
+
+--------------------------------------------------------------------------------
+STEP 8: Integrate budget creation and exhaustion detection in run.ts
+--------------------------------------------------------------------------------
+
+  [V2 FIX #1 handling (payloadCount check) unchanged from V3.]
+  [FIX #2] CORRECTED: Added !timedOut to budget exhaustion condition.
+  [FIX #3] CORRECTED: Added !emptyAssistantReplyIsSilent and
+           !attempt.yieldDetected conditions.
+  [FIX #4] CORRECTED: Clear stale retry instructions.
+
+  TARGET FILE (MODIFY):
+    src/agents/embedded-agent-runner/run.ts
+
+  CHANGES:
+
+    Items 1-5: [Unchanged from V3.]
+
+    Item 6: Budget exhaustion detection.
+
+    [FIX #2, #3] CORRECTED: The budget exhaustion condition now includes
+    guards that match the analogous compaction continuation retry check
+    (lines 3823-3835 of run.ts). The V3 plan omitted `!timedOut`,
+    `!emptyAssistantReplyIsSilent`, and `!attempt.yieldDetected`.
+
+    The compaction continuation retry condition (actual code, lines
+    3823-3835) for reference:
+
+      if (
+        !emptyAssistantReplyIsSilent &&     // ← V3 MISSED
+        attemptCompactionCount > 0 &&
+        payloadCount === 0 &&
+        !aborted &&
+        !promptError &&
+        !timedOut &&                        // ← V3 MISSED
+        !attempt.clientToolCalls &&
+        !attempt.yieldDetected &&           // ← V3 MISSED
+        !attempt.didSendDeterministicApprovalPrompt &&
+        !attempt.lastToolError &&
+        !accumulatedReplayState.hadPotentialSideEffects &&
+        compactionContinuationRetryAttempts < 1
+      )
+
+    CORRECTED budget exhaustion condition:
+
+      // --- Budget Exhaustion Detection ---
+      if (
+        iterationBudget &&
+        iterationBudget.remaining <= 0 &&
+        !emptyAssistantReplyIsSilent &&       // [FIX #3] Silent completions
+                                              //   are successful; budget=0 is
+                                              //   coincidental, not an error.
+        payloadCount === 0 &&                 // [V2 FIX #1] Only trigger when
+                                              //   no text response produced.
+        !attempt.clientToolCalls &&           // [V2 FIX #1] Not a client tool call.
+        !budgetSummaryAttempt &&              // Not already a summary attempt.
+        !aborted &&
+        !promptError &&
+        !timedOut &&                          // [FIX #2] Timed-out attempts are
+                                              //   handled by the timeout path
+                                              //   (lines 3628-3707), not budget.
+        !attempt.yieldDetected                // [FIX #3] Agent yielded voluntarily;
+                                              //   budget=0 is coincidental.
+      ) {
+
+    WHY !timedOut IS NEEDED (FIX #2):
+
+      Without it, the following scenario is mishandled:
+
+      The attempt times out during tool execution (timedOutDuringPrompt=false).
+      The timeout return path (lines 3628-3707) only fires when
+      timedOutDuringPrompt=true, so the code continues to the retry section.
+      Budget.remaining=0, payloadCount=0. Without !timedOut, the budget
+      exhaustion handler fires instead of letting the timeout be handled
+      by the existing timeout recovery mechanisms.
+
+      The compaction continuation check (line 3829) includes !timedOut for
+      exactly this reason.
+
+    WHY !emptyAssistantReplyIsSilent IS NEEDED (FIX #3):
+
+      If the agent completed its work silently (intentional no-visible-text
+      output, e.g. for silent notification processing), payloadCount=0 is
+      expected. If the budget also happens to be at 0, we should NOT trigger
+      budget exhaustion -- the work completed successfully.
+
+    WHY !attempt.yieldDetected IS NEEDED (FIX #3):
+
+      If the agent voluntarily yielded (paused to wait for user input),
+      it may produce payloadCount=0 with budget=0. The yield should be
+      respected, not overridden by budget exhaustion handling.
+
+    [FIX #4] Item 6a: Clear stale retry instructions.
+
+      When budget exhaustion triggers the summary flow, clear any stale
+      retry instructions from previous iterations. These could create
+      redundant or conflicting prompt instructions during the summary
+      attempt:
+
+        if (budgetConfig.forceSummaryOnExhaustion) {
+          iterationBudget.refund();
+          budgetExhaustedSummaryPending = true;
+          budgetExhaustedSummaryInstruction = BUDGET_EXHAUSTION_SUMMARY_INSTRUCTION;
+          // [FIX #4] Clear stale retry instructions so the summary
+          // attempt's prompt contains only the budget summary instruction.
+          reasoningOnlyRetryInstruction = null;
+          emptyResponseRetryInstruction = null;
+          compactionContinuationRetryInstruction = null;
+          continue;
+        }
+
+      WHY THIS MATTERS:
+
+        Without clearing, the following scenario causes a confusing prompt:
+
+        1. Iteration A: LLM returns reasoning-only response ->
+           reasoningOnlyRetryInstruction = "please provide visible answer"
+           -> continue
+        2. Iteration B: retry with visible-answer instruction -> LLM enters
+           tool-calling loop -> budget exhausts -> budget exhaustion handler
+           fires -> budgetExhaustedSummaryInstruction = "please summarize"
+           -> continue
+        3. Iteration C: summary attempt -> prompt includes BOTH
+           "please provide visible answer" AND "please summarize"
+
+        Clearing the stale instructions in step 2 prevents this.
+
+    Item 7: Handle summary attempt completion.
+
+    [Unchanged from V3.]
+
+
+--------------------------------------------------------------------------------
+STEP 9: Extend EmbeddedAgentRunMeta error kind union
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+--------------------------------------------------------------------------------
+STEP 10: Add budget-exhaustion result builder
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+--------------------------------------------------------------------------------
+STEP 11: Add budget-exhaustion summary injection in run.ts
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3, except that the instruction-setting code in
+   Step 11.3 now also clears stale instructions as documented in
+   Step 8 Item 6a (FIX #4).]
+
+
+--------------------------------------------------------------------------------
+STEP 12: Add budget refund for compaction restarts
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+--------------------------------------------------------------------------------
+STEP 13: Add budget metadata to run result
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+================================================================================
+LAYER 5 -- DEFAULTS
+================================================================================
+
+--------------------------------------------------------------------------------
+STEP 14: Enable tool loop detection warnings by default
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+================================================================================
+LAYER 6 -- TESTING
+================================================================================
+
+--------------------------------------------------------------------------------
+STEP 15: Add unit tests for IterationBudget
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3.]
+
+
+--------------------------------------------------------------------------------
+STEP 16: Add integration tests for budget in run loop
+--------------------------------------------------------------------------------
+
+  [Unchanged from V3, with the following addition:]
+
+  Additional test scenario:
+
+    8. Budget exhaustion skipped for timed-out attempt
+       - Config: { enabled: true, maxIterations: 3 }
+       - Mock: LLM makes 3 rounds, then times out during tool execution
+       - Verify: timeout handling fires, NOT budget exhaustion
+       - Verify: budget metadata still included in result
+
+    9. Budget exhaustion skipped for silent reply
+       - Config: { enabled: true, maxIterations: 3 }
+       - Mock: emptyAssistantReplyIsSilent = true, budget used = 3
+       - Verify: normal silent completion, NOT budget exhaustion
+
+
+================================================================================
+PART C -- RISK ANALYSIS
+================================================================================
+
+
+C.1  HIGH RISK
+-----------------
+
+  [Unchanged from V3: None identified.]
+
+
+C.2  MEDIUM RISK
+-------------------
+
+  [Items 1-3 unchanged from V3.]
+
+
+C.3  LOW RISK
+-----------------
+
+  [Items 1-2 unchanged from V3.]
+
+  [FIX #5] CORRECTED: Item 3 (Budget interaction with failover)
+
+  3. Budget interaction with failover (Steps 8-10)
+     RISK: When a FailoverError triggers mid-run, the budget state may be
+     inconsistent (partially consumed).
+
+     [FIX #5] CORRECTED BEHAVIOR: The budget RESETS on failover, not
+     persists. FailoverError propagates up from the while(true) loop in
+     runEmbeddedAgentInternal. The outer runEmbeddedAgent wrapper catches
+     it and retries with a different model by calling
+     runEmbeddedAgentInternal again. The new call creates a NEW
+     IterationBudget, so the failover model gets a fresh budget.
+
+     V3 incorrectly stated: "The budget persists across the restart,
+     which is the desired behavior -- the agent has already used those
+     iterations regardless of which provider served them."
+
+     ACTUAL BEHAVIOR: Each failover retry gets a fresh budget. This is
+     acceptable because:
+     - Failover typically occurs due to provider errors, not productive work
+     - The iterations consumed before failover were wasted (error scenarios)
+     - A fresh budget for the new model ensures the agent can complete its task
+     - If total-work capping across failover is needed, it should be
+       implemented at the outer runEmbeddedAgent level, not inside
+       runEmbeddedAgentInternal. This is out of scope for this port.
+
+
+C.4  FALLBACK PLAN
+---------------------
+
+  [Unchanged from V3.]
+
+
+C.5  DEPENDENCY SUMMARY
+--------------------------
+
+  [Unchanged from V3: 4 new + 15 modified = 19 files.
+   No new files or modifications added by the review corrections.]
+
+
+C.6  IMPLEMENTATION ORDER
+----------------------------
+
+  [Unchanged from V3.]
+
+
+================================================================================
+END OF CORRECTED V3 PLAN
+================================================================================
