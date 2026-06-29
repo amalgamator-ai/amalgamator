@@ -300,7 +300,7 @@ Do the following:
 1. Read and understand ALL files listed in <pipeline_artifacts>. These contain the complete history of how this feature was designed, planned, coded, tested, and debugged. You MUST understand this context to make informed fixes.
 
 2. Read <pr_comments_file> from <output_dir>. Analyze each comment:
-   - Categorize: bug fix, style issue, design concern, missing test, documentation, nit
+   - Categorize: bug fix, style issue, design concern, missing test, documentation, behavior proof request, nit
    - Determine priority: must-fix, should-fix, optional
    - Identify the affected file(s) and code area
 
@@ -310,11 +310,20 @@ Do the following:
    - Make the code change in <target_project_dir>
    - If a reviewer requests additional tests, add them
 
-4. After all fixes are applied:
+4. If a reviewer requests "real behavior proof", "live output", "terminal proof", or similar evidence that the feature works in practice:
+   - This is NOT a process-only request — you CAN and MUST generate this proof
+   - Write a small reproducible test script or scenario that demonstrates the feature working (e.g., a script that triggers the exact behavior the reviewer wants to see)
+   - Run the script and capture the terminal output (stdout + stderr)
+   - Save the captured proof output to <output_dir>/behavior_proof_R{round_id}.txt
+   - Include only the relevant output, redact any sensitive paths or tokens if present
+   - The proof should clearly show the before/after behavior or the feature activating as designed
+
+5. After all fixes are applied:
    - Run the build: cd <target_project_dir> && {build_command}
+   - Run the linter: cd <target_project_dir> && {lint_command}
    - Run the tests: cd <target_project_dir> && {test_command}
-   - Fix any build/test failures caused by the changes
-   - Iterate until build and tests pass
+   - Fix any build, lint, or test failures caused by the changes
+   - Iterate until build, lint, and tests all pass
 
 5. Generate a patch of all changes since the last commit:
    cd <target_project_dir> && git diff HEAD > <output_dir>/{output_patch_file}
@@ -333,11 +342,13 @@ IMPORTANT:
 <output>
 - Apply fixes directly to <target_project_dir>
 - Dump the fix patch to <output_dir>/{output_patch_file}
+- If behavior proof was requested, save it to <output_dir>/behavior_proof_R{round_id}.txt
 - Dump a summary to <output_dir>/{output_summary_file} that includes:
     - A header noting this is PR review round {round_id}
     - For each PR comment: what was requested, what was done, and why
     - List of all files modified
     - Build and test results
+    - If behavior proof was generated, note the proof file and briefly describe what it demonstrates
     - Any comments that were intentionally not addressed, with reasoning
 </output>
 
@@ -371,13 +382,20 @@ Do the following:
 2. Read the fix patch from <fix_patch_file>
 3. Read the fix summary from <fix_summary_file>
 
-Write a structured summary suitable for posting as a PR update comment:
-- Header indicating this is round {round_id} of PR review fixes
-- For each reviewer comment: quote the original comment, describe what was changed
+Also check if a behavior proof file exists at <output_dir>/behavior_proof_R{round_id}.txt — if it does, read it.
+
+Write a structured summary suitable for posting as a PR update comment. Include ONLY the following — nothing else:
+- For each reviewer comment that was fixed: quote the original comment briefly, then describe what was changed and why
 - List all files modified with a one-line description of each change
-- Report build and test results
-- Note any comments that were not addressed, with explanation
-- Provide the git commands needed to push the updated branch
+- If behavior proof was generated, include the proof output (or a clear excerpt) directly in the summary so reviewers can see the feature working. Format it in a collapsible details/summary block.
+- If any reviewer comments were NOT addressed, list them with a brief explanation of why
+- If there are remaining open items or known limitations, list them
+
+Do NOT include:
+- Git commands, push instructions, or workflow instructions
+- Any mention of automation, AI, or tooling
+- Any header like "round N" — just describe the fixes directly
+- Build/test result details — the CI will show those
 </instructions>
 
 <output>
@@ -399,6 +417,7 @@ class FixPRCommentsPrompt:
     branch_name: str
     round_id: int
     build_command: str
+    lint_command: str
     test_command: str
     output_patch_file: str
     output_summary_file: str
@@ -414,6 +433,7 @@ class FixPRCommentsPrompt:
             branch_name=self.branch_name,
             round_id=self.round_id,
             build_command=self.build_command,
+            lint_command=self.lint_command if self.lint_command else "echo 'no lint configured'",
             test_command=self.test_command,
             output_patch_file=self.output_patch_file,
             output_summary_file=self.output_summary_file,
@@ -499,8 +519,9 @@ Do the following:
 
 6. After all review fixes are applied:
    - Run the build: cd <target_project_dir> && {build_command}
+   - Run the linter: cd <target_project_dir> && {lint_command}
    - Run the tests: cd <target_project_dir> && {test_command}
-   - Fix any build/test failures
+   - Fix any build, lint, or test failures
 
 7. Generate the reviewed patch:
    cd <target_project_dir> && git diff HEAD > <output_dir>/{output_patch_file}
@@ -535,6 +556,7 @@ class ReviewPRFixPrompt:
     branch_name: str
     round_id: int
     build_command: str
+    lint_command: str
     test_command: str
     output_patch_file: str
     output_summary_file: str
@@ -549,6 +571,7 @@ class ReviewPRFixPrompt:
             branch_name=self.branch_name,
             round_id=self.round_id,
             build_command=self.build_command,
+            lint_command=self.lint_command if self.lint_command else "echo 'no lint configured'",
             test_command=self.test_command,
             output_patch_file=self.output_patch_file,
             output_summary_file=self.output_summary_file,

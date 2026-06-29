@@ -108,6 +108,26 @@ def _run_build(config):
 
 
 # ---------------------------------------------------------------------------
+# Phase 2b: Lint
+# ---------------------------------------------------------------------------
+
+def _run_lint(config):
+    if not config.lint_command:
+        print("Lint: SKIPPED (no lint_command configured)")
+        return
+    print("Running: {}".format(config.lint_command))
+    result = subprocess.run(
+        config.lint_command, shell=True,
+        cwd=config.openclaw_source_dir, check=False,
+    )
+    if result.returncode != 0:
+        print("ERROR: Lint failed (exit code {}).".format(result.returncode))
+        print("Fix lint errors before running PR review.")
+        sys.exit(1)
+    print("Lint: PASS")
+
+
+# ---------------------------------------------------------------------------
 # Phase 3: Test
 # ---------------------------------------------------------------------------
 
@@ -154,6 +174,7 @@ async def _run_fix_iterations(config, claude_config, context, artifact_context,
             branch_name=config.branch_name,
             round_id=round_id,
             build_command=config.build_command,
+            lint_command=config.lint_command,
             test_command=config.test_command,
             output_patch_file=gen_patch,
             output_summary_file=gen_summary,
@@ -194,6 +215,7 @@ async def _run_fix_iterations(config, claude_config, context, artifact_context,
             branch_name=config.branch_name,
             round_id=round_id,
             build_command=config.build_command,
+            lint_command=config.lint_command,
             test_command=config.test_command,
             output_patch_file=review_patch,
             output_summary_file=review_summary,
@@ -242,24 +264,51 @@ async def _run_fix_iterations(config, claude_config, context, artifact_context,
 # Phase 5: Commit
 # ---------------------------------------------------------------------------
 
-def _build_commit_message(config, round_id, final_summary_file):
-    """Build a commit message by extracting what was fixed from the summary."""
+def _extract_findings_from_file(path):
+    """Extract [P1]/[P2] findings from a summary file, handling multiple formats."""
     import re
-    bullet_lines = []
+    findings = []
     seen = set()
-    summary_path = os.path.join(config.output_dir, final_summary_file) if final_summary_file else None
-    if summary_path and os.path.isfile(summary_path):
-        finding_pat = re.compile(r'^\[P\d\]\s+(.+?)\s+—\s+(.+)$')
-        with open(summary_path) as f:
-            for line in f:
-                m = finding_pat.match(line.strip())
+    patterns = [
+        re.compile(r'^\[P\d\]\s+(.+?)\s+—\s+(.+)$'),
+        re.compile(r'^###\s+Comment\s+\d+:\s+\[P\d\]\s+(.+)$'),
+        re.compile(r'^COMMENT\s+\d+:\s+\[P\d\]\s+(.+)$'),
+        re.compile(r'^-\s+\[P\d\]\s+(.+?)\s+—\s+(.+)$'),
+        re.compile(r'^-\s+\[P\d\]\s+(.+)$'),
+    ]
+    with open(path) as f:
+        for line in f:
+            stripped = line.strip()
+            for pat in patterns:
+                m = pat.match(stripped)
                 if m:
                     desc = m.group(1).strip()
-                    location = m.group(2).strip()
+                    if len(m.groups()) > 1:
+                        location = m.group(2).strip()
+                        desc = "{} ({})".format(desc, location)
                     key = desc.lower()
                     if key not in seen:
                         seen.add(key)
-                        bullet_lines.append("- {} ({})".format(desc, location))
+                        findings.append("- {}".format(desc))
+                    break
+    return findings
+
+
+def _build_commit_message(config, round_id, final_summary_file):
+    """Build a commit message by extracting what was fixed from the summary."""
+    bullet_lines = []
+
+    if final_summary_file:
+        summary_path = os.path.join(config.output_dir, final_summary_file)
+        if os.path.isfile(summary_path):
+            bullet_lines = _extract_findings_from_file(summary_path)
+
+    if not bullet_lines:
+        gen_summary = final_summary_file.replace("_review_", "_") if final_summary_file else None
+        if gen_summary:
+            gen_path = os.path.join(config.output_dir, gen_summary)
+            if os.path.isfile(gen_path):
+                bullet_lines = _extract_findings_from_file(gen_path)
 
     if not bullet_lines:
         bullet_lines.append("- Address reviewer feedback")
@@ -428,11 +477,12 @@ async def run_pr_review(config, round_id):
     print("=" * 80)
     _verify_branch(config)
 
-    # Phase 2: Build
+    # Phase 2: Build + Lint
     print("\n" + "=" * 80)
     print("PHASE 2: BUILD")
     print("=" * 80)
     _run_build(config)
+    _run_lint(config)
 
     # Phase 3: Test
     print("\n" + "=" * 80)
@@ -453,11 +503,12 @@ async def run_pr_review(config, round_id):
         print("ERROR: No fixes were generated. Exiting.")
         sys.exit(1)
 
-    # Phase 5: Rebuild after fixes
+    # Phase 5: Rebuild + Lint after fixes
     print("\n" + "=" * 80)
     print("PHASE 5: REBUILD (verify fixes compile)")
     print("=" * 80)
     _run_build(config)
+    _run_lint(config)
 
     # Phase 6: Retest after fixes
     print("\n" + "=" * 80)

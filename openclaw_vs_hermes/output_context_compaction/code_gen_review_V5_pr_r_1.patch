@@ -1,0 +1,302 @@
+diff --git a/packages/agent-core/src/harness/compaction/compaction.ts b/packages/agent-core/src/harness/compaction/compaction.ts
+index 173b567917..a6698bd515 100644
+--- a/packages/agent-core/src/harness/compaction/compaction.ts
++++ b/packages/agent-core/src/harness/compaction/compaction.ts
+@@ -136,9 +136,9 @@ export interface CompactionSettings {
+   reserveTokens: number;
+   /** Approximate recent-context tokens to keep after compaction. */
+   keepRecentTokens: number;
+-  /** Maximum passes for multi-pass compaction. @default 3 */
++  /** @internal Maximum passes for multi-pass compaction. Not user-configurable; controlled by internal constants. @default 3 */
+   maxPasses?: number;
+-  /** Minimum token reduction fraction to count as progress. @default 0.05 */
++  /** @internal Minimum token reduction fraction to count as progress. Not user-configurable; controlled by internal constants. @default 0.05 */
+   progressThreshold?: number;
+ }
+ 
+diff --git a/packages/agent-core/src/index.ts b/packages/agent-core/src/index.ts
+index a179d2b592..7a959646bf 100644
+--- a/packages/agent-core/src/index.ts
++++ b/packages/agent-core/src/index.ts
+@@ -45,17 +45,5 @@ export {
+   type CompactionResult,
+   type CompactionSettings,
+   type ContextUsageEstimate,
+-  type CutPointResult,
+ } from "./harness/compaction/compaction.js";
+ export * from "./harness/utils/truncate.js";
+-export {
+-  CompactionProgressTracker,
+-  compactionMadeProgress,
+-  MAX_COMPACTION_PASSES,
+-  PROGRESS_THRESHOLD,
+-  INEFFECTIVE_SAVINGS_THRESHOLD,
+-  MAX_INEFFECTIVE_COMPRESSIONS,
+-  DEFAULT_COMPACTION_TIMEOUT_MS,
+-  type MultiPassCompactionState,
+-  type CompactionProgressTrackerState,
+-} from "./harness/compaction/compaction-progress.js";
+diff --git a/scripts/plugin-sdk-surface-report.mjs b/scripts/plugin-sdk-surface-report.mjs
+index 8ef8845266..d494db1bdd 100644
+--- a/scripts/plugin-sdk-surface-report.mjs
++++ b/scripts/plugin-sdk-surface-report.mjs
+@@ -202,8 +202,8 @@ let publicDeprecatedExportsByEntrypointBudget;
+ try {
+   budgets = {
+     publicEntrypoints: readBudgetEnv("OPENCLAW_PLUGIN_SDK_MAX_PUBLIC_ENTRYPOINTS", 322),
+-    publicExports: readBudgetEnv("OPENCLAW_PLUGIN_SDK_MAX_PUBLIC_EXPORTS", 10399),
+-    publicFunctionExports: readBudgetEnv("OPENCLAW_PLUGIN_SDK_MAX_PUBLIC_FUNCTION_EXPORTS", 5215),
++    publicExports: readBudgetEnv("OPENCLAW_PLUGIN_SDK_MAX_PUBLIC_EXPORTS", 10389),
++    publicFunctionExports: readBudgetEnv("OPENCLAW_PLUGIN_SDK_MAX_PUBLIC_FUNCTION_EXPORTS", 5214),
+     publicDeprecatedExports: readBudgetEnv(
+       "OPENCLAW_PLUGIN_SDK_MAX_PUBLIC_DEPRECATED_EXPORTS",
+       3247,
+diff --git a/src/agents/agent-hooks/compaction-safeguard.ts b/src/agents/agent-hooks/compaction-safeguard.ts
+index e96b98bf90..b5f2abae8c 100644
+--- a/src/agents/agent-hooks/compaction-safeguard.ts
++++ b/src/agents/agent-hooks/compaction-safeguard.ts
+@@ -964,18 +964,6 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
+       summarizationInstructions,
+     );
+ 
+-    // Pre-compaction pruning: replace old tool results with 1-line
+-    // summaries before summarization (reduces input for both provider
+-    // and LLM paths). Protects recent turns from modification.
+-    const { pruned: prunedMessages, prunedCount } = preCompactionPrune(
+-      baseMessagesToSummarize,
+-      recentTurnsPreserve * 2, // 2 msgs per user turn (user + assistant)
+-    );
+-    if (prunedCount > 0) {
+-      baseMessagesToSummarize = prunedMessages;
+-      log.info(`[compaction-safeguard] pre-pruned ${prunedCount} old tool result(s)`);
+-    }
+-
+     // -----------------------------------------------------------------------
+     // Provider path — one call with all messages, no LLM-specific prep.
+     // Falls through to the LLM path below on failure.
+@@ -1038,6 +1026,19 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
+       }
+     }
+ 
++    // Pre-compaction pruning: replace old tool results with 1-line
++    // summaries before LLM summarization. Only applies to the LLM path;
++    // the provider path receives all messages unchanged to preserve
++    // its existing all-message contract.
++    const { pruned: prunedMessages, prunedCount } = preCompactionPrune(
++      baseMessagesToSummarize,
++      recentTurnsPreserve * 2, // 2 msgs per user turn (user + assistant)
++    );
++    if (prunedCount > 0) {
++      baseMessagesToSummarize = prunedMessages;
++      log.info(`[compaction-safeguard] pre-pruned ${prunedCount} old tool result(s)`);
++    }
++
+     // -----------------------------------------------------------------------
+     // LLM path — resolve model + auth, prune, chunk, quality guard.
+     // -----------------------------------------------------------------------
+diff --git a/src/config/config.multi-pass-compaction.test.ts b/src/config/config.multi-pass-compaction.test.ts
+index aecffb9815..ea6d1478db 100644
+--- a/src/config/config.multi-pass-compaction.test.ts
++++ b/src/config/config.multi-pass-compaction.test.ts
+@@ -18,46 +18,27 @@ function materializeCompactionConfig(input: Record<string, unknown>) {
+ 
+ // -- Suite G: Configuration Schema Extension --
+ 
+-describe("multi-pass compaction configuration defaults", () => {
+-  it("applies default maxPasses=3 when not specified", () => {
++describe("compaction configuration defaults", () => {
++  it("applies default mode='safeguard' when not specified", () => {
+     const result = materializeCompactionConfig({});
+-    expect(result.maxPasses).toBe(3);
+-  });
+-
+-  it("applies default progressThreshold=0.05 when not specified", () => {
+-    const result = materializeCompactionConfig({});
+-    expect(result.progressThreshold).toBe(0.05);
+-  });
+-
+-  it("preserves user-specified maxPasses", () => {
+-    const result = materializeCompactionConfig({ maxPasses: 5 });
+-    expect(result.maxPasses).toBe(5);
+-  });
+-
+-  it("preserves user-specified progressThreshold", () => {
+-    const result = materializeCompactionConfig({ progressThreshold: 0.1 });
+-    expect(result.progressThreshold).toBe(0.1);
++    expect(result.mode).toBe("safeguard");
+   });
+ 
+-  it("applies new field defaults even when mode is already set", () => {
++  it("preserves user-specified mode", () => {
+     const result = materializeCompactionConfig({ mode: "safeguard" });
+     expect(result.mode).toBe("safeguard");
+-    expect(result.maxPasses).toBe(3);
+-    expect(result.progressThreshold).toBe(0.05);
+   });
+ 
+-  it("preserves existing compaction settings alongside new fields", () => {
++  it("preserves existing compaction settings", () => {
+     const result = materializeCompactionConfig({
+       mode: "safeguard",
+       reserveTokens: 16384,
+       keepRecentTokens: 20000,
+-      maxPasses: 2,
+       recentTurnsPreserve: 3,
+     });
+     expect(result.mode).toBe("safeguard");
+     expect(result.reserveTokens).toBe(16384);
+     expect(result.keepRecentTokens).toBe(20000);
+-    expect(result.maxPasses).toBe(2);
+     expect(result.recentTurnsPreserve).toBe(3);
+   });
+ 
+@@ -67,47 +48,15 @@ describe("multi-pass compaction configuration defaults", () => {
+   });
+ });
+ 
+-describe("multi-pass compaction Zod schema validation", () => {
+-  it("accepts valid multi-pass config fields", () => {
++describe("compaction Zod schema validation", () => {
++  it("accepts valid compaction config", () => {
+     const result = compactionSchema.safeParse({
+       mode: "safeguard",
+-      maxPasses: 3,
+-      progressThreshold: 0.05,
+     });
+     expect(result.success).toBe(true);
+   });
+ 
+-  it("rejects invalid type for maxPasses", () => {
+-    const result = compactionSchema.safeParse({ maxPasses: "three" });
+-    expect(result.success).toBe(false);
+-  });
+-
+-  it("rejects invalid type for progressThreshold", () => {
+-    const result = compactionSchema.safeParse({ progressThreshold: "five percent" });
+-    expect(result.success).toBe(false);
+-  });
+-
+-  it("rejects maxPasses below minimum via Zod schema", () => {
+-    const result = compactionSchema.safeParse({ maxPasses: 0 });
+-    expect(result.success).toBe(false);
+-  });
+-
+-  it("rejects maxPasses above maximum via Zod schema", () => {
+-    const result = compactionSchema.safeParse({ maxPasses: 100 });
+-    expect(result.success).toBe(false);
+-  });
+-
+-  it("rejects progressThreshold at zero via Zod schema", () => {
+-    const result = compactionSchema.safeParse({ progressThreshold: 0 });
+-    expect(result.success).toBe(false);
+-  });
+-
+-  it("rejects progressThreshold at 1.0 via Zod schema", () => {
+-    const result = compactionSchema.safeParse({ progressThreshold: 1 });
+-    expect(result.success).toBe(false);
+-  });
+-
+-  it("backwards-compatible with pre-multi-pass configs", () => {
++  it("backwards-compatible with standard configs", () => {
+     const result = compactionSchema.safeParse({
+       mode: "safeguard",
+       reserveTokens: 16384,
+@@ -118,9 +67,29 @@ describe("multi-pass compaction Zod schema validation", () => {
+ 
+   it("rejects unknown keys in compaction config (strict mode)", () => {
+     const result = compactionSchema.safeParse({
+-      maxPasses: 3,
+       unknownField: "surprise",
+     });
+     expect(result.success).toBe(false);
+   });
++
++  it("rejects maxPasses since it is an internal-only setting", () => {
++    // maxPasses is intentionally not in the user-facing config schema;
++    // it is an internal constant (MAX_COMPACTION_PASSES = 3) that will
++    // be wired when multi-pass integration is complete.
++    const result = compactionSchema.safeParse({
++      mode: "safeguard",
++      maxPasses: 3,
++    });
++    expect(result.success).toBe(false);
++  });
++
++  it("rejects progressThreshold since it is an internal-only setting", () => {
++    // progressThreshold is intentionally not in the user-facing config
++    // schema; it is an internal constant (PROGRESS_THRESHOLD = 0.05).
++    const result = compactionSchema.safeParse({
++      mode: "safeguard",
++      progressThreshold: 0.05,
++    });
++    expect(result.success).toBe(false);
++  });
+ });
+diff --git a/src/config/defaults.ts b/src/config/defaults.ts
+index b63371c917..60a0f98544 100644
+--- a/src/config/defaults.ts
++++ b/src/config/defaults.ts
+@@ -532,15 +532,7 @@ export function applyCompactionDefaults(cfg: OpenClawConfig): OpenClawConfig {
+     return cfg;
+   }
+   const compaction = defaults?.compaction;
+-
+-  // Apply defaults per-field (not blocked by mode guard) so that
+-  // maxPasses/progressThreshold defaults are applied even when
+-  // mode is already set.
+-  const needsMode = !compaction?.mode;
+-  const needsMaxPasses = compaction?.maxPasses === undefined;
+-  const needsProgressThreshold = compaction?.progressThreshold === undefined;
+-
+-  if (!needsMode && !needsMaxPasses && !needsProgressThreshold) {
++  if (compaction?.mode) {
+     return cfg;
+   }
+ 
+@@ -552,9 +544,7 @@ export function applyCompactionDefaults(cfg: OpenClawConfig): OpenClawConfig {
+         ...defaults,
+         compaction: {
+           ...compaction,
+-          ...(needsMode ? { mode: "safeguard" as const } : {}),
+-          ...(needsMaxPasses ? { maxPasses: 3 } : {}),
+-          ...(needsProgressThreshold ? { progressThreshold: 0.05 } : {}),
++          mode: "safeguard",
+         },
+       },
+     },
+diff --git a/src/config/types.agent-defaults.ts b/src/config/types.agent-defaults.ts
+index 062f4b422e..baeda38e12 100644
+--- a/src/config/types.agent-defaults.ts
++++ b/src/config/types.agent-defaults.ts
+@@ -570,18 +570,6 @@ export type AgentCompactionConfig = {
+    * Default: false (silent by default).
+    */
+   notifyUser?: boolean;
+-  /**
+-   * Maximum number of compaction passes per invocation.
+-   * Each pass reduces the context further. Set to 1 for single-pass behavior.
+-   * Range: 1-10. Default: 3.
+-   */
+-  maxPasses?: number;
+-  /**
+-   * Minimum token reduction fraction to count as progress between passes.
+-   * If a pass reduces tokens by less than this fraction, the loop stops.
+-   * Range: 0.01-0.50. Default: 0.05 (5%).
+-   */
+-  progressThreshold?: number;
+ };
+ 
+ export type AgentCompactionMemoryFlushConfig = {
+diff --git a/src/config/zod-schema.agent-defaults.ts b/src/config/zod-schema.agent-defaults.ts
+index bb931d079e..f1f4c229c1 100644
+--- a/src/config/zod-schema.agent-defaults.ts
++++ b/src/config/zod-schema.agent-defaults.ts
+@@ -200,8 +200,6 @@ export const AgentDefaultsSchema = z
+         truncateAfterCompaction: z.boolean().optional(),
+         maxActiveTranscriptBytes: NonNegativeByteSizeSchema.optional(),
+         notifyUser: z.boolean().optional(),
+-        maxPasses: z.number().int().min(1).max(10).optional(),
+-        progressThreshold: z.number().gt(0).lt(1).optional(),
+       })
+       .strict()
+       .optional(),

@@ -99,12 +99,28 @@ echo "Commits to push:"
 git -C "$SOURCE_DIR" log --oneline origin/main..HEAD
 echo ""
 
+# Generate PR body with required sections
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "Generating PR body with required sections..."
+bash "${SCRIPT_DIR}/generate_pr_body.sh" "$CONFIG_FILE"
+echo ""
+
+PR_BODY_FILE="${OUTPUT_DIR}/PR_body.md"
+
 # Push
 echo "Pushing $BRANCH to myfork..."
 git -C "$SOURCE_DIR" push myfork "$BRANCH" --force-with-lease
 echo ""
 echo "Push complete."
 echo ""
+
+# Update PR body (required for CI: "What Problem This Solves" + "Evidence")
+if [[ -f "$PR_BODY_FILE" ]]; then
+    echo "Updating PR body with required sections..."
+    gh pr edit "$PR_NUMBER" --repo "${OWNER}/${REPO}" --body-file "$PR_BODY_FILE"
+    echo "PR body updated."
+    echo ""
+fi
 
 # Post comment
 echo "Posting round $ROUND_ID summary as PR comment..."
@@ -113,5 +129,6 @@ echo ""
 echo "============================================"
 echo "Done."
 echo "  PR updated: ${PR_URL}"
+echo "  PR body updated with 'What Problem This Solves' and 'Evidence' sections."
 echo "  Summary posted as comment on the PR."
 echo "============================================"

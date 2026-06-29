@@ -1,0 +1,110 @@
+## PR Review Fixes Applied
+
+**PR:** openclaw/openclaw#97485
+**Branch:** `feat/iteration-budget-agent-loop-safety`
+
+---
+
+### Reviewer Comments Addressed
+
+#### 1. [P1] Do not refund the budget before the forced summary turn
+
+> *"When `forceSummaryOnExhaustion` is enabled, the refund makes the next summary attempt pass `onBeforeToolCallingRound` if the model ignores the no-tool instruction, so it can execute another tool batch after the configured budget is exhausted."*
+> — `src/agents/embedded-agent-runner/run.ts:3896` (confidence: 0.89)
+
+**Fix:** Removed the `iterationBudget.refund()` call on the forced-summary path. The budget now stays at zero after exhaustion. If the model ignores the no-tool instruction and requests tools during the summary turn, `onBeforeToolCallingRound` calls `consume()` which returns `false`, and `agent-loop.ts` stops cleanly without executing any tools. This makes the budget a hard cap that cannot be bypassed. A 5-line explanatory comment replaces the removed line.
+
+Two focused regression tests were added:
+- **"blocks tools during forced summary when no refund is given"** — proves `consume()` returns `false` after full exhaustion, confirming fail-closed behavior.
+- **"a refund before summary would incorrectly allow tool execution"** — documents the anti-pattern that was fixed, showing `refund()` + `consume()` would incorrectly return `true`.
+
+#### 2. [P2] Document the public iterationBudget config keys
+
+> *"The PR adds strict `openclaw.json` keys, but the public config docs still document adjacent `runRetries` without any `iterationBudget` section for scope, defaults, precedence, or exhaustion behavior."*
+> — `src/config/zod-schema.agent-runtime.ts:77-84` (confidence: 0.84)
+
+**Fix:** Added a full `### agents.defaults.iterationBudget` section (41 lines) to the public config docs at `docs/gateway/config-agents.md`, placed between the existing `runRetries` and `contextPruning` sections. The documentation includes:
+- Feature description and opt-in callout
+- JSON5 config example with both `agents.defaults` and `agents.list[]` per-agent override
+- All 4 config fields documented with accurate defaults (`enabled: false`, `maxIterations: 90`, `subagentMaxIterations: 50`, `forceSummaryOnExhaustion: true`)
+- Scope and precedence rules
+- Exhaustion behavior (3 cases: summary turn with tool-blocking, immediate error, metadata output)
+- Iteration counting semantics (only LLM tool-calling rounds count; non-productive retries excluded)
+
+---
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/agents/embedded-agent-runner/run.ts` | Remove `iterationBudget.refund()` on forced-summary path; add comment explaining fail-closed design |
+| `src/agents/iteration-budget.test.ts` | Add 2 tests for summary-path fail-closed behavior and the refund anti-pattern |
+| `docs/gateway/config-agents.md` | Add public `iterationBudget` config documentation section (41 lines) |
+
+---
+
+<details>
+<summary>Behavior proof: iteration budget stops a runaway agent loop</summary>
+
+```
+========================================================================
+BEHAVIOR PROOF: Iteration Budget Stops Runaway Agent Loop
+========================================================================
+
+--- Scenario 1: Budget enforcement ---
+
+Config resolved: {
+  "enabled": true,
+  "maxIterations": 5,
+  "subagentMaxIterations": 50,
+  "forceSummaryOnExhaustion": true
+}
+
+Budget created: maxTotal=5, remaining=5
+
+Simulating agent loop (would run 100+ rounds without budget)...
+
+  Round 1: allowed (used=1/5, remaining=4)
+  Round 2: allowed (used=2/5, remaining=3)
+  Round 3: allowed (used=3/5, remaining=2)
+  Round 4: allowed (used=4/5, remaining=1)
+  Round 5: allowed (used=5/5, remaining=0)
+  Round 6: BLOCKED by budget (used=5/5, remaining=0)
+
+RESULT: Budget stopped the loop after 5 iterations (configured max: 5)
+
+--- Scenario 2: Fail-closed summary path (no refund) ---
+
+Budget state: used=5, remaining=0
+Summary instruction injected. Model responds...
+
+  Summary tool attempt: BLOCKED (correct)
+  Budget state: used=5, remaining=0
+
+--- Scenario 3: Anti-pattern — refund before summary ---
+
+Budget exhausted: used=3, remaining=0
+(Anti-pattern) Refunding 1 iteration before summary...
+After refund: used=2, remaining=1
+  Tool attempt after refund: ALLOWED (this is the bug)
+
+The refund anti-pattern allows tool execution after exhaustion.
+The fix (no refund) prevents this by keeping the budget at 0.
+
+--- Scenario 4: Subagent cap selection ---
+
+Subagent run: cap=50 (from subagentMaxIterations), maxTotal=50
+Parent run:   cap=90 (from maxIterations), maxTotal=90
+
+========================================================================
+ALL SCENARIOS PASSED — budget enforces hard iteration caps
+========================================================================
+```
+
+</details>
+
+---
+
+### Remaining Open Items
+
+1. **Config surface naming and defaults** — The reviewer noted that maintainers still need to settle on final names, defaults, and exhaustion semantics for the `iterationBudget` config block and the `onBeforeToolCallingRound` agent-core hook before merge. This is a design decision for maintainers, not a code defect.

@@ -1,0 +1,220 @@
+================================================================================
+PR REVIEW ROUND 1 — FIX SUMMARY (V5)
+================================================================================
+
+Feature:     Multi-Pass Context Compaction
+PR:          openclaw/openclaw#97580
+Branch:      feat/multi-pass-context-compaction
+Review by:   ClawSweeper bot (automated)
+Fix round:   1
+Date:        2026-06-29
+
+================================================================================
+1. PR COMMENT ANALYSIS & RESPONSES
+================================================================================
+
+COMMENT 1: [P1] Keep provider compaction inputs unpruned
+  Location:   src/agents/agent-hooks/compaction-safeguard.ts:970-973
+  Category:   Design concern / Bug fix
+  Priority:   Must-fix
+  Reviewer:   The pruning pass runs before the provider path, so configured
+              compaction providers no longer receive all messages.
+  Action:     FIXED. Moved preCompactionPrune call from before the provider
+              path to after it, so it only applies to the LLM safeguard path.
+              The provider path now receives the original unpruned
+              baseMessagesToSummarize, preserving its existing all-message
+              contract. Updated the comment to clarify scope.
+  Why:        The original code was written as a performance optimization
+              (reducing input for all paths), but the reviewer correctly
+              identified that provider-owned compaction has a contract to
+              receive all messages. The pruning is only needed for the
+              built-in LLM summarization path.
+
+COMMENT 2: [P1] Wire the multi-pass loop into real callers
+  Location:   src/agents/multi-pass-compaction.ts:119-121
+  Category:   Design concern
+  Priority:   Must-fix (addressed by scope reduction)
+  Reviewer:   multiPassCompact is standalone and not wired into production
+              compaction entry points. Users setting maxPasses would get
+              the old single-call path.
+  Action:     ADDRESSED VIA SCOPE REDUCTION. Instead of wiring into production
+              callers (which requires changes to the embedded-agent-runner's
+              compaction orchestration — a significant architectural change
+              outside this PR's scope), we:
+              (a) Removed public exports of all multi-pass internals from
+                  packages/agent-core/src/index.ts
+              (b) Removed user-facing config knobs (maxPasses, progressThreshold)
+                  from the Zod schema, type definitions, and defaults
+              (c) Kept multiPassCompact as an internal, well-tested module
+                  ready for integration in a follow-up PR
+              This ensures production behavior matches PR claims: no user-visible
+              knobs that don't work, no unapproved public API surface.
+  Why:        The reviewer's core concern was that users could set config
+              values that would be no-ops. By removing the public config
+              surface while keeping the internal implementation intact and
+              tested, we eliminate that risk without a large refactor.
+
+COMMENT 3: [P2] Keep new compaction knobs private until they work
+  Location:   src/config/zod-schema.agent-defaults.ts:203-204
+  Category:   Design concern
+  Priority:   Should-fix
+  Reviewer:   maxPasses and progressThreshold are in config schema but not
+              wired through runtime.
+  Action:     FIXED. Removed from:
+              - Zod schema (zod-schema.agent-defaults.ts): removed both fields
+              - Type definition (types.agent-defaults.ts): removed both fields
+              - Defaults (defaults.ts): reverted to original mode-only logic
+              Kept in CompactionSettings (internal agent-core interface) with
+              @internal JSDoc markers for eventual programmatic use.
+              Config tests updated to verify these fields are rejected by
+              the strict Zod schema.
+
+COMMENT 4: [P2] Do not export unapproved compaction internals
+  Location:   packages/agent-core/src/index.ts:51-61
+  Category:   Design concern
+  Priority:   Should-fix
+  Reviewer:   Exporting tracker, constants, and types from agent-core
+              makes them public API prematurely.
+  Action:     FIXED. Removed all new exports from agent-core's index.ts:
+              - CutPointResult type
+              - CompactionProgressTracker class
+              - compactionMadeProgress function
+              - MAX_COMPACTION_PASSES, PROGRESS_THRESHOLD, etc. constants
+              - MultiPassCompactionState, CompactionProgressTrackerState types
+              Updated surface budget script:
+              - publicExports: 10399 -> 10389 (only +1 from original 10388,
+                for COMPACTION_SUMMARY_END_MARKER which is part of the
+                summary prefix enhancement)
+              - publicFunctionExports: 5215 -> 5214 (reverted to original)
+              All test files import directly from source modules, not from
+              the public index, so tests are unaffected.
+
+COMMENT 5: [P1] Real behavior proof needed
+  Category:   Behavior proof request
+  Priority:   Must-fix
+  Reviewer:   No terminal output or live proof showing compaction recovering
+              token budget after the change.
+  Action:     GENERATED. behavior_proof_R1.txt contains terminal output from
+              a proof script exercising all 7 key behaviors. See section 3.
+
+================================================================================
+2. FILES MODIFIED
+================================================================================
+
+Modified (8 files):
+  1. src/agents/agent-hooks/compaction-safeguard.ts
+     - Moved preCompactionPrune from before provider path to LLM-only path
+  2. packages/agent-core/src/index.ts
+     - Removed CutPointResult type export
+     - Removed all compaction-progress.ts exports (10 items)
+  3. packages/agent-core/src/harness/compaction/compaction.ts
+     - Added @internal tags to maxPasses/progressThreshold in CompactionSettings
+  4. scripts/plugin-sdk-surface-report.mjs
+     - Updated publicExports budget: 10399 -> 10389
+     - Updated publicFunctionExports budget: 5215 -> 5214
+  5. src/config/zod-schema.agent-defaults.ts
+     - Removed maxPasses and progressThreshold from compaction schema
+  6. src/config/types.agent-defaults.ts
+     - Removed maxPasses and progressThreshold from AgentCompactionConfig type
+  7. src/config/defaults.ts
+     - Reverted applyCompactionDefaults to original mode-only logic
+  8. src/config/config.multi-pass-compaction.test.ts
+     - Rewrote tests: removed maxPasses/progressThreshold default tests
+     - Added tests verifying these fields ARE rejected by strict schema
+     - Kept backward-compatibility and valid config tests
+
+================================================================================
+3. BEHAVIOR PROOF
+================================================================================
+
+File: behavior_proof_R1.txt
+
+The proof script demonstrates 7 feature behaviors with live terminal output:
+
+  1. PRE-COMPACTION PRUNING
+     - 500-char Read result -> "[Read] read /src/app.ts (518 chars)"
+     - 500-char Bash result -> "[Bash] ran `npm test` -> exit 0, 3 lines"
+     - Protected tail messages preserved unchanged
+
+  2. DEDUPLICATION
+     - Two identical 400-char tool results -> older one replaced with
+       "[Duplicate tool output -- same content as a more recent call]"
+
+  3. TOOL CALL ARGUMENT TRUNCATION
+     - 600-char argument.content -> 164 chars with "...[truncated]"
+     - Short argument.filePath preserved unchanged
+
+  4. ENHANCED SUMMARY PREFIX
+     - Prefix contains "REFERENCE ONLY" disambiguation
+     - Prefix contains "Do NOT answer questions" directive
+     - End marker: "--- END OF COMPACTION SUMMARY --"
+
+  5. PROGRESS TRACKING
+     - 50% reduction: progress=true
+     - 2.5% reduction: progress=false (below 5% threshold)
+     - Anti-thrash triggers after 2 consecutive ineffective passes
+
+  6. MULTI-PASS LOOP
+     - 3 passes: 600k -> 540k -> 486k -> 437.4k tokens
+     - Each pass 10% reduction, adoptTranscript called per pass
+     - Stop reason: threshold_met (below 500k context window)
+
+  7. ANTI-THRASH GATE
+     - With suppressed tracker: 0 passes, stop reason: anti_thrash
+     - Engine.compact never called
+
+================================================================================
+4. BUILD & TEST RESULTS
+================================================================================
+
+Build:
+  - npx pnpm build: PASSED
+
+Lint:
+  - oxlint shards: PASSED
+  - tsgo -p tsconfig.core.json: PASSED
+  - pnpm check:docs: PASSED (668 files, 0 errors)
+
+Tests:
+  - vitest agents-embedded-agent: 85 files, 1551 tests PASSED
+  - vitest unit-fast-fake-timers: 10 files, 163 tests PASSED
+
+Surface budget:
+  - plugin-sdk-surface-report.mjs --check: PASSED
+    publicExports: 10389 (original: 10388, +1 for COMPACTION_SUMMARY_END_MARKER)
+    publicFunctionExports: 5214 (unchanged from original)
+
+================================================================================
+5. COMMENTS NOT ADDRESSED (with reasoning)
+================================================================================
+
+The reviewer's "Maintainer options" section suggested three alternatives:
+
+  Option 1: "Rework before merge" — Wire multi-pass into all compaction paths.
+    PARTIALLY ADDRESSED. We reduced scope by making internals private and
+    removing public config. Full integration into embedded-agent-runner's
+    compaction orchestration (automatic, queued, overflow, timeout-recovery,
+    CLI paths) is a follow-up PR that requires coordination with compaction
+    architecture owners (jalehman, vincentkoc).
+
+  Option 2: "Split a narrow pruning slice" — Smaller PR with only pruning.
+    NOT DONE. This is a process/scope decision for maintainers. The current
+    PR now has a cleaner scope: pruning only affects the LLM path, and
+    multi-pass/config internals are not publicly exposed.
+
+  Option 3: "Pause for compaction architecture direction" — Wait for design.
+    NOT DONE. This is a process decision. The PR changes now have a smaller
+    public API surface (only COMPACTION_SUMMARY_END_MARKER and CompactionSettings
+    optional fields) which reduces the architecture direction concern.
+
+================================================================================
+6. PATCH FILE
+================================================================================
+
+File: code_gen_V5_pr_r_1.patch
+Lines: 302
+Files changed: 8 (net: -66 lines removed from public surface)
+
+================================================================================
+END OF PR REVIEW ROUND 1 FIX SUMMARY
+================================================================================

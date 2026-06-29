@@ -1,0 +1,217 @@
+================================================================================
+PR REVIEW COMMENTS — Round 1
+================================================================================
+PR:         openclaw/openclaw#97580
+URL:        https://github.com/openclaw/openclaw/pull/97580
+Fetched:    2026-06-29 19:51:40 UTC
+Round:      1
+================================================================================
+
+================================================================================
+INLINE CODE REVIEW COMMENTS
+================================================================================
+
+
+================================================================================
+REVIEW SUMMARIES
+================================================================================
+
+
+================================================================================
+DISCUSSION COMMENTS
+================================================================================
+
+--- DISCUSSION COMMENT ---
+Author: clawsweeper[bot]
+Created: 2026-06-28T22:47:39Z
+Updated: 2026-06-28T23:00:50Z
+
+Body:
+Codex review: needs real behavior proof before merge. _Reviewed June 28, 2026, 6:59 PM ET / 22:59 UTC._
+
+**Summary**
+Adds a multi-pass compaction tracker/helper, pre-compaction tool-result pruning, compaction summary prompt changes, new compaction config schema/defaults, public agent-core exports, script surface-budget changes, and tests.
+
+PR surface: Source +857, Tests +1290, Other 0. Total +2147 across 16 files.
+
+Reproducibility: yes. for the review findings at source level: PR-head and current-main inspection show the new multi-pass helper has no production call site, while real compaction paths still call the existing single-call wrappers. No after-fix real OpenClaw session proof is present in the PR body or comments.
+
+**Review metrics:** 2 noteworthy metrics.
+- **Config/default surfaces:** 2 added keys, 2 new default values. The PR adds user-visible compaction knobs and materialized defaults, so maintainers need runtime propagation, metadata/docs, and upgrade behavior checked before merge.
+- **Public agent-core surface:** 10 exports added, 2 script budget defaults changed. The PR exposes new compaction internals through the public agent-core entrypoint and adjusts surface-budget automation, making API direction and validation compatibility-sensitive.
+
+**Merge readiness**
+Overall: 🧂 unranked krab
+Proof: 🧂 unranked krab
+Patch quality: 🧂 unranked krab
+Result: blocked until real behavior proof is added.
+
+Overall follows the weaker of proof and patch quality, so missing proof can cap an otherwise strong patch.
+
+Rank-up moves:
+- Wire or remove the multi-pass helper and config so production compaction behavior matches the PR claims.
+- Keep configured compaction providers on their existing all-message contract unless maintainers approve an opt-in pruning contract.
+- [P1] Add redacted real-session proof showing compaction recovering token budget after the change.
+
+Proof guidance:
+- [P1] Needs real behavior proof before merge: The external PR body lists tests but does not include redacted terminal output, logs, recordings, linked artifacts, or live output showing a real OpenClaw session after the change; add proof with private details redacted, then update the PR body to trigger re-review.
+
+**Risk before merge**
+- [P1] Merging the branch as written would expose maxPasses and progressThreshold in config/defaults without applying them through real production compaction callers.
+- [P1] The pruning pass changes what configured compaction providers and built-in summarization see before there is real-session proof that context, tool-call structure, and provider-owned summarization remain safe.
+- [P1] The PR adds public agent-core exports and adjusts plugin-SDK surface-budget automation before the API direction is approved or integrated.
+- [P1] The branch is dirty against current main and its surface-budget defaults already differ from current main, so final automation validation needs a clean rebase before any merge decision.
+
+**Maintainer options:**
+1. **Rework before merge (recommended)**  
+   Wire multi-pass behavior through automatic, queued, overflow, timeout-recovery, and CLI compaction paths; keep provider-owned compaction inputs intact or explicitly opt in to pruning; align config metadata/docs and add real-session proof.
+2. **Split a narrow pruning slice**  
+   If maintainers want the tool-result pruning sooner, replace this broad branch with a smaller PR that changes only the built-in safeguard LLM path and proves summary quality on a real session.
+3. **Pause for compaction architecture direction**  
+   Use the open compaction architecture discussion to decide whether multi-pass loops, progress thresholds, and public tracker exports belong in core before continuing this branch.
+
+**Next step before merge**
+- [P1] Human maintainer review is needed because the remaining blockers are product/API direction, provider compatibility, branch rebase, and contributor real-behavior proof rather than a narrow automation-safe repair.
+
+**Security**
+Cleared: No concrete security or supply-chain issue found; the diff touches compaction runtime/config/script budgets but not workflows, lockfiles, dependency sources, permissions, secrets, downloads, or install hooks.
+
+**Review findings**
+- [P1] Keep provider compaction inputs unpruned — `src/agents/agent-hooks/compaction-safeguard.ts:970-973`
+- [P1] Wire the multi-pass loop into real callers — `src/agents/multi-pass-compaction.ts:119-121`
+- [P2] Keep new compaction knobs private until they work — `src/config/zod-schema.agent-defaults.ts:203-204`
+
+<details>
+<summary>Review details</summary>
+
+Best possible solution:
+
+Rework this as either an integrated compaction change that wires callers, config, metadata/docs, provider boundaries, and proof end to end, or split out a smaller opt-in pruning-only change under the existing safeguard boundary.
+
+Do we have a high-confidence way to reproduce the issue?
+
+Yes for the review findings at source level: PR-head and current-main inspection show the new multi-pass helper has no production call site, while real compaction paths still call the existing single-call wrappers. No after-fix real OpenClaw session proof is present in the PR body or comments.
+
+Is this the best way to solve the issue?
+
+No. The current patch is a plausible experiment, but the best maintainable solution is to either integrate the loop through the existing compaction owners with config/API/docs proof or split a smaller pruning-only change that preserves provider boundaries.
+
+Full review comments:
+
+- [P1] Keep provider compaction inputs unpruned — `src/agents/agent-hooks/compaction-safeguard.ts:970-973`
+  The new pruning pass runs before the configured provider path, so `allMessages` no longer contains all messages even though this path explicitly says the provider handles its own context management. That can silently change third-party compaction providers; keep pruning out of the provider path or make it an approved opt-in with proof.
+  Confidence: 0.88
+- [P1] Wire the multi-pass loop into real callers — `src/agents/multi-pass-compaction.ts:119-121`
+  This helper is added and tested, but production compaction entry points still call `activeSession.compact()` or `contextEngine.compact()` through the existing single-call timeout wrappers. Users who set `maxPasses` or rely on the advertised iterative behavior would still get the old path.
+  Confidence: 0.93
+- [P2] Keep new compaction knobs private until they work — `src/config/zod-schema.agent-defaults.ts:203-204`
+  The schema now accepts `maxPasses` and `progressThreshold`, and defaults.ts materializes them, but current settings managers and compaction callers do not propagate those values. Please either wire the knobs through runtime plus config metadata/docs or remove the public config surface from this PR.
+  Confidence: 0.9
+- [P2] Do not export unapproved compaction internals — `packages/agent-core/src/index.ts:51-61`
+  Exporting the tracker, constants, and state types from `packages/agent-core` plus changing the surface-budget script turns this unintegrated helper into public API. Keep these internals private until maintainers approve the external contract, or add the missing API docs and compatibility tests.
+  Confidence: 0.84
+
+Overall correctness: patch is incorrect
+Overall confidence: 0.92
+
+AGENTS.md: found and applied where relevant.
+
+Codex review notes: model internal, reasoning high; reviewed against [87aae9f11d27](https://github.com/openclaw/openclaw/commit/87aae9f11d270c414e1ae97cff34540069cf71e7).
+
+</details>
+
+<details>
+<summary>Label changes</summary>
+
+Label justifications:
+
+- `P2`: This is a normal-priority compaction/session-state feature PR with bounded but important runtime impact and clear merge blockers.
+- `merge-risk: 🚨 compatibility`: The PR adds public config keys/defaults and public agent-core exports without end-to-end runtime use or approved API direction.
+- `merge-risk: 🚨 session-state`: The diff changes pruning, cut-point, and summary behavior that determine which conversation/session context survives compaction.
+- `merge-risk: 🚨 automation`: The diff changes plugin-SDK surface-budget automation, and those budget values already differ on current main.
+- `rating: 🧂 unranked krab`: Overall readiness is 🧂 unranked krab; proof is 🧂 unranked krab and patch quality is 🧂 unranked krab.
+- `status: 📣 needs proof`: The PR needs real behavior proof before ClawSweeper can clear the contributor ask. Needs real behavior proof before merge: The external PR body lists tests but does not include redacted terminal output, logs, recordings, linked artifacts, or live output showing a real OpenClaw session after the change; add proof with private details redacted, then update the PR body to trigger re-review.
+
+</details>
+
+<details>
+<summary>Evidence reviewed</summary>
+
+PR surface:
+
+Source +857, Tests +1290, Other 0. Total +2147 across 16 files.
+
+<details>
+<summary>View PR surface stats</summary>
+
+| Area | Files | Added | Removed | Net |
+|---|---:|---:|---:|---:|
+| Source | 10 | 861 | 4 | +857 |
+| Tests | 5 | 1290 | 0 | +1290 |
+| Docs | 0 | 0 | 0 | 0 |
+| Config | 0 | 0 | 0 | 0 |
+| Generated | 0 | 0 | 0 | 0 |
+| Other | 1 | 2 | 2 | 0 |
+| **Total** | **16** | **2153** | **6** | **+2147** |
+
+</details>
+
+What I checked:
+
+- **Repository policy read and applied:** Root AGENTS.md and the scoped src/agents and scripts guides were read fully; their config compatibility, public API, session-state, and script-wrapper guidance apply to this compaction/config PR. ([`AGENTS.md:1`](https://github.com/openclaw/openclaw/blob/87aae9f11d27/AGENTS.md#L1), [87aae9f11d27](https://github.com/openclaw/openclaw/commit/87aae9f11d27))
+- **Live PR state:** Live GitHub shows this external PR is open, not draft, author association NONE, maintainer edits enabled, and mergeable=false/dirty; the body lists tests but no terminal/log/live-output proof of an after-fix OpenClaw session. ([a2e52c78becc](https://github.com/openclaw/openclaw/commit/a2e52c78becc))
+- **Provider path is changed before provider-owned summarization:** The PR prunes baseMessagesToSummarize before the provider path, so configured compaction providers no longer receive the full message set they currently own. ([`src/agents/agent-hooks/compaction-safeguard.ts:970`](https://github.com/openclaw/openclaw/blob/a2e52c78becc/src/agents/agent-hooks/compaction-safeguard.ts#L970), [a2e52c78becc](https://github.com/openclaw/openclaw/commit/a2e52c78becc))
+- **Current provider contract expects all messages:** Current main documents and implements the provider compaction path as one call with all messages and no pruning, with the provider handling its own context management. ([`src/agents/agent-hooks/compaction-safeguard.ts:979`](https://github.com/openclaw/openclaw/blob/87aae9f11d27/src/agents/agent-hooks/compaction-safeguard.ts#L979), [87aae9f11d27](https://github.com/openclaw/openclaw/commit/87aae9f11d27))
+- **Multi-pass helper is added as a standalone helper:** The PR adds multiPassCompact, but the helper itself is only introduced in a new module and is not shown as wired into the existing compaction entry points. ([`src/agents/multi-pass-compaction.ts:119`](https://github.com/openclaw/openclaw/blob/a2e52c78becc/src/agents/multi-pass-compaction.ts#L119), [a2e52c78becc](https://github.com/openclaw/openclaw/commit/a2e52c78becc))
+- **Current production callers remain single-call compaction:** Current main still wraps activeSession.compact and contextEngine.compact with the existing single-call timeout helpers across automatic, queued, timeout-recovery, overflow-recovery, and CLI paths. ([`src/agents/embedded-agent-runner/compact.ts:1478`](https://github.com/openclaw/openclaw/blob/87aae9f11d27/src/agents/embedded-agent-runner/compact.ts#L1478), [87aae9f11d27](https://github.com/openclaw/openclaw/commit/87aae9f11d27))
+
+Likely related people:
+
+- **jalehman:** CONTRIBUTING lists Josh Lehman for Compaction and Context Engine, and live file history shows recent embedded-agent runner seam work relevant to compaction entry points. (role: listed compaction and context-engine owner; recent runner contributor; confidence: high; commits: [0dfa22c6e0fc](https://github.com/openclaw/openclaw/commit/0dfa22c6e0fc); files: `CONTRIBUTING.md`, `src/agents/embedded-agent-runner/compact.ts`, `src/agents/multi-pass-compaction.ts`)
+- **vincentkoc:** CONTRIBUTING lists Vincent Koc for Agents, Telemetry, Hooks, and Security, and live history shows recent embedded-agent runner work in the same owner boundary. (role: listed agents/hooks owner and recent area contributor; confidence: high; commits: [206552c6977b](https://github.com/openclaw/openclaw/commit/206552c6977b), [abec88cfab3e](https://github.com/openclaw/openclaw/commit/abec88cfab3e); files: `CONTRIBUTING.md`, `src/agents/embedded-agent-runner/compact.ts`, `src/agents/agent-hooks/compaction-safeguard.ts`)
+- **yetval:** Live file history shows recent fixes in packages/agent-core compaction cut-point/token accounting, which is one of the central surfaces this PR changes. (role: recent compaction contributor; confidence: medium; commits: [f826a665a217](https://github.com/openclaw/openclaw/commit/f826a665a217), [2ece2945ae67](https://github.com/openclaw/openclaw/commit/2ece2945ae67); files: `packages/agent-core/src/harness/compaction/compaction.ts`)
+- **hugenshen:** Live file history shows recent compaction-safeguard work on provider-side AbortError retry behavior, adjacent to the provider and LLM compaction path this PR changes. (role: recent compaction-safeguard contributor; confidence: medium; commits: [245c18da5a6c](https://github.com/openclaw/openclaw/commit/245c18da5a6c); files: `src/agents/agent-hooks/compaction-safeguard.ts`)
+
+</details>
+
+<details>
+<summary>What the crustacean ranks mean</summary>
+
+- 🦀 challenger crab: rare, exceptional readiness with strong proof, clean implementation, and convincing validation.
+- 🦞 diamond lobster: very strong readiness with only minor maintainer review expected.
+- 🐚 platinum hermit: good normal PR, likely mergeable with ordinary maintainer review.
+- 🦐 gold shrimp: useful signal, but proof or patch confidence is still limited.
+- 🦪 silver shellfish: thin signal; proof, validation, or implementation needs work.
+- 🧂 unranked krab: not merge-ready because proof is missing/unusable or there are serious correctness or safety concerns.
+- 🌊 off-meta tidepool: rating does not apply to this item.
+
+Shiny media proof means a screenshot, video, or linked artifact directly shows the changed behavior. Runtime, network, CSP, and security claims still need visible diagnostics.
+
+</details>
+
+<details>
+<summary>How this review workflow works</summary>
+
+- ClawSweeper keeps one durable marker-backed review comment per issue or PR.
+- Re-runs edit this comment so the latest verdict, findings, and automation markers stay together instead of adding duplicate bot comments.
+- A fresh review can be triggered by eligible `@clawsweeper re-review` comments, exact-item GitHub events, scheduled/background review runs, or manual workflow dispatch.
+- PR/issue authors and users with repository write access can comment `@clawsweeper re-review` or `@clawsweeper re-run` on an open PR or issue to request a fresh review only.
+- Maintainers can also comment `@clawsweeper review` to request a fresh review only.
+- Fresh-review commands do not start repair, autofix, rebase, CI repair, or automerge.
+- Maintainer-only repair and merge flows require explicit commands such as `@clawsweeper autofix`, `@clawsweeper automerge`, `@clawsweeper fix ci`, or `@clawsweeper address review`.
+- Maintainers can comment `@clawsweeper explain` to ask for more context, or `@clawsweeper stop` to stop active automation.
+
+</details>
+
+<!-- clawsweeper-verdict:needs-human item=97580 sha=a2e52c78beccd2be6836f6da488829cd3d79401c confidence=high updated_at=2026-06-28T22:54:24Z reviewed_at=2026-06-28T22:59:58.254Z source_revision=f6c1e90d0e49a946349a3853c25aafed976d35817be01a3bde09bb0bcc83832f -->
+
+<!-- clawsweeper-review item=97580 -->
+
+================================================================================
+SUMMARY
+================================================================================
+Inline code comments: 0
+Review summaries:     0
+Discussion comments:  1
+Total:                1
+================================================================================

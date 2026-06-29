@@ -1,0 +1,65 @@
+================================================================================
+BEHAVIOR PROOF — Iteration Budget Agent Loop Safety
+================================================================================
+PR:         openclaw/openclaw#97485
+Branch:     feat/iteration-budget-agent-loop-safety
+Generated:  2026-06-29
+Round:      2
+Script:     test/proof/iteration-budget-proof.ts
+Command:    npx tsx test/proof/iteration-budget-proof.ts
+================================================================================
+
+Terminal output (stdout):
+
+========================================================================
+BEHAVIOR PROOF: Iteration Budget Stops Runaway Agent Loop
+========================================================================
+
+--- Scenario 1: Budget enforcement ---
+
+Config resolved: {
+  "enabled": true,
+  "maxIterations": 5,
+  "subagentMaxIterations": 50,
+  "forceSummaryOnExhaustion": true
+}
+
+Budget created: maxTotal=5, remaining=5
+
+Simulating agent loop (would run 100+ rounds without budget)...
+
+  Round 1: allowed (used=1/5, remaining=4)
+  Round 2: allowed (used=2/5, remaining=3)
+  Round 3: allowed (used=3/5, remaining=2)
+  Round 4: allowed (used=4/5, remaining=1)
+  Round 5: allowed (used=5/5, remaining=0)
+  Round 6: BLOCKED by budget (used=5/5, remaining=0)
+
+RESULT: Budget stopped the loop after 5 iterations (configured max: 5)
+
+--- Scenario 2: Fail-closed summary path (no refund) ---
+
+Budget state: used=5, remaining=0
+Summary instruction injected. Model responds...
+
+  Summary tool attempt: BLOCKED (correct)
+  Budget state: used=5, remaining=0
+
+--- Scenario 3: Anti-pattern — refund before summary ---
+
+Budget exhausted: used=3, remaining=0
+(Anti-pattern) Refunding 1 iteration before summary...
+After refund: used=2, remaining=1
+  Tool attempt after refund: ALLOWED (this is the bug)
+
+The refund anti-pattern allows tool execution after exhaustion.
+The fix (no refund) prevents this by keeping the budget at 0.
+
+--- Scenario 4: Subagent cap selection ---
+
+Subagent run: cap=50 (from subagentMaxIterations), maxTotal=50
+Parent run:   cap=90 (from maxIterations), maxTotal=90
+
+========================================================================
+ALL SCENARIOS PASSED — budget enforces hard iteration caps
+========================================================================

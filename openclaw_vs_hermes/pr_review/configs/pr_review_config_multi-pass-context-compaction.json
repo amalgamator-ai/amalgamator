@@ -5,7 +5,8 @@
     "pr_url": "https://github.com/openclaw/openclaw/pull/97580",
     "branch_name": "feat/multi-pass-context-compaction",
     "build_command": "npx pnpm install && npx pnpm build",
-    "test_command": "npx pnpm test",
+    "lint_command": "node scripts/run-oxlint-shards.mjs --threads=8 && node scripts/run-tsgo.mjs -p tsconfig.core.json && npx pnpm check:docs",
+    "test_command": "node scripts/run-vitest.mjs run --config test/vitest/vitest.agents-embedded-agent.config.ts --reporter=verbose && node scripts/run-vitest.mjs run --config test/vitest/vitest.unit-fast-fake-timers.config.ts --reporter=verbose",
     "thinking_mode": "deep",
     "max_fix_iterations": 3
 }

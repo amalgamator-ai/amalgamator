@@ -14,6 +14,7 @@ class PRReviewConfig:
     pr_url: str = ""
     branch_name: str = ""
     build_command: str = "pnpm install && pnpm build"
+    lint_command: str = ""
     test_command: str = "pnpm test"
     thinking_mode: str = "deep"
     max_fix_iterations: int = 3
@@ -67,6 +68,7 @@ class PRReviewConfig:
             pr_url=pr_url,
             branch_name=branch_name,
             build_command=data.get("build_command", "pnpm install && pnpm build"),
+            lint_command=data.get("lint_command", ""),
             test_command=data.get("test_command", "pnpm test"),
             thinking_mode=thinking_mode,
             max_fix_iterations=data.get("max_fix_iterations", 3),

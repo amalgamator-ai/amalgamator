@@ -1,0 +1,162 @@
+CONVERGED
+================================================================================
+REVIEW OF PR REVIEW ROUND 1 FIX CODE — SUMMARY (V5 pr_r_1)
+================================================================================
+
+Feature:     Multi-Pass Context Compaction
+PR:          openclaw/openclaw#97580
+Branch:      feat/multi-pass-context-compaction
+Fix round:   1 (review of the round-1 fix patch)
+Date:        2026-06-29
+
+================================================================================
+1. REVIEW RESULT: CONVERGED
+================================================================================
+
+The fix code in code_gen_V5_pr_r_1.patch correctly addresses all 4 reviewer
+comments from PR_comments_1.txt (plus the behavior proof request). No issues
+were found that require code changes. The patch is accepted as-is.
+
+================================================================================
+2. REVIEWER COMMENT COVERAGE VERIFICATION
+================================================================================
+
+COMMENT 1: [P1] Keep provider compaction inputs unpruned
+  Location:   src/agents/agent-hooks/compaction-safeguard.ts:970-973
+  FIX STATUS: CORRECT
+  Verification:
+    - preCompactionPrune() call was moved from line ~964 (before provider path)
+      to line ~1029 (after provider path, before LLM path)
+    - Provider path at line 971 now receives the original unpruned
+      baseMessagesToSummarize, preserving its all-message contract
+    - LLM path at line 1042 receives pruned messages
+    - Import at line 55 remains intact
+    - Comment updated to document LLM-only scope
+
+COMMENT 2: [P1] Wire the multi-pass loop into real callers
+  FIX STATUS: CORRECTLY ADDRESSED VIA SCOPE REDUCTION
+  Verification:
+    - All multi-pass exports removed from packages/agent-core/src/index.ts
+    - User-facing config knobs (maxPasses, progressThreshold) removed from
+      Zod schema, type definitions, and defaults
+    - multiPassCompact module kept as internal, well-tested code for future
+      integration — this is the right architectural decision
+    - No user-visible knobs that don't work
+
+COMMENT 3: [P2] Keep new compaction knobs private until they work
+  FIX STATUS: CORRECT
+  Verification:
+    - maxPasses removed from zod-schema.agent-defaults.ts
+    - progressThreshold removed from zod-schema.agent-defaults.ts
+    - Both fields removed from types.agent-defaults.ts AgentCompactionConfig
+    - defaults.ts reverted to original mode-only guard logic
+    - CompactionSettings retains the fields with @internal JSDoc markers
+      (correct: available for programmatic use, not user-configurable)
+    - Config tests rewritten to verify rejection of these fields
+
+COMMENT 4: [P2] Do not export unapproved compaction internals
+  FIX STATUS: CORRECT
+  Verification:
+    - CutPointResult type export removed from index.ts
+    - All 9 compaction-progress.ts exports removed from index.ts:
+      CompactionProgressTracker, compactionMadeProgress, MAX_COMPACTION_PASSES,
+      PROGRESS_THRESHOLD, INEFFECTIVE_SAVINGS_THRESHOLD,
+      MAX_INEFFECTIVE_COMPRESSIONS, DEFAULT_COMPACTION_TIMEOUT_MS,
+      MultiPassCompactionState, CompactionProgressTrackerState
+    - Surface budget updated: 10399 -> 10389 (publicExports),
+      5215 -> 5214 (publicFunctionExports)
+    - All internal consumers (multi-pass-compaction.ts, test files) use
+      direct source imports, not the public index — unaffected by removal
+
+COMMENT 5: [P1] Real behavior proof needed
+  FIX STATUS: ADDRESSED (behavior_proof_R1.txt generated — scope of this
+  review is the code patch, not the proof artifact)
+
+================================================================================
+3. ISSUES FOUND IN FIX CODE
+================================================================================
+
+No issues found. The fix code is correct, complete, and introduces no
+regressions. Detailed analysis:
+
+CORRECTNESS:
+  - All 4 reviewer comments addressed appropriately
+  - Provider path receives unpruned messages (contract preserved)
+  - Public API surface reduced to only the approved addition
+    (COMPACTION_SUMMARY_END_MARKER)
+  - Config defaults reverted to original single-field logic
+  - @internal markers correctly applied
+
+COMPLETENESS:
+  - Every reviewer comment has a corresponding code change
+  - Surface budget numbers verified against actual export counts
+  - Test file updated to match new behavior (rejection tests added)
+
+REGRESSIONS:
+  - None detected
+  - Internal modules still import directly from source (not via public index)
+  - multiPassCompact module and its 30+ tests remain intact and functional
+  - Pre-compaction pruning still applies to the LLM path as designed
+
+TYPESCRIPT QUALITY:
+  - No new `any` types introduced
+  - @internal JSDoc markers are idiomatic for public interfaces with
+    internal-only fields
+  - CompactionSettings interface is clean
+
+TEST COVERAGE:
+  - Config tests correctly verify:
+    * Default mode application works
+    * User-specified mode preserved
+    * Existing settings pass through
+    * Undefined compaction block handled
+    * Valid config accepted
+    * Standard backward-compatible configs accepted
+    * Unknown keys rejected (strict mode)
+    * maxPasses rejected as internal-only
+    * progressThreshold rejected as internal-only
+  - All 1551 agents-embedded-agent tests pass
+  - All 163 unit-fast-fake-timers tests pass
+
+STYLE CONSISTENCY:
+  - Test file naming (config.multi-pass-compaction.test.ts) retained for
+    continuity with the feature branch — acceptable
+  - Comment style in compaction-safeguard.ts matches existing patterns
+
+OVER-ENGINEERING:
+  - None. The fix is minimal and targeted — it only changes what the
+    reviewer comments requested
+
+================================================================================
+4. BUILD AND TEST RESULTS
+================================================================================
+
+Build:
+  - npx pnpm install: PASSED (already up to date)
+  - npx pnpm build: PASSED (153.0s)
+
+Lint:
+  - oxlint shards (--threads=8): PASSED
+  - tsgo -p tsconfig.core.json: PASSED (no errors)
+  - pnpm check:docs: PASSED (668 files, 0 errors)
+
+Tests:
+  - vitest agents-embedded-agent: 85 files, 1551 tests PASSED (20.15s)
+  - vitest unit-fast-fake-timers: 10 files, 163 tests PASSED (3.69s)
+
+Surface budget:
+  - plugin-sdk-surface-report.mjs --check: PASSED
+    * publicExports: 10389 (original 10388 + 1 for COMPACTION_SUMMARY_END_MARKER)
+    * publicFunctionExports: 5214 (unchanged from original)
+
+================================================================================
+5. PATCH FILE
+================================================================================
+
+File: code_gen_review_V5_pr_r_1.patch
+Lines: 302 (identical to input — no changes needed)
+Files: 8 (same as input fix patch)
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

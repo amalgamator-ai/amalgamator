@@ -1,0 +1,104 @@
+CONVERGED
+
+================================================================================
+CODE GEN REVIEW SUMMARY — V5 / Review of PR Review Round 2
+================================================================================
+PR:         openclaw/openclaw#97485
+Branch:     feat/iteration-budget-agent-loop-safety
+Feature:    Iteration Budget & Agent Loop Safety
+Round:      PR Review Round 2 (review of fix patch)
+Reviewed:   2026-06-29
+================================================================================
+
+## Review Verdict: CONVERGED
+
+No corrections were needed. The R2 fix patch is clean, correct, and complete.
+
+## Review Analysis
+
+### Comment 1: [P1] Do not refund the budget before the forced summary turn
+
+**Fix reviewed:** Removed `iterationBudget.refund()` at run.ts:3896, replaced
+with a 5-line comment block explaining the fail-closed design.
+
+**Assessment:** CORRECT. Verified end-to-end fail-closed behavior:
+1. When the budget is exhausted, `budgetExhaustedSummaryPending` is set to
+   true and the loop continues to the next iteration.
+2. On the next iteration, the model receives the budget exhaustion summary
+   instruction appended to the prompt (run.ts:1962).
+3. If the model responds with text only: `onBeforeToolCallingRound` is never
+   called, the summary text is extracted, and `buildBudgetExhaustedResult`
+   returns the final result.
+4. If the model ignores the no-tool instruction and requests tools:
+   `onBeforeToolCallingRound` calls `consume()` which returns `false`
+   (budget exhausted, remaining = 0). agent-loop.ts (line 363-367) then
+   emits `turn_end` + `agent_end` and returns without executing any tools.
+5. In both cases, no tools can execute after budget exhaustion. The budget
+   is a hard cap.
+
+### Comment 2: [P2] Document the public iterationBudget config keys
+
+**Fix reviewed:** Added `### agents.defaults.iterationBudget` section to
+`docs/gateway/config-agents.md` (41 lines).
+
+**Assessment:** CORRECT. The documentation:
+- Is placed correctly between `runRetries` and `contextPruning` sections
+- Includes feature description, opt-in callout, JSON5 config example
+- Documents all 4 config fields with accurate defaults
+- Explains scope/precedence, exhaustion behavior (3 cases), iteration
+  counting semantics
+- Follows the structure and style of the adjacent `runRetries` docs
+
+### Comment 3: [P1] Behavior proof
+
+**Fix reviewed:** Proof script created and output provided in
+`behavior_proof_R2.txt`.
+
+**Assessment:** ADDRESSED. This is a process/documentation item, not code.
+
+### New test coverage
+
+Two new tests under "IterationBudget -- summary path fail-closed":
+
+1. "blocks tools during forced summary when no refund is given" -- proves
+   `consume()` returns `false` after full exhaustion, confirming the
+   fail-closed behavior. Well-commented with rationale.
+
+2. "a refund before summary would incorrectly allow tool execution" --
+   documents the anti-pattern that was fixed, showing that `refund()` +
+   `consume()` would incorrectly return `true`. Useful regression guard.
+
+**Assessment:** CORRECT. Both tests are well-written, cover the right
+scenarios, and serve as documentation of the design decision.
+
+## Checks Performed
+
+- **Correctness:** Fixes address all reviewer comments accurately
+- **Completeness:** No reviewer comments missed or inadequately addressed
+- **Regressions:** No existing behavior modified beyond the intended fix
+- **TypeScript quality:** No type issues; minimal code change
+- **Test coverage:** New tests adequately cover the fail-closed behavior
+- **Style consistency:** Follows OpenClaw's code conventions
+- **Over-engineering:** Fix is minimal -- one line removed, comment added,
+  tests added, docs added. No unnecessary complexity.
+
+## Build & Test Results
+
+| Step | Result | Details |
+|------|--------|---------|
+| Install | PASS | `npx pnpm install` -- already up to date |
+| Build | PASS | `npx pnpm build` -- completed successfully (176.7s) |
+| Lint: oxlint | PASS | `node scripts/run-oxlint-shards.mjs --threads=8` -- exit 0 |
+| Lint: tsgo | PASS | `node scripts/run-tsgo.mjs -p tsconfig.core.json` -- exit 0 |
+| Test: agents-embedded-agent | PASS | 85 test files, 1551 tests passed (24.40s) |
+| Test: unit-fast-fake-timers | PASS | 10 test files, 163 tests passed (4.46s) |
+| **Total** | **PASS** | **95 test files, 1714 tests passed, 0 failures** |
+
+No regressions detected.
+
+## Output Artifacts
+
+| File | Description |
+|------|-------------|
+| `code_gen_review_V5_pr_r_2.patch` | Reviewed patch (unchanged from input) |
+| `code_gen_review_summary_V5_pr_r_2.txt` | This summary |
