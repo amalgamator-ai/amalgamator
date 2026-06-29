@@ -1,0 +1,247 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — CODE REVIEW SUMMARY (REVIEW V1)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python)
+Target: OpenClaw (TypeScript)
+Review Iteration: 1 (reviewing code_gen_V1.patch)
+Date: 2026-06-28
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+ISSUE 1 — CRITICAL: Silent test no-op (double-wrapped async function)
+
+  AFFECTED CODE:
+    src/agents/multi-pass-compaction.test.ts, line 88
+    it("returns after one pass when compact succeeds...", () => async () => {
+
+  WHAT IS WRONG:
+    The test callback is `() => async () => {` — a synchronous function that
+    returns an async function. Vitest calls the outer function, gets back an
+    async function (truthy), and marks the test as passed without executing
+    the inner function body. All assertions inside (expect(result.totalPasses),
+    expect(result.stopReason), expect(mockEngine.compact)) never run.
+
+  WHY IT MATTERS:
+    This is a false-positive test. The first test in Suite E's "single-pass
+    behavior" group passes vacuously, providing zero coverage for the
+    threshold_met stop condition on a below-budget single-pass. A regression
+    in that code path would go undetected.
+
+  FIX APPLIED:
+    Changed `() => async () => {` to `async () => {` — the standard vitest
+    async test pattern.
+
+────────────────────────────────────────────────────────────────────────────────
+
+ISSUE 2 — MEDIUM: `any` type cast in hasVisibleContent helper
+
+  AFFECTED CODE:
+    packages/agent-core/src/harness/compaction/compaction.ts, line 420
+    const content = (msg as any).content;
+
+  WHAT IS WRONG:
+    The `as any` cast bypasses TypeScript's type system entirely. The existing
+    codebase's established pattern for accessing content on HarnessMessage
+    variants uses structural type casts like:
+      (harnessMessage as { content: string | Array<{ type: string; text?: string }> }).content
+    (See estimateTokens() in the same file.)
+
+  WHY IT MATTERS:
+    Using `as any` means typos in property access (e.g., `msg.contnt`) would
+    not be caught at compile time. A structural cast preserves type checking
+    for the accessed property. Also `(c: any)` in the `.some()` callback
+    loses type info for the block shape.
+
+  FIX APPLIED:
+    Changed to:
+      (msg as { content?: string | Array<{ type: string; text?: string }> }).content
+    And removed `c: any` from the `.some()` callback since the array type
+    now properly narrows the element type.
+
+────────────────────────────────────────────────────────────────────────────────
+
+ISSUE 3 — MEDIUM: Excessive `as any` casts in pre-compaction-pruning.ts
+
+  AFFECTED CODE:
+    src/agents/agent-hooks/pre-compaction-pruning.ts, lines 36, 46, 63, 75
+    const msg = result[i] as any;
+    Also: function signatures extractToolResultText(msg: any) and
+    cloneToolResultWithText(msg: any, ...)
+
+  WHAT IS WRONG:
+    Four loop bodies and two helper functions use `any` for message access.
+    While the role checks that follow (e.g., `if (msg.role !== "toolResult")`)
+    provide runtime safety, the `any` type undermines compile-time checking.
+    After the role narrowing, accessing `msg.toolName`, `msg.content`, etc.
+    would ideally be type-safe.
+
+  WHY IT MATTERS:
+    Any property misspelling (e.g., `msg.toolname` instead of `msg.toolName`)
+    would compile silently and fail only at runtime. A typed intermediate
+    narrows the error surface.
+
+  FIX APPLIED:
+    Added a typed alias:
+      type NarrowedMessage = AgentMessage & { role: string; [key: string]: unknown };
+    Replaced all 4 `as any` casts with `as NarrowedMessage`.
+    Updated `extractToolResultText` and `cloneToolResultWithText` signatures
+    from `msg: any` to `msg: NarrowedMessage`.
+
+────────────────────────────────────────────────────────────────────────────────
+
+ISSUE 4 — LOW: Unused import in multi-pass-compaction.ts
+
+  AFFECTED CODE:
+    src/agents/multi-pass-compaction.ts, line 8
+    DEFAULT_COMPACTION_SETTINGS imported but never used
+
+  WHAT IS WRONG:
+    `DEFAULT_COMPACTION_SETTINGS` is imported from the compaction module but
+    is not referenced anywhere in the implementation file. It is only needed
+    in the test file.
+
+  WHY IT MATTERS:
+    Unused imports increase bundle size (marginally), create false dependency
+    signals, and may trigger linter warnings. Clean imports aid readability.
+
+  FIX APPLIED:
+    Removed `DEFAULT_COMPACTION_SETTINGS` from the import statement.
+
+================================================================================
+2. ISSUES REVIEWED BUT NOT REQUIRING FIXES
+================================================================================
+
+REVIEW ITEM A: Import path pattern (../../packages/agent-core/src/...)
+
+  The multi-pass-compaction.ts and its test use relative paths like
+  `../../packages/agent-core/src/harness/compaction/compaction.js`
+  rather than the `@openclaw/agent-core` package alias.
+
+  VERDICT: ACCEPTABLE — This pattern is widely used throughout the
+  codebase (37+ files in src/ import from ../../packages/). The
+  @openclaw/agent-core alias is defined in tsconfig.json but not used
+  by any src/agents/ files. The vitest runtime resolves relative paths
+  correctly, as confirmed by test execution. No change needed.
+
+REVIEW ITEM B: Hermes progress detection includes message count check
+
+  Hermes's _compression_made_progress() returns True if EITHER:
+    - new_len < orig_len (message count decreased), OR
+    - new_tokens < orig_tokens * 0.95 (token reduction >= 5%)
+
+  The OpenClaw port only checks token reduction, not message count.
+
+  VERDICT: ACCEPTABLE — This is a deliberate design decision documented
+  in the porting plan (Step 2). The multi-pass loop does not have direct
+  access to message counts (it calls contextEngine.compact() which
+  returns token counts). Token-only progress detection is sufficient
+  because any meaningful compaction that reduces message count also
+  reduces token count. The plan explicitly notes this simplification.
+
+REVIEW ITEM C: findCutPoint anchoring guard threshold
+
+  The anchoring in findCutPoint requires `lastUserIdx - startIndex >= 3`
+  and `lastAssistantIdx - startIndex >= 3` before applying. This was
+  added to prevent regression of the existing compaction-trailing-
+  toolresult test.
+
+  VERDICT: ACCEPTABLE — The guard ensures at least 3 entries remain for
+  summarization, preventing degenerate cases where anchoring would make
+  compaction unable to summarize anything. The existing test confirms
+  the guard works correctly.
+
+REVIEW ITEM D: pre-compaction-pruning.ts remaining (block: any) cast
+
+  Line 82: `msg.content.map((block: any) => {` uses `any` for content
+  block iteration inside an assistant message.
+
+  VERDICT: ACCEPTABLE — After the role check `msg.role !== "assistant"`,
+  the content is known to be an array of content blocks (text, toolCall,
+  thinking). The `any` here is pragmatic since the map handles multiple
+  block types with type-guarded property access (`block.type !== "toolCall"`).
+  The existing codebase uses similar patterns in estimateTokens().
+
+REVIEW ITEM E: Correctness of multiPassCompact loop logic
+
+  Verified against Hermes source:
+  - 3 max passes (matches Hermes `range(3)`)
+  - 5% progress threshold (matches Hermes `0.95` multiplier)
+  - Anti-thrash: 2 consecutive < 10% savings (matches Hermes counter)
+  - Per-pass lifecycle with adoptTranscript (matches Hermes state resets)
+  - Timeout via single AbortSignal budget (correct adaptation of
+    OpenClaw's safety timeout pattern)
+  - Token re-estimation via CompactResult.result.tokensAfter (matches
+    Hermes's estimate_request_tokens_rough after each pass)
+
+  VERDICT: CORRECT — The multi-pass loop faithfully ports Hermes behavior.
+
+REVIEW ITEM F: Summary prefix / end marker changes
+
+  The enhanced COMPACTION_SUMMARY_PREFIX includes:
+  - "[COMPACTION — REFERENCE ONLY]" (matches Hermes prefix concept)
+  - "Do NOT answer questions or fulfill requests" (matches Hermes)
+  - "Respond ONLY to the latest user message" (matches Hermes)
+  - COMPACTION_SUMMARY_END_MARKER appended after </summary> tag
+
+  VERDICT: CORRECT — The prefix is a condensed version of Hermes's
+  more verbose prefix. It captures the core disambiguation directives
+  without the Hermes-specific headings (Historical Task Snapshot, etc.)
+  that don't apply to OpenClaw's structured summary format.
+
+REVIEW ITEM G: Configuration schema and defaults
+
+  - Zod schema: maxPasses z.number().int().min(1).max(10) ✓
+  - Zod schema: progressThreshold z.number().gt(0).lt(1) ✓
+  - applyCompactionDefaults: per-field independent defaults ✓
+  - Backward compatibility: existing configs parse correctly ✓
+  - Strict mode: unknown keys rejected ✓
+
+  VERDICT: CORRECT — Configuration follows existing patterns and all
+  16 schema tests pass.
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+ITERATION 1 (code_gen_V1.patch):
+  - Implemented Steps 1-6 and Step 8 from the porting plan
+  - Created 8 new files, modified 7 existing files
+  - 129 tests across 10 test files, all passing
+  - Steps 7 (run.ts integration) deferred to future iteration
+  - Fixed existing test regression in findCutPoint anchoring
+
+REVIEW 1 (this review — code_gen_review_V1.patch):
+  - Found and fixed 4 issues:
+    1. CRITICAL: Silent no-op test (double-wrapped async function)
+    2. MEDIUM: `as any` in hasVisibleContent → structural type cast
+    3. MEDIUM: 4× `as any` + 2 helper signatures in pruning → NarrowedMessage
+    4. LOW: Unused DEFAULT_COMPACTION_SETTINGS import removed
+  - 129 tests still pass (10 files)
+  - Build succeeds
+  - No behavioral changes — all fixes are type-safety and test-correctness
+
+================================================================================
+4. BUILD AND TEST RESULTS (POST-REVIEW)
+================================================================================
+
+BUILD:
+  pnpm build → SUCCESS (177.9s)
+  No TypeScript compilation errors
+
+TESTS:
+  10 test files, 129 tests, ALL PASSING
+  - Suite A (compaction-progress.test.ts): 24 tests ✓
+  - Suite B (pre-compaction-pruning.test.ts): 20 tests ✓ (×2 shards)
+  - Suite D (compaction-summary-prefix.test.ts): 8 tests ✓
+  - Suite E (multi-pass-compaction.test.ts): 25 tests ✓ (×2 shards)
+  - Suite G (config.multi-pass-compaction.test.ts): 16 tests ✓
+  - Existing compaction tests: ALL PASSING (no regressions)
+  - Existing config tests: ALL PASSING (no regressions)
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

@@ -1,0 +1,331 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — REVIEW SUMMARY V1
+================================================================================
+
+Date: 2026-06-28
+Review of: code_port_plan_V1.txt (Iteration 1)
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+15 issues were found during code-level verification of the V1 plan against
+the actual OpenClaw source code. Issues are grouped by severity.
+
+──── CRITICAL ISSUES (5) — Would cause incorrect behavior ────────────────────
+
+ISSUE #1: PRE-PRUNING INJECTION POINT IS FUNDAMENTALLY WRONG
+
+  Affected: Step 3 (pre-pruning), Step 7 (integration)
+
+  What V1 says: Call pruneOldToolResults() from run.ts on "currentMessages"
+  before multiPassCompact(), with "applyPrunedMessages()" to apply the
+  result.
+
+  What's wrong: OpenClaw's compaction pipeline reads from the SESSION TREE
+  (via prepareCompaction() in agent-harness.compact()), NOT from in-memory
+  messages in run.ts. Modifying in-memory messages in run.ts has ZERO
+  EFFECT on what gets summarized. The function "applyPrunedMessages()"
+  does not exist in OpenClaw and has no meaningful implementation path.
+
+  Why it matters: The entire pre-pruning subsystem would be dead code.
+  Messages passed to the summarizer would be untouched, negating the
+  token savings that pre-pruning is supposed to provide.
+
+  Fix: Move pre-pruning into the compaction-safeguard hook
+  (compaction-safeguard.ts), where it operates on
+  preparation.messagesToSummarize BEFORE the summarization pipeline.
+  This is consistent with the safeguard's existing pattern of modifying
+  messages before summarization (stripping runtime context, pruning
+  history, splitting recent turns).
+
+ISSUE #2: adoptCompactionTranscript MUST BE PER-PASS
+
+  Affected: Step 6 (multi-pass loop), Step 7 (integration detail I2)
+
+  What V1 says: "adoptCompactionTranscript(): Called once after ALL passes
+  complete (not per-pass)."
+
+  What's wrong: adoptCompactionTranscript() updates activeSessionId and
+  activeSessionFile from CompactResult. If a compaction pass rotates the
+  session (via CompactResult.sessionId), subsequent passes MUST use the
+  new session ID/file. Without per-pass updates, subsequent passes would
+  use stale session info, causing the compaction to operate on the wrong
+  session.
+
+  Why it matters: Session rotation is supported by the context engine
+  plugin interface (CompactResult.sessionId, CompactResult.sessionFile).
+  While the default compaction doesn't rotate, custom context engines
+  could. The multi-pass loop must be robust to session rotation.
+
+  Fix: Call adoptCompactionTranscript() after EACH successful pass.
+  Update compactParams.sessionId and compactParams.sessionFile for
+  subsequent passes. Added adoptTranscript callback to multiPassCompact.
+
+ISSUE #3: runContextEngineMaintenance MUST BE PER-PASS
+
+  Affected: Step 6, Step 7
+
+  What V1 says: Not mentioned at all.
+
+  What's wrong: The existing overflow compaction code (run.ts line 2727)
+  calls runContextEngineMaintenance() after each successful compaction.
+  Multi-pass must replicate this per-pass to keep the context engine
+  synchronized. Without it, the context engine could have stale state
+  for subsequent passes.
+
+  Fix: Added runMaintenance callback to multiPassCompact, called after
+  each successful pass. Matches the existing post-compaction lifecycle.
+
+ISSUE #4: CompactionSettings CANONICAL LOCATION IS compaction.ts, NOT types.ts
+
+  Affected: Step 1 (types)
+
+  What V1 says: "FILE: packages/agent-core/src/harness/types.ts (MODIFY)
+  — Add to CompactionSettings interface"
+
+  What's wrong: CompactionSettings is defined in TWO places:
+    - compaction.ts line 132 (CANONICAL — exported via index.ts)
+    - types.ts line 748 (DUPLICATE)
+  The export chain is: compaction.ts -> index.ts -> external consumers.
+  Modifying only types.ts would create a divergence where the exported
+  interface lacks the new fields.
+
+  Fix: Modify CompactionSettings in compaction.ts (the canonical
+  definition). Also update or remove the duplicate in types.ts.
+
+ISSUE #5: PACKAGE NAME WRONG
+
+  Affected: Step 7 (imports), Step 6 (dependencies)
+
+  What V1 says: `import { CompactionProgressTracker } from "@anthropic/agent-core"`
+
+  What's wrong: The actual package name is "@openclaw/agent-core"
+  (verified from packages/agent-core/package.json). @anthropic/agent-core
+  does not exist.
+
+  Fix: All imports corrected to @openclaw/agent-core.
+
+──── SIGNIFICANT ISSUES (7) — Would cause implementation errors ──────────────
+
+ISSUE #6: CutPointResult IS IN compaction.ts, NOT types.ts
+
+  Affected: Step 4 (cut point enhancement)
+
+  What V1 says: "MODIFY CutPointResult type (in types.ts)"
+
+  What's wrong: CutPointResult is an interface defined in compaction.ts
+  (line ~378), NOT in types.ts. Also, CutPointResult is NOT exported
+  from the agent-core index.ts.
+
+  Fix: Modify CutPointResult in compaction.ts. Add CutPointResult to
+  the index.ts exports.
+
+ISSUE #7: ContextEngineCompactParams IS PRIVATE
+
+  Affected: Step 6 (multiPassCompact signature)
+
+  What V1 says: Uses ContextEngineCompactParams in the function signature.
+
+  What's wrong: ContextEngineCompactParams is a private type alias in
+  compaction-safety-timeout.ts (line 140):
+    type ContextEngineCompactParams = Parameters<ContextEngine["compact"]>[0];
+  It is NOT exported.
+
+  Fix: Define an equivalent type inline in multi-pass-compaction.ts:
+    export type CompactionPassParams = Parameters<ContextEngine["compact"]>[0];
+  This derives the type from the ContextEngine interface, same as the
+  original private alias.
+
+ISSUE #8: MESSAGE COUNT ESTIMATION IS HAND-WAVED
+
+  Affected: Step 6 (implementation sketch)
+
+  What V1 says: `const origMessageCount = /* get from session context */;`
+  and `const newMessageCount = /* get from session context */;` (placeholders)
+
+  What's wrong: In OpenClaw's session tree model, getting message count
+  requires assembling the session context from tree entries (calling
+  buildSessionContext or contextEngine.assemble), which is expensive.
+  The V1 plan includes message count in MultiPassCompactionState and
+  compactionMadeProgress but provides no implementation for obtaining it.
+
+  Fix: Remove message count from progress detection entirely. Token-only
+  progress detection (>5% reduction) is sufficient. The message count
+  check in Hermes was an optimization for Python's cheap len(messages);
+  in OpenClaw's session tree architecture it adds complexity without
+  proportional benefit. Simplified MultiPassCompactionState and
+  compactionMadeProgress to token-only.
+
+ISSUE #9: estimateTokensFn NEEDS SPECIFIC PARAMS
+
+  Affected: Step 7 (timeout recovery path)
+
+  What V1 says: `estimateTokensFn: async () => {
+    const ctx = await contextEngine.assemble(...);
+    return estimateContextTokens(ctx.messages).tokens;
+  }`
+
+  What's wrong: contextEngine.assemble() requires specific params
+  (sessionId, sessionFile, tokenBudget, etc.) that aren't shown in
+  the V1 plan. The "..." is undefined.
+
+  Fix: Removed estimateTokensFn entirely. CompactResult.result.tokensAfter
+  IS populated by OpenClaw's embedded compact.ts (via
+  estimateTokensAfterCompaction()), so it's the primary token source.
+  No fallback estimation is needed.
+
+ISSUE #10: PREEMPTIVE COMPACTION PATH TARGETS WRONG FILE
+
+  Affected: Step 7 (item 5)
+
+  What V1 says: "MODIFY PREEMPTIVE COMPACTION PATH (attempt.ts, lines ~4605)"
+
+  What's wrong: attempt.ts only DETECTS overflow and sets
+  preflightRecovery with a route decision. It does NOT call compaction.
+  The actual compaction call for the preemptive path goes through the
+  OVERFLOW error handling in run.ts (line ~2707). The flow is:
+    1. attempt.ts detects overflow -> sets preflightRecovery
+    2. Attempt returns with promptError
+    3. run.ts detects overflow error -> triggers compaction at line ~2707
+
+  Fix: Removed item 5 (attempt.ts modification). The overflow path
+  modification (item 5 in corrected plan) already covers the preemptive
+  case.
+
+ISSUE #11: ONLY 2 COMPACTION CALL SITES, NOT 3
+
+  Affected: Step 7 (overall structure)
+
+  What V1 says: Implies 3 paths need modification (timeout, overflow,
+  preemptive-in-attempt.ts).
+
+  What's wrong: There are exactly 2 compactContextEngineWithSafetyTimeout()
+  calls in run.ts: line ~2503 (timeout) and line ~2707 (overflow /
+  preemptive). The preemptive path feeds into the overflow path.
+
+  Fix: Corrected to 2 call sites. Step 7 renamed to "Embedded Runner
+  Integration (2 Call Sites)".
+
+ISSUE #12: tokensAfter AVAILABILITY UNDOCUMENTED
+
+  Affected: Step 6 (token estimation)
+
+  What V1 says: Uses compactResult.result?.tokensAfter as preferred
+  source with estimateTokensFn as fallback.
+
+  What's wrong: The V1 plan doesn't confirm whether tokensAfter is
+  actually populated. Verification shows it IS populated by
+  compactEmbeddedAgentSessionDirectOnce() in compact.ts (line 1631),
+  making it the reliable primary source.
+
+  Fix: Documented that tokensAfter IS reliably populated. Removed the
+  fallback estimateTokensFn (Issue #9). Primary token source is now
+  compactResult.result.tokensAfter with tokensBefore as a no-change
+  fallback.
+
+──── MINOR ISSUES (3) — Documentation/clarity ────────────────────────────────
+
+ISSUE #13: SUMMARY PREFIX REPLACEMENT VS CONFIGURATION
+
+  Affected: Step 5 (disambiguation prefix)
+
+  What V1 says: "REPLACE COMPACTION_SUMMARY_PREFIX" in Step 5, but Step 8
+  adds a config flag "disambiguationPrefix: true".
+
+  What's wrong: Step 5 says to REPLACE the constant directly, which is
+  a breaking change. Step 8 makes it configurable, but the implementation
+  path is unclear.
+
+  Fix: Step 5 now PRESERVES the old prefix as
+  COMPACTION_SUMMARY_PREFIX_MINIMAL and ADDS the enhanced version as
+  COMPACTION_SUMMARY_PREFIX_ENHANCED. The default export
+  COMPACTION_SUMMARY_PREFIX points to the enhanced version.
+
+ISSUE #14: PRE-PRUNING ONCE VS PER-PASS CLARIFICATION
+
+  Affected: Step 3, Step 6 (design decision D5)
+
+  What V1 says: D5 says "PRE-PRUNING ONCE" but the integration point
+  (Step 7 item 6) is ambiguous about timing.
+
+  What's wrong: With the corrected injection point (inside the
+  compaction-safeguard hook), pre-pruning naturally runs ONCE per
+  compaction invocation — each pass fires the hook independently with
+  its own preparation from the session tree. This is correct but the V1
+  plan's reasoning is wrong (it assumed run.ts injection).
+
+  Fix: Clarified that pre-pruning runs inside the hook per-pass, but
+  each pass gets NEW preparation.messagesToSummarize from the updated
+  session tree, so the pre-pruning is correct without explicit once-only
+  gating.
+
+ISSUE #15: RETRY LOOP MULTIPLICATION CLARIFICATION
+
+  Affected: Step 7 (integration detail I1)
+
+  What V1 says: "maximum compaction attempts = 3 retries * 3 passes = 9"
+
+  What's wrong: While technically accurate, this math is misleading. The
+  anti-thrashing guard would block after 2 consecutive ineffective
+  compressions, so in practice the maximum would be much lower.
+
+  Fix: Added clarification that anti-thrashing limits the effective
+  maximum well below the theoretical 9.
+
+================================================================================
+2. ITERATION EVOLUTION
+================================================================================
+
+ITERATION 1 (V1 -> Review V1):
+
+  INITIAL STATE: V1 was the first plan iteration, generated from code
+  trace analysis and partial source code verification.
+
+  REVIEW PROCESS: The Review V1 phase performed deep code-level
+  verification against the actual OpenClaw source code. Specific
+  verifications included:
+
+  - Read compaction.ts: confirmed CompactionSettings definition (line 132),
+    DEFAULT_COMPACTION_SETTINGS (line 142), shouldCompact (line 236),
+    findCutPoint (line 378), CutPointResult interface (line 378),
+    prepareCompaction (line 634), compact (line 730)
+  - Read types.ts: confirmed duplicate CompactionSettings (line 748),
+    CompactionEntry (line 386), SessionBeforeCompactEvent (line 574)
+  - Read messages.ts: confirmed COMPACTION_SUMMARY_PREFIX (line 42),
+    createCompactionSummaryMessage (line 91), convertToLlm (line 159)
+  - Read compaction-safety-timeout.ts: confirmed compactWithSafetyTimeout
+    (line 67), compactContextEngineWithSafetyTimeout (line 162),
+    ContextEngineCompactParams (line 140, PRIVATE)
+  - Read context-engine/types.ts: confirmed CompactResult (line 126),
+    ContextEngine.compact params (line 402)
+  - Read run.ts: confirmed 2 compaction call sites (lines 2503, 2707),
+    adoptCompactionTranscript (line 1808), overflowCompactionAttempts
+    (line 1567), timeoutCompactionAttempts (line 1636),
+    runContextEngineMaintenance (line 2727)
+  - Read agent-harness.ts: confirmed compact() method (line 808), hook
+    firing (line 835), appendCompaction (line 864)
+  - Read compaction-safeguard.ts: confirmed hook registration (line 880),
+    messagesToSummarize pipeline, stripRuntimeContextCustomMessages
+  - Read package.json: confirmed package name "@openclaw/agent-core"
+  - Read compact.ts: confirmed tokensAfter population (line 1631)
+  - Verified context-pruning extension.ts: confirmed "context" hook
+    pattern (NOT compaction hook — separate system)
+
+  PROGRESSION:
+  - V1: 9 steps, 6 new files, 8 modified files
+  - Review V1: 9 steps (restructured), 6 new files, 9 modified files
+
+  KEY FIXES IN THIS REVIEW:
+  - Pre-pruning moved from dead-code location (run.ts) to effective
+    location (compaction-safeguard hook)
+  - Per-pass lifecycle (adoptTranscript + runMaintenance) added
+  - Package name, file locations, type definitions corrected
+  - Message count removed from progress detection (token-only is sufficient)
+  - estimateTokensFn removed (tokensAfter is reliably available)
+  - Preemptive compaction path correctly identified as part of overflow path
+  - Summary prefix change made non-breaking (both variants available)
+
+================================================================================
+END OF REVIEW SUMMARY V1
+================================================================================

@@ -1,0 +1,202 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — CODE GENERATION SUMMARY (V1)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python)
+Target: OpenClaw (TypeScript)
+Iteration: 1
+Date: 2026-06-28
+
+================================================================================
+1. CODE PATCH EXPLANATION
+================================================================================
+
+The code_gen_V1.patch implements the Multi-Pass Context Compaction feature
+as specified in code_port_plan_review_V4.txt and test_plan_review_V4.txt.
+
+CORE FUNCTIONALITY IMPLEMENTED:
+
+  1. Progress Detection & Anti-Thrashing (compaction-progress.ts)
+     - compactionMadeProgress(): detects if a compaction pass reduced tokens
+       by more than a configurable threshold (default 5%)
+     - CompactionProgressTracker class: tracks consecutive ineffective
+       compaction passes and suppresses further attempts after 2 failures
+     - Constants: MAX_COMPACTION_PASSES (3), PROGRESS_THRESHOLD (0.05),
+       INEFFECTIVE_SAVINGS_THRESHOLD (0.10), MAX_INEFFECTIVE_COMPRESSIONS (2),
+       DEFAULT_COMPACTION_TIMEOUT_MS (180000)
+
+  2. Pre-Compaction Pruning (pre-compaction-pruning.ts)
+     - preCompactionPrune(): three-sub-pass pre-processing of messages:
+       a. Hash-based deduplication of identical tool results (>200 chars)
+       b. Replace old tool results with 1-line summaries by tool name
+       c. Truncate large tool call arguments (Record<string, unknown>)
+     - Tail protection: recent messages are not modified
+     - Immutable: returns new array, never mutates input
+
+  3. Cut Point Enhancement (compaction.ts modifications)
+     - findCutPoint() enhanced with user/assistant message anchoring
+     - After the backward token walk, anchoring passes ensure:
+       a. Last user message is preserved in the tail
+       b. Last assistant message with visible text content is in the tail
+     - Monotonic: tail can only grow, never shrink
+     - Safety floor: at least startIndex+1
+     - Conservative: requires >=3 entries for summarization to activate
+
+  4. Summary Prefix Disambiguation (messages.ts modifications)
+     - COMPACTION_SUMMARY_PREFIX enhanced with disambiguation directives:
+       "[COMPACTION — REFERENCE ONLY]" + instructions to treat as background
+     - COMPACTION_SUMMARY_END_MARKER added: clear boundary after summary
+     - convertToLlm() updated to append end marker
+
+  5. Multi-Pass Compaction Loop (multi-pass-compaction.ts)
+     - multiPassCompact(): iterates contextEngine.compact() up to maxPasses
+     - Per-pass lifecycle: adoptTranscript + optional runMaintenance
+     - Progress checks: compactionMadeProgress() after each pass
+     - Anti-thrashing gate: CompactionProgressTracker at loop entry
+     - Timeout: single AbortSignal budget across all passes
+     - maxPasses clamped to [1, 10]
+     - MultiPassCompactionResult with diagnostic per-pass states
+
+  6. Configuration Schema Extension
+     - AgentCompactionConfig type: added maxPasses, progressThreshold
+     - Zod schema: maxPasses z.number().int().min(1).max(10)
+                   progressThreshold z.number().gt(0).lt(1)
+     - applyCompactionDefaults: per-field defaults pattern (not early-exit)
+     - CompactionSettings interface: added optional maxPasses, progressThreshold
+
+  7. Integration Points
+     - compaction-safeguard.ts: pre-pruning injected before provider/LLM path
+     - agent-core index.ts: new exports for progress module + CutPointResult
+
+TESTS IMPLEMENTED (5 test suites, 89 new tests):
+
+  Suite A (compaction-progress.test.ts): 24 tests
+    - compactionMadeProgress: 12 tests (thresholds, edge cases, custom values)
+    - CompactionProgressTracker: 7 tests (effective/ineffective tracking, reset)
+    - Constants: 5 tests (all constants have expected values)
+
+  Suite B (pre-compaction-pruning.test.ts): 20 tests
+    - Sub-pass 1 deduplication: 4 tests
+    - Sub-pass 2 tool result summaries: 10 tests
+    - Sub-pass 3 tool call arg truncation: 6 tests
+
+  Suite D (compaction-summary-prefix.test.ts): 8 tests
+    - Enhanced prefix directives: 4 tests
+    - End marker: 2 tests
+    - Summary wrapping: 2 tests
+
+  Suite E (multi-pass-compaction.test.ts): 25 tests
+    - Single-pass behavior: 5 tests
+    - Multi-pass iteration: 3 tests
+    - Abort handling: 3 tests
+    - Error handling: 4 tests
+    - Progress tracking: 2 tests
+    - Configuration defaults: 5 tests
+    - Lifecycle callbacks: 3 tests
+
+  Suite G (config.multi-pass-compaction.test.ts): 16 tests
+    - Configuration defaults: 7 tests
+    - Zod schema validation: 9 tests
+
+  Existing tests: 40 tests (all pass, no regressions)
+
+================================================================================
+2. ITERATION EVOLUTION
+================================================================================
+
+ITERATION 1 (this iteration):
+  - Implemented Steps 1-6 and Step 8 from the porting plan
+  - Steps 7 (run.ts integration) deferred: the run.ts modification is
+    complex (2 call sites, ~200 lines of delicate try-catch variable
+    scoping) and requires careful verification. The multi-pass loop and
+    all supporting modules are complete and independently testable.
+  - Suites C (cut point anchoring), F (embedded runner integration),
+    H (compaction-safeguard integration), and I (vertical slice) deferred
+    as they depend on integration points in run.ts.
+  - Fixed existing test regression (compaction-trailing-toolresult.test.ts)
+    caused by anchoring in findCutPoint by adding a conservative guard:
+    anchoring only activates when >=3 entries remain for summarization.
+
+================================================================================
+3. FILES CREATED OR MODIFIED
+================================================================================
+
+NEW FILES (8):
+  1. packages/agent-core/src/harness/compaction/compaction-progress.ts
+     Constants, interfaces, compactionMadeProgress(), CompactionProgressTracker
+
+  2. packages/agent-core/src/harness/compaction/compaction-progress.test.ts
+     Suite A: 24 tests for progress detection and anti-thrashing
+
+  3. packages/agent-core/src/harness/compaction/compaction-summary-prefix.test.ts
+     Suite D: 8 tests for enhanced summary prefix and end marker
+
+  4. src/agents/agent-hooks/pre-compaction-pruning.ts
+     preCompactionPrune() with 3 sub-passes
+
+  5. src/agents/agent-hooks/pre-compaction-pruning.test.ts
+     Suite B: 20 tests for pre-compaction pruning
+
+  6. src/agents/multi-pass-compaction.ts
+     multiPassCompact(), MultiPassCompactionResult, MultiPassCompactParams
+
+  7. src/agents/multi-pass-compaction.test.ts
+     Suite E: 25 tests for multi-pass compaction loop
+
+  8. src/config/config.multi-pass-compaction.test.ts
+     Suite G: 16 tests for configuration schema extension
+
+MODIFIED FILES (7):
+  1. packages/agent-core/src/harness/compaction/compaction.ts
+     - CompactionSettings: added maxPasses?, progressThreshold?
+     - findCutPoint(): added user/assistant message anchoring with helpers
+
+  2. packages/agent-core/src/harness/messages.ts
+     - COMPACTION_SUMMARY_PREFIX: enhanced with disambiguation directives
+     - COMPACTION_SUMMARY_END_MARKER: new exported constant
+     - convertToLlm(): appends end marker to compactionSummary
+
+  3. packages/agent-core/src/index.ts
+     - Added exports for compaction-progress module
+     - Added CutPointResult type export
+
+  4. src/agents/agent-hooks/compaction-safeguard.ts
+     - Added import for preCompactionPrune
+     - Injected pre-pruning at line ~965 before provider path
+
+  5. src/config/defaults.ts
+     - applyCompactionDefaults: per-field defaults pattern for maxPasses (3)
+       and progressThreshold (0.05)
+
+  6. src/config/zod-schema.agent-defaults.ts
+     - Added maxPasses and progressThreshold to compaction schema
+
+  7. src/config/types.agent-defaults.ts
+     - Added maxPasses and progressThreshold to AgentCompactionConfig type
+
+================================================================================
+4. BUILD AND TEST RESULTS
+================================================================================
+
+BUILD:
+  pnpm build → SUCCESS (total 169.9s including tsdown, UI, plugins)
+  No TypeScript compilation errors
+
+TESTS:
+  All new test files: 10 files, 129 tests, ALL PASSING
+  - Suite A (progress detection): 24 tests ✓
+  - Suite B (pre-compaction pruning): 20 tests ✓ (×2 shards)
+  - Suite D (summary prefix): 8 tests ✓
+  - Suite E (multi-pass loop): 25 tests ✓ (×2 shards)
+  - Suite G (config schema): 16 tests ✓
+  - Existing compaction tests: ALL PASSING (no regressions)
+  - Existing config tests: ALL PASSING (no regressions)
+
+REGRESSION CHECK:
+  compaction-trailing-toolresult.test.ts: PASS (fixed with conservative
+  anchoring guard requiring >=3 entries for summarization)
+
+================================================================================
+END OF SUMMARY
+================================================================================

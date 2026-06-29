@@ -1,0 +1,1281 @@
+================================================================================
+OPENCLAW — CONTEXT COMPACTION SYSTEM: FULL CODE TRACE
+================================================================================
+
+Feature: Context Compaction (target for Multi-Pass improvements from Hermes)
+Category: Core / Context Management
+Traced from: /home/alexm-redhat/code/exper/openclaw
+
+TABLE OF CONTENTS
+─────────────────
+1. Architecture Overview
+2. Entry Points & Trigger Chain
+3. Compaction Decision Logic
+4. Core Compaction: agent-core compact()
+5. Summarization Pipeline (summarizeInStages / summarizeWithFallback)
+6. Compaction Safeguard Hook (Gateway Layer)
+7. Head/Tail Protection & Cut Points
+8. Tool Result Pruning (Context Pruning)
+9. Summary Prefix & Context Reconstruction
+10. Session Storage & Persistence
+11. Safety Timeout & Abort Handling
+12. Multi-Pass / Retry Semantics (Current State)
+13. Configuration & Defaults
+14. Data Models & Type Signatures
+15. External Dependencies
+16. Error Handling Patterns
+17. File Inventory
+18. Gap Analysis vs Hermes
+
+================================================================================
+1. ARCHITECTURE OVERVIEW
+================================================================================
+
+OpenClaw's compaction system is split across TWO layers:
+
+  ┌──────────────────────────────────────────────────────────┐
+  │ LAYER 1: Agent Core SDK (packages/agent-core/)           │
+  │   Portable, platform-independent compaction primitives   │
+  │   - shouldCompact()  — threshold check                   │
+  │   - prepareCompaction() — cut point & message extraction │
+  │   - compact() — single-pass summary generation           │
+  │   - estimateTokens() — char-based heuristic              │
+  │   File: packages/agent-core/src/harness/compaction/      │
+  ├──────────────────────────────────────────────────────────┤
+  │ LAYER 2: Gateway / Embedded Runner (src/agents/)         │
+  │   Platform-specific orchestration & error recovery       │
+  │   - Preemptive overflow detection before prompt          │
+  │   - Post-turn overflow & timeout recovery (retry loop)   │
+  │   - compaction-safeguard hook (LLM summary quality)      │
+  │   - Context pruning (cache-TTL based tool result trim)   │
+  │   - Safety timeout wrapper (180s default)                │
+  │   File: src/agents/embedded-agent-runner/                │
+  ├──────────────────────────────────────────────────────────┤
+  │ LAYER 3: Context Engine Plugin Interface                 │
+  │   Pluggable contract for external context management     │
+  │   - Engines can own compaction lifecycle                  │
+  │   - bootstrap → ingest → assemble → compact → afterTurn  │
+  │   File: src/context-engine/types.ts                      │
+  └──────────────────────────────────────────────────────────┘
+
+  Agent Harness (packages/agent-core/src/harness/agent-harness.ts)
+  provides a public compact() method but does NOT auto-trigger.
+  Auto-compaction is orchestrated by the embedded runner (Layer 2).
+
+================================================================================
+2. ENTRY POINTS & TRIGGER CHAIN
+================================================================================
+
+There are FOUR trigger paths for compaction:
+
+─── PATH A: Pre-Prompt Preemptive Compaction ──────────────────────────────────
+
+  File: src/agents/embedded-agent-runner/run/preemptive-compaction.ts
+  File: src/agents/embedded-agent-runner/run/attempt.ts (line ~4605)
+
+  BEFORE each LLM API call, the runner estimates token pressure:
+
+    1. Call shouldPreemptivelyCompactBeforePrompt({
+         messages, systemPrompt, prompt,
+         contextTokenBudget, reserveTokens, ...
+       })
+
+    2. Estimates token pressure from:
+       - Transcript messages (walk all messages)
+       - System prompt
+       - Current user prompt
+       - Multiplied by SAFETY_MARGIN (1.2)
+
+    3. Computes overflow:
+       overflowTokens = estimatedPromptTokens - promptBudgetBeforeReserve
+       where promptBudgetBeforeReserve = contextTokenBudget - effectiveReserveTokens
+
+    4. Routes to one of:
+       - "fits" → proceed normally
+       - "compact_only" → set preflightRecovery, skip prompt submission
+       - "truncate_tool_results_only" → truncate, don't compact
+       - "compact_then_truncate" → compact first, then truncate
+
+    5. If shouldCompact:
+       - Sets promptError = "Context overflow: prompt too large (precheck)"
+       - Sets skipPromptSubmission = true
+       - Attempt returns with preflightRecovery set
+
+─── PATH B: Post-Turn Overflow Recovery ───────────────────────────────────────
+
+  File: src/agents/embedded-agent-runner/run.ts (lines ~2585–2878)
+
+  After a failed API call, the runner detects context overflow errors:
+
+    1. isLikelyContextOverflowError() checks the error text
+    2. If overflow detected AND overflowCompactionAttempts < 3:
+       - Increment overflowCompactionAttempts
+       - Call compactContextEngineWithSafetyTimeout(contextEngine, params, timeout)
+       - If compacted: adoptCompactionTranscript(), continue retry loop
+    3. If all 3 attempts exhausted → return terminal error
+
+─── PATH C: Timeout-Based Compaction ──────────────────────────────────────────
+
+  File: src/agents/embedded-agent-runner/run.ts (lines ~2426–2555)
+
+  When the LLM times out and context usage is high:
+
+    1. Detect timeout (timedOut flag)
+    2. Check tokenUsedRatio > 0.65 (65% of context window)
+    3. If timeoutCompactionAttempts < 2:
+       - Increment timeoutCompactionAttempts
+       - Call compactContextEngineWithSafetyTimeout()
+       - If compacted: continue retry loop
+    4. If 2 attempts exhausted → return timeout error
+
+─── PATH D: Manual /compact Command ──────────────────────────────────────────
+
+  File: packages/agent-core/src/harness/agent-harness.ts (lines ~808–885)
+
+  Direct invocation via harness.compact(customInstructions):
+    1. Validates harness is "idle"
+    2. Sets phase to "compaction"
+    3. prepareCompaction() with DEFAULT_COMPACTION_SETTINGS
+    4. Fires session_before_compact hook (can cancel or override)
+    5. Calls compact() from compaction module (unless hook provided result)
+    6. Persists CompactionEntry to session storage
+    7. Fires session_compact hook (notification only)
+    8. Returns CompactionResult
+
+  Also: src/agents/command/cli-compaction.ts for CLI binding
+
+─── RETRY LOOP STRUCTURE ─────────────────────────────────────────────────────
+
+  File: src/agents/embedded-agent-runner/run.ts
+
+  while (true) {
+    if (runLoopIterations >= MAX_RUN_LOOP_ITERATIONS) break;
+    runLoopIterations++;
+
+    // Execute attempt (may trigger preemptive compaction internally)
+    const attemptResult = await runAttempt(...);
+
+    // Handle preemptive compaction result
+    if (preflightRecovery?.handled) continue;  // retry
+
+    // Handle timeout with high context usage
+    if (timedOut && tokenUsedRatio > 0.65 && timeoutCompactionAttempts < 2) {
+      await compactContextEngineWithSafetyTimeout(...);
+      continue;  // retry
+    }
+
+    // Handle overflow error
+    if (contextOverflowError && overflowCompactionAttempts < 3) {
+      await compactContextEngineWithSafetyTimeout(...);
+      continue;  // retry
+    }
+
+    // If all retries exhausted → return error
+  }
+
+  Constants:
+    MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3
+    MAX_TIMEOUT_COMPACTION_ATTEMPTS = 2
+
+================================================================================
+3. COMPACTION DECISION LOGIC
+================================================================================
+
+─── AGENT-CORE shouldCompact() ────────────────────────────────────────────────
+
+  File: packages/agent-core/src/harness/compaction/compaction.ts (lines 236–245)
+
+  function shouldCompact(
+    contextTokens: number,
+    contextWindow: number,
+    settings: CompactionSettings,
+  ): boolean {
+    if (!settings.enabled) return false;
+    return contextTokens > contextWindow - settings.reserveTokens;
+  }
+
+  This is a SIMPLE threshold check — no anti-thrashing, no progress tracking.
+
+─── GATEWAY PREEMPTIVE CHECK ──────────────────────────────────────────────────
+
+  File: src/agents/embedded-agent-runner/run/preemptive-compaction.ts (lines 248–329)
+
+  function shouldPreemptivelyCompactBeforePrompt(params):
+    1. Estimate token pressure from messages + system prompt + prompt
+    2. Apply SAFETY_MARGIN (1.2x)
+    3. Compute effective reserve tokens (min-capped at MIN_PROMPT_BUDGET)
+    4. Compute overflow = estimated - (budget - reserve)
+    5. If overflow > 0, evaluate tool-result reduction potential
+    6. Route: "fits" | "compact_only" | "truncate_tool_results_only" | "compact_then_truncate"
+
+  Token estimation constants:
+    ESTIMATED_CHARS_PER_TOKEN = 4
+    TOOL_RESULT_CHARS_PER_TOKEN = 2
+    JSON_PAYLOAD_CHARS_PER_TOKEN = 3
+    MESSAGE_BOUNDARY_OVERHEAD_TOKENS = 12
+    CONTENT_BLOCK_OVERHEAD_TOKENS = 6
+    IMAGE_BLOCK_TOKENS = 2,000
+    TRUNCATION_ROUTE_BUFFER_TOKENS = 512
+
+================================================================================
+4. CORE COMPACTION: agent-core compact()
+================================================================================
+
+File: packages/agent-core/src/harness/compaction/compaction.ts
+
+─── prepareCompaction() ───────────────────────────────────────────────────────
+
+  Signature:
+    function prepareCompaction(
+      pathEntries: SessionTreeEntry[],
+      settings: CompactionSettings,
+    ): Result<CompactionPreparation | undefined, CompactionError>
+
+  Algorithm:
+    1. Find the last compaction entry (prevCompactionIndex)
+    2. Extract previous summary for iterative updates
+    3. Determine boundary: start from after last compaction's firstKeptEntryId
+    4. Estimate tokensBefore via estimateContextTokens(buildSessionContext(pathEntries).messages)
+    5. Find cut point via findCutPoint(entries, boundaryStart, boundaryEnd, keepRecentTokens)
+    6. Collect messagesToSummarize (boundaryStart to cut point)
+    7. Collect turnPrefixMessages if cut splits a turn
+    8. Extract file operations from messages
+    9. Return CompactionPreparation
+
+  Returns undefined when:
+    - No entries, or last entry is already a compaction
+
+─── compact() ────────────────────────────────────────────────────────────────
+
+  Signature:
+    async function compact(
+      preparation: CompactionPreparation,
+      model: Model,
+      apiKey: string | undefined,
+      headers?: Record<string, string>,
+      customInstructions?: string,
+      signal?: AbortSignal,
+      thinkingLevel?: ThinkingLevel,
+      streamFn?: StreamFn,
+      runtime?: AgentCoreCompletionRuntimeDeps,
+    ): Promise<Result<CompactionResult, CompactionError>>
+
+  Algorithm:
+    IF split turn AND turnPrefixMessages:
+      Run BOTH in parallel (Promise.all):
+        - generateSummary(messagesToSummarize, ..., previousSummary)
+        - generateTurnPrefixSummary(turnPrefixMessages, ...)
+      Combine: "{history}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix}"
+    ELSE:
+      generateSummary(messagesToSummarize, ..., previousSummary)
+
+    Append file operations metadata (readFiles, modifiedFiles)
+    Return CompactionResult { summary, firstKeptEntryId, tokensBefore, details }
+
+  This is a SINGLE-PASS LLM call — no multi-pass iteration.
+
+─── generateSummary() ─────────────────────────────────────────────────────────
+
+  Signature:
+    async function generateSummary(
+      currentMessages: AgentMessage[],
+      model: Model,
+      reserveTokens: number,
+      apiKey: string | undefined,
+      headers?: Record<string, string>,
+      signal?: AbortSignal,
+      customInstructions?: string,
+      previousSummary?: string,
+      thinkingLevel?: ThinkingLevel,
+      streamFn?: StreamFn,
+      runtime?: AgentCoreCompletionRuntimeDeps,
+    ): Promise<Result<string, CompactionError>>
+
+  Algorithm:
+    1. maxTokens = min(0.8 * reserveTokens, model.maxTokens)
+    2. Choose prompt:
+       - No previousSummary → SUMMARIZATION_PROMPT (fresh summary)
+       - Has previousSummary → UPDATE_SUMMARIZATION_PROMPT (iterative update)
+    3. Append customInstructions if provided
+    4. convertToLlm(currentMessages) → serializeConversation()
+    5. Build prompt: <conversation>...</conversation> [+ <previous-summary>...] + instructions
+    6. Call completeSummarization(model, context, options)
+    7. Extract text content from response
+    8. Return summary string
+
+  Summary structure (SUMMARIZATION_PROMPT):
+    ## Goal
+    ## Constraints & Preferences
+    ## Progress (### Done, ### In Progress, ### Blocked)
+    ## Key Decisions
+    ## Next Steps
+    ## Critical Context
+
+  Iterative update (UPDATE_SUMMARIZATION_PROMPT):
+    Same structure, with explicit rules:
+    - PRESERVE all existing information
+    - ADD new progress, decisions, and context
+    - UPDATE Progress section (move In Progress → Done)
+    - PRESERVE exact file paths, function names, error messages
+
+================================================================================
+5. SUMMARIZATION PIPELINE (summarizeInStages / summarizeWithFallback)
+================================================================================
+
+File: src/agents/compaction.ts
+
+The gateway layer has a more sophisticated summarization pipeline than
+the agent-core's single-pass generateSummary().
+
+─── summarizeInStages() ───────────────────────────────────────────────────────
+
+  Signature:
+    async function summarizeInStages(params: {
+      messages, model, apiKey, headers, signal,
+      reserveTokens, maxChunkTokens, contextWindow,
+      customInstructions, summarizationInstructions,
+      previousSummary, parts, minMessagesForSplit,
+    }): Promise<string>
+
+  Algorithm:
+    1. Build stage split plan via buildStageSplitPlanWithWorker()
+       - Determines "single" vs "split" mode
+    2. If "single": delegate to summarizeWithFallback()
+    3. If "split":
+       a. For each chunk: summarizeWithFallback(..., previousSummary=undefined)
+       b. Collect partial summaries
+       c. If multiple: merge via summarizeWithFallback() with MERGE_SUMMARIES_INSTRUCTIONS
+       d. If single: return directly
+
+  This is the CLOSEST OpenClaw has to multi-pass — it chunks messages
+  and summarizes each chunk separately, then merges.
+
+─── summarizeWithFallback() ───────────────────────────────────────────────────
+
+  Signature:
+    async function summarizeWithFallback(params: {
+      messages, model, apiKey, headers, signal,
+      reserveTokens, maxChunkTokens, contextWindow,
+      customInstructions, summarizationInstructions, previousSummary,
+    }): Promise<string>
+
+  Algorithm:
+    1. Try full summarization via summarizeChunks()
+    2. If fails: Build oversized fallback plan
+       - Separate small and oversized messages
+       - Try summarizing only small messages
+       - Append notes about oversized messages
+    3. If partial summary available (from failed chunk), use it
+    4. Final fallback: "Context contained N messages (K oversized)..."
+
+─── summarizeChunks() ─────────────────────────────────────────────────────────
+
+  Signature:
+    async function summarizeChunks(params: {
+      messages, model, apiKey, headers, signal,
+      reserveTokens, maxChunkTokens,
+      customInstructions, summarizationInstructions, previousSummary,
+    }): Promise<string>
+
+  Algorithm:
+    1. Build chunks via buildSummaryChunksWithWorker()
+    2. Initialize summary = previousSummary
+    3. For each chunk (sequential, not parallel):
+       - Call generateSummary(chunk, ..., previousSummary=summary)
+       - With retryAsync(3 attempts, 500ms–5000ms delay, jitter=0.2)
+       - On success: update summary iteratively
+       - On failure: preserve partial summary, throw with .partialSummary
+
+  This ITERATES over chunks sequentially, feeding the previous
+  chunk's summary as previousSummary to the next. This is closest
+  to Hermes's iterative summary update.
+
+─── CHUNKING STRATEGY ─────────────────────────────────────────────────────────
+
+  File: src/agents/compaction-planning.ts
+
+  chunkMessagesByMaxTokens(messages, maxTokens):
+    - Split messages into chunks that fit under maxTokens
+    - Apply SAFETY_MARGIN (1.2x) to each message estimate
+    - Never split tool_call/tool_result pairs
+
+  splitMessagesByTokenShare(messages, parts):
+    - Split into N roughly equal token-share chunks
+    - Track pendingToolCallIds to keep tool_call/tool_result together
+    - Default parts = 2
+
+  computeAdaptiveChunkRatio(messages, contextWindow):
+    - Adapts chunk size based on message sizes
+    - Range: MIN_CHUNK_RATIO (0.15) to BASE_CHUNK_RATIO (0.40)
+    - Accounts for SUMMARIZATION_OVERHEAD_TOKENS (4096)
+
+================================================================================
+6. COMPACTION SAFEGUARD HOOK (GATEWAY LAYER)
+================================================================================
+
+File: src/agents/agent-hooks/compaction-safeguard.ts
+
+This is a comprehensive hook registered on session_before_compact that
+completely replaces the agent-core's default compact() with:
+
+─── HOOK REGISTRATION ─────────────────────────────────────────────────────────
+
+  compactionSafeguardExtension(api):
+    api.on("session_before_compact", async (event, ctx) => { ... })
+
+─── ALGORITHM ─────────────────────────────────────────────────────────────────
+
+  1. STRIP runtime context custom messages
+  2. CHECK for real conversation content
+     - If no real content: write minimal compaction boundary to prevent re-trigger loop
+  3. EXTRACT file operations and tool failures
+  4. RESOLVE instructions (event → runtime config → DEFAULT_COMPACTION_INSTRUCTIONS)
+  5. TRY provider-based summarization (if configured)
+     - Falls through to LLM on failure
+  6. RESOLVE model + credentials
+  7. PRUNE history for context share:
+     - buildHistoryPrunePlanWithWorker()
+     - If new content > max history budget: drop oldest chunks
+     - Summarize dropped chunks separately
+  8. SPLIT preserved recent turns:
+     - splitPreservedRecentTurns() — keep last N user turns verbatim
+     - DEFAULT_RECENT_TURNS_PRESERVE = 3 (max 12)
+  9. COMPUTE adaptive chunk ratio
+  10. SUMMARIZE via LLM with quality guard:
+      - Loop up to qualityGuardMaxRetries + 1 attempts (default 1+1=2)
+      - Call summarizeViaLLM() → summarizeInStages()
+      - If split turn: generate separate turn prefix summary
+      - auditSummaryQuality() on each attempt
+      - Regenerate with quality feedback instructions on failure
+  11. ASSEMBLE final summary:
+      - Cap main body at MAX_COMPACTION_SUMMARY_CHARS (16,000)
+      - Append suffix (split turn, preserved turns, tool failures, file ops, workspace)
+      - capCompactionSummaryPreservingSuffix() protects tail sections
+  12. RETURN CompactionResult via hook → SDK persists entry
+
+─── KEY FEATURES ──────────────────────────────────────────────────────────────
+
+  - QUALITY GUARD: Audits summary structure, retries with feedback
+  - PRESERVED TURNS: Keeps last N user turns verbatim in summary
+  - TOOL FAILURE TRACKING: Extracts and preserves error details
+  - PREVIOUS SUMMARY REDISTILL: Prepends old summary with prune instructions
+  - WORKSPACE CONTEXT: Reads AGENTS.md sections for post-compaction context
+  - IDENTIFIER PRESERVATION: Policy-based opaque identifier protection
+  - OVERSIZED MESSAGE HANDLING: Separate fallback for large messages
+
+─── LIMITATIONS ───────────────────────────────────────────────────────────────
+
+  - Single-pass compaction (no loop checking if tokens are below threshold)
+  - No progress tracking (5% improvement check from Hermes)
+  - No anti-thrashing guard
+  - Quality guard only retries the summary, not the compaction threshold
+
+================================================================================
+7. HEAD/TAIL PROTECTION & CUT POINTS
+================================================================================
+
+File: packages/agent-core/src/harness/compaction/compaction.ts
+
+─── findCutPoint() ────────────────────────────────────────────────────────────
+
+  Signature:
+    function findCutPoint(
+      entries: SessionTreeEntry[],
+      startIndex: number,
+      endIndex: number,
+      keepRecentTokens: number,
+    ): CutPointResult
+
+  Algorithm:
+    1. Find valid cut points (entry types that can be boundaries):
+       - message entries with roles: user, assistant, bashExecution, custom,
+         branchSummary, compactionSummary
+       - branch_summary entries
+       - custom_message entries
+       - EXCLUDES: toolResult (cannot split tool_call/result pairs)
+    2. Walk backward from end, accumulating tokens per message
+    3. When accumulated >= keepRecentTokens:
+       - Find the nearest valid cut point >= current position
+    4. Walk backward to avoid cutting inside a compaction or message boundary
+    5. Detect split turn:
+       - If cut is NOT at a user message → find the turn start
+       - isSplitTurn = true when the cut lands mid-turn
+
+  Default: keepRecentTokens = 20,000 tokens
+
+  Result:
+    CutPointResult {
+      firstKeptEntryIndex: number;
+      turnStartIndex: number;
+      isSplitTurn: boolean;
+    }
+
+─── HEAD PROTECTION ───────────────────────────────────────────────────────────
+
+  The system always keeps:
+    - The compaction summary message (replaces everything before cut point)
+    - Everything from firstKeptEntry onward
+
+  The compaction summary message is inserted as a compactionSummary-role
+  message at the beginning of the context.
+
+─── TAIL PROTECTION ───────────────────────────────────────────────────────────
+
+  Controlled by keepRecentTokens (default: 20,000):
+    - Walk backward accumulating tokens
+    - Keep approximately 20K tokens of recent context
+    - Never split tool_call/tool_result pairs
+
+  Gateway layer adds:
+    - DEFAULT_RECENT_TURNS_PRESERVE = 3 (keep last 3 user turns verbatim)
+    - MAX_RECENT_TURNS_PRESERVE = 12
+
+─── NO EXPLICIT protect_first_n ───────────────────────────────────────────────
+
+  Unlike Hermes, OpenClaw does NOT have an explicit "protect first N messages"
+  parameter. The system prompt is not part of the session tree entries —
+  it's rebuilt fresh each turn. The first user message gets no special
+  protection beyond the keepRecentTokens budget.
+
+================================================================================
+8. TOOL RESULT PRUNING (CONTEXT PRUNING)
+================================================================================
+
+File: src/agents/agent-hooks/context-pruning/
+      - settings.ts   — configuration
+      - pruner.ts      — core pruning logic
+      - runtime.ts     — runtime integration
+      - extension.ts   — hook registration
+
+This is a SEPARATE system from compaction — it runs as a context hook
+that trims tool results before they become stale.
+
+─── PRUNING MODES ─────────────────────────────────────────────────────────────
+
+  - "off" — disabled
+  - "cache-ttl" — trim based on prompt cache TTL expiry
+
+─── DEFAULT SETTINGS ──────────────────────────────────────────────────────────
+
+  DEFAULT_CONTEXT_PRUNING_SETTINGS = {
+    mode: "cache-ttl",
+    ttlMs: 5 * 60 * 1000,        // 5 minutes
+    keepLastAssistants: 3,        // protect last 3 assistant turns
+    softTrimRatio: 0.3,           // soft-trim at 30% of context
+    hardClearRatio: 0.5,          // hard-clear at 50% of context
+    minPrunableToolChars: 50,000, // minimum chars before pruning
+    tools: {},                    // allow/deny glob patterns
+    softTrim: {
+      maxChars: 4,000,            // max chars after soft trim
+      headChars: 1,500,           // keep first 1500 chars
+      tailChars: 1,500,           // keep last 1500 chars
+    },
+    hardClear: {
+      enabled: true,
+      placeholder: "[Old tool result content cleared]",
+    },
+  }
+
+─── PRUNING ALGORITHM ─────────────────────────────────────────────────────────
+
+  - Tracks prompt-cache TTL per tool result
+  - When TTL expires AND context pressure is high:
+    - SOFT TRIM: head + tail preservation (keep first/last N chars)
+    - HARD CLEAR: replace entire tool result with placeholder
+  - Respects tool allow/deny globs
+  - Protects last N assistant turns
+
+  This is the closest equivalent to Hermes's _prune_old_tool_results().
+
+================================================================================
+9. SUMMARY PREFIX & CONTEXT RECONSTRUCTION
+================================================================================
+
+File: packages/agent-core/src/harness/messages.ts
+
+─── COMPACTION SUMMARY PREFIX ─────────────────────────────────────────────────
+
+  COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was
+  compacted into the following summary:
+
+  <summary>
+  `
+
+  COMPACTION_SUMMARY_SUFFIX = `
+  </summary>`
+
+  When converted to LLM context, compactionSummary messages become:
+    role: "user"
+    content: COMPACTION_SUMMARY_PREFIX + summary + COMPACTION_SUMMARY_SUFFIX
+
+─── BRANCH SUMMARY PREFIX ────────────────────────────────────────────────────
+
+  BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch that this
+  conversation came back from:
+
+  <summary>
+  `
+
+─── COMPARISON WITH HERMES ────────────────────────────────────────────────────
+
+  OpenClaw's prefix is MUCH simpler than Hermes's SUMMARY_PREFIX which contains
+  extensive disambiguation directives:
+    - "treat it as background reference, NOT as active instructions"
+    - "Do NOT answer questions mentioned in this summary"
+    - "Respond ONLY to the latest user message AFTER this summary"
+    - "Historical" section headings vs "Active" headings
+    - Reverse signal handling (stop, undo, roll back)
+    - Memory priority directives (MEMORY.md always authoritative)
+
+  OpenClaw's prefix lacks all of these disambiguation directives.
+
+================================================================================
+10. SESSION STORAGE & PERSISTENCE
+================================================================================
+
+File: packages/agent-core/src/harness/session/session.ts
+      packages/agent-core/src/harness/types.ts
+
+─── SESSION TREE MODEL ────────────────────────────────────────────────────────
+
+  Sessions are append-only trees stored as JSONL files.
+  Each entry has: { type, id, parentId, timestamp }
+
+  Entry types: message, thinking_level_change, model_change,
+               compaction, branch_summary, custom, custom_message,
+               label, session_info, leaf
+
+─── COMPACTION ENTRY ──────────────────────────────────────────────────────────
+
+  CompactionEntry {
+    type: "compaction";
+    id: string;
+    parentId: string | null;
+    timestamp: string;
+    summary: string;
+    firstKeptEntryId: string;  // ID of first retained entry
+    tokensBefore: number;      // context tokens before compaction
+    details?: unknown;         // implementation-specific (file ops)
+    fromHook?: boolean;        // true if hook provided summary
+  }
+
+  When building session context (buildSessionContext):
+    1. Walk all pathEntries
+    2. Find the last compaction entry
+    3. Insert compactionSummary message for it
+    4. Only include message entries AFTER the compaction's firstKeptEntryId
+    5. Earlier messages are replaced by the summary
+
+─── IN-PLACE vs ROTATION ─────────────────────────────────────────────────────
+
+  OpenClaw uses IN-PLACE compaction by default:
+    - Appends a CompactionEntry to the session tree
+    - Does NOT rotate session IDs
+    - Does NOT create child sessions
+    - Session tree remains a single append-only file
+
+  The context engine plugin interface supports session rotation
+  (CompactResult.sessionId, CompactResult.sessionFile) but the
+  default compaction does not use it.
+
+================================================================================
+11. SAFETY TIMEOUT & ABORT HANDLING
+================================================================================
+
+File: src/agents/embedded-agent-runner/compaction-safety-timeout.ts
+
+─── TIMEOUT VALUE ─────────────────────────────────────────────────────────────
+
+  EMBEDDED_COMPACTION_TIMEOUT_MS = 180,000  (180 seconds / 3 minutes)
+
+  Configurable via:
+    config.agents?.defaults?.compaction?.timeoutSeconds
+
+  Resolution:
+    resolveCompactionTimeoutMs(cfg):
+      finiteSecondsToTimerSafeMilliseconds(cfg?.agents?.defaults?.compaction?.timeoutSeconds)
+      ?? EMBEDDED_COMPACTION_TIMEOUT_MS
+
+─── compactWithSafetyTimeout() ────────────────────────────────────────────────
+
+  Signature:
+    async function compactWithSafetyTimeout<T>(
+      compact: (abortSignal?: AbortSignal) => Promise<T>,
+      timeoutMs: number = 180_000,
+      opts?: { abortSignal?: AbortSignal; onCancel?: () => void },
+    ): Promise<T>
+
+  Algorithm:
+    1. Create composed abort signal (timeout + external)
+    2. Race compact() against external abort signal
+    3. On timeout: call onCancel(), reject with "Compaction timed out"
+    4. On external abort: call onCancel(), reject with AbortError
+    5. Clean up signal listeners in finally
+
+─── compactContextEngineWithSafetyTimeout() ───────────────────────────────────
+
+  Wraps contextEngine.compact() with the same safety timeout.
+  Threads abort signal into compact() params so cooperating engines
+  can cancel in-flight work.
+
+─── HARNESS ABORT SIGNAL ──────────────────────────────────────────────────────
+
+  In agent-harness.ts compact():
+    - Creates a FRESH AbortController for the hook signal
+    - Signal is NOT connected to the turn's abort controller
+    - compact() function receives signal=undefined
+
+  In the embedded runner:
+    - Turn has its own abort controller
+    - Compaction gets its own composed signal (timeout + external)
+    - Both are independent
+
+================================================================================
+12. MULTI-PASS / RETRY SEMANTICS (CURRENT STATE)
+================================================================================
+
+OpenClaw does NOT have true multi-pass compaction. Here's what it has:
+
+─── WHAT EXISTS ───────────────────────────────────────────────────────────────
+
+  1. OVERFLOW RETRY LOOP (run.ts):
+     - Up to MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3 retries
+     - Each retry triggers a fresh compact() call
+     - BUT no progress check between retries
+     - No 5% improvement threshold
+     - Simply retries and hopes for better results
+
+  2. TIMEOUT RETRY LOOP (run.ts):
+     - Up to MAX_TIMEOUT_COMPACTION_ATTEMPTS = 2 retries
+     - Each retry triggers a fresh compact() call
+     - Only triggers when tokenUsedRatio > 0.65
+
+  3. SUMMARIZATION CHUNKING (compaction.ts):
+     - summarizeChunks() processes chunks sequentially
+     - Each chunk builds on the previous summary
+     - This is iterative summarization, NOT iterative compaction
+
+  4. QUALITY GUARD (compaction-safeguard.ts):
+     - Up to qualityGuardMaxRetries + 1 attempts (default 2)
+     - Only retries the SUMMARY GENERATION, not the compaction decision
+     - Checks summary structure and identifier preservation
+
+─── WHAT IS MISSING (vs Hermes) ───────────────────────────────────────────────
+
+  1. NO multi-pass loop that checks if tokens are below threshold
+     after each compaction pass
+
+  2. NO progress detection (>5% token reduction) between passes
+
+  3. NO anti-thrashing guard (consecutive ineffective compressions)
+
+  4. NO iterative summary refinement at the COMPACTION level
+     (only at the chunk summarization level)
+
+  5. NO head protection decay (protect_first_n decaying after first pass)
+
+  6. NO explicit protect_first_n parameter for first user messages
+
+  7. NO tool output 1-line summaries (Hermes's _summarize_tool_result)
+     Only full replacement with placeholders or soft/hard trim
+
+  8. NO disambiguation directives in the summary prefix
+     (Hermes's extensive SUMMARY_PREFIX with "REFERENCE ONLY" etc.)
+
+================================================================================
+13. CONFIGURATION & DEFAULTS
+================================================================================
+
+─── AGENT-CORE DEFAULTS ───────────────────────────────────────────────────────
+
+  DEFAULT_COMPACTION_SETTINGS = {
+    enabled: true,
+    reserveTokens: 16,384,   // tokens reserved for summary prompt/output
+    keepRecentTokens: 20,000, // recent context to keep after compaction
+  }
+
+─── GATEWAY CONSTANTS ─────────────────────────────────────────────────────────
+
+  MIN_PROMPT_BUDGET_TOKENS = 8,000      // absolute minimum prompt budget
+  MIN_PROMPT_BUDGET_RATIO = 0.5         // 50% of context window minimum
+
+  EMBEDDED_COMPACTION_TIMEOUT_MS = 180,000  // 3 minutes
+  MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3
+  MAX_TIMEOUT_COMPACTION_ATTEMPTS = 2
+
+─── COMPACTION PLANNING CONSTANTS ─────────────────────────────────────────────
+
+  SAFETY_MARGIN = 1.2                    // 20% buffer on token estimates
+  BASE_CHUNK_RATIO = 0.4                 // default chunk size (40% of context)
+  MIN_CHUNK_RATIO = 0.15                 // minimum chunk size
+  SUMMARIZATION_OVERHEAD_TOKENS = 4,096   // reserved for prompt overhead
+  DEFAULT_CONTEXT_TOKENS = 200,000       // fallback context window
+
+─── COMPACTION SAFEGUARD CONSTANTS ────────────────────────────────────────────
+
+  DEFAULT_RECENT_TURNS_PRESERVE = 3      // recent user turns kept verbatim
+  MAX_RECENT_TURNS_PRESERVE = 12
+  DEFAULT_QUALITY_GUARD_MAX_RETRIES = 1  // quality retry attempts
+  MAX_QUALITY_GUARD_MAX_RETRIES = 3
+  MAX_COMPACTION_SUMMARY_CHARS = 16,000  // summary length cap
+  MAX_FILE_OPS_SECTION_CHARS = 2,000
+  MAX_FILE_OPS_LIST_CHARS = 900
+  MAX_TOOL_FAILURES = 8
+  MAX_TOOL_FAILURE_CHARS = 240
+  MAX_RECENT_TURN_TEXT_CHARS = 600
+
+─── TOKEN ESTIMATION CONSTANTS ────────────────────────────────────────────────
+
+  (Agent-core, compaction.ts)
+  IMAGE_BLOCK_CHARS = 4,800              // chars per image block
+
+  (Gateway, preemptive-compaction.ts)
+  ESTIMATED_CHARS_PER_TOKEN = 4
+  TOOL_RESULT_CHARS_PER_TOKEN = 2
+  JSON_PAYLOAD_CHARS_PER_TOKEN = 3
+  MESSAGE_BOUNDARY_OVERHEAD_TOKENS = 12
+  CONTENT_BLOCK_OVERHEAD_TOKENS = 6
+  IMAGE_BLOCK_TOKENS = 2,000
+
+─── CONTEXT PRUNING DEFAULTS ──────────────────────────────────────────────────
+
+  mode: "cache-ttl"
+  ttlMs: 300,000 (5 minutes)
+  keepLastAssistants: 3
+  softTrimRatio: 0.3
+  hardClearRatio: 0.5
+  minPrunableToolChars: 50,000
+  softTrim.maxChars: 4,000
+  softTrim.headChars: 1,500
+  softTrim.tailChars: 1,500
+  hardClear.placeholder: "[Old tool result content cleared]"
+
+─── CONFIGURABLE VIA config.yaml / AGENTS.md ──────────────────────────────────
+
+  config.agents.defaults.compaction.timeoutSeconds — safety timeout
+  compaction-safeguard runtime settings:
+    - customInstructions
+    - identifierPolicy: "strict" | "off" | "custom"
+    - identifierInstructions
+    - recentTurnsPreserve
+    - qualityGuardEnabled
+    - qualityGuardMaxRetries
+    - maxHistoryShare
+    - contextWindowTokens
+    - postCompactionSections (AGENTS.md sections to preserve)
+    - provider (compaction provider ID)
+
+================================================================================
+14. DATA MODELS & TYPE SIGNATURES
+================================================================================
+
+─── MESSAGE TYPES ─────────────────────────────────────────────────────────────
+
+  AgentMessage = UserMessage | AssistantMessage | ToolResultMessage
+               | BashExecutionMessage | CustomMessage
+               | BranchSummaryMessage | CompactionSummaryMessage
+
+  CompactionSummaryMessage {
+    role: "compactionSummary";
+    summary: string;
+    tokensBefore: number;
+    timestamp: number;
+  }
+
+  BranchSummaryMessage {
+    role: "branchSummary";
+    summary: string;
+    fromId: string;
+    timestamp: number;
+  }
+
+─── COMPACTION SETTINGS ───────────────────────────────────────────────────────
+
+  CompactionSettings {
+    enabled: boolean;
+    reserveTokens: number;
+    keepRecentTokens: number;
+  }
+
+─── COMPACTION PREPARATION ────────────────────────────────────────────────────
+
+  CompactionPreparation {
+    firstKeptEntryId: string;
+    messagesToSummarize: AgentMessage[];
+    turnPrefixMessages: AgentMessage[];
+    isSplitTurn: boolean;
+    tokensBefore: number;
+    previousSummary?: string;
+    fileOps: FileOperations;
+    settings: CompactionSettings;
+  }
+
+─── COMPACTION RESULT ─────────────────────────────────────────────────────────
+
+  CompactionResult {
+    summary: string;
+    firstKeptEntryId: string;
+    tokensBefore: number;
+    details?: { readFiles: string[]; modifiedFiles: string[] };
+  }
+
+  CompactResult (context engine) {
+    ok: boolean;
+    compacted: boolean;
+    reason?: string;
+    result?: {
+      summary?: string;
+      firstKeptEntryId?: string;
+      tokensBefore: number;
+      tokensAfter?: number;
+      details?: unknown;
+      sessionId?: string;
+      sessionFile?: string;
+    };
+  }
+
+─── ERROR TYPES ───────────────────────────────────────────────────────────────
+
+  CompactionError extends Error {
+    code: "aborted" | "summarization_failed" | "invalid_session" | "unknown";
+  }
+
+  AgentHarnessError extends Error {
+    code: "busy" | "invalid_state" | "invalid_argument" | "session"
+        | "hook" | "auth" | "compaction" | "branch_summary" | "unknown";
+  }
+
+─── SESSION TREE ENTRIES ──────────────────────────────────────────────────────
+
+  CompactionEntry {
+    type: "compaction";
+    id: string;
+    parentId: string | null;
+    timestamp: string;
+    summary: string;
+    firstKeptEntryId: string;
+    tokensBefore: number;
+    details?: unknown;
+    fromHook?: boolean;
+  }
+
+─── FILE OPERATIONS ───────────────────────────────────────────────────────────
+
+  FileOperations {
+    read: Set<string>;
+    written: Set<string>;
+    edited: Set<string>;
+  }
+
+─── CONTEXT ENGINE INTERFACE ──────────────────────────────────────────────────
+
+  ContextEngine {
+    readonly info: ContextEngineInfo;
+    bootstrap?(...): Promise<BootstrapResult>;
+    maintain?(...): Promise<ContextEngineMaintenanceResult>;
+    ingest(...): Promise<IngestResult>;
+    ingestBatch?(...): Promise<IngestBatchResult>;
+    afterTurn?(...): Promise<void>;
+    assemble(...): Promise<AssembleResult>;
+    compact(...): Promise<CompactResult>;
+    prepareSubagentSpawn?(...): Promise<SubagentSpawnPreparation | undefined>;
+    onSubagentEnded?(...): Promise<void>;
+    dispose?(): Promise<void>;
+  }
+
+  ContextEngineInfo {
+    id: string;
+    name: string;
+    version?: string;
+    ownsCompaction?: boolean;
+    turnMaintenanceMode?: "foreground" | "background";
+    hostRequirements?: Partial<Record<ContextEngineOperation, ContextEngineHostRequirements>>;
+  }
+
+─── PREEMPTIVE COMPACTION DECISION ────────────────────────────────────────────
+
+  PreemptiveCompactionRoute =
+    "fits" | "compact_only" | "truncate_tool_results_only" | "compact_then_truncate"
+
+  PreemptiveCompactionDecision {
+    route: PreemptiveCompactionRoute;
+    shouldCompact: boolean;
+    estimatedPromptTokens: number;
+    pressureSource?: string;
+    promptBudgetBeforeReserve: number;
+    overflowTokens: number;
+    toolResultReducibleChars: number;
+    effectiveReserveTokens: number;
+  }
+
+================================================================================
+15. EXTERNAL DEPENDENCIES
+================================================================================
+
+─── LLM CORE PACKAGE ──────────────────────────────────────────────────────────
+
+  packages/llm-core/
+    - Model, Context, StreamFn types
+    - AssistantMessage, UserMessage, TextContent, ImageContent
+    - Usage type (input, output, cacheRead, cacheWrite, totalTokens)
+    - Transport type
+    - resolveClaudeFable5ModelIdentity
+
+─── NODE.JS STANDARD LIBRARY ─────────────────────────────────────────────────
+
+  fs — file reading for workspace context
+  path — path joining
+  node:worker_threads — compaction planning workers
+
+─── INTERNAL INFRASTRUCTURE ───────────────────────────────────────────────────
+
+  normalization-core — number coercion, record type guards
+  infra/retry.js — retryAsync with configurable attempts/delay/jitter
+  infra/errors.js — error formatting
+  infra/unhandled-rejections.js — isAbortError
+  node-host/with-timeout.js — timeout wrapper
+  logging/subsystem.js — structured subsystem logging
+
+─── EXTERNAL SERVICES ─────────────────────────────────────────────────────────
+
+  LLM API calls via:
+    - StreamFn (streaming completions)
+    - resolveAgentCoreCompleteFn (non-streaming)
+    - Uses model.api field to determine provider
+    - Supports: anthropic-messages, bedrock-converse-stream, and others
+
+  Compaction providers (plugin):
+    - getCompactionProvider(providerId) — external summarization services
+
+================================================================================
+16. ERROR HANDLING PATTERNS
+================================================================================
+
+─── RESULT TYPE PATTERN ───────────────────────────────────────────────────────
+
+  Agent-core uses Result<T, E> = { ok: true; value: T } | { ok: false; error: E }
+  Functions return Result instead of throwing (prepareCompaction, compact, generateSummary)
+
+─── COMPACTION SAFEGUARD ERROR HANDLING ───────────────────────────────────────
+
+  - Abort/timeout errors always propagate (isAbortError, isTimeoutError)
+  - Model/auth resolution failure → cancel compaction (preserve history)
+  - Summarization failure → cancel compaction (preserve history)
+  - Quality guard failure during retry → keep last successful summary
+  - Provider failure → fall through to LLM path
+
+─── RUN LOOP ERROR HANDLING ───────────────────────────────────────────────────
+
+  - Overflow error → retry with compaction (up to 3 times)
+  - Timeout error → retry with compaction (up to 2 times)
+  - Compaction failure → surface original error
+  - Exhausted retries → terminal error
+  - Partial summary → preserved via .partialSummary on Error
+
+─── RETRY SEMANTICS ───────────────────────────────────────────────────────────
+
+  summarizeChunks: retryAsync with 3 attempts, 500ms–5000ms, jitter=0.2
+  shouldRetry: abort and timeout errors NOT retried
+
+================================================================================
+17. FILE INVENTORY
+================================================================================
+
+─── AGENT-CORE (packages/agent-core/) ─────────────────────────────────────────
+
+  src/harness/compaction/compaction.ts
+    — Core compaction: shouldCompact, prepareCompaction, compact,
+      generateSummary, findCutPoint, estimateTokens, estimateContextTokens,
+      DEFAULT_COMPACTION_SETTINGS, SUMMARIZATION_SYSTEM_PROMPT, etc.
+
+  src/harness/compaction/compaction.test.ts
+    — Compaction unit tests
+
+  src/harness/compaction/compaction-image-tokens.test.ts
+    — Image token handling tests
+
+  src/harness/compaction/compaction-trailing-toolresult.test.ts
+    — Tool result pairing tests
+
+  src/harness/compaction/branch-summarization.ts
+    — Branch summary generation
+
+  src/harness/compaction/utils.ts
+    — FileOperations, serializeConversation, computeFileLists,
+      formatFileOperations, truncateForSummary
+
+  src/harness/messages.ts
+    — Message conversion, COMPACTION_SUMMARY_PREFIX/SUFFIX,
+      createCompactionSummaryMessage, convertToLlm
+
+  src/harness/session/session.ts
+    — buildSessionContext (context reconstruction from session tree)
+
+  src/harness/agent-harness.ts
+    — compact() method, hook firing, session management
+
+  src/harness/types.ts
+    — CompactionError, CompactionEntry, CompactionSettings,
+      CompactionPreparation, CompactResult, SessionTreeEntry, etc.
+
+  src/index.ts
+    — Public exports
+
+─── GATEWAY LAYER (src/agents/) ───────────────────────────────────────────────
+
+  agent-compaction-constants.ts
+    — MIN_PROMPT_BUDGET_TOKENS, MIN_PROMPT_BUDGET_RATIO
+
+  compaction.ts
+    — summarizeInStages, summarizeWithFallback, summarizeChunks,
+      resolveContextWindowTokens
+
+  compaction-planning.ts
+    — SAFETY_MARGIN, BASE_CHUNK_RATIO, MIN_CHUNK_RATIO,
+      SUMMARIZATION_OVERHEAD_TOKENS, splitMessagesByTokenShare,
+      chunkMessagesByMaxTokens, computeAdaptiveChunkRatio,
+      estimateMessagesTokens, sanitizeCompactionMessages
+
+  compaction-planning-worker.ts
+    — Worker thread wrappers for planning functions
+
+  defaults.ts
+    — DEFAULT_CONTEXT_TOKENS = 200,000
+
+─── COMPACTION HOOKS ──────────────────────────────────────────────────────────
+
+  agent-hooks/compaction-instructions.ts
+    — DEFAULT_COMPACTION_INSTRUCTIONS, resolveCompactionInstructions
+
+  agent-hooks/compaction-safeguard.ts
+    — compactionSafeguardExtension (session_before_compact hook)
+
+  agent-hooks/compaction-safeguard-quality.ts
+    — auditSummaryQuality, buildStructuredFallbackSummary,
+      extractOpaqueIdentifiers, buildCompactionStructureInstructions
+
+  agent-hooks/compaction-safeguard-runtime.ts
+    — getCompactionSafeguardRuntime, setCompactionSafeguardCancelReason
+
+─── CONTEXT PRUNING ───────────────────────────────────────────────────────────
+
+  agent-hooks/context-pruning/settings.ts
+    — DEFAULT_CONTEXT_PRUNING_SETTINGS, computeEffectiveSettings
+
+  agent-hooks/context-pruning/pruner.ts
+    — Core pruning logic
+
+  agent-hooks/context-pruning/runtime.ts
+    — Runtime integration
+
+  agent-hooks/context-pruning/extension.ts
+    — Hook registration
+
+  agent-hooks/context-pruning/tools.ts
+    — Tool-specific pruning
+
+─── EMBEDDED RUNNER ───────────────────────────────────────────────────────────
+
+  embedded-agent-runner/compaction-safety-timeout.ts
+    — compactWithSafetyTimeout, compactContextEngineWithSafetyTimeout,
+      resolveCompactionTimeoutMs, EMBEDDED_COMPACTION_TIMEOUT_MS
+
+  embedded-agent-runner/run.ts
+    — Main run loop with overflow/timeout compaction retry
+
+  embedded-agent-runner/run/preemptive-compaction.ts
+    — shouldPreemptivelyCompactBeforePrompt, estimateLlmBoundaryTokenPressure
+
+  embedded-agent-runner/run/attempt.ts
+    — Per-attempt execution with preemptive compaction check
+
+─── CONTEXT ENGINE ────────────────────────────────────────────────────────────
+
+  context-engine/types.ts
+    — ContextEngine interface, CompactResult, AssembleResult, etc.
+
+─── EXTENSION BRIDGES ─────────────────────────────────────────────────────────
+
+  extensions/codex/src/app-server/compact.ts
+    — Codex compaction bridge
+
+  extensions/copilot/src/compaction-bridge.ts
+    — Copilot compaction bridge
+
+─── DOCUMENTATION ─────────────────────────────────────────────────────────────
+
+  docs/concepts/compaction.md
+  docs/concepts/context-engine.md
+  docs/reference/session-management-compaction.md
+  docs/reference/token-use.md
+
+================================================================================
+18. GAP ANALYSIS vs HERMES
+================================================================================
+
+┌────────────────────────────────┬──────────────┬──────────────┐
+│ Feature                        │ Hermes       │ OpenClaw     │
+├────────────────────────────────┼──────────────┼──────────────┤
+│ Multi-pass compaction loop     │ 3 passes     │ None (1 pass)│
+│ Progress threshold (>5%)       │ Yes          │ No           │
+│ Anti-thrashing guard           │ Yes (2x <10%)│ No           │
+│ Iterative summary updates     │ Yes          │ Partial (*)  │
+│ Tool result 1-line summaries  │ Yes (rich)   │ No (simple)  │
+│ Tool result deduplication     │ Yes (MD5)    │ No           │
+│ Tool call arg truncation      │ Yes (JSON)   │ No           │
+│ Head protect_first_n          │ Yes (decay)  │ No           │
+│ Tail token budget             │ Yes          │ Yes (20K)    │
+│ User/assistant msg anchoring  │ Yes          │ No           │
+│ Summary prefix disambiguation │ Rich         │ Minimal      │
+│ Historical section headings   │ Yes          │ No           │
+│ End marker                    │ Yes          │ No           │
+│ Focus topic (/compact <focus>)│ Yes          │ Partial (**)│
+│ Auto-focus from recent turns  │ Yes          │ No           │
+│ Static fallback summary       │ Yes (rich)   │ Yes (basic)  │
+│ Aux model fallback chain      │ Yes (3-tier) │ No (single)  │
+│ Session rotation option       │ Yes          │ No (in-place)│
+│ Compression lock              │ Yes (SQLite) │ No           │
+│ Safety timeout                │ No           │ Yes (180s)   │
+│ Preflight compression         │ Yes          │ Yes          │
+│ Post-turn auto-compaction     │ Yes          │ Yes          │
+│ Context pruning (separate)    │ No           │ Yes (TTL)    │
+│ Quality guard on summary      │ No           │ Yes          │
+│ Staged summarization          │ No           │ Yes (chunks) │
+│ Recent turns preservation     │ No           │ Yes (3 turns)│
+│ Workspace context in summary  │ No           │ Yes (AGENTS) │
+│ Tool failure extraction       │ No           │ Yes          │
+│ Identifier preservation policy│ No           │ Yes          │
+│ Compaction provider plugins   │ No           │ Yes          │
+│ Context engine plugin system  │ No           │ Yes (full)   │
+└────────────────────────────────┴──────────────┴──────────────┘
+
+(*) OpenClaw's summarizeChunks iterates chunks with previous summary
+    as input — this is iterative at the CHUNK level, not at the
+    compaction-pass level.
+
+(**) OpenClaw supports customInstructions per compaction call, but lacks
+     Hermes's automatic focus derivation from recent user turns.
+
+KEY PORTING TARGETS (from Hermes):
+  1. Multi-pass loop with progress detection
+  2. Anti-thrashing guard
+  3. Tool result 1-line summaries
+  4. Tool result deduplication (MD5)
+  5. Summary prefix disambiguation directives
+  6. User/assistant message anchoring in tail
+  7. Head protection with decay
+
+EXISTING OPENCLAW STRENGTHS TO PRESERVE:
+  1. Quality guard with retry
+  2. Staged summarization (chunk + merge)
+  3. Recent turns verbatim preservation
+  4. Context pruning (cache-TTL based)
+  5. Workspace context (AGENTS.md sections)
+  6. Tool failure extraction
+  7. Identifier preservation policies
+  8. Context engine plugin system
+  9. Safety timeout (180s)
+
+================================================================================
+END OF TRACE
+================================================================================

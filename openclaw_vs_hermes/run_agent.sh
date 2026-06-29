@@ -2,11 +2,11 @@
 # Run the Hermes -> OpenClaw feature porting agent
 #
 # Usage:
-#   ./agent/run_agent.sh                          # Full pipeline (detect + port feature #1)
-#   ./agent/run_agent.sh --detect-only            # Only detect features
-#   ./agent/run_agent.sh --feature-id 2           # Port specific feature
-#   ./agent/run_agent.sh --resume                 # Resume interrupted run
-#   ./agent/run_agent.sh --config path/to/config  # Custom config
+#   ./openclaw_vs_hermes/run_agent.sh                          # Full pipeline (detect + port feature #1)
+#   ./openclaw_vs_hermes/run_agent.sh --detect-only            # Only detect features
+#   ./openclaw_vs_hermes/run_agent.sh --feature-id 2           # Port specific feature
+#   ./openclaw_vs_hermes/run_agent.sh --resume                 # Resume interrupted run
+#   ./openclaw_vs_hermes/run_agent.sh --config path/to/config  # Custom config
 
 set -euo pipefail
 
@@ -39,4 +39,4 @@ echo "Config: ${CONFIG}"
 echo "Project root: ${PROJECT_ROOT}"
 echo "============================================"
 
-python -m agent.run_agent --config "${CONFIG}" "${EXTRA_ARGS[@]}"
+python -m openclaw_vs_hermes.run_agent --config "${CONFIG}" "${EXTRA_ARGS[@]}"

@@ -1,0 +1,261 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — TEST PLAN SUMMARY (V3)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Date: 2026-06-28
+Iteration: V3 (from-scratch rewrite, all learnings incorporated)
+
+================================================================================
+1. EXPLANATION OF THE V3 TEST PLAN
+================================================================================
+
+  V3 is a from-scratch rewrite of the test plan that incorporates all 22
+  corrections discovered across four prior iterations (V1, V1 Review, V2,
+  V2 Review). Rather than patch-on-patch corrections, every test case was
+  designed from the start with the verified codebase facts baked in.
+
+  KEY CHARACTERISTICS OF V3:
+
+  1. FRESH CODEBASE VERIFICATION
+
+     All type definitions, shard assignments, mock patterns, and file
+     conventions were re-verified against the actual OpenClaw codebase
+     before writing. Key verifications:
+
+     - CompactResult type (context-engine/types.ts:126-141): confirmed
+       flat type with ok: boolean, compacted: boolean
+     - ToolCall interface (llm-core/types.ts:251-258): confirmed
+       { id, name, arguments: Record<string, unknown> }
+     - applyCompactionDefaults (config/defaults.ts:529-552): confirmed
+       only sets mode:"safeguard", does NOT clamp values
+     - Zod schema (zod-schema.agent-defaults.ts:158-205): confirmed
+       .strict() mode, existing field definitions
+     - MessageEntry (harness/types.ts:367-370): confirmed
+       { type: "message"; message: AgentMessage }
+     - Test model convention: "claude-fable-5" in compaction tests
+     - Harness vi.doMock paths: "../" prefix for src/agents/ targets
+     - testing barrel: compaction-safeguard.ts exports testing object
+     - Message factories: agent-message-fixtures.ts with makeAgentUserMessage,
+       makeAgentAssistantMessage, ZERO_USAGE_FIXTURE
+
+  2. NO KNOWN CONTRADICTIONS
+
+     V2's critical contradiction between tests 4.15 and 8.17 (where
+     shouldContinueMultiPass behavior conflicted with the multi-pass
+     loop's tolerance behavior) was resolved at the design level in
+     V2 Review. V3 implements this resolution natively:
+
+     - shouldContinueMultiPass takes consecutiveNoProgress (a counter)
+     - Counter must reach 2 for anti-thrash exit
+     - multiPassCompact maintains the counter, calling
+       compressionMadeProgress after each pass to increment/reset it
+     - Single marginal pass does NOT stop the loop (intentional
+       enhancement over Hermes)
+
+  3. ALL PORT PLAN FIXES COVERED BY TESTS
+
+     Every correction from the port plan (Review V4) has at least one
+     test that would FAIL if the fix were reverted:
+
+     - RV4-1 (ToolCall id/name): Tests 5.4, 5.13
+     - RV4-2 (Record<> arguments): Tests 5.10-5.12, 5.15
+     - RV4-3 (entry.message.role): Tests 6.1, 6.3
+     - RV4-4 (entry.message.content): Tests 6.4, 6.5
+     - RV4-5 (already let): N/A (no test needed — no code change)
+     - RV4-6 (AbortSignal.any()): N/A (non-issue — confirmed)
+     - RV4-7 (stale compactParams): Test 8.15
+
+  4. STRUCTURAL IMPROVEMENTS OVER V2
+
+     a) Test count slightly increased: 110 vs 107 (V2 Review).
+        +1 test in Suite A (abort priority, test 4.19)
+        +2 tests in Suite D (wrapCompactionSummary, tests 7.7-7.8)
+        +1 test in Suite E (exception handling, test 8.14; stale params, 8.15)
+        +1 test in Suite G (minProgressThreshold at 1.0, test 10.13)
+        -2 tests in Suite B (consolidated combined pass tests)
+
+     b) Suite E and Suite I share a test file (multi-pass-compaction.test.ts)
+        to reduce file sprawl while maintaining logical separation via
+        nested describe blocks.
+
+     c) Suite D expanded to test wrapCompactionSummary utility (tests 7.7-7.8)
+        rather than just constant assertions.
+
+     d) Explicit abort priority test (4.19) verifies that abort signal
+        is checked FIRST even when other exit conditions are met.
+
+================================================================================
+2. TEST PLAN STRUCTURE
+================================================================================
+
+  9 TEST SUITES across 7 new test files + 3 modified files:
+
+  ┌───────────────────────────────────────────────────────────┐
+  │ Suite │ Name                    │ Tests │ Vitest Shard    │
+  ├───────────────────────────────────────────────────────────┤
+  │ A     │ Progress Detection      │   19  │ agents-support  │
+  │ B     │ Pre-Compaction Pruning  │   20  │ agents-support  │
+  │ C     │ Cut Point Anchoring     │   12  │ unit-support    │
+  │ D     │ Summary Prefix          │    8  │ unit-support    │
+  │ E     │ Multi-Pass Loop         │   21  │ agents-core     │
+  │ F     │ Runner Integration      │    7  │ agents-embedded │
+  │ G     │ Config Schema           │   15  │ runtime-config  │
+  │ H     │ Safeguard Integration   │    4  │ agents-support  │
+  │ I     │ Vertical Integration    │    4  │ agents-core     │
+  ├───────────────────────────────────────────────────────────┤
+  │ TOTAL │                         │  110  │ 5 shards        │
+  └───────────────────────────────────────────────────────────┘
+
+================================================================================
+3. ITERATION EVOLUTION
+================================================================================
+
+  ── V1 (Initial — 2026-06-28) ─────────────────────────────────────────────
+
+  First test plan. 107 tests across 8 suites.
+  Triangulated from Hermes tests, OpenClaw conventions, and port plan.
+  Covered all 9 porting steps and attempted to map Hermes tests.
+
+  PROBLEMS FOUND (15 issues):
+    - Wrong vitest shard assignments for 4 files
+    - Fixture duplication with existing factories
+    - Incorrect mock patterns (contextEngine is injected, not imported)
+    - Missing compaction-safeguard integration tests
+    - Import path errors and function signature mismatches
+    - Undocumented harness extension strategy
+    - Function signatures used options bag instead of plain params
+    - E2E tests infeasible within test infrastructure
+
+  ── V1 Review (Corrected — 2026-06-28) ────────────────────────────────────
+
+  Corrected all 15 V1 issues. 102 tests across 9 suites.
+  Key fixes:
+    1. Shard assignments verified against vitest config files
+    2. Reused existing factory functions (no duplicates)
+    3. Corrected mock patterns (injected engine, direct mock)
+    4. Added Suite H (compaction-safeguard integration)
+    5. Fixed import paths and function signatures
+    6. Documented harness extension strategy
+    7. Aligned function signatures with plain params convention
+    8. Scoped E2E tests to feasible integration level
+
+  ── V2 (From-Scratch — 2026-06-28) ────────────────────────────────────────
+
+  From-scratch rewrite incorporating all V1 Review learnings.
+  106 tests across 9 suites. Key improvements:
+    1. Zod .strict() handling in Suite G
+    2. Precise token estimation in Suite C
+    3. CompactResult type variants tested
+    4. Exact 5% boundary test added (test 4.12)
+    5. Verified testing export barrel contents
+    6. Referenced existing summary prefix patterns
+
+  ── V2 Review (Corrected — 2026-06-28) ────────────────────────────────────
+
+  Corrected 7 issues found during code-level verification.
+  107 tests across 9 suites. Key fixes:
+    1. FIX-T1: Boundary math (950<950 is false) — test expectation corrected
+    2. FIX-T2: Model name "claude-fable-5" — convention aligned
+    3. FIX-T3: CompactResult is flat type — documentation corrected
+    4. FIX-T4: vi.doMock path "../" not "../../" — mock path corrected
+    5. FIX-T5: Defaults don't clamp — schema rejects instead
+    6. FIX-T6: consecutiveNoProgress counter — contradiction resolved
+    7. FIX-T7: NonNullable<> typing — convention aligned
+
+  ── V3 (From-Scratch — 2026-06-28) ────────────────────────────────────────
+
+  From-scratch rewrite incorporating ALL 22 corrections from 4 iterations.
+  110 tests across 9 suites. Characteristics:
+    1. Every prior correction baked in from the start (not patched)
+    2. Fresh codebase verification of all types, paths, and conventions
+    3. No known contradictions between test expectations
+    4. All port plan FIX items have verifying tests
+    5. Expanded coverage: abort priority, wrapCompactionSummary,
+       exception handling, minProgressThreshold boundary
+    6. Clean separation of concerns: pure function tests (A, B) vs
+       mock-injected tests (E, I) vs module-mocked tests (F)
+    7. Test file organization minimizes sprawl (Suite I shares
+       Suite E's file via nested describe blocks)
+
+================================================================================
+4. CONVERGENCE ASSESSMENT
+================================================================================
+
+  CONVERGENCE INDICATORS:
+
+  1. STRUCTURAL STABILITY: The 9-suite structure has been stable since
+     V1 Review (4 iterations ago). No suites added or removed.
+
+  2. FILE ASSIGNMENTS: Shard assignments unchanged since V1 Review.
+     All 5 shards verified against actual vitest config files.
+
+  3. CORRECTION SEVERITY TREND:
+     V1→V1 Review: 15 issues (many structural)
+     V2→V2 Review: 7 issues (targeted, 2 HIGH)
+     V2 Review→V3: 0 issues (clean rewrite incorporating all fixes)
+
+  4. TEST COUNT STABILITY:
+     V1: 107, V1R: 102, V2: 106, V2R: 107, V3: 110
+     Range: 102-110 (stable within ~8% band)
+     V3 increase (+3 vs V2R) comes from targeted expansions,
+     not structural changes.
+
+  5. NO KNOWN OPEN ISSUES: All previously identified contradictions,
+     path errors, type mismatches, and convention misalignments have
+     been resolved and verified.
+
+  REMAINING RISKS:
+
+  R1: Implementation may discover additional type constraints not
+      visible in the type definitions (e.g., runtime validation in
+      non-exported functions). Tests may need adjustment.
+
+  R2: The exact API of multiPassCompact (step 6) is not yet
+      implemented — the test plan assumes the parameter shape from
+      the port plan. Minor adjustments may be needed once the
+      function signature is finalized.
+
+  R3: Suite F harness extension assumes the existing harness is
+      compatible with the new vi.doMock. If the harness has been
+      modified by other PRs, the extension may need rebasing.
+
+  These are implementation-phase risks, not plan-phase issues.
+
+================================================================================
+5. EVOLUTION SUMMARY TABLE
+================================================================================
+
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │ Iteration    │ Tests │ Suites │ New Files │ Modified │ Issues Found  │
+  ├───────────────────────────────────────────────────────────────────────┤
+  │ V1 Initial   │  107  │   8    │     7     │    3     │  15 found     │
+  │ V1 Review    │  102  │   9    │     6     │    3*    │  15 fixed     │
+  │ V2           │  106  │   9    │     6     │    3*    │   7 found     │
+  │ V2 Review    │  107  │   9    │     6     │    3*    │   7 fixed     │
+  │ V3 (current) │  110  │   9    │     7     │    3*    │   0 (clean)   │
+  ├───────────────────────────────────────────────────────────────────────┤
+  │ Total corrections incorporated: 22                                   │
+  │ Convergence status: STABLE (ready for implementation)                │
+  └───────────────────────────────────────────────────────────────────────┘
+  * Modified count = 1 test file + 2 harness/fixture files
+
+  CUMULATIVE CORRECTIONS BY CATEGORY:
+
+  ┌─────────────────────────────────────────────────────────┐
+  │ Category                  │ Count │ Severity Impact     │
+  ├─────────────────────────────────────────────────────────┤
+  │ Type/interface mismatches │   5   │ 2 HIGH, 3 LOW       │
+  │ Path/import errors        │   3   │ 2 HIGH, 1 LOW       │
+  │ Boundary math errors      │   2   │ 1 MEDIUM, 1 LOW     │
+  │ Convention misalignments  │   4   │ 4 LOW                │
+  │ Logic contradictions      │   2   │ 2 HIGH               │
+  │ Structural gaps           │   3   │ 2 MEDIUM, 1 LOW      │
+  │ Documentation inaccuracies│   3   │ 3 LOW                │
+  ├─────────────────────────────────────────────────────────┤
+  │ TOTAL                     │  22   │ 6 HIGH, 3 MED, 13 LOW│
+  └─────────────────────────────────────────────────────────┘
+
+================================================================================
+END OF SUMMARY (V3)
+================================================================================

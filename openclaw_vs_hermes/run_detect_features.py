@@ -2,7 +2,7 @@
 """Standalone script to run ONLY the feature detection phase.
 
 Usage:
-    python -m agent.run_detect_features --config agent/configs/default_config.json
+    python -m openclaw_vs_hermes.run_detect_features --config agent/configs/default_config.json
 """
 
 import os as _os
@@ -21,9 +21,9 @@ import asyncio
 from common.utils import setup_logging, safe_clean_dir
 from common.claude_utils import claude_run, _all_steps_complete
 
-from agent.agent_config import AgentConfig
-from agent.use_case import FeaturePortingUseCase
-from agent.agent_prompts import DETECTED_FEATURES_JSON
+from openclaw_vs_hermes.agent_config import AgentConfig
+from openclaw_vs_hermes.use_case import FeaturePortingUseCase
+from openclaw_vs_hermes.agent_prompts import DETECTED_FEATURES_JSON
 
 
 def parse_args():
@@ -137,7 +137,7 @@ def print_results(output_dir):
         print("  JSON:   {}".format(json_path))
         print()
         print("To run the full porting pipeline for a specific feature:")
-        print("  python -m agent.run_agent --config {} --feature-id <N>".format(
+        print("  python -m openclaw_vs_hermes.run_agent --config {} --feature-id <N>".format(
             "<config_path>"
         ))
     else:

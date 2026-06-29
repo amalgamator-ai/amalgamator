@@ -1,0 +1,1470 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — CORRECTED TEST PLAN (REVIEW V1)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python) — pytest, tests/agent/test_compression_*.py
+Target: OpenClaw (TypeScript) — Vitest, co-located *.test.ts files
+Porting Plan: code_port_plan_review_V4.txt (Steps 1-9)
+Date: 2026-06-28
+Revision: Review V1 (corrected from V1 initial)
+
+================================================================================
+REVIEW CHANGE LOG (V1 -> Review V1)
+================================================================================
+
+  This plan corrects 15 issues found during code-level verification of the
+  V1 test plan against the actual OpenClaw codebase. See the companion
+  test_plan_review_summary_V1.txt for full documentation of each issue.
+
+  CORRECTIONS APPLIED:
+
+  FIX-T1:  VITEST SHARD ASSIGNMENTS corrected for 4 files. V1 had wrong
+           shard names. Verified against actual vitest.agents-paths.mjs:
+             agents-core = src/agents/*.test.ts (top-level ONLY)
+             agents-support = src/agents/*/**/*.test.ts (subdirs, excl.
+               embedded-agent-runner/ and tools/)
+             packages shard = packages/**/*.test.ts
+             runtime-config = src/config/**/*.test.ts
+
+  FIX-T2:  FIXTURE DUPLICATION eliminated. V1 proposed new factories
+           (makeUserMessage, makeAssistantTextMessage, createTestModel)
+           that duplicated existing ones (makeAgentUserMessage,
+           makeAgentAssistantMessage, createAnthropicModelFixture).
+           Corrected to reuse existing factories.
+
+  FIX-T3:  SUITE C TOKEN ESTIMATION corrected from "mock required" to
+           "uses real estimateTokens." Existing findCutPoint tests
+           (compaction-image-tokens.test.ts, compaction-trailing-
+           toolresult.test.ts) use the REAL estimateTokens function
+           (deterministic char/4 heuristic), not a mock.
+
+  FIX-T4:  SUITE E MOCK PATTERN corrected. V1 used vi.mock("../context-
+           engine.js") but contextEngine is resolved at runtime and
+           passed as an object parameter, not imported from a module.
+           Corrected to inject a mock contextEngine object, matching
+           run.overflow-compaction.harness.ts patterns.
+
+  FIX-T5:  SUITE E CompactResult TYPE defined. V1 referenced CompactResult
+           without defining it. Added actual type from context-engine/
+           types.ts and the exact compact() parameter shape.
+
+  FIX-T6:  SUITE G CONFIG IMPORT corrected. V1 imported a non-existent
+           materializeCompactionConfig from "./config-helpers.js". Actual
+           pattern: import applyCompactionDefaults from "./defaults.js"
+           and define materializeCompactionConfig locally in the test.
+
+  FIX-T7:  SUITE F HARNESS COMPLEXITY documented. V1 didn't acknowledge
+           the 40+ mock harness in run.overflow-compaction.harness.ts.
+           Corrected to specify harness extension strategy.
+
+  FIX-T8:  SUITE I (compaction-safeguard integration tests) ADDED. V1
+           listed compaction-safeguard.test.ts as modified but provided
+           no specific test cases. Added 4 tests for pre-pruning injection.
+
+  FIX-T9:  TESTS 6.13-6.14 merged into 6.1/6.4. The "property path
+           correctness" tests were redundant with the anchoring tests
+           that already verify correct behavior (and thus correct paths).
+
+  FIX-T10: SUITE B TEST 5.21 metrics return type aligned with port plan.
+           preCompactionPrune returns { messages: AgentMessage[],
+           metrics: PruneMetrics } — metrics are a secondary output
+           for logging, consistent with the port plan's logging note.
+
+  FIX-T11: SESSION TREE ENTRY construction pattern corrected. V1's
+           makeMessageEntry omitted the timestamp ISO string field.
+           Corrected to match existing pattern: new Date(msg.timestamp)
+           .toISOString().
+
+  FIX-T12: SUITE D MODULE LOCATION disambiguated. Summary prefix logic
+           integrated into compaction-safeguard.ts via the testing export
+           pattern, matching the existing module structure.
+
+  FIX-T13: SUITE H E2E scope clarified and scaled to integration-level
+           tests using existing harness patterns, not a novel full-
+           pipeline framework.
+
+  FIX-T14: contextEngine.compact() PARAMETER SHAPE reflected in Suite E
+           mocks. The actual params include sessionId, sessionKey,
+           sessionFile, tokenBudget, force, compactionTarget,
+           runtimeSettings, runtimeContext, abortSignal, etc.
+
+  FIX-T15: multiPassCompact INTEGRATION WITH compactContextEngine-
+           WithSafetyTimeout clarified. The safety timeout wraps the
+           entire multi-pass sequence, not individual passes.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1.  Testing Strategy Overview
+  2.  Test File Inventory
+  3.  Shared Test Utilities & Fixtures
+  4.  TEST SUITE A — Progress Detection & Anti-Thrashing
+  5.  TEST SUITE B — Pre-Compaction Pruning
+  6.  TEST SUITE C — Cut Point Enhancement (Message Anchoring)
+  7.  TEST SUITE D — Summary Prefix Disambiguation
+  8.  TEST SUITE E — Multi-Pass Compaction Loop
+  9.  TEST SUITE F — Embedded Runner Integration
+  10. TEST SUITE G — Configuration Schema Extension
+  11. TEST SUITE H — Compaction-Safeguard Integration
+  12. TEST SUITE I — Integration / Vertical Slice
+  13. Regression Coverage Matrix
+  14. Mock & Fixture Dependency Map
+  15. Test Execution & CI Notes
+
+================================================================================
+1. TESTING STRATEGY OVERVIEW
+================================================================================
+
+  FRAMEWORK:     Vitest (matches OpenClaw's existing test infrastructure)
+  RUNNER CONFIG: Existing vitest shard configs; new tests slot into shards
+                 per Section 15.
+  CO-LOCATION:   Test files placed adjacent to source files (OpenClaw
+                 convention)
+  NAMING:        {module}.test.ts for unit/integration
+  MOCKING:       vi.hoisted() for module-level mocks, vi.fn() for function
+                 stubs, vi.mock() with vi.importActual() for partial module
+                 overrides, testing export pattern for dependency injection.
+
+  COVERAGE GOALS:
+    - Every new exported function has at least one happy-path and one error test
+    - Every Hermes regression test that has a corresponding concept in the port
+      has a mapped test case in OpenClaw
+    - Every corrected property path (FIX-1 through FIX-5 in port plan Review V4)
+      has an explicit assertion verifying the correct path
+    - Configuration defaults and boundary values are tested
+    - Abort/timeout propagation is tested at every async boundary
+
+  DESIGN PRINCIPLES:
+    DP-1: Test behavior, not implementation. Mock at module boundaries
+          (LLM calls, contextEngine.compact, session I/O), not internal
+          helpers.
+    DP-2: Use OpenClaw's existing fixture factories (makeAgentAssistantMessage,
+          makeAgentUserMessage, castAgentMessage from
+          src/agents/test-helpers/agent-message-fixtures.ts) wherever possible.
+          Only add new helpers for genuinely new patterns.
+    DP-3: Token estimation mocks use the standard OpenClaw formula:
+          Math.max(1, Math.ceil(textLength / 4)). For agent-core package tests,
+          use the REAL estimateTokens (deterministic char/4 heuristic) matching
+          existing compaction test conventions.
+    DP-4: Each test suite is independently runnable.
+    DP-5: No external service dependencies. All LLM calls are mocked.
+    DP-6: No nested describe blocks. Use flat, sequential top-level describe
+          blocks (matching OpenClaw convention).
+    DP-7: Reuse existing harness infrastructure. New integration tests extend
+          run.overflow-compaction.harness.ts rather than building a new harness.
+
+================================================================================
+2. TEST FILE INVENTORY
+================================================================================
+
+  NEW TEST FILES (6):
+
+  A. src/agents/agent-hooks/compaction-progress.test.ts
+     Tests: Progress detection & anti-thrashing module (Step 2)
+     Source: src/agents/agent-hooks/compaction-progress.ts
+     Shard: agents-support (src/agents/*/**/*.test.ts)
+
+  B. src/agents/agent-hooks/pre-compaction-pruning.test.ts
+     Tests: Tool result pre-pruning (Step 3)
+     Source: src/agents/agent-hooks/pre-compaction-pruning.ts
+     Shard: agents-support
+
+  C. packages/agent-core/src/harness/compaction/compaction-anchoring.test.ts
+     Tests: Cut point enhancement helpers (Step 4)
+     Source: packages/agent-core/src/harness/compaction/compaction.ts (modified)
+     Shard: packages (global packages/**/*.test.ts pattern)
+
+  D. src/agents/multi-pass-compaction.test.ts
+     Tests: Multi-pass compaction loop (Step 6)
+     Source: src/agents/multi-pass-compaction.ts (new gateway-layer module)
+     Shard: agents-core (src/agents/*.test.ts — top-level)
+
+  E. src/config/config.multi-pass-compaction.test.ts
+     Tests: Configuration schema extension (Step 8)
+     Source: src/config/ (modified schema files)
+     Shard: runtime-config (src/config/**/*.test.ts)
+
+  F. src/agents/embedded-agent-runner/run/multi-pass-compaction-integration.test.ts
+     Tests: Embedded runner integration (Step 7)
+     Source: src/agents/embedded-agent-runner/ (modified runner files)
+     Shard: agents-embedded-agent (src/agents/embedded-agent-runner/**/*.test.ts)
+
+  MODIFIED TEST FILES (2):
+
+  G. src/agents/agent-hooks/compaction-safeguard.test.ts
+     Add: Pre-pruning injection tests, summary prefix disambiguation tests
+          (Steps 3+5 integration)
+     Shard: agents-support
+
+  H. src/agents/embedded-agent-runner/run.overflow-compaction.test.ts
+     Add: Multi-pass overflow recovery tests (Step 7)
+     Shard: agents-embedded-agent
+
+  HARNESS FILE (modified):
+
+  I. src/agents/embedded-agent-runner/run.overflow-compaction.harness.ts
+     Add: mockedMultiPassCompact mock, resetMultiPassCompactMock() in reset fn
+
+================================================================================
+3. SHARED TEST UTILITIES & FIXTURES
+================================================================================
+
+  ── FILE: src/agents/test-helpers/compaction-fixtures.ts (NEW)
+
+  Purpose: Shared fixture factories that extend (not duplicate) existing
+  test-helpers. Reuses makeAgentAssistantMessage, makeAgentUserMessage,
+  and ZERO_USAGE_FIXTURE from the existing agent-message-fixtures.ts and
+  usage-fixtures.ts.
+
+  3.1 CONVERSATION BUILDERS (new — no existing equivalent)
+
+    import { makeAgentAssistantMessage, makeAgentUserMessage } from
+      "./agent-message-fixtures.js";
+    import type { AgentMessage } from "openclaw/plugin-sdk/agent-core";
+    import type { AssistantMessage, ToolResultMessage } from
+      "openclaw/plugin-sdk/llm";
+
+    function makeToolResultMessage(
+      toolCallId: string,
+      toolName: string,
+      content: string,
+      overrides?: Partial<ToolResultMessage>,
+    ): ToolResultMessage
+      - Creates a ToolResultMessage with TextContent
+      - Uses correct ToolResultMessage fields: toolCallId, toolName (per FIX-1)
+      - Default: isError=false, timestamp=Date.now()
+
+    function makeAssistantWithToolCalls(
+      toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
+      text?: string,
+      timestamp?: number,
+    ): AssistantMessage
+      - Delegates to makeAgentAssistantMessage with ToolCall content blocks
+      - Uses correct ToolCall fields: id, name, arguments (per FIX-1)
+      - Optional leading TextContent block
+
+    function makeAlternatingConversation(
+      turns: number,
+      textSize?: number,
+    ): AgentMessage[]
+      - Creates user/assistant alternating pairs using makeAgentUserMessage
+        and makeAgentAssistantMessage
+      - Each message has textSize characters (default: 100)
+      - Timestamps are sequential
+
+    function makeConversationWithToolCalls(
+      userTurns: number,
+      toolCallsPerTurn: number,
+      argSize?: number,
+    ): AgentMessage[]
+      - Creates realistic conversations with tool use
+      - Each assistant turn has toolCallsPerTurn ToolCall blocks
+      - Each tool call is followed by a ToolResultMessage
+      - argSize controls the size of tool call arguments (default: 100)
+
+  3.2 SESSION TREE ENTRY BUILDERS (new — agent-core package tests define
+      inline, but a shared version aids new test files)
+
+    import type { SessionTreeEntry } from
+      "packages/agent-core/src/harness/types.js";
+
+    function messageEntry(
+      message: AgentMessage,
+      index: number,
+    ): SessionTreeEntry
+      - Wraps AgentMessage in a MessageEntry: { type: "message", message }
+      - id: `entry-${index}`
+      - parentId: index === 0 ? null : `entry-${index - 1}`
+      - timestamp: new Date(message.timestamp).toISOString()
+      - Matches the exact pattern used in compaction-trailing-toolresult.test.ts
+        and compaction-image-tokens.test.ts
+
+    function buildSessionTree(messages: AgentMessage[]): SessionTreeEntry[]
+      - Convenience: maps messages through messageEntry with sequential indices
+
+  NOTE: No makeUserMessage, makeAssistantTextMessage, or createTestModel
+  factories are defined here. Existing makeAgentUserMessage,
+  makeAgentAssistantMessage, and createAnthropicModelFixture (from
+  compaction-safeguard.test.ts) are used directly.
+
+================================================================================
+4. TEST SUITE A — PROGRESS DETECTION & ANTI-THRASHING
+================================================================================
+
+  FILE: src/agents/agent-hooks/compaction-progress.test.ts
+  SOURCE: src/agents/agent-hooks/compaction-progress.ts
+  PORTED FROM: Hermes tests/agent/test_compression_progress.py
+
+  FRAMEWORK SETUP:
+    import { describe, expect, it } from "vitest";
+    import {
+      compressionMadeProgress,
+      shouldContinueMultiPass,
+    } from "./compaction-progress.js";
+
+  Note: compressionMadeProgress is a pure function taking
+  (origLen: number, newLen: number, origTokens: number, newTokens: number)
+  matching the Hermes _compression_made_progress(orig_len, new_len,
+  orig_tokens, new_tokens) signature. No ProgressMetrics wrapper object —
+  plain parameters match the Hermes convention and keep the function simple.
+
+  shouldContinueMultiPass takes structured parameters because its decision
+  involves more inputs (passNumber, maxPasses, tokenTarget, abortSignal, etc.).
+
+  ── describe("compressionMadeProgress") ──────────────────────────────────────
+
+    Maps to Hermes TestCompressionMadeProgress (9 tests).
+
+    4.1 it("returns true when messages are reduced")
+        WHAT: Row/message count reduction is progress.
+        CALL: compressionMadeProgress(10, 5, 1000, 1000)
+        EXPECT: true
+        HERMES: test_rows_reduced_counts_as_progress
+
+    4.2 it("returns true when tokens are reduced without message change")
+        WHAT: Token reduction alone counts as progress (Hermes #39548).
+        CALL: compressionMadeProgress(220, 220, 288_028, 183_180)
+        EXPECT: true
+        HERMES: test_tokens_reduced_without_row_change_counts_as_progress
+
+    4.3 it("returns true when both messages and tokens are reduced")
+        WHAT: Both reduced is unambiguously progress.
+        CALL: compressionMadeProgress(220, 180, 288_028, 150_000)
+        EXPECT: true
+        HERMES: test_both_reduced_counts_as_progress
+
+    4.4 it("returns false when neither messages nor tokens changed")
+        WHAT: No change means stuck — no progress.
+        CALL: compressionMadeProgress(10, 10, 1000, 1000)
+        EXPECT: false
+        HERMES: test_neither_moved_means_no_progress
+
+    4.5 it("returns false when both messages and tokens increased")
+        WHAT: Pathological expansion is not progress.
+        CALL: compressionMadeProgress(10, 12, 1000, 1200)
+        EXPECT: false
+        HERMES: test_rows_grew_and_tokens_grew_means_no_progress
+
+    4.6 it("returns true when messages grew but tokens dropped significantly")
+        WHAT: Token reduction trumps message count increase.
+        CALL: compressionMadeProgress(10, 11, 1000, 600)
+        EXPECT: true
+        HERMES: test_rows_grew_but_tokens_dropped_is_progress
+
+    4.7 it("returns true when tokens grew but messages dropped significantly")
+        WHAT: Message reduction alone is sufficient.
+        CALL: compressionMadeProgress(10, 5, 1000, 1100)
+        EXPECT: true
+        HERMES: test_tokens_grew_but_rows_dropped_is_progress
+
+    4.8 it("returns false when token reduction is below 5% threshold")
+        WHAT: Sub-5% token drop is noise, not signal. Tests both 3% (no)
+              and 6% (yes) to verify the material floor.
+        CALL A: compressionMadeProgress(10, 10, 1000, 970)
+        EXPECT A: false (3% drop, below 5% threshold)
+        CALL B: compressionMadeProgress(10, 10, 1000, 940)
+        EXPECT B: true (6% drop, above 5% threshold)
+        HERMES: test_sub_5pct_token_drop_is_not_progress
+
+    4.9 it("returns false when original tokens are zero (degenerate)")
+        WHAT: Zero-token baseline must not be read as a win.
+        CALL: compressionMadeProgress(10, 10, 0, 0)
+        EXPECT: false
+        HERMES: test_zero_orig_tokens_is_not_progress
+
+  ── describe("compressionMadeProgress edge cases") ───────────────────────────
+
+    4.10 it("handles NaN token values gracefully")
+         WHAT: Malformed token estimates don't crash.
+         CALL: compressionMadeProgress(10, 10, NaN, 50000)
+         EXPECT: false (treated as no progress)
+
+    4.11 it("handles negative token values")
+         WHAT: Negative tokens from estimation bugs don't crash.
+         CALL: compressionMadeProgress(10, 10, -100, 50000)
+         EXPECT: false
+
+  ── describe("shouldContinueMultiPass") ──────────────────────────────────────
+
+    4.12 it("returns false when maxPasses reached")
+         WHAT: Hard cap on iteration count.
+         INPUT: { passNumber: 3, maxPasses: 3, progressMade: true,
+                  tokensAfter: 120000, targetTokens: 100000 }
+         EXPECT: { continue: false, reason: "max_passes_reached" }
+
+    4.13 it("returns false when tokens are at or below target")
+         WHAT: Goal achieved — no more passes needed.
+         INPUT: { passNumber: 1, tokensAfter: 80000, targetTokens: 100000,
+                  progressMade: true }
+         EXPECT: { continue: false, reason: "target_reached" }
+
+    4.14 it("returns false when no progress was made")
+         WHAT: Anti-thrashing: bail if progress detection says no progress.
+         INPUT: { passNumber: 1, progressMade: false, tokensAfter: 120000,
+                  targetTokens: 100000 }
+         EXPECT: { continue: false, reason: "no_progress" }
+
+    4.15 it("returns true when progress was made and tokens still above target")
+         WHAT: Happy path: keep going.
+         INPUT: { passNumber: 1, maxPasses: 3, progressMade: true,
+                  tokensAfter: 120000, targetTokens: 100000 }
+         EXPECT: { continue: true }
+
+    4.16 it("returns false on abort signal")
+         WHAT: External cancellation stops the loop.
+         SETUP: const ac = new AbortController(); ac.abort();
+         INPUT: { ..., abortSignal: ac.signal }
+         EXPECT: { continue: false, reason: "aborted" }
+
+    4.17 it("returns false when consecutive no-progress count reaches 2")
+         WHAT: Two consecutive passes with <5% improvement triggers
+               anti-thrashing bail (matches Hermes behavior).
+         INPUT: { consecutiveNoProgress: 2, progressMade: false }
+         EXPECT: { continue: false, reason: "anti_thrash" }
+
+================================================================================
+5. TEST SUITE B — PRE-COMPACTION PRUNING
+================================================================================
+
+  FILE: src/agents/agent-hooks/pre-compaction-pruning.test.ts
+  SOURCE: src/agents/agent-hooks/pre-compaction-pruning.ts
+  PORTED FROM: Hermes agent/context_compressor.py _prune_old_tool_results
+
+  FRAMEWORK SETUP:
+    import { describe, expect, it } from "vitest";
+    import { preCompactionPrune } from "./pre-compaction-pruning.js";
+    import { makeAgentAssistantMessage, makeAgentUserMessage }
+      from "../test-helpers/agent-message-fixtures.js";
+    import { makeToolResultMessage, makeAssistantWithToolCalls,
+      makeConversationWithToolCalls }
+      from "../test-helpers/compaction-fixtures.js";
+    import type { AgentMessage } from "openclaw/plugin-sdk/agent-core";
+    import type { AssistantMessage, ToolResultMessage }
+      from "openclaw/plugin-sdk/llm";
+
+  preCompactionPrune signature (per port plan):
+    function preCompactionPrune(
+      messages: AgentMessage[],
+      pruneBoundaryIndex: number,
+    ): { messages: AgentMessage[]; metrics: PruneMetrics }
+
+  where PruneMetrics = { deduplicated: number; summarized: number;
+    truncatedArgs: number }
+
+  ── describe("preCompactionPrune sub-pass 1: deduplication") ─────────────────
+
+    5.1 it("deduplicates identical tool results by content hash")
+        WHAT: Two tool results with identical content are collapsed to one.
+        INPUT: messages containing:
+          makeToolResultMessage("tc-1", "read_file", "file content ABC"),
+          makeToolResultMessage("tc-2", "read_file", "file content ABC"),
+          makeToolResultMessage("tc-3", "read_file", "file content XYZ"),
+        EXPECT: 2 unique results retained; tc-2 replaced with
+                "[duplicate of tc-1]"; metrics.deduplicated === 1
+
+    5.2 it("preserves tool results with different content")
+        WHAT: Non-duplicates are untouched.
+        INPUT: 3 tool results with unique content
+        EXPECT: All 3 preserved unchanged; metrics.deduplicated === 0
+
+    5.3 it("handles empty tool result content")
+        WHAT: Empty content results are not falsely deduplicated with
+              non-empty results.
+        INPUT: 2 tool results with empty content, 1 with real content
+        EXPECT: Empty ones may be deduped against each other; real preserved
+
+    5.4 it("deduplicates using toolCallId to track originals")
+        WHAT: Uses toolCallId (ToolResultMessage field) as the dedup key.
+        INPUT: Multiple results with same content, different toolCallIds
+        EXPECT: Only first occurrence preserved; replacement references
+                first toolCallId in its text.
+        VERIFIES PORT PLAN FIX-1: Uses toolCallId (not id) for
+        ToolResultMessage
+
+  ── describe("preCompactionPrune sub-pass 2: old result summarization") ──────
+
+    5.5 it("replaces old tool results with 1-line summaries")
+        WHAT: Tool results before the prune boundary get a compact summary.
+        INPUT: Conversation with 20 messages, pruneBoundaryIndex at 10.
+               Tool results in messages 3-8.
+        EXPECT: Results before boundary replaced with compact summary
+                containing toolName; metrics.summarized > 0
+
+    5.6 it("preserves recent tool results after the prune boundary")
+        WHAT: Recent tool results are not pruned.
+        INPUT: Same 20-message conversation; tool results in messages 15-18.
+        EXPECT: All recent results preserved with full content
+
+    5.7 it("uses toolName from ToolResultMessage for the summary line")
+        WHAT: Summary references the tool name for context.
+        INPUT: Tool result with toolName="read_file"
+        EXPECT: Summary contains "read_file"
+        VERIFIES PORT PLAN FIX-1: Uses toolName field of ToolResultMessage
+
+    5.8 it("handles mixed message types around tool results")
+        WHAT: User messages, assistant text, and tool results interleaved.
+        INPUT: [user, assistant+toolCall, toolResult, user, assistant+text]
+        EXPECT: Only toolResult eligible for pruning; others untouched
+
+    5.9 it("returns original messages unchanged when no pruning needed")
+        WHAT: Short conversations or no tool results.
+        INPUT: 5 alternating user/assistant text messages
+        EXPECT: Output messages identical to input
+
+  ── describe("preCompactionPrune sub-pass 3: tool call argument truncation") ─
+
+    VERIFIES PORT PLAN FIX-1 AND FIX-2.
+
+    5.10 it("truncates large string values in ToolCall.arguments")
+         WHAT: String values > 200 chars in arguments Record are truncated.
+         INPUT: makeAssistantWithToolCalls([{
+           id: "tc-1", name: "write_file",
+           arguments: { path: "/short", content: "x".repeat(500) },
+         }])
+         EXPECT: arguments.content starts with "x".repeat(150) and ends
+                 with "...[truncated]"
+         VERIFIES FIX-2: arguments is Record<string, unknown>
+
+    5.11 it("preserves non-string values in arguments")
+         WHAT: Numbers, booleans, arrays, nulls are not truncated.
+         INPUT: arguments: { count: 42, enabled: true, tags: ["a","b"],
+                data: null }
+         EXPECT: All values preserved unchanged
+         VERIFIES FIX-2: Only string leaves are truncated
+
+    5.12 it("uses JSON.stringify length for size estimation, not key count")
+         WHAT: Size check is serialized length, not property count.
+         INPUT A: arguments: { a: "short" } (serialized < 500 chars)
+         EXPECT A: Not truncated (below 500-char threshold)
+         INPUT B: arguments: { a: "x".repeat(600) } (serialized > 500)
+         EXPECT B: Value truncated
+         VERIFIES FIX-2: JSON.stringify for size estimation
+
+    5.13 it("uses ToolCall field names id and name, not toolCallId/toolName")
+         WHAT: Explicit verification of correct field access on ToolCall
+               content blocks in AssistantMessage.
+         INPUT: AssistantMessage.content[0] = {
+                  type: "toolCall", id: "tc-1", name: "write_file",
+                  arguments: { content: "x".repeat(1000) }
+                }
+         EXPECT: Truncation applied; id and name fields preserved unchanged
+         VERIFIES FIX-1: ToolCall uses id/name, not toolCallId/toolName
+
+    5.14 it("does not mutate the original AssistantMessage")
+         WHAT: Pre-pruning produces clones; originals are untouched.
+         INPUT: Original AssistantMessage with large arguments
+         SETUP: Save deep reference to original arguments
+         EXPECT: Original message's arguments unchanged after pruning
+
+    5.15 it("handles nested objects with deep string values")
+         WHAT: arguments: { config: { template: "x".repeat(500) } }
+               have deeply nested strings truncated.
+         INPUT: arguments: { config: { template: "x".repeat(500), count: 10 } }
+         EXPECT: config.template truncated; config.count preserved
+         VERIFIES FIX-2 extension: recursive walk of nested objects
+
+    5.16 it("skips truncation for small arguments (below 500 char threshold)")
+         WHAT: Small arguments are returned unchanged.
+         INPUT: arguments: { path: "/foo/bar.ts", line: 42 }
+         EXPECT: Arguments returned as-is
+
+    5.17 it("handles assistant messages with mixed content blocks")
+         WHAT: TextContent blocks in the same message are not affected.
+         INPUT: makeAgentAssistantMessage with content:
+                [TextContent, ToolCall(large args), ToolCall(small args)]
+         EXPECT: Text unchanged, first ToolCall truncated, second unchanged
+
+    5.18 it("preserves thoughtSignature and executionMode on ToolCall")
+         WHAT: Non-standard ToolCall fields are preserved during cloning.
+         INPUT: ToolCall with thoughtSignature="abc", executionMode="parallel",
+                arguments with large strings
+         EXPECT: Truncated clone retains thoughtSignature and executionMode
+
+  ── describe("preCompactionPrune full pipeline") ────────────────────────────
+
+    5.19 it("applies all three sub-passes in sequence")
+         WHAT: End-to-end pruning: dedup, summarize old, truncate args.
+         INPUT: 30-message conversation with:
+                - 2 duplicate tool results (early)
+                - 5 old tool results with large content (before boundary)
+                - 3 assistant messages with large tool call arguments
+                - 5 recent tool results (after boundary)
+         EXPECT: Duplicates collapsed, old results summarized,
+                 large arguments truncated, recent results preserved
+
+    5.20 it("returns metrics about pruning actions taken")
+         WHAT: Pruning reports what it did for logging.
+         INPUT: conversation with known dedup/prune/truncation counts
+         EXPECT: result.metrics equals { deduplicated: N, summarized: M,
+                 truncatedArgs: K }
+
+    5.21 it("handles empty message array")
+         WHAT: Empty input doesn't crash.
+         INPUT: [], pruneBoundaryIndex: 0
+         EXPECT: result.messages === [], metrics all zero
+
+    5.22 it("handles conversation with no tool messages")
+         WHAT: Pure text conversation passes through unchanged.
+         INPUT: 10 alternating user/assistant text messages
+         EXPECT: All messages unchanged, metrics all zero
+
+================================================================================
+6. TEST SUITE C — CUT POINT ENHANCEMENT (MESSAGE ANCHORING)
+================================================================================
+
+  FILE: packages/agent-core/src/harness/compaction/compaction-anchoring.test.ts
+  SOURCE: packages/agent-core/src/harness/compaction/compaction.ts (modified)
+  PORTED FROM: Hermes agent/context_compressor.py head/tail protection
+
+  FRAMEWORK SETUP:
+
+    Follows the pattern of compaction-trailing-toolresult.test.ts and
+    compaction-image-tokens.test.ts:
+
+    import { describe, expect, it } from "vitest";
+    import type { AgentMessage } from "../../types.js";
+    import type { SessionTreeEntry } from "../types.js";
+    import { estimateTokens, findCutPoint } from "./compaction.js";
+
+    Token estimation: Uses the REAL estimateTokens function (deterministic
+    char/4 heuristic). No mock required. Tests construct messages with
+    specific text sizes to control the token budget and force a known
+    initial cut point.
+
+  HELPER FUNCTIONS (defined inline in test file, matching existing pattern):
+
+    function messageEntry(msg: AgentMessage, index: number): SessionTreeEntry {
+      return {
+        type: "message",
+        id: `entry-${index}`,
+        parentId: index === 0 ? null : `entry-${index - 1}`,
+        timestamp: new Date(msg.timestamp).toISOString(),
+        message: msg,
+      };
+    }
+
+    function userText(text: string, timestamp: number): AgentMessage {
+      return { role: "user", content: [{ type: "text", text }], timestamp };
+    }
+
+    function assistantText(text: string, timestamp: number): AgentMessage {
+      return {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        api: "anthropic-messages" as const,
+        provider: "anthropic" as const,
+        model: "test-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+                 totalTokens: 0,
+                 cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+                         total: 0 } },
+        stopReason: "stop" as const,
+        timestamp,
+      };
+    }
+
+    function assistantToolCallOnly(
+      toolCallId: string, timestamp: number,
+    ): AgentMessage {
+      return {
+        role: "assistant",
+        content: [{ type: "toolCall", id: toolCallId, name: "test",
+                     arguments: {} }],
+        api: "anthropic-messages" as const,
+        provider: "anthropic" as const,
+        model: "test-model",
+        usage: { /* zero */ },
+        stopReason: "tool_use" as const,
+        timestamp,
+      };
+    }
+
+    function toolResultText(text: string, timestamp: number): AgentMessage {
+      return {
+        role: "toolResult", toolCallId: "call-1", toolName: "bash",
+        content: [{ type: "text", text }], isError: false, timestamp,
+      };
+    }
+
+  ── describe("findCutPoint user message anchoring") ──────────────────────────
+
+    VERIFIES PORT PLAN FIX-3.
+
+    6.1 it("anchors the last user message in the tail")
+        WHAT: Cut point is adjusted so the last user message is preserved.
+        SETUP: Build session tree with 10 entries of varying sizes. Set
+               keepRecentTokens so the initial cut (token walk) lands at
+               index 7. Place the last user message at index 5.
+               Token-walk cut at 7 means entries 7-9 are in the tail.
+               After anchoring, entries 5-9 are in the tail.
+        EXPECT: result.firstKeptEntryIndex <= 5
+        VERIFIES FIX-3: Accesses (entry.message as HarnessMessage).role
+
+    6.2 it("does not adjust when last user message is already in the tail")
+        WHAT: No unnecessary cut point movement.
+        SETUP: Last user message at index 8, token-walk cut at 6.
+        EXPECT: result.firstKeptEntryIndex === 6 (unchanged)
+
+    6.3 it("anchoring is monotonic — tail only grows, never shrinks")
+        WHAT: User anchoring can only move the cut point earlier.
+        SETUP: Multiple user messages, token-walk cut at 6, last user at 4.
+        EXPECT: result.firstKeptEntryIndex <= 4 (tail grew from 6→4)
+
+  ── describe("findCutPoint assistant message anchoring") ─────────────────────
+
+    VERIFIES PORT PLAN FIX-4.
+
+    6.4 it("anchors the last assistant message with visible text content")
+        WHAT: Last assistant message with real text is kept in the tail.
+        SETUP: Session tree where last assistant with TextContent is at
+               index 5; token-walk cut at 7.
+        EXPECT: result.firstKeptEntryIndex <= 5
+        VERIFIES FIX-4: hasVisibleContent reads entry.message.content
+
+    6.5 it("skips assistant messages with only tool calls (no text)")
+        WHAT: Assistant messages with only ToolCall blocks are not "visible."
+        SETUP: Last assistant has only ToolCall content (no text). Previous
+               assistant at index 3 has TextContent.
+        EXPECT: Anchoring reaches back to index 3, not the tool-call-only
+                assistant
+
+    6.6 it("skips assistant messages with only thinking blocks")
+        WHAT: ThinkingContent is not visible content.
+        SETUP: Last assistant content: [{ type: "thinking", thinking: "..." }]
+        EXPECT: Not anchored — skipped by hasVisibleContent
+
+    6.7 it("handles assistant message with empty text content")
+        WHAT: TextContent with text="" is not considered visible.
+        SETUP: Last assistant content: [{ type: "text", text: "" }]
+        EXPECT: Not anchored — empty text is not visible
+
+  ── describe("findCutPoint combined anchoring") ──────────────────────────────
+
+    6.8 it("applies both anchors and takes the earliest")
+        WHAT: Both user and assistant anchors applied; earliest wins.
+        SETUP: Last user at index 5, last visible assistant at index 3,
+               token-walk cut at 7.
+        EXPECT: result.firstKeptEntryIndex <= 3 (assistant anchor is earlier)
+
+    6.9 it("respects safety floor — cut point never below startIndex + 1")
+        WHAT: At least one entry is always summarized.
+        SETUP: startIndex=0, all anchors point to index 0.
+        EXPECT: result.firstKeptEntryIndex >= 1
+
+    6.10 it("handles session tree with only non-message entries")
+         WHAT: Session tree with CompactionEntry, ModelChangeEntry, etc.
+         SETUP: No MessageEntry items between startIndex and initial cut
+         EXPECT: No anchoring applied; original cut point preserved
+
+    6.11 it("handles interleaved tool results and user messages")
+         WHAT: ToolResult entries don't confuse the anchoring search.
+         SETUP: [..., user, assistant+toolCall, toolResult, user, assistant]
+         EXPECT: Anchoring correctly finds the last user/assistant
+
+    6.12 it("preserves existing findCutPoint behavior for unmodified cases")
+         WHAT: Regression — when no anchoring is needed, result is identical
+               to pre-modification behavior.
+         SETUP: Token-walk cut already includes last user and visible
+                assistant in the tail.
+         EXPECT: Identical CutPointResult to a pre-modification findCutPoint
+
+================================================================================
+7. TEST SUITE D — SUMMARY PREFIX DISAMBIGUATION
+================================================================================
+
+  These tests are ADDED to the existing compaction-safeguard.test.ts file
+  (not a separate file) because the summary prefix logic is integrated into
+  compaction-safeguard.ts via the testing export pattern.
+
+  FILE: src/agents/agent-hooks/compaction-safeguard.test.ts (ADDITIONS)
+
+  SETUP:
+    The compaction-safeguard.ts testing export is extended to include:
+      testing.buildMultiPassSummaryPrefix
+      testing.buildCompactionEndMarker
+
+    Tests import via: import { testing } from "./compaction-safeguard.js";
+
+  ── describe("multi-pass summary prefix disambiguation") ─────────────────────
+
+    7.1 it("includes pass number in multi-pass compaction")
+        WHAT: Pass N of M is included in the prefix for disambiguation.
+        CALL: testing.buildMultiPassSummaryPrefix({ passNumber: 2,
+              totalPasses: 3 })
+        EXPECT: Result contains "pass 2" (case insensitive)
+
+    7.2 it("omits pass number for single-pass compaction")
+        WHAT: No pass metadata when only one pass occurred.
+        CALL: testing.buildMultiPassSummaryPrefix({ passNumber: 1,
+              totalPasses: 1 })
+        EXPECT: No pass numbering in result
+
+    7.3 it("includes previous summary marker when chaining summaries")
+        WHAT: When summarizing over a previous compaction, prefix notes it.
+        CALL: testing.buildMultiPassSummaryPrefix({ hasPreviousSummary: true })
+        EXPECT: Contains indicator of prior summary context
+
+    7.4 it("includes the standard compaction header")
+        WHAT: Prefix always has the standard disambiguation header.
+        EXPECT: Contains "summary" in the text (case insensitive)
+
+  ── describe("compaction end marker") ────────────────────────────────────────
+
+    7.5 it("generates a clear end-of-summary marker")
+        WHAT: End marker signals where summary ends and live conversation
+              begins.
+        CALL: testing.buildCompactionEndMarker({ tokensBefore: 150000,
+              tokensAfter: 45000 })
+        EXPECT: Contains "[end of summary]" or equivalent boundary text
+
+    7.6 it("end marker is stable across invocations (deterministic)")
+        WHAT: Same inputs produce same marker.
+        EXPECT: Two calls with same args return identical strings
+
+================================================================================
+8. TEST SUITE E — MULTI-PASS COMPACTION LOOP
+================================================================================
+
+  FILE: src/agents/multi-pass-compaction.test.ts
+  SOURCE: src/agents/multi-pass-compaction.ts (new gateway-layer module)
+  PORTED FROM: Hermes agent/context_engine.py multi-pass preflight loop
+
+  FRAMEWORK SETUP:
+
+    multiPassCompact receives a contextEngine (or a compact function) as a
+    parameter, NOT as a module import. Tests inject a mock object directly.
+    This matches the existing pattern where contextEngine is resolved at
+    runtime via resolveContextEngine() and passed as an object parameter.
+
+    import { describe, expect, it, vi, beforeEach } from "vitest";
+    import { multiPassCompact } from "./multi-pass-compaction.js";
+
+    // Mock contextEngine follows run.overflow-compaction.harness.ts pattern
+    function createMockContextEngine() {
+      return {
+        info: { ownsCompaction: false },
+        compact: vi.fn(async () => ({
+          ok: false as const,
+          compacted: false as const,
+          reason: "nothing to compact",
+        })),
+      };
+    }
+
+    // Mock compact result factories
+    function makeCompactSuccess(overrides: {
+      tokensAfter?: number;
+      tokensBefore?: number;
+      summary?: string;
+    } = {}) {
+      return {
+        ok: true as const,
+        compacted: true as const,
+        result: {
+          summary: overrides.summary ?? "Compacted session",
+          tokensBefore: overrides.tokensBefore ?? 200000,
+          tokensAfter: overrides.tokensAfter ?? 100000,
+          firstKeptEntryId: "entry-5",
+        },
+      };
+    }
+
+    // Base compact params (matching actual ContextEngineCompactParams shape)
+    const baseCompactParams = {
+      sessionId: "test-session",
+      sessionKey: "test-key",
+      sessionFile: "/tmp/session.jsonl",
+      tokenBudget: 100000,
+      force: true,
+      compactionTarget: "budget" as const,
+    };
+
+  ── describe("multiPassCompact happy path") ──────────────────────────────────
+
+    8.1 it("performs a single pass when first pass brings tokens below target")
+        WHAT: If one pass is enough, no further iteration.
+        SETUP: mockEngine.compact returns makeCompactSuccess({ tokensAfter: 80000 })
+               targetTokens=100000
+        EXPECT: compact called once, result.passesCompleted === 1
+
+    8.2 it("performs multiple passes until tokens are below target")
+        WHAT: Core multi-pass loop.
+        SETUP: Pass 1: makeCompactSuccess({ tokensAfter: 150000 })
+               Pass 2: makeCompactSuccess({ tokensAfter: 90000 })
+        EXPECT: compact called twice, result.passesCompleted === 2
+
+    8.3 it("stops at maxPasses even if tokens still above target")
+        WHAT: Hard cap prevents infinite loops.
+        SETUP: Every pass returns tokensAfter: 120000 (never reaches 100000)
+               maxPasses=3
+        EXPECT: compact called 3 times, result.reason === "max_passes_reached"
+
+    8.4 it("stops when progress drops below minProgressThreshold")
+        WHAT: Anti-thrashing: small improvements trigger early exit.
+        SETUP: Pass 1: 200000 -> 150000 (25% reduction — continue)
+               Pass 2: 150000 -> 147000 (2% reduction — below 5%)
+        EXPECT: compact called twice, result.reason === "no_progress"
+
+    8.5 it("returns aggregated metrics across all passes")
+        WHAT: Final result summarizes all passes.
+        SETUP: 2 passes with known reductions
+        EXPECT: result includes:
+                - totalTokensBefore (from pass 1 input)
+                - totalTokensAfter (from last pass output)
+                - passesCompleted: 2
+
+  ── describe("multiPassCompact abort handling") ──────────────────────────────
+
+    8.6 it("respects abort signal between passes")
+        WHAT: Abort signal checked between passes, not just during LLM call.
+        SETUP: Pass 1 succeeds; abort controller fires before pass 2.
+               Use mockEngine.compact.mockImplementation that aborts after
+               first call.
+        EXPECT: compact called once, result.reason === "aborted"
+
+    8.7 it("propagates abort signal to individual compact() calls")
+        WHAT: Each compact() call receives the abort signal.
+        SETUP: compact mock that inspects params.abortSignal
+        EXPECT: abortSignal present in every compact() call's params
+
+    8.8 it("handles abort during a compact() call gracefully")
+        WHAT: If compact() rejects due to abort, loop exits cleanly.
+        SETUP: compact mock rejects with AbortError on pass 2
+        EXPECT: result.reason === "aborted", no unhandled rejection
+
+  ── describe("multiPassCompact error handling") ──────────────────────────────
+
+    8.9 it("returns partial result when a pass fails with non-abort error")
+        WHAT: Non-fatal errors in a pass don't discard previous progress.
+        SETUP: Pass 1 succeeds (200000 -> 150000);
+               Pass 2 throws Error("API rate limit")
+        EXPECT: result includes pass 1 metrics,
+                result.reason === "error",
+                result.passesCompleted === 1
+
+    8.10 it("returns failure when first pass fails")
+         WHAT: No partial results if the very first pass fails.
+         SETUP: compact mock throws on first call
+         EXPECT: result.ok === false, result.passesCompleted === 0
+
+    8.11 it("returns failure when compact returns ok but not compacted")
+         WHAT: compact() says { ok: true, compacted: false, reason: "..." }
+         SETUP: compact returns non-compacted result
+         EXPECT: Loop exits, result reflects no compaction occurred
+
+  ── describe("multiPassCompact parameter forwarding") ────────────────────────
+
+    8.12 it("forwards all compact params to each compact() call")
+         WHAT: sessionId, sessionFile, tokenBudget, force all forwarded.
+         SETUP: Call multiPassCompact with baseCompactParams
+         EXPECT: Every compact() call receives the same params snapshot
+
+    8.13 it("adds passNumber to runtimeContext for each pass")
+         WHAT: Each compact() call includes the current pass number.
+         SETUP: multiPassCompact runs 2 passes
+         EXPECT: Pass 1 params include runtimeContext with passNumber=1;
+                 Pass 2 includes passNumber=2
+
+  ── describe("multiPassCompact progress tracking") ───────────────────────────
+
+    8.14 it("uses tokensAfter from pass N as baseline for pass N+1 check")
+         WHAT: Progress is measured incrementally, not against the original.
+         SETUP: Pass 1: 200000 -> 120000 (40% reduction)
+                Pass 2: 120000 -> 116000 (3.3% reduction — below 5%)
+         EXPECT: Loop stops after pass 2 due to insufficient incremental
+                 progress
+
+    8.15 it("tracks consecutive no-progress passes for anti-thrashing")
+         WHAT: Two consecutive sub-threshold passes trigger anti-thrash exit.
+         SETUP: Pass 1: 200000 -> 195000 (2.5% — marginal)
+                Pass 2: 195000 -> 193000 (1% — marginal again)
+         EXPECT: Loop exits with reason "anti_thrash" after pass 2
+
+    8.16 it("resets consecutive no-progress counter after a good pass")
+         WHAT: A productive pass resets the anti-thrash counter.
+         SETUP: Pass 1: 200000 -> 195000 (2.5% — marginal, counter=1)
+                Pass 2: 195000 -> 150000 (23% — good, counter reset to 0)
+                Pass 3: 150000 -> 148000 (1.3% — marginal, counter=1)
+         EXPECT: Loop exits after pass 3, not pass 2
+
+  ── describe("multiPassCompact configuration defaults") ──────────────────────
+
+    8.17 it("defaults maxPasses to 3 when not specified")
+         SETUP: No maxPasses in config
+         EXPECT: Allows up to 3 passes
+
+    8.18 it("defaults minProgressThreshold to 0.05 (5%)")
+         SETUP: No minProgressThreshold in config
+         EXPECT: 4.9% reduction treated as no progress
+
+    8.19 it("clamps maxPasses to [1, 10]")
+         SETUP: maxPasses=0 -> clamped to 1; maxPasses=50 -> clamped to 10
+         EXPECT: compact called at most 1 or 10 times respectively
+
+================================================================================
+9. TEST SUITE F — EMBEDDED RUNNER INTEGRATION
+================================================================================
+
+  FILE: src/agents/embedded-agent-runner/run/multi-pass-compaction-
+        integration.test.ts
+  SOURCE: Embedded runner files (Step 7 call sites)
+
+  FRAMEWORK SETUP:
+
+    Extends the existing overflow compaction harness. The harness file
+    (run.overflow-compaction.harness.ts) is modified to add:
+
+      export const mockedMultiPassCompact = vi.fn(async () => ({
+        ok: true as const,
+        compacted: true as const,
+        passesCompleted: 1,
+        result: { summary: "Compacted", tokensAfter: 80000 },
+      }));
+
+    And in resetRunOverflowCompactionHarnessMocks():
+      mockedMultiPassCompact.mockReset();
+      mockedMultiPassCompact.mockResolvedValue({ ok: true, compacted: true,
+        passesCompleted: 1, result: { summary: "Compacted", tokensAfter: 80000 } });
+
+    The harness's loadRunOverflowCompactionHarness() adds:
+      vi.doMock("../../multi-pass-compaction.js", () => ({
+        multiPassCompact: mockedMultiPassCompact,
+      }));
+
+    Test file imports:
+    import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+    import {
+      loadRunOverflowCompactionHarness,
+      mockedContextEngine,
+      mockedMultiPassCompact,
+      mockedCompactDirect,
+      mockedRunEmbeddedAttempt,
+      mockedGlobalHookRunner,
+      resetRunOverflowCompactionHarnessMocks,
+      overflowBaseRunParams,
+    } from "../run.overflow-compaction.harness.js";
+    import {
+      makeAttemptResult,
+      makeCompactionSuccess,
+      makeOverflowError,
+    } from "../run.overflow-compaction.fixture.js";
+
+  ── describe("embedded runner multi-pass overflow recovery") ─────────────────
+
+    9.1 it("uses multiPassCompact instead of single compact on overflow")
+        WHAT: When overflow triggers compaction, multiPassCompact is called.
+        SETUP: Overflow error triggers compaction path;
+               contextEngine.info.ownsCompaction = false
+        EXPECT: mockedMultiPassCompact called with correct params;
+                mockedCompactDirect NOT called directly
+
+    9.2 it("uses multiPassCompact for preemptive compaction")
+        WHAT: Preemptive compaction (before prompt submission) uses
+              multi-pass.
+        SETUP: Token estimate exceeds budget before submission
+        EXPECT: mockedMultiPassCompact called
+
+    9.3 it("falls back to single compact when ownsCompaction is true")
+        WHAT: When a plugin owns compaction, multi-pass is not used.
+        SETUP: contextEngine.info.ownsCompaction = true
+        EXPECT: mockedCompactDirect called, NOT mockedMultiPassCompact
+
+    9.4 it("propagates multi-pass results to hook callbacks")
+        WHAT: after_compaction hook receives multi-pass metadata.
+        SETUP: mockedGlobalHookRunner.hasHooks.mockReturnValue(true);
+               Multi-pass compaction with passesCompleted=2
+        EXPECT: runAfterCompaction hook includes passesCompleted in metadata
+
+    9.5 it("respects run-level abort signal during multi-pass")
+        WHAT: Run cancellation stops multi-pass mid-iteration.
+        SETUP: Abort signal fires; multiPassCompact configured to check it
+        EXPECT: multiPassCompact called with abort signal in params
+
+    9.6 it("safety timeout wraps the entire multi-pass sequence")
+        WHAT: The 180s safety timeout applies to the ENTIRE multi-pass
+              sequence, not per-pass.
+        SETUP: multiPassCompact is called WITHIN the existing
+               compactContextEngineWithSafetyTimeout wrapper (or equivalent
+               wrapper that applies the aggregate timeout)
+        EXPECT: The timeout signal is passed through to multiPassCompact's
+                abort signal parameter
+
+    9.7 it("handles multiPassCompact returning partial result on error")
+        WHAT: If multi-pass fails mid-way, runner uses partial progress.
+        SETUP: mockedMultiPassCompact resolves with
+               { ok: false, passesCompleted: 1 }
+        EXPECT: Runner does not treat as total failure; retries or
+                reports partial compaction
+
+================================================================================
+10. TEST SUITE G — CONFIGURATION SCHEMA EXTENSION
+================================================================================
+
+  FILE: src/config/config.multi-pass-compaction.test.ts
+  SOURCE: Configuration schema files (Step 8)
+
+  FRAMEWORK SETUP:
+
+    Follows existing config.compaction-settings.test.ts pattern:
+
+    import { describe, expect, it } from "vitest";
+    import { applyCompactionDefaults } from "./defaults.js";
+    import { OpenClawSchema } from "./zod-schema.js";
+
+    // Local helper (matches existing pattern in config.compaction-settings)
+    function materializeCompactionConfig(
+      compaction: Record<string, unknown>,
+    ) {
+      const cfg = applyCompactionDefaults({
+        agents: { defaults: { compaction } },
+      });
+      return cfg.agents?.defaults?.compaction;
+    }
+
+  ── describe("multi-pass compaction configuration defaults") ─────────────────
+
+    10.1 it("applies default maxPasses=3 when not specified")
+         INPUT: materializeCompactionConfig({})
+         EXPECT: result.maxPasses === 3
+
+    10.2 it("applies default minProgressThreshold=0.05 when not specified")
+         INPUT: materializeCompactionConfig({})
+         EXPECT: result.minProgressThreshold === 0.05
+
+    10.3 it("preserves user-specified maxPasses")
+         INPUT: materializeCompactionConfig({ maxPasses: 5 })
+         EXPECT: result.maxPasses === 5
+
+    10.4 it("preserves user-specified minProgressThreshold")
+         INPUT: materializeCompactionConfig({ minProgressThreshold: 0.10 })
+         EXPECT: result.minProgressThreshold === 0.10
+
+    10.5 it("clamps maxPasses to valid range [1, 10]")
+         INPUT A: materializeCompactionConfig({ maxPasses: 0 })
+         EXPECT A: result.maxPasses === 1
+         INPUT B: materializeCompactionConfig({ maxPasses: 100 })
+         EXPECT B: result.maxPasses === 10
+
+    10.6 it("clamps minProgressThreshold to valid range [0.01, 0.50]")
+         INPUT A: materializeCompactionConfig({ minProgressThreshold: 0 })
+         EXPECT A: result.minProgressThreshold === 0.01
+         INPUT B: materializeCompactionConfig({ minProgressThreshold: 0.99 })
+         EXPECT B: result.minProgressThreshold === 0.50
+
+    10.7 it("preserves existing compaction settings alongside new fields")
+         INPUT: materializeCompactionConfig({ enabled: true,
+                reserveTokens: 16384, keepRecentTokens: 20000, maxPasses: 2 })
+         EXPECT: All fields preserved; no existing settings dropped
+
+    10.8 it("handles undefined compaction block gracefully")
+         INPUT: applyCompactionDefaults({}) — no compaction key
+         EXPECT: All defaults applied, no crash
+
+  ── describe("multi-pass compaction Zod schema validation") ──────────────────
+
+    10.9 it("accepts valid multi-pass config fields")
+         INPUT: OpenClawSchema.safeParse({ agents: { defaults: {
+                compaction: { maxPasses: 3, minProgressThreshold: 0.05 } } } })
+         EXPECT: result.success === true
+
+    10.10 it("rejects invalid types for new fields")
+          INPUT: OpenClawSchema.safeParse({ agents: { defaults: {
+                 compaction: { maxPasses: "three" } } } })
+          EXPECT: result.success === false
+
+    10.11 it("backwards-compatible with pre-multi-pass configs")
+          WHAT: Configs from before multi-pass feature work unchanged.
+          INPUT: OpenClawSchema.safeParse({ agents: { defaults: {
+                 compaction: { enabled: true, reserveTokens: 16384 } } } })
+          EXPECT: result.success === true
+
+================================================================================
+11. TEST SUITE H — COMPACTION-SAFEGUARD INTEGRATION
+================================================================================
+
+  FILE: src/agents/agent-hooks/compaction-safeguard.test.ts (ADDITIONS)
+
+  These tests verify the pre-pruning injection point in compaction-safeguard.ts
+  (Step 3 integration). They use the existing testing export and
+  setSummarizeInStagesForTest pattern.
+
+  SETUP:
+    import compactionSafeguardExtension, { testing } from
+      "./compaction-safeguard.js";
+
+    Uses the existing createCompactionHandler() factory from
+    compaction-safeguard.test.ts to get a handler instance and drive
+    events through it.
+
+  ── describe("compaction-safeguard pre-pruning integration") ─────────────────
+
+    11.1 it("calls preCompactionPrune before summarization")
+         WHAT: The pre-pruning function is called on baseMessagesToSummarize
+               before the summarizer runs.
+         SETUP: Register a compaction handler; fire session_before_compact
+                with messages containing duplicate tool results.
+         EXPECT: The messages passed to summarizeInStages do NOT contain
+                 duplicates — pre-pruning has already run.
+
+    11.2 it("passes pruned messages to the summarizer, not originals")
+         WHAT: The summarizer receives the output of preCompactionPrune.
+         SETUP: Fire session_before_compact with messages that have large
+                tool call arguments (>500 chars).
+         EXPECT: The summarizeInStages mock receives messages with truncated
+                 arguments (verify via mock call inspection).
+
+    11.3 it("logs pruning metrics")
+         WHAT: Pruning results are logged for observability.
+         SETUP: Fire session_before_compact with pruneable messages.
+         EXPECT: Log output includes deduplicated/summarized/truncated counts.
+
+    11.4 it("skips pre-pruning when no tool messages present")
+         WHAT: Pre-pruning short-circuits when there are no tool results.
+         SETUP: Fire session_before_compact with pure text conversation.
+         EXPECT: Messages reach summarizer unchanged.
+
+================================================================================
+12. TEST SUITE I — INTEGRATION / VERTICAL SLICE
+================================================================================
+
+  FILE: src/agents/multi-pass-compaction.test.ts (additional tests in
+        same file as Suite E, or a separate describe block)
+
+  These tests exercise multiPassCompact with a richer mock contextEngine
+  that simulates realistic compaction behavior, validating the interaction
+  between progress detection, summary prefix generation, and loop
+  termination.
+
+  ── describe("multiPassCompact vertical integration") ────────────────────────
+
+    12.1 it("compacts a conversation to below target in 2 passes")
+         WHAT: Full flow with realistic mock compaction behavior.
+         SETUP: mockEngine.compact pass 1 returns tokensAfter=150000;
+                pass 2 returns tokensAfter=85000. Target = 100000.
+         EXPECT: passesCompleted === 2, result.ok === true,
+                 result.result.tokensAfter <= 100000
+
+    12.2 it("preserves anchoring semantics across multi-pass")
+         WHAT: Each pass receives the anchoring-enhanced cut point.
+         SETUP: Mock compact that inspects the token budget parameter
+                to verify it's consistent across passes.
+         EXPECT: Each compact() call receives the same tokenBudget
+                 (anchoring is handled within compact, not by multiPass)
+
+    12.3 it("handles the single-pass case identically to pre-existing behavior")
+         WHAT: With maxPasses=1, behavior matches old single-pass path.
+         SETUP: maxPasses=1 in config
+         EXPECT: Exactly one compact() call; result matches existing format
+
+    12.4 it("handles conversation that cannot be compacted further")
+         WHAT: Very short conversation where compaction makes no progress.
+         SETUP: compact returns { ok: true, compacted: false,
+                reason: "already within budget" }
+         EXPECT: result reflects no compaction performed
+
+================================================================================
+13. REGRESSION COVERAGE MATRIX
+================================================================================
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Hermes Regression              │ Plan Entry │ OpenClaw Test             │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ #39548: Token-only progress    │ 4.2        │ compressionMadeProgress   │
+  │         (no row reduction)     │            │ "tokens reduced without   │
+  │                                │            │  message change"          │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Sub-5% noise filter            │ 4.8        │ compressionMadeProgress   │
+  │                                │            │ "below 5% threshold"      │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Zero-token degenerate          │ 4.9        │ compressionMadeProgress   │
+  │                                │            │ "zero (degenerate)"       │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Anti-thrash: 2 consecutive     │ 4.17,      │ shouldContinueMultiPass   │
+  │ no-progress passes             │ 8.15-8.16  │ & multiPassCompact        │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Tool result deduplication      │ 5.1-5.4    │ preCompactionPrune        │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Tool result summarization      │ 5.5-5.9    │ preCompactionPrune        │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Tool call argument truncation  │ 5.10-5.18  │ preCompactionPrune        │
+  │                                │            │ sub-pass 3                │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Head/tail protection           │ 6.1-6.12   │ findCutPoint anchoring    │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Summary prefix disambiguation  │ 7.1-7.4    │ buildMultiPassSummaryPfx  │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Multi-pass loop termination    │ 8.1-8.5    │ multiPassCompact          │
+  │                                │            │ happy path                │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Port Plan FIX-1: ToolCall      │ 5.4,5.13,  │ pre-compaction-pruning    │
+  │ id/name vs toolCallId/toolName │ 5.18       │                           │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Port Plan FIX-2: ToolCall.args │ 5.10-5.12, │ pre-compaction-pruning    │
+  │ Record<> vs JSON string        │ 5.15       │ sub-pass 3                │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Port Plan FIX-3: entry.message │ 6.1,6.3    │ compaction-anchoring      │
+  │ .role vs entry.role            │            │                           │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Port Plan FIX-4: entry.message │ 6.4,6.5    │ compaction-anchoring      │
+  │ .content vs entry.content      │            │                           │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Port Plan REF-2/D10: stale     │ 8.12       │ multiPassCompact param    │
+  │ compactParams across passes    │            │ forwarding                │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+14. MOCK & FIXTURE DEPENDENCY MAP
+================================================================================
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Test Suite │ Mocks Required               │ Fixtures Required           │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ A: Progress│ None (pure functions)        │ None (primitives only)      │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ B: Pruning │ None (pure function)         │ makeToolResultMessage       │
+  │            │                              │ makeAssistantWithToolCalls  │
+  │            │                              │ makeAgentUserMessage        │
+  │            │                              │ makeAgentAssistantMessage   │
+  │            │                              │ makeConversationWithToolCalls│
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ C: Anchors │ None (real estimateTokens    │ Inline message factories    │
+  │            │  — deterministic heuristic)  │ (userText, assistantText,   │
+  │            │                              │ messageEntry — defined in   │
+  │            │                              │ test file per existing      │
+  │            │                              │ convention)                 │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ D: Prefix  │ None (tested via testing     │ None (string parameters)    │
+  │            │  export on compaction-       │                             │
+  │            │  safeguard)                  │                             │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ E: Loop    │ Mock contextEngine object    │ makeCompactSuccess,         │
+  │            │ (vi.fn on compact method)    │ baseCompactParams           │
+  │            │ AbortController (real)       │                             │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ F: Runner  │ Full overflow harness        │ makeOverflowError,          │
+  │            │ (extended with               │ makeAttemptResult,          │
+  │            │  mockedMultiPassCompact)     │ makeCompactionSuccess       │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ G: Config  │ None (pure schema/defaults)  │ Config object literals      │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ H: Safegrd │ setSummarizeInStagesForTest  │ createCompactionHandler     │
+  │  Integr.  │ (existing testing export)    │ (existing factory)          │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ I: Integr. │ Mock contextEngine object    │ Same as Suite E             │
+  │  Vertical │ (same as Suite E)            │                             │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  MOCK IMPLEMENTATION NOTES:
+
+  M1: Mock contextEngine (for Suites E and I)
+      Inject directly as function parameter. No vi.mock() of a module.
+      Pattern:
+        const mockEngine = createMockContextEngine();
+        mockEngine.compact.mockResolvedValueOnce(makeCompactSuccess({...}));
+        const result = await multiPassCompact(mockEngine, baseCompactParams,
+          multiPassConfig);
+
+  M2: Overflow Harness Extension (for Suite F)
+      Extend run.overflow-compaction.harness.ts:
+        - Add mockedMultiPassCompact export
+        - Add vi.doMock("../../multi-pass-compaction.js", ...) in loader
+        - Add reset logic in resetRunOverflowCompactionHarnessMocks()
+      This keeps all overflow-related mocking in one place.
+
+  M3: Compaction-Safeguard Testing Export (for Suites D and H)
+      Use the existing testing export pattern. New functions
+      (buildMultiPassSummaryPrefix, buildCompactionEndMarker) are added
+      to the testing export object in compaction-safeguard.ts.
+
+  M4: Abort Signal (for Suites E and F)
+      Use real AbortController:
+        const ac = new AbortController();
+        // trigger mid-test: ac.abort();
+
+  M5: Token Estimation (for Suite C)
+      NOT MOCKED. Real estimateTokens used (char/4 heuristic).
+      Construct messages with known text sizes (e.g., "x".repeat(4000) =
+      1000 tokens) to control the cut point position.
+
+================================================================================
+15. TEST EXECUTION & CI NOTES
+================================================================================
+
+  15.1 VITEST SHARD ASSIGNMENT (verified against vitest.agents-paths.mjs)
+
+    compaction-progress.test.ts         → agents-support
+      (src/agents/agent-hooks/* is a subdirectory of src/agents/)
+    pre-compaction-pruning.test.ts      → agents-support
+      (src/agents/agent-hooks/* subdirectory)
+    compaction-anchoring.test.ts        → packages shard
+      (packages/agent-core/src/harness/compaction/*)
+    multi-pass-compaction.test.ts       → agents-core
+      (src/agents/*.test.ts — TOP-LEVEL file, not in a subdirectory)
+    config.multi-pass-compaction.test.ts→ runtime-config
+      (src/config/**/*.test.ts)
+    multi-pass-compaction-integration   → agents-embedded-agent
+      .test.ts                            (src/agents/embedded-agent-runner/**/*)
+
+    SHARD PATTERN REFERENCE:
+      agents-core:           src/agents/*.test.ts (top-level ONLY)
+      agents-support:        src/agents/*/**/*.test.ts (subdirs, excl.
+                             embedded-agent-runner/ and tools/)
+      agents-embedded-agent: src/agents/embedded-agent-runner/**/*.test.ts
+      runtime-config:        src/config/**/*.test.ts
+      packages:              packages/**/*.test.ts (global pattern)
+
+  15.2 TEST ISOLATION
+
+    - Each test file is independently runnable: no cross-file state
+    - Use beforeEach for mock setup; afterEach for cleanup
+    - Use vi.restoreAllMocks() in afterEach where mocks are used
+    - Fake timers (vi.useFakeTimers) NOT used in these tests;
+      timeout behavior tested via abort signal propagation
+    - Suite C uses real estimateTokens (no mock to clean up)
+
+  15.3 PERFORMANCE BUDGET
+
+    Suite A (progress):   < 100ms (pure functions, no I/O)
+    Suite B (pruning):    < 500ms (message array manipulation)
+    Suite C (anchoring):  < 200ms (session tree traversal, real token est.)
+    Suite D (prefix):     < 50ms  (string builders via testing export)
+    Suite E (loop):       < 1s    (async mocks, multiple passes)
+    Suite F (runner):     < 2s    (overflow harness loading)
+    Suite G (config):     < 100ms (schema validation)
+    Suite H (safeguard):  < 500ms (handler creation + event dispatch)
+    Suite I (integration):< 1s    (async mocks, realistic flow)
+
+  15.4 EXPECTED TEST COUNT
+
+    Suite A: 17 tests  (progress detection & anti-thrashing)
+    Suite B: 22 tests  (pre-compaction pruning, 3 sub-passes + pipeline)
+    Suite C: 12 tests  (cut point anchoring)
+    Suite D:  6 tests  (summary prefix disambiguation)
+    Suite E: 19 tests  (multi-pass loop)
+    Suite F:  7 tests  (embedded runner integration)
+    Suite G: 11 tests  (configuration schema)
+    Suite H:  4 tests  (compaction-safeguard integration)
+    Suite I:  4 tests  (vertical integration)
+    ────────────────────
+    TOTAL: 102 tests
+
+  15.5 PRIORITY ORDER FOR IMPLEMENTATION
+
+    The test suites should be implemented in this order, matching the
+    implementation step dependencies:
+
+    1. Suite A (progress detection) — no dependencies, pure logic
+    2. Suite G (configuration) — needed by all other suites for defaults
+    3. Suite B (pre-pruning) — depends on message fixtures only
+    4. Suite C (anchoring) — depends on session tree construction
+    5. Suite D (prefix) — depends on compaction-safeguard testing export
+    6. Suite H (safeguard integration) — depends on D, B integration
+    7. Suite E (multi-pass loop) — depends on A (progress), integrates B-D
+    8. Suite F (runner integration) — depends on E (loop module)
+    9. Suite I (vertical integration) — depends on all above
+
+================================================================================
+END OF CORRECTED TEST PLAN (REVIEW V1)
+================================================================================

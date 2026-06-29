@@ -1,0 +1,858 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — CORRECTED TEST PLAN (REVIEW V2)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python) — pytest, tests/agent/test_compression_*.py
+Target: OpenClaw (TypeScript) — Vitest, co-located *.test.ts files
+Porting Plan: code_port_plan_review_V4.txt (Steps 1-9)
+Date: 2026-06-28
+Revision: Review V2 (corrected from V2 initial)
+
+================================================================================
+REVIEW CHANGE LOG (V2 -> Review V2)
+================================================================================
+
+  This plan corrects 7 issues found during code-level verification of the
+  V2 test plan against the actual OpenClaw codebase. See the companion
+  test_plan_review_summary_V2.txt for full documentation of each issue.
+
+  CORRECTIONS APPLIED:
+
+  FIX-T1:  TEST 4.12 BOUNDARY MATH CORRECTED. V2 NOTE stated Hermes's
+           `new_tokens < orig_tokens * 0.95` returns true for exactly 5%
+           reduction (950 from 1000). This is WRONG: 950 < 950 is false.
+           Exactly 5% reduction is NOT progress; you need >5% (strict <).
+           Test expectation corrected to false.
+
+  FIX-T2:  SUITE C MODEL NAME aligned with existing convention. V2 used
+           `model: "test-model"` in inline helpers. Existing tests
+           (compaction-trailing-toolresult.test.ts, compaction-image-tokens
+           .test.ts) consistently use `model: "claude-fable-5"`. Corrected
+           to match codebase convention.
+
+  FIX-T3:  CompactResult TYPE DOCUMENTATION corrected. V2 IMP-6 claimed
+           CompactResult is a "discriminated union." The actual type
+           (context-engine/types.ts:126-141) is a flat type with
+           `ok: boolean; compacted: boolean`. NOT a discriminated union
+           with literal types. The mock factories produce valid objects
+           (using `as const` for narrowing), but the documentation claim
+           was inaccurate. Corrected throughout.
+
+  FIX-T4:  SUITE F vi.doMock PATH CORRECTED. V2 specified
+           `vi.doMock("../../multi-pass-compaction.js", ...)` in the
+           harness extension. From the harness at
+           `src/agents/embedded-agent-runner/run.overflow-compaction.harness.ts`:
+             `../../` = `src/` (TWO levels up)
+             `../` = `src/agents/` (ONE level up)
+           The target module `src/agents/multi-pass-compaction.ts` is
+           at `src/agents/`, so the correct path is
+           `"../multi-pass-compaction.js"`, not `"../../..."`.
+           Verified against 25+ existing vi.doMock paths in the harness:
+             `../defaults.js` = `src/agents/defaults.js`
+             `../auth-profiles.js` = `src/agents/auth-profiles.js`
+           Pattern: one `../` from the harness reaches `src/agents/`.
+
+  FIX-T5:  SUITE G CLAMPING LOCATION CLARIFIED. V2 tests 10.5 and 10.6
+           assumed clamping in applyCompactionDefaults. Existing OpenClaw
+           convention: applyCompactionDefaults ONLY sets missing defaults
+           (currently only mode:"safeguard"). It does NOT clamp values.
+           Range enforcement uses two layers:
+             Layer 1: Zod schema `.min()/.max()` REJECTS out-of-range
+             Layer 2: Runtime code clamps as belt-and-suspenders
+           Tests 10.5/10.6 restructured: defaults section tests missing-
+           value defaulting (10.1-10.4, 10.7-10.8); schema section tests
+           range rejection (10.5a/10.6a added to Zod block); runtime
+           clamping remains in Suite E (8.20).
+
+  FIX-T6:  TESTS 4.15 AND 8.16/8.17 CONTRADICTION RESOLVED. V2 had:
+           - Test 4.15: progressMade=false → continue: false (immediate)
+           - Test 8.17: Loop continues after first sub-5% pass (tolerant)
+           These are contradictory. Resolution: shouldContinueMultiPass
+           does NOT check progressMade directly. It checks
+           consecutiveNoProgress (a counter maintained by the caller).
+           Test 4.15 removed. Test 4.18 remains as the sole no-progress
+           exit test. New test 4.15 added for "continue when counter
+           below threshold." Alignment with Hermes behavior clarified:
+           Hermes breaks immediately; OpenClaw adds tolerance via the
+           consecutiveNoProgress counter, which is an INTENTIONAL
+           enhancement documented in the port plan.
+
+  FIX-T7:  SUITE G materializeCompactionConfig TYPING improved. V2 used
+           `Record<string, unknown>` with `as any`. Corrected to use the
+           existing pattern from config.compaction-settings.test.ts which
+           uses `NonNullable<...>` type narrowing on `OpenClawConfig`.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1.  Testing Strategy Overview
+  2.  Test File Inventory
+  3.  Shared Test Utilities & Fixtures
+  4.  TEST SUITE A — Progress Detection & Anti-Thrashing
+  5.  TEST SUITE B — Pre-Compaction Pruning
+  6.  TEST SUITE C — Cut Point Enhancement (Message Anchoring)
+  7.  TEST SUITE D — Summary Prefix Disambiguation
+  8.  TEST SUITE E — Multi-Pass Compaction Loop
+  9.  TEST SUITE F — Embedded Runner Integration
+  10. TEST SUITE G — Configuration Schema Extension
+  11. TEST SUITE H — Compaction-Safeguard Integration
+  12. TEST SUITE I — Integration / Vertical Slice
+  13. Regression Coverage Matrix
+  14. Mock & Fixture Dependency Map
+  15. Test Execution & CI Notes
+
+================================================================================
+1. TESTING STRATEGY OVERVIEW
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 1]
+
+================================================================================
+2. TEST FILE INVENTORY
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 2]
+
+  The harness vi.doMock path correction (FIX-T4) changes the internal
+  content of the harness extension but not the file list.
+
+================================================================================
+3. SHARED TEST UTILITIES & FIXTURES
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 3]
+
+================================================================================
+4. TEST SUITE A — PROGRESS DETECTION & ANTI-THRASHING
+================================================================================
+
+  FILE: src/agents/agent-hooks/compaction-progress.test.ts
+  SOURCE: src/agents/agent-hooks/compaction-progress.ts
+  PORTED FROM: Hermes agent/turn_context.py _compression_made_progress
+
+  FRAMEWORK SETUP:
+    import { describe, expect, it } from "vitest";
+    import {
+      compressionMadeProgress,
+      shouldContinueMultiPass,
+    } from "./compaction-progress.js";
+
+  NOTES:
+    - compressionMadeProgress: PURE FUNCTION, 4 plain parameters:
+      (origLen: number, newLen: number, origTokens: number, newTokens: number)
+    - shouldContinueMultiPass: takes structured params object.
+    - No mocks needed — pure functions, no I/O, no side effects.
+
+  -- describe("compressionMadeProgress") -----------------------------------------
+
+    4.1 it("returns true when messages are reduced")
+        CALL: compressionMadeProgress(10, 5, 1000, 1000)
+        EXPECT: true
+
+    4.2 it("returns true when tokens are reduced without message change")
+        CALL: compressionMadeProgress(220, 220, 288_028, 183_180)
+        EXPECT: true
+
+    4.3 it("returns true when both messages and tokens are reduced")
+        CALL: compressionMadeProgress(220, 180, 288_028, 150_000)
+        EXPECT: true
+
+    4.4 it("returns false when neither messages nor tokens changed")
+        CALL: compressionMadeProgress(10, 10, 1000, 1000)
+        EXPECT: false
+
+    4.5 it("returns false when both messages and tokens increased")
+        CALL: compressionMadeProgress(10, 12, 1000, 1200)
+        EXPECT: false
+
+    4.6 it("returns true when messages grew but tokens dropped significantly")
+        CALL: compressionMadeProgress(10, 11, 1000, 600)
+        EXPECT: true
+
+    4.7 it("returns true when tokens grew but messages dropped significantly")
+        CALL: compressionMadeProgress(10, 5, 1000, 1100)
+        EXPECT: true
+
+    4.8 it("returns false when token reduction is below 5% threshold")
+        CALL A: compressionMadeProgress(10, 10, 1000, 970)
+        EXPECT A: false (3% drop, below 5% threshold)
+        CALL B: compressionMadeProgress(10, 10, 1000, 940)
+        EXPECT B: true (6% drop, above 5% threshold)
+
+    4.9 it("returns false when original tokens are zero (degenerate)")
+        CALL: compressionMadeProgress(10, 10, 0, 0)
+        EXPECT: false
+
+  -- describe("compressionMadeProgress edge cases") --------------------------------
+
+    4.10 it("handles NaN token values gracefully")
+         CALL: compressionMadeProgress(10, 10, NaN, 50000)
+         EXPECT: false
+
+    4.11 it("handles negative token values")
+         CALL: compressionMadeProgress(10, 10, -100, 50000)
+         EXPECT: false
+
+    CHANGE FROM V2 (FIX-T1):
+
+    4.12 it("returns false for exactly 5% token reduction (strict < threshold)")
+         WHAT: Hermes uses `new_tokens < orig_tokens * 0.95`, which is a
+               STRICT less-than. Exactly 5% reduction (950 from 1000) means
+               `950 < 1000 * 0.95` = `950 < 950` = false. You need MORE
+               than 5% reduction to count as progress.
+         CALL A: compressionMadeProgress(10, 10, 1000, 950)
+         EXPECT A: false (exactly 5% reduction — NOT progress)
+         CALL B: compressionMadeProgress(10, 10, 1000, 949)
+         EXPECT B: true (5.1% reduction — IS progress)
+         NOTE: V2 incorrectly stated "returns true." Corrected to match
+               Hermes's strict < semantics.
+
+  -- describe("shouldContinueMultiPass") -------------------------------------------
+
+    CHANGE FROM V2 (FIX-T6):
+
+    The shouldContinueMultiPass function does NOT receive progressMade
+    directly. It receives the consecutiveNoProgress counter maintained
+    by the caller (multiPassCompact). The function's decision tree is:
+
+      1. Check abortSignal.aborted → false, "aborted"
+      2. Check passNumber >= maxPasses → false, "max_passes_reached"
+      3. Check tokensAfter <= targetTokens → false, "target_reached"
+      4. Check consecutiveNoProgress >= 2 → false, "anti_thrash"
+      5. Otherwise → true (continue)
+
+    The caller (multiPassCompact) runs compressionMadeProgress after each
+    pass, increments/resets the counter, and passes it here.
+
+    4.13 it("returns false when maxPasses reached")
+         INPUT: { passNumber: 3, maxPasses: 3,
+                  tokensAfter: 120000, targetTokens: 100000,
+                  consecutiveNoProgress: 0 }
+         EXPECT: { continue: false, reason: "max_passes_reached" }
+
+    4.14 it("returns false when tokens are at or below target")
+         INPUT: { passNumber: 1, maxPasses: 3, tokensAfter: 80000,
+                  targetTokens: 100000, consecutiveNoProgress: 0 }
+         EXPECT: { continue: false, reason: "target_reached" }
+
+    4.15 it("returns true when counter below anti-thrash threshold")
+         WHAT: A single no-progress pass does NOT stop the loop. The
+               counter must reach 2 for anti-thrash exit. This is an
+               INTENTIONAL enhancement over Hermes (which stops
+               immediately) — it gives the compactor a second chance.
+         INPUT: { passNumber: 1, maxPasses: 5,
+                  tokensAfter: 120000, targetTokens: 100000,
+                  consecutiveNoProgress: 1 }
+         EXPECT: { continue: true }
+
+    4.16 it("returns true when tokens above target and counter is zero")
+         WHAT: Happy path: keep going.
+         INPUT: { passNumber: 1, maxPasses: 3,
+                  tokensAfter: 120000, targetTokens: 100000,
+                  consecutiveNoProgress: 0 }
+         EXPECT: { continue: true }
+
+    4.17 it("returns false on abort signal")
+         SETUP: const ac = new AbortController(); ac.abort();
+         INPUT: { passNumber: 1, maxPasses: 3,
+                  tokensAfter: 120000, targetTokens: 100000,
+                  consecutiveNoProgress: 0, abortSignal: ac.signal }
+         EXPECT: { continue: false, reason: "aborted" }
+
+    4.18 it("returns false when consecutive no-progress count reaches 2")
+         INPUT: { passNumber: 2, maxPasses: 5,
+                  tokensAfter: 120000, targetTokens: 100000,
+                  consecutiveNoProgress: 2 }
+         EXPECT: { continue: false, reason: "anti_thrash" }
+
+  TEST COUNT: 18 tests (12 + 6)
+
+================================================================================
+5. TEST SUITE B — PRE-COMPACTION PRUNING
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 5]
+
+  TEST COUNT: 22 tests
+
+================================================================================
+6. TEST SUITE C — CUT POINT ENHANCEMENT (MESSAGE ANCHORING)
+================================================================================
+
+  FILE: packages/agent-core/src/harness/compaction/compaction-anchoring.test.ts
+  SOURCE: packages/agent-core/src/harness/compaction/compaction.ts (modified)
+
+  FRAMEWORK SETUP:
+
+    [UNCHANGED from V2 — same imports and approach]
+
+  HELPER FUNCTIONS (defined inline, matching existing pattern):
+
+    CHANGE FROM V2 (FIX-T2):
+
+    All inline helpers use `model: "claude-fable-5"` to match the
+    convention used in existing compaction test files:
+      - compaction-trailing-toolresult.test.ts (line 20)
+      - compaction-image-tokens.test.ts (line 17)
+
+    function userText(text: string, timestamp: number): AgentMessage {
+      return { role: "user", content: [{ type: "text", text }], timestamp };
+    }
+
+    function assistantText(text: string, timestamp: number): AgentMessage {
+      return {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        api: "anthropic-messages" as const,
+        provider: "anthropic" as const,
+        model: "claude-fable-5",
+        usage: {
+          input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop" as const,
+        timestamp,
+      };
+    }
+
+    function assistantToolCallOnly(
+      toolCallId: string, timestamp: number,
+    ): AgentMessage {
+      return {
+        role: "assistant",
+        content: [{
+          type: "toolCall", id: toolCallId, name: "test_tool",
+          arguments: {},
+        }],
+        api: "anthropic-messages" as const,
+        provider: "anthropic" as const,
+        model: "claude-fable-5",
+        usage: {
+          input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "tool_use" as const,
+        timestamp,
+      };
+    }
+
+    function toolResultText(
+      text: string, toolCallId: string, timestamp: number,
+    ): AgentMessage {
+      return {
+        role: "toolResult",
+        toolCallId,
+        toolName: "test_tool",
+        content: [{ type: "text", text }],
+        isError: false,
+        timestamp,
+      };
+    }
+
+    function makeEntry(msg: AgentMessage, index: number): SessionTreeEntry {
+      return {
+        type: "message",
+        id: `entry-${index}`,
+        parentId: index === 0 ? null : `entry-${index - 1}`,
+        timestamp: new Date(msg.timestamp).toISOString(),
+        message: msg,
+      };
+    }
+
+  TESTS 6.1 through 6.12:
+
+    [UNCHANGED from V2 — same test cases and assertions.
+     Only the model name in helpers changed from "test-model" to
+     "claude-fable-5". No impact on test logic since estimateTokens
+     does not use the model field.]
+
+  TEST COUNT: 12 tests
+
+================================================================================
+7. TEST SUITE D — SUMMARY PREFIX DISAMBIGUATION
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 7]
+
+  TEST COUNT: 6 tests
+
+================================================================================
+8. TEST SUITE E — MULTI-PASS COMPACTION LOOP
+================================================================================
+
+  FILE: src/agents/multi-pass-compaction.test.ts
+  SOURCE: src/agents/multi-pass-compaction.ts (new gateway-layer module)
+
+  FRAMEWORK SETUP:
+
+    multiPassCompact receives a contextEngine (or a compact function) as
+    a parameter, NOT as a module import. Tests inject a mock object directly.
+
+    CHANGE FROM V2 (FIX-T3):
+
+    CompactResult is a FLAT TYPE with `ok: boolean; compacted: boolean`
+    (not a discriminated union with literal types). The `as const`
+    narrowing in mock factories is for convenience — it narrows the type
+    for better IntelliSense but the values are assignable to the wider
+    `boolean` type.
+
+    import { describe, expect, it, vi, beforeEach } from "vitest";
+    import { multiPassCompact } from "./multi-pass-compaction.js";
+    import type { CompactResult } from "../context-engine/types.js";
+
+    function createMockContextEngine() {
+      return {
+        info: { ownsCompaction: false },
+        compact: vi.fn(async (): Promise<CompactResult> => ({
+          ok: false,
+          compacted: false,
+          reason: "nothing to compact",
+        })),
+      };
+    }
+
+    // Factory helpers produce valid CompactResult objects.
+    // NOTE: CompactResult is { ok: boolean; compacted: boolean; ... }
+    // (a flat type, NOT a discriminated union).
+    function makeCompactSuccess(overrides: {
+      tokensAfter?: number;
+      tokensBefore?: number;
+      summary?: string;
+    } = {}): CompactResult {
+      return {
+        ok: true,
+        compacted: true,
+        result: {
+          summary: overrides.summary ?? "Compacted session",
+          tokensBefore: overrides.tokensBefore ?? 200000,
+          tokensAfter: overrides.tokensAfter ?? 100000,
+          firstKeptEntryId: "entry-5",
+        },
+      };
+    }
+
+    function makeCompactNotCompacted(reason: string): CompactResult {
+      return { ok: true, compacted: false, reason };
+    }
+
+    function makeCompactFailure(reason: string): CompactResult {
+      return { ok: false, compacted: false, reason };
+    }
+
+    const baseCompactParams = {
+      sessionId: "test-session",
+      sessionKey: "test-key",
+      sessionFile: "/tmp/session.jsonl",
+      tokenBudget: 100000,
+      force: true,
+      compactionTarget: "budget" as const,
+    };
+
+    let mockEngine: ReturnType<typeof createMockContextEngine>;
+
+    beforeEach(() => {
+      mockEngine = createMockContextEngine();
+    });
+
+  TESTS 8.1 through 8.14:
+
+    [UNCHANGED from V2 — same test cases and assertions]
+
+  -- describe("multiPassCompact progress tracking") -------------------------------
+
+    8.15 it("uses tokensAfter from pass N as baseline for pass N+1 progress check")
+         [UNCHANGED from V2]
+
+    CHANGE FROM V2 (FIX-T6): Tests 8.16 and 8.17 now align with the
+    shouldContinueMultiPass design where consecutiveNoProgress is tracked
+    by multiPassCompact and a single sub-threshold pass does NOT stop
+    the loop (only 2 consecutive stops it).
+
+    8.16 it("tracks consecutive no-progress passes for anti-thrashing")
+         WHAT: Two consecutive sub-threshold passes trigger anti-thrash exit.
+         SETUP: Pass 1: 200000 -> 195000 (2.5% — sub-threshold, counter→1)
+                Pass 2: 195000 -> 193000 (1% — sub-threshold, counter→2)
+         EXPECT: compact called TWICE (not once), loop exits with
+                 reason "anti_thrash" after pass 2.
+                 This confirms the loop continued past the first
+                 sub-threshold pass (counter was 1 < 2).
+
+    8.17 it("resets consecutive no-progress counter after a good pass")
+         SETUP: Pass 1: 200000 -> 195000 (2.5% — marginal, counter→1)
+                Pass 2: 195000 -> 150000 (23% — good, counter→0)
+                Pass 3: 150000 -> 148000 (1.3% — marginal, counter→1)
+         EXPECT: compact called THREE times (not two). Loop exits after
+                 pass 3 because pass 2 reset the counter.
+                 passesCompleted === 3.
+
+  -- describe("multiPassCompact configuration defaults") --------------------------
+
+    8.18 it("defaults maxPasses to 3 when not specified")
+         [UNCHANGED from V2]
+
+    8.19 it("defaults minProgressThreshold to 0.05 (5%)")
+         [UNCHANGED from V2]
+
+    8.20 it("clamps maxPasses to [1, 10] at runtime")
+         WHAT: Runtime safety clamp in multiPassCompact itself (belt-and-
+               suspenders, since Zod schema also validates ranges).
+         [UNCHANGED from V2]
+
+  TEST COUNT: 20 tests
+
+================================================================================
+9. TEST SUITE F — EMBEDDED RUNNER INTEGRATION
+================================================================================
+
+  FILE: src/agents/embedded-agent-runner/run/multi-pass-compaction-
+        integration.test.ts
+
+  FRAMEWORK SETUP:
+
+    CHANGE FROM V2 (FIX-T4):
+
+    HARNESS EXTENSION (run.overflow-compaction.harness.ts):
+
+      The vi.doMock path for multiPassCompact is corrected from
+      `"../../multi-pass-compaction.js"` to `"../multi-pass-compaction.js"`.
+
+      From the harness at:
+        src/agents/embedded-agent-runner/run.overflow-compaction.harness.ts
+
+      Resolution: `../` = `src/agents/` (one level up)
+      Target module: `src/agents/multi-pass-compaction.ts`
+      Correct path: `"../multi-pass-compaction.js"`
+
+      Verified against existing harness vi.doMock paths:
+        `../defaults.js`        → src/agents/defaults.js         ✓
+        `../auth-profiles.js`   → src/agents/auth-profiles.js    ✓
+        `../failover-error.js`  → src/agents/failover-error.js   ✓
+        `../multi-pass-compaction.js` → src/agents/multi-pass-compaction.js ✓
+
+      CORRECTED HARNESS CODE:
+
+      // New mock export
+      export const mockedMultiPassCompact = vi.fn(async () => ({
+        ok: true,
+        compacted: true,
+        passesCompleted: 1,
+        result: {
+          summary: "Compacted",
+          tokensAfter: 80000,
+          tokensBefore: 200000,
+          firstKeptEntryId: "entry-5",
+        },
+      }));
+
+      // In loadRunOverflowCompactionHarness():
+      vi.doMock("../multi-pass-compaction.js", () => ({
+        multiPassCompact: mockedMultiPassCompact,
+      }));
+
+      // In resetRunOverflowCompactionHarnessMocks():
+      mockedMultiPassCompact.mockReset();
+      mockedMultiPassCompact.mockResolvedValue({
+        ok: true, compacted: true, passesCompleted: 1,
+        result: { summary: "Compacted", tokensAfter: 80000,
+                  tokensBefore: 200000, firstKeptEntryId: "entry-5" },
+      });
+
+  TESTS 9.1 through 9.7:
+
+    [UNCHANGED from V2 — same test cases and assertions]
+
+  TEST COUNT: 7 tests
+
+================================================================================
+10. TEST SUITE G — CONFIGURATION SCHEMA EXTENSION
+================================================================================
+
+  FILE: src/config/config.multi-pass-compaction.test.ts
+
+  FRAMEWORK SETUP:
+
+    CHANGE FROM V2 (FIX-T5, FIX-T7):
+
+    Follows the exact existing pattern from config.compaction-settings.test.ts:
+
+    import { describe, expect, it } from "vitest";
+    import { applyCompactionDefaults } from "./defaults.js";
+    import type { OpenClawConfig } from "./types.js";
+
+    // For Zod schema validation tests
+    import { OpenClawSchema } from "./zod-schema.js";
+
+    // Local helper — matches EXACT pattern from config.compaction-settings.test.ts
+    // Uses proper type narrowing, NOT Record<string, unknown> with as any.
+    function materializeCompactionConfig(
+      compaction: NonNullable<
+        NonNullable<OpenClawConfig["agents"]>["defaults"]
+      >["compaction"],
+    ) {
+      const cfg = applyCompactionDefaults({
+        agents: {
+          defaults: {
+            compaction,
+          },
+        },
+      });
+      return cfg.agents?.defaults?.compaction;
+    }
+
+  IMPORTANT CONTEXT:
+
+    The Zod compaction schema (zod-schema.agent-defaults.ts:158-205)
+    uses .strict(). New fields MUST be added to the Zod schema, the
+    TypeScript type, AND the defaults function.
+
+    CHANGE FROM V2 (FIX-T5): Clamping is NOT done in applyCompactionDefaults.
+    Existing convention: defaults functions only fill MISSING values. Range
+    enforcement happens in two layers:
+      Layer 1: Zod schema `.min()/.max()` REJECTS out-of-range values
+      Layer 2: Runtime code (multiPassCompact) clamps as safety measure
+
+  -- describe("multi-pass compaction configuration defaults") ----------------------
+
+    10.1 it("applies default maxPasses=3 when not specified")
+         INPUT: materializeCompactionConfig({})
+         EXPECT: result.maxPasses === 3
+
+    10.2 it("applies default minProgressThreshold=0.05 when not specified")
+         INPUT: materializeCompactionConfig({})
+         EXPECT: result.minProgressThreshold === 0.05
+
+    10.3 it("preserves user-specified maxPasses")
+         INPUT: materializeCompactionConfig({ maxPasses: 5 })
+         EXPECT: result.maxPasses === 5
+
+    10.4 it("preserves user-specified minProgressThreshold")
+         INPUT: materializeCompactionConfig({ minProgressThreshold: 0.10 })
+         EXPECT: result.minProgressThreshold === 0.10
+
+    10.5 it("preserves existing compaction settings alongside new fields")
+         INPUT: materializeCompactionConfig({
+                  mode: "safeguard",
+                  reserveTokens: 16384,
+                  keepRecentTokens: 20000,
+                  maxPasses: 2,
+                  recentTurnsPreserve: 3,
+                })
+         EXPECT: All fields preserved; no existing settings dropped
+
+    10.6 it("handles undefined compaction block gracefully")
+         INPUT: applyCompactionDefaults({} as OpenClawConfig)
+         EXPECT: Returns config without crash. (Current behavior: returns
+                 unchanged when no agents.defaults block exists.)
+
+  -- describe("multi-pass compaction Zod schema validation") ----------------------
+
+    10.7 it("accepts valid multi-pass config fields")
+         INPUT: OpenClawSchema.safeParse({
+                  agents: { defaults: {
+                    compaction: { maxPasses: 3,
+                                  minProgressThreshold: 0.05 }
+                  }}
+                })
+         EXPECT: result.success === true
+
+    10.8 it("rejects invalid type for maxPasses")
+         INPUT: OpenClawSchema.safeParse({
+                  agents: { defaults: {
+                    compaction: { maxPasses: "three" }
+                  }}
+                })
+         EXPECT: result.success === false
+
+    10.9 it("rejects invalid type for minProgressThreshold")
+         INPUT: OpenClawSchema.safeParse({
+                  agents: { defaults: {
+                    compaction: { minProgressThreshold: "high" }
+                  }}
+                })
+         EXPECT: result.success === false
+
+    CHANGE FROM V2 (FIX-T5): Tests for range enforcement via Zod schema.
+    These were previously tests 10.5/10.6 (clamping in defaults).
+
+    10.10 it("rejects maxPasses below minimum via Zod schema")
+          INPUT: OpenClawSchema.safeParse({
+                   agents: { defaults: {
+                     compaction: { maxPasses: 0 }
+                   }}
+                 })
+          EXPECT: result.success === false
+          NOTE: Zod schema uses z.number().int().min(1).max(10)
+
+    10.11 it("rejects maxPasses above maximum via Zod schema")
+          INPUT: OpenClawSchema.safeParse({
+                   agents: { defaults: {
+                     compaction: { maxPasses: 100 }
+                   }}
+                 })
+          EXPECT: result.success === false
+
+    10.12 it("rejects minProgressThreshold outside valid range via Zod")
+          INPUT A: OpenClawSchema.safeParse({
+                     agents: { defaults: {
+                       compaction: { minProgressThreshold: 0 }
+                     }}
+                   })
+          EXPECT A: result.success === false
+          INPUT B: OpenClawSchema.safeParse({
+                     agents: { defaults: {
+                       compaction: { minProgressThreshold: 0.99 }
+                     }}
+                   })
+          EXPECT B: result.success === false
+
+    10.13 it("backwards-compatible with pre-multi-pass configs")
+          INPUT: OpenClawSchema.safeParse({
+                   agents: { defaults: {
+                     compaction: { mode: "safeguard", reserveTokens: 16384 }
+                   }}
+                 })
+          EXPECT: result.success === true
+
+    10.14 it("rejects unknown keys in compaction config (strict mode)")
+          INPUT: OpenClawSchema.safeParse({
+                   agents: { defaults: {
+                     compaction: { unknownField: 42 }
+                   }}
+                 })
+          EXPECT: result.success === false
+
+  TEST COUNT: 14 tests (6 defaults + 8 schema)
+
+================================================================================
+11. TEST SUITE H — COMPACTION-SAFEGUARD INTEGRATION
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 11]
+
+  TEST COUNT: 4 tests
+
+================================================================================
+12. TEST SUITE I — INTEGRATION / VERTICAL SLICE
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 12]
+
+  TEST COUNT: 4 tests
+
+================================================================================
+13. REGRESSION COVERAGE MATRIX
+================================================================================
+
+  +----------------------------------------------------------------------+
+  | Hermes Regression / Concern    | Port Plan  | OpenClaw Test Suite     |
+  |                                | Reference  | & Test ID(s)           |
+  +----------------------------------------------------------------------+
+  | #39548: Token-only progress    | Step 2     | A: 4.2                 |
+  | (no row/message reduction)     |            |                        |
+  +----------------------------------------------------------------------+
+  | Sub-5% noise filter            | Step 2     | A: 4.8, 4.12           |
+  +----------------------------------------------------------------------+
+  | Exact 5% boundary (strict <)   | Step 2     | A: 4.12                |
+  +----------------------------------------------------------------------+
+  | Zero-token degenerate          | Step 2     | A: 4.9                 |
+  +----------------------------------------------------------------------+
+  | NaN/negative token values      | Step 2     | A: 4.10, 4.11          |
+  +----------------------------------------------------------------------+
+  | Anti-thrash: consecutive       | Step 2+6   | A: 4.15, 4.18 ;        |
+  | no-progress passes             |            | E: 8.16-8.17           |
+  +----------------------------------------------------------------------+
+  | Tool result deduplication      | Step 3     | B: 5.1-5.4             |
+  +----------------------------------------------------------------------+
+  | Tool result summarization      | Step 3     | B: 5.5-5.9             |
+  +----------------------------------------------------------------------+
+  | Tool call argument truncation  | Step 3     | B: 5.10-5.18           |
+  +----------------------------------------------------------------------+
+  | Head/tail protection           | Step 4     | C: 6.1-6.12            |
+  | (user + assistant anchoring)   |            |                        |
+  +----------------------------------------------------------------------+
+  | Summary prefix disambiguation  | Step 5     | D: 7.1-7.4             |
+  +----------------------------------------------------------------------+
+  | Summary end marker             | Step 5     | D: 7.5-7.6             |
+  +----------------------------------------------------------------------+
+  | Multi-pass loop termination    | Step 6     | E: 8.1-8.5             |
+  +----------------------------------------------------------------------+
+  | Abort handling in multi-pass   | Step 6     | E: 8.6-8.8             |
+  +----------------------------------------------------------------------+
+  | Error recovery in multi-pass   | Step 6     | E: 8.9-8.12            |
+  +----------------------------------------------------------------------+
+  | Incremental progress tracking  | Step 6     | E: 8.15-8.17           |
+  +----------------------------------------------------------------------+
+  | Config defaults                | Step 8     | G: 10.1-10.6           |
+  +----------------------------------------------------------------------+
+  | Zod schema validation +        | Step 8     | G: 10.7-10.14          |
+  | range enforcement + compat     |            |                        |
+  +----------------------------------------------------------------------+
+  | Runner integration: overflow   | Step 7     | F: 9.1-9.7             |
+  +----------------------------------------------------------------------+
+  | Pre-pruning injection in       | Step 3+7   | H: 11.1-11.4           |
+  | compaction-safeguard           |            |                        |
+  +----------------------------------------------------------------------+
+  | Port Plan FIX-1: ToolCall      | Step 3     | B: 5.4, 5.13, 5.18    |
+  | id/name vs toolCallId/toolName |            |                        |
+  +----------------------------------------------------------------------+
+  | Port Plan FIX-2: ToolCall.args | Step 3     | B: 5.10-5.12, 5.15    |
+  | Record<> vs JSON string        |            |                        |
+  +----------------------------------------------------------------------+
+  | Port Plan FIX-3: entry.message | Step 4     | C: 6.1, 6.3           |
+  | .role vs entry.role            |            |                        |
+  +----------------------------------------------------------------------+
+  | Port Plan FIX-4: entry.message | Step 4     | C: 6.4, 6.5           |
+  | .content vs entry.content      |            |                        |
+  +----------------------------------------------------------------------+
+  | Port Plan REF-2/D10: stale     | Step 6     | E: 8.13               |
+  | compactParams across passes    |            |                        |
+  +----------------------------------------------------------------------+
+
+================================================================================
+14. MOCK & FIXTURE DEPENDENCY MAP
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 14]
+
+  Only FIX-T3 changes: Remove the "discriminated union" language from
+  the CompactResult description. Replace with "flat type with boolean
+  flags" in documentation references.
+
+  Only FIX-T4 changes: M2 note updated with corrected vi.doMock path
+  (`"../multi-pass-compaction.js"` not `"../../..."`).
+
+================================================================================
+15. TEST EXECUTION & CI NOTES
+================================================================================
+
+  15.1 VITEST SHARD ASSIGNMENT
+       [UNCHANGED FROM V2]
+
+  15.2 TEST ISOLATION
+       [UNCHANGED FROM V2]
+
+  15.3 PERFORMANCE BUDGET
+       [UNCHANGED FROM V2]
+
+  15.4 EXPECTED TEST COUNT
+
+    Suite A: 18 tests  (progress detection & anti-thrashing)
+    Suite B: 22 tests  (pre-compaction pruning)
+    Suite C: 12 tests  (cut point anchoring)
+    Suite D:  6 tests  (summary prefix disambiguation)
+    Suite E: 20 tests  (multi-pass loop)
+    Suite F:  7 tests  (embedded runner integration)
+    Suite G: 14 tests  (configuration schema extension)  ← was 13, now 14
+    Suite H:  4 tests  (compaction-safeguard integration)
+    Suite I:  4 tests  (vertical integration)
+    -------------------
+    TOTAL: 107 tests   ← was 106, now 107
+
+  15.5 PRIORITY ORDER FOR IMPLEMENTATION
+       [UNCHANGED FROM V2]
+
+================================================================================
+END OF CORRECTED TEST PLAN (REVIEW V2)
+================================================================================

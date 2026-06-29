@@ -1,0 +1,357 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — REVIEW SUMMARY V4
+================================================================================
+
+Date: 2026-06-28
+Review of: code_port_plan_V4.txt (Iteration 4)
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+5 issues were found during code-level verification of the V4 plan against
+the actual OpenClaw source code, plus 2 refinements. Issues grouped by
+severity.
+
+──── SIGNIFICANT ISSUES (2) — Would cause TypeScript compilation or runtime failures ────
+
+ISSUE #1: ToolCall FIELD NAMES WRONG
+
+  Affected: Step 3, sub-pass 3 (truncate tool call arguments) and sub-pass 4
+
+  What V4 says:
+    Content block: { type: "toolCall", toolCallId, toolName, arguments }
+
+  What the actual type is (packages/llm-core/src/types.ts:251-258):
+    export interface ToolCall {
+      type: "toolCall";
+      id: string;                       // NOT toolCallId
+      name: string;                      // NOT toolName
+      arguments: Record<string, unknown>;
+      thoughtSignature?: string;
+      executionMode?: "sequential" | "parallel";
+    }
+
+  Why V4 got this wrong:
+    V4 incorporated lessons L25 (ToolResultMessage.toolCallId) and L29
+    (ToolResultMessage.toolName) from the V2 review. These are the
+    CORRECT field names for ToolResultMessage. But V4 then applied these
+    same field names to ToolCall content blocks in assistant messages,
+    which are a DIFFERENT type with DIFFERENT field names.
+
+    ToolResultMessage: { toolCallId, toolName }  ← correct
+    ToolCall:          { id, name }               ← V4 got this wrong
+
+  Verification path:
+    - packages/llm-core/src/types.ts line 251: ToolCall interface
+    - Field "id: string" at line 253
+    - Field "name: string" at line 254
+    - Field "arguments: Record<string, unknown>" at line 255
+
+  Why it matters: Accessing tc.toolCallId and tc.toolName on a ToolCall
+  object would return undefined, silently producing wrong results. TypeScript
+  would catch this at compile time because the fields don't exist on the
+  ToolCall interface.
+
+  Fix: Use id, name for ToolCall content blocks. Reserve toolCallId,
+  toolName for ToolResultMessage.
+
+
+ISSUE #2: ToolCall.arguments IS Record<string, unknown>, NOT string
+
+  Affected: Step 3, sub-pass 3 (truncate tool call arguments)
+
+  What V4 says:
+    "If ToolCall.arguments is a string > 500 chars:
+     a. Parse as JSON
+     b. Truncate string values > 200 chars (keep head + "...[truncated]")
+     c. Re-serialize
+     d. On JSON parse failure: truncate raw string with head + "...[truncated]""
+
+  What the actual type is:
+    arguments: Record<string, unknown>
+
+  Why V4 got this wrong:
+    This is a direct translation artifact from Hermes. In Hermes (Python),
+    tool call arguments are stored as a JSON string:
+      tc.get("function", {}).get("arguments", "")
+    V4 ported the string-based logic directly without adapting to OpenClaw's
+    already-parsed representation.
+
+  Why it matters:
+    - Checking string.length > 500 on a Record would always return false
+      (typeof check would fail)
+    - JSON.parse() on an already-parsed object would no-op (it's already an object)
+    - The entire sub-pass 3 would be inert
+
+  Fix: Adapt to object-based truncation:
+    a. Estimate size: JSON.stringify(tc.arguments).length > 500
+    b. Walk the object's values recursively
+    c. For string values > 200 chars: replace with truncated version
+    d. Return a new Record (no JSON parse/re-serialize needed)
+
+
+──── MODERATE ISSUES (2) — Would cause incorrect behavior ──────────────────────
+
+ISSUE #3: findCutPoint ANCHORING USES WRONG PROPERTY PATH
+
+  Affected: Step 4 (cut point enhancement, user/assistant anchoring)
+
+  What V4 says:
+    const lastUserIdx = findLastIndex(entries, startIndex, cutIdx,
+      (e) => e.type === "message" && "role" in e && e.role === "user");
+
+  What the actual type structure is:
+    MessageEntry = { type: "message"; message: AgentMessage }
+
+    The entry itself has NO `role` field. The role is nested:
+      entry.message.role  (not  entry.role)
+
+  Existing code pattern (findValidCutPoints, line 323):
+    const role = (entry.message as HarnessMessage).role;
+
+  Existing code pattern (findCutPoint, line 431):
+    cutEntry.type === "message" && cutEntry.message.role === "user"
+
+  Why it matters: The predicate `"role" in e` would return false for every
+  MessageEntry because `role` is not a direct property of the entry — it's
+  on `entry.message`. The anchoring would NEVER match any entries, making
+  it a complete no-op.
+
+  Fix: Use entry.message to access the role:
+    entry.type === "message" && (entry.message as HarnessMessage).role === "user"
+
+
+ISSUE #4: hasVisibleContent HELPER ACCESSES WRONG PROPERTY PATH
+
+  Affected: Step 4 (cut point enhancement, assistant message anchoring)
+
+  What V4 says:
+    function hasVisibleContent(entry: SessionTreeEntry): boolean {
+      if (entry.type !== "message") return false;
+      const msg = entry as any;
+      if (!msg.content) return false;   // ← checks entry.content
+      ...
+
+  What the actual type structure is:
+    MessageEntry = { type: "message"; message: AgentMessage }
+
+    The content array is on entry.message.content, not entry.content.
+    The entry itself has: type, id, parentId, timestamp, appendMode?
+    It does NOT have a content field.
+
+  Why it matters: `msg.content` would always be undefined (the entry has
+  no content field), causing hasVisibleContent to always return false. The
+  assistant message anchoring would never match any entries.
+
+  Fix: Access content through the message:
+    const msg = (entry as MessageEntry).message;
+    const content = (msg as any).content;
+
+
+──── MINOR ISSUE (1) — Incorrect documentation, no functional impact ───────────
+
+ISSUE #5: baseMessagesToSummarize IS ALREADY `let`, NOT `const`
+
+  Affected: Step 3 (compaction-safeguard.ts modification)
+
+  What V4 says:
+    "VARIABLE MUTABILITY: baseMessagesToSummarize is currently declared with
+     `const`. It must be changed to `let` to allow reassignment after pruning."
+
+  What the actual code is (compaction-safeguard.ts line 884):
+    let baseMessagesToSummarize = stripRuntimeContextCustomMessages(
+      preparation.messagesToSummarize,
+    );
+    // ... and reassigned at line 898:
+    baseMessagesToSummarize = branchMessages;
+
+  Why it matters: The instruction to change const to let would confuse
+  implementors, as the variable is already `let`. Applying the instruction
+  literally would produce no change (let to let). At worst, an implementor
+  might worry they're looking at the wrong variable.
+
+  Fix: Remove the const→let instruction. Note that it's already let.
+
+
+──── REFINEMENTS (2) — Non-issues or documentation improvements ────────────────
+
+REF-1: AbortSignal.any() RISK DOWNGRADED
+
+  V4 listed this as a Low-Medium risk. Actual: OpenClaw targets Node >= 22.19.0
+  (package.json engines field). AbortSignal.any() is supported since Node 22.10.0
+  and is already used in 5+ files across the codebase. This is not a risk.
+
+REF-2: STALE compactParams ON SESSION ROTATION
+
+  multiPassCompact passes the same compactParams snapshot to every pass.
+  If a context engine plugin rotates sessions between passes, subsequent
+  passes would reference stale sessionId/sessionFile values. For the default
+  in-place compaction this is a non-issue. Documented as a known limitation
+  with maxPasses=1 as an escape hatch for rotation plugins.
+
+
+================================================================================
+2. ITERATION EVOLUTION
+================================================================================
+
+─── ITERATION 1: V1 (Initial Plan) ───────────────────────────────────────────
+
+  First attempt from code trace analysis. Established 9-step structure but
+  had fundamental errors.
+
+  Key errors: wrong injection point, missing per-pass lifecycle, wrong file
+  locations, wrong package name, wrong call site count (3 vs 2).
+
+  Issues found: 15 (5 critical, 7 significant, 3 minor)
+
+─── ITERATION 1.5: Review V1 (Corrected Plan) ────────────────────────────────
+
+  Fixed all 15 V1 issues. Moved pre-pruning to compaction-safeguard hook,
+  added per-pass lifecycle callbacks, corrected all file locations.
+
+  Issues fixed: 15
+  New issues discovered: 6
+
+─── ITERATION 2: V2 (From Scratch, 1st rebuild) ─────────────────────────────
+
+  Incorporated 21 issues (15 from V1 + 6 new). Discovered third
+  adoptCompactionTranscript, two-branch overflow adoption, and other
+  structural details.
+
+  Issues incorporated: 21
+
+─── ITERATION 2.5: Review V2 (Corrected Plan) ────────────────────────────────
+
+  Found 8 field-name errors from Python→TypeScript translation:
+  tool_use→toolCall, tool_use_id→toolCallId, input→arguments, etc.
+
+  Issues fixed: 8
+
+─── ITERATION 3: V3 (From Scratch, 2nd rebuild) ─────────────────────────────
+
+  Verification-first methodology. Eliminated all field-name errors from V2.
+  Added 6 verifications.
+
+  Issues incorporated: 29 + 6 verifications
+
+─── ITERATION 3.5: Review V3 (Corrected Plan) ────────────────────────────────
+
+  Found 3 architectural issues: CompactResult type mismatch across package
+  boundaries, variable scoping in try-catch, export list inconsistency.
+
+  Issues fixed: 3
+
+─── ITERATION 4: V4 (From Scratch, 3rd rebuild) ─────────────────────────────
+
+  Complete standalone rebuild. Incorporated all 38 prior issues. Added 9
+  new verifications from direct source reads. Self-contained document with
+  no cross-references.
+
+  Issues incorporated: 38 + 9 verifications
+
+─── ITERATION 4.5: Review V4 (Current — Corrected Plan) ──────────────────────
+
+  SOURCE CODE VERIFICATIONS PERFORMED:
+
+    1. run.ts compaction call sites (lines 2440-2830):
+       - Confirmed all variable declarations, try-catch structures, hook
+         calls, and adoption call sites match V4's claims
+       - Discovered modelFallbacksOverride difference between timeout and
+         overflow runtime contexts (not an issue for the plan, since the
+         full runtime context is preserved unchanged)
+       - Confirmed overflowTokenCountForCompaction is conditionally defined
+
+    2. Type definitions (packages/llm-core/src/types.ts):
+       - Verified ToolCall: { type: "toolCall", id, name, arguments }
+         NOT { toolCallId, toolName } as V4 claimed
+       - Verified arguments: Record<string, unknown>, NOT string
+       - Verified ToolResultMessage: { toolCallId, toolName } (different!)
+       - Verified AssistantMessage.content: (TextContent|ThinkingContent|ToolCall)[]
+
+    3. findCutPoint implementation (compaction.ts lines 388-439):
+       - Verified existing role access pattern: (entry.message as HarnessMessage).role
+       - Verified MessageEntry: { type: "message"; message: AgentMessage }
+       - Confirmed NO direct `role` field on SessionTreeEntry
+       - V4's "role" in e predicate would never match
+
+    4. compaction-safeguard.ts (lines 878-900):
+       - Verified baseMessagesToSummarize declared with `let` at line 884
+       - Verified reassignment at line 898 (branch messages fallback)
+       - V4's const→let instruction was wrong
+
+    5. Node.js version and AbortSignal.any():
+       - Verified engines: { "node": ">=22.19.0" } in package.json
+       - Found 5+ existing uses of AbortSignal.any() in codebase
+       - V4's risk assessment was overly cautious
+
+  CATEGORY BREAKDOWN:
+    - 2 SIGNIFICANT: Would cause TypeScript compilation failures
+      (ToolCall field names, ToolCall.arguments type mismatch)
+    - 2 MODERATE: Would cause incorrect behavior (silent no-ops)
+      (findCutPoint anchoring, hasVisibleContent property paths)
+    - 1 MINOR: Incorrect documentation (baseMessagesToSummarize mutability)
+    - 2 REFINEMENTS: Risk assessment update, design limitation documentation
+
+  ISSUE SEVERITY TREND ACROSS ALL ITERATIONS:
+    V1:        5 critical, 7 significant, 3 minor          (15 total)
+    V2:        0 critical, 5 significant, 1 moderate, 2 minor  (8 total)
+    V3:        0 critical, 0 significant, 6 verifications      (6 V3-specific)
+    Review V3: 0 critical, 1 significant, 1 moderate, 1 minor  (3 total)
+    V4:        0 critical, 0 significant, 9 verifications      (9 V4-specific)
+    Review V4: 0 critical, 2 significant, 2 moderate, 1 minor  (5 issues + 2 refinements)
+
+  KEY OBSERVATION: V4's verification-first methodology successfully
+  prevented all the issues from V1-V3 from recurring. The NEW issues
+  found in Review V4 fall into two categories:
+
+    Category A: TYPE FIELD CONFUSION (Issues #1, #2)
+      V4 correctly learned that ToolResultMessage uses toolCallId/toolName
+      (lessons L25, L29 from V2 Review). But it then INCORRECTLY applied
+      these same field names to ToolCall content blocks, which have
+      different field names (id/name). This is a cross-type confusion
+      error — the lessons were correct but over-applied.
+
+      Additionally, V4 ported Hermes's string-based arguments handling
+      directly without noticing that OpenClaw's ToolCall.arguments is
+      already a parsed Record<string, unknown>, not a JSON string. This
+      is a language-translation artifact.
+
+    Category B: NESTED TYPE ACCESS (Issues #3, #4)
+      V4 correctly identified that SessionTreeEntry and MessageEntry are
+      the relevant types. But the anchoring code accessed properties
+      directly on the entry (entry.role, entry.content) instead of
+      through the nested message (entry.message.role, entry.message.content).
+      This is a nesting-depth error — the code looked one level too shallow.
+
+  Both categories represent translation-level issues (Python→TypeScript
+  type system differences) rather than architectural issues. The overall
+  architecture, type placement, variable scoping, and lifecycle design
+  from V4 are all confirmed correct.
+
+─── PROGRESSION SUMMARY ──────────────────────────────────────────────────────
+
+  V1 (Initial):           15 issues found
+  Review V1:              15 fixed, 6 new discovered
+  V2 (From Scratch):      21 incorporated, 8 new found
+  Review V2:              8 fixed
+  V3 (From Scratch):      29 incorporated, 6 new verifications
+  Review V3:              3 found, 3 fixed
+  V4 (From Scratch):      38 incorporated, 9 new verifications
+  Review V4:              5 found + 2 refinements, all fixed
+
+  Total issues found and resolved across all iterations: 43
+
+  Remaining risk areas:
+    - Session rotation compatibility with multi-pass (document as known
+      limitation; maxPasses=1 escape hatch)
+    - Pre-compaction pruning interaction with existing context-pruning
+      system (cache-TTL): they operate at different pipeline stages
+      (context assembly vs compaction preparation), so double-pruning
+      is unlikely, but should be integration-tested
+    - Enhanced summary prefix's behavioral impact across different LLM
+      models should be validated empirically
+
+================================================================================
+END OF REVIEW SUMMARY V4
+================================================================================

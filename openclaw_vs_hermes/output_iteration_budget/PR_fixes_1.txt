@@ -1,0 +1,104 @@
+## Round 1 — PR Review Fixes Applied
+
+**PR:** openclaw/openclaw#97485
+**Branch:** `feat/iteration-budget-agent-loop-safety`
+**Feature:** Iteration Budget & Agent Loop Safety
+**Reviewer:** clawsweeper[bot]
+**Review date:** 2026-06-28
+**Fixes applied:** 2026-06-29
+
+---
+
+### Reviewer Comments Addressed
+
+#### 1. [P1] Honor subagent iteration caps
+
+> **Original comment:** `subagentMaxIterations` is accepted and defaulted, but the runtime always constructs the budget with `maxIterations`. A configured subagent cap is therefore silently ignored for subagent sessions; select the subagent cap for subagent session keys or remove the field until supported.
+> *(Confidence: 0.89 | File: `src/agents/embedded-agent-runner/run.ts:1591`)*
+
+**Fix:** Added subagent detection using `params.spawnedBy` and conditional cap selection. When `spawnedBy` is set (subagent run), the `IterationBudget` is now constructed with `resolvedBudgetConfig.subagentMaxIterations` (default: 50) instead of `maxIterations` (default: 90). This correctly honors per-session-type caps as designed.
+
+---
+
+#### 2. [P1] Count each budgeted tool round once
+
+> **Original comment:** The same `IterationBudget` is consumed before each outer attempt and again by `onBeforeToolCallingRound`. This makes the configured limit smaller than advertised, and low values can block the first tool round before it executes; keep one canonical counter or split the counters into separate named budgets.
+> *(Confidence: 0.87 | File: `src/agents/embedded-agent-runner/run.ts:1945`)*
+
+**Fix:** Removed the redundant outer-loop `iterationBudget.consume()` call (4 lines). The `onBeforeToolCallingRound` callback is now the sole budget consumption point, counting exactly once per LLM tool-calling round. Non-productive iterations (compaction retries, auth retries, timeout retries) are correctly excluded from consumption since they have their own independent limits.
+
+---
+
+#### 3. [P2] Document the new config surface
+
+> **Original comment:** This strict `iterationBudget` block is added to the runtime schema without matching config help, labels, or gateway docs. Users and UI/help surfaces will not discover or understand the new keys, and config-contract policy expects schema, metadata, and docs to move together.
+> *(Confidence: 0.82 | File: `src/config/zod-schema.agent-runtime.ts:77-84`)*
+
+**Fix:** Added 10 `FIELD_HELP` entries and 10 matching `FIELD_LABELS` entries covering all `iterationBudget` keys for both `agents.defaults` and `agents.list[]` scopes. Help text describes defaults, behavior, and when each field takes effect. Follows the established pattern used by the adjacent `runRetries` config block.
+
+---
+
+### Comments Not Addressed (with explanation)
+
+#### [P1] Needs real behavior proof before merge
+
+> **Original comment:** The PR body lists tests but provides no redacted live output, logs, terminal proof, or artifact showing a real OpenClaw runaway loop stopped after the change.
+
+**Reason not addressed:** This is a process/documentation requirement, not a code defect. Real behavior proof (terminal output, logs, or artifacts demonstrating a runaway loop stopped by the budget) must be provided separately by the PR author and attached to the PR body. This is outside the scope of code fixes.
+
+---
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/agents/embedded-agent-runner/run.ts` | Select `subagentMaxIterations` for subagent runs; remove redundant outer-loop budget consumption |
+| `src/config/schema.help.ts` | Add 10 `FIELD_HELP` entries documenting all `iterationBudget` config keys |
+| `src/config/schema.labels.ts` | Add 10 `FIELD_LABELS` entries for UI display of all `iterationBudget` config keys |
+
+---
+
+### Build & Test Results
+
+| Step | Result | Details |
+|------|--------|---------|
+| Install | PASS | `npx pnpm install` -- already up to date |
+| Build | PASS | `npx pnpm build` -- completed successfully (147.7s) |
+| Test: agents-embedded-agent | PASS | 85 test files, 1551 tests passed (20.87s) |
+| Test: unit-fast-fake-timers | PASS | 10 test files, 163 tests passed (3.88s) |
+| **Total** | **PASS** | **95 test files, 1714 tests passed, 0 failures** |
+
+No regressions detected.
+
+---
+
+### Patch Convergence
+
+The fix patch was reviewed for correctness against the actual source code and **converged on first pass** -- no corrections were needed during the review cycle.
+
+---
+
+### Git Commands to Push
+
+```bash
+# Stage and commit the round-1 fixes
+cd /home/alexm-redhat/code/exper/openclaw
+git add src/agents/embedded-agent-runner/run.ts \
+        src/config/schema.help.ts \
+        src/config/schema.labels.ts
+git commit -m "fix: honor subagent caps, single budget counter, document config surface
+
+Address ClawSweeper review findings from PR #97485:
+- [P1] Select subagentMaxIterations for subagent sessions (run.ts)
+- [P1] Remove redundant outer-loop budget consumption (run.ts)
+- [P2] Add FIELD_HELP and FIELD_LABELS for iterationBudget config keys"
+
+# Push the updated branch
+git push origin feat/iteration-budget-agent-loop-safety
+```
+
+---
+
+### Remaining Action Items
+
+1. **[P1] Provide real behavior proof** -- Attach redacted terminal/log output showing a runaway OpenClaw run stopped at the configured budget to the PR body. After adding proof, ClawSweeper should re-review automatically; if not, comment `@clawsweeper re-review`.

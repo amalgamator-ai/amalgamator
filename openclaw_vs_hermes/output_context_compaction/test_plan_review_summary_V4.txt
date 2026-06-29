@@ -1,0 +1,379 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — TEST PLAN REVIEW SUMMARY (REVIEW V4)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Date: 2026-06-28
+Iteration: Review V4 (review of V4 initial)
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+  6 issues were found during code-level verification of the V4 test plan
+  against the actual OpenClaw codebase. Each issue was verified by reading
+  the relevant source files, type definitions, test files, vitest
+  configuration, and harness code.
+
+  ── FIX-RV1: SUITE I FILE PATH INCORRECT ─────────────────────────────────────
+
+    SEVERITY: Low (incorrect path, easy to fix)
+
+    V4 STATED:
+      src/agents/embedded-agent-runner/run/run.overflow-compaction.test.ts
+
+    ACTUAL (verified via file system):
+      src/agents/embedded-agent-runner/run.overflow-compaction.test.ts
+
+    The "run." prefix is part of the FILENAME, not a subdirectory prefix.
+    The file lives directly in embedded-agent-runner/ alongside:
+      - run.overflow-compaction.harness.ts
+      - run.overflow-compaction.fixture.ts
+      - run.overflow-compaction.loop.test.ts
+
+    The run/ subdirectory exists but contains different test files
+    (abortable.test.ts, attempt*.test.ts, etc.), not the overflow-
+    compaction tests.
+
+    VERIFICATION: Direct file system inspection confirmed the file at
+    src/agents/embedded-agent-runner/run.overflow-compaction.test.ts.
+    The import path in the existing test file uses:
+      import { ... } from "./run.overflow-compaction.harness.js"
+    (same directory, not "../" for a subdirectory).
+
+    CORRECTED: Path updated in Section 2 item #10 and Section 12.
+
+  ── FIX-RV2: SUITE G ZOD SCHEMA IMPORT NONEXISTENT ──────────────────────────
+
+    SEVERITY: Medium (test would not compile)
+
+    V4 STATED:
+      import { compactionSchema } from "./zod-schema.agent-defaults.js";
+
+    ACTUAL (verified via direct read of zod-schema.agent-defaults.ts):
+      There is NO standalone "compactionSchema" export.
+      The compaction schema is a nested field within AgentDefaultsSchema:
+
+        export const AgentDefaultsSchema = z.object({
+          compaction: z.object({
+            mode: z.union([z.literal("default"), z.literal("safeguard")]).optional(),
+            provider: z.string().optional(),
+            reserveTokens: z.number().int().nonnegative().optional(),
+            keepRecentTokens: z.number().int().positive().optional(),
+            // ... 14 more fields ...
+          }).strict().optional(),
+          // ... other agent default fields ...
+        });
+
+      The file exports: AgentDefaultsSchema (line 52 onward).
+      No compactionSchema export exists.
+
+    IMPACT: All 9 Zod schema tests (10.8-10.16) would fail to compile
+    because the import doesn't resolve.
+
+    CORRECTED:
+      import { AgentDefaultsSchema } from "./zod-schema.agent-defaults.js";
+      const compactionSchema = AgentDefaultsSchema.shape.compaction.unwrap();
+
+    The .shape.compaction access gets the ZodOptional wrapper. The .unwrap()
+    call removes the optional layer, yielding the inner ZodObject that
+    accepts .safeParse() for the compaction-specific fields.
+
+    VERIFICATION: Direct read of zod-schema.agent-defaults.ts confirmed
+    the export name (AgentDefaultsSchema) and schema structure. The
+    .strict() modifier is at line 204, confirming test 10.16's expectation.
+
+  ── FIX-RV3: SUITE G CONTRADICTORY IMPORT FOR materializeCompactionConfig ────
+
+    SEVERITY: Low (test would not compile, easy to fix)
+
+    V4 STATED (line 1310):
+      import { materializeCompactionConfig } from "./defaults.js";
+
+    V4 ALSO STATED (lines 1315-1322):
+      function materializeCompactionConfig(input: Record<string, unknown>) { ... }
+
+    CONTRADICTION: materializeCompactionConfig cannot be both imported
+    AND locally defined. The actual defaults.js exports applyCompactionDefaults,
+    NOT materializeCompactionConfig.
+
+    VERIFICATION: Direct read of defaults.ts confirmed the export:
+      export function applyCompactionDefaults(cfg: OpenClawConfig): OpenClawConfig
+
+    CORRECTED: Import line changed to:
+      import { applyCompactionDefaults } from "./defaults.js";
+    And materializeCompactionConfig remains a local test helper that
+    wraps applyCompactionDefaults.
+
+  ── FIX-RV4: TESTS 8.8 AND 8.19 ANTI-THRASH AMBIGUITY ──────────────────────
+
+    SEVERITY: Medium (tests pass for the wrong reason)
+
+    V4 STATED (for both tests):
+      mockEngine.compact always resolves to
+      makeCompactSuccess({ tokensAfter: 150000 })
+
+    PROBLEM: The multi-pass loop tracks inter-pass progress. With a
+    constant mock (every call returns tokensAfter=150000):
+
+      Pass 1: result.tokensBefore=200000 (makeCompactSuccess default),
+              tokensAfter=150000. Progress: 25% (200000→150000). OK.
+      Pass 2: prevTokens=150000 (from pass 1), newTokens=150000 (same mock).
+              Progress: 0%. consecutiveNoProgress=1.
+      Pass 3: prevTokens=150000, newTokens=150000.
+              Progress: 0%. consecutiveNoProgress=2. ANTI-THRASH FIRES.
+
+    Result: the loop stops at 3 passes because anti-thrash fires at
+    counter=2, which COINCIDENTALLY equals maxPasses=3.
+
+    Test 8.8 says it verifies "stops at maxPasses even if still above
+    budget" — but it actually stops due to anti-thrash.
+    Test 8.19 says it verifies "defaults maxPasses to 3" — but it
+    actually stops due to anti-thrash.
+
+    If the default maxPasses were changed to 10, BOTH tests would still
+    pass (anti-thrash stops at pass 3 regardless). So they don't detect
+    regressions in the maxPasses logic.
+
+    NOTE: This analysis assumes the loop uses "inter-pass tracking"
+    (previous tokensAfter vs current tokensAfter) for progress detection.
+    If the implementation uses "per-pass tracking" (result.tokensBefore vs
+    result.tokensAfter), every pass shows 25% progress and only maxPasses
+    limits the loop. Since the implementation design isn't locked, the test
+    should be robust to EITHER approach.
+
+    CORRECTED: Both tests now use .mockResolvedValueOnce() with DECREASING
+    tokensAfter values, each showing >5% relative reduction from the
+    previous pass. This ensures progress is always detected and ONLY
+    maxPasses limits the loop — regardless of which progress tracking
+    method the implementation uses.
+
+    VERIFICATION:
+      Test 8.8 (corrected):
+        Pass 1: 200000→170000. 15% reduction > 5%. Progress. ✓
+        Pass 2: 170000→145000. 14.7% reduction > 5%. Progress. ✓
+        Pass 3: 145000→125000. 13.8% reduction > 5%. Progress. ✓
+        Budget: 125000 > 100000. Still above. ✓
+        Only maxPasses=3 stops the loop.
+
+      Test 8.19 (corrected):
+        Same decreasing pattern. Only maxPasses=3 (default) stops the loop.
+
+  ── FIX-RV5: TEST 8.21 TWO CASES IN ONE it() BLOCK ──────────────────────────
+
+    SEVERITY: Low-Medium (test would fail due to accumulated mock calls)
+
+    V4 STATED:
+      8.21 it("clamps maxPasses to [1, 10] at runtime")
+           CALL 1: multiPassCompact(..., { maxPasses: 50 })
+           EXPECT: called at most 10 times
+
+           CALL 2: multiPassCompact(..., { maxPasses: 0 })
+           EXPECT: called exactly 1 time
+
+    PROBLEMS:
+      1. Mock not reset between calls. After call 1 (3 compact calls due
+         to anti-thrash, see FIX-RV4), total call count = 3. After call 2
+         (1 more call), total = 4. Assertion "called exactly 1 time" fails
+         because the mock shows 4 accumulated calls.
+
+      2. With the original constant mock, call 1 results in only 3 calls
+         (anti-thrash), not 10. The assertion "at most 10 times" passes
+         trivially (3 <= 10) but doesn't verify clamping from 50 to 10.
+
+      3. Violates principle P1 (one assertion focus per test).
+
+    CORRECTED: Split into two it() blocks:
+      8.21a: "clamps maxPasses to 10 at maximum" — uses decreasing
+             tokensAfter mock, expects exactly 10 compact calls.
+      8.21b: "clamps maxPasses to 1 at minimum" — expects exactly 1 call.
+
+    Test count: 22 → 23 (Suite E only; total 112 → 113).
+
+  ── FIX-RV6: SUITE F IMPORT PATTERN WRONG ───────────────────────────────────
+
+    SEVERITY: Low (would work but inconsistent with existing convention)
+
+    V4 STATED:
+      let harness: Awaited<ReturnType<
+        typeof import("../run.overflow-compaction.harness.js")
+      >>;
+      beforeAll(async () => {
+        const mod = await import("../run.overflow-compaction.harness.js");
+        harness = await mod.loadRunOverflowCompactionHarness();
+      });
+
+    PROBLEMS:
+      1. Type annotation invalid: typeof import(...) yields a Promise,
+         not a function. ReturnType<Promise<T>> is not valid TypeScript.
+
+      2. Uses dynamic import for the harness module. The EXISTING test
+         (run.overflow-compaction.test.ts) uses STATIC imports:
+           import { loadRunOverflowCompactionHarness, mockedContextEngine, ... }
+           from "./run.overflow-compaction.harness.js";
+
+      3. The test references `mockedMultiPassCompact` directly in EXPECT
+         clauses, but with the V4 pattern, this variable would only be
+         available as `mod.mockedMultiPassCompact`, not in the test scope.
+
+    VERIFICATION: Direct read of run.overflow-compaction.test.ts confirmed
+    static import pattern at lines 25-53.
+
+    CORRECTED: Changed to static imports matching the existing convention.
+    The mock variables are imported directly as named exports from the
+    harness module. loadRunOverflowCompactionHarness() is called in
+    beforeAll to get runEmbeddedAgent.
+
+================================================================================
+2. SUMMARY OF CHANGES
+================================================================================
+
+  V4 (Initial) → Review V4 (Corrected):
+
+  STRUCTURAL CHANGES:
+    - Suite I file path corrected (removed erroneous run/ subdirectory)
+    - Suite G Zod import corrected (AgentDefaultsSchema.shape.compaction)
+    - Suite G defaults import corrected (applyCompactionDefaults)
+    - Tests 8.8 and 8.19 mock setups corrected (decreasing tokensAfter)
+    - Test 8.21 split into 8.21a and 8.21b
+    - Suite F test setup import pattern corrected (static imports)
+
+  TEST COUNT:
+    V4 total:      112 tests across 9 suites
+    Review V4:     113 tests across 9 suites
+    Delta: +1 test (Suite E: 22→23 from FIX-RV5)
+
+  FILES:
+    V4:        7 new test files, 3 modified test/support files
+    Review V4: Same file count (corrections are within existing files)
+
+================================================================================
+3. ITERATION EVOLUTION
+================================================================================
+
+  V1 (Initial — 2026-06-28):
+    Initial test plan. 107 tests across 8 suites.
+    Triangulated from Hermes tests, OpenClaw conventions, and port plan.
+
+  V1 Review (Corrected — 2026-06-28):
+    Corrected 15 issues. 102 tests across 9 suites.
+    Key: shard fixes, factory reuse, mock pattern corrections, Suite H added.
+
+  V2 (From-Scratch — 2026-06-28):
+    From-scratch rewrite. 106 tests across 9 suites.
+    Key: Zod .strict(), CompactResult variants, exact 5% boundary test.
+
+  V2 Review (Corrected — 2026-06-28):
+    Corrected 7 issues. 107 tests across 9 suites.
+    Key: boundary math, model convention, CompactResult flat type,
+    vi.doMock path, defaults don't clamp, consecutiveNoProgress counter,
+    NonNullable<> typing.
+
+  V3 (From-Scratch — 2026-06-28):
+    From-scratch rewrite incorporating all 22 corrections. 110 tests
+    across 9 suites. Key: all prior corrections baked in, abort priority
+    test, wrapCompactionSummary tests, exception handling.
+
+  V3 Review (Corrected — 2026-06-28):
+    Corrected 5 issues. 111 tests across 9 suites.
+    Key fixes:
+    1. FIX-R1: Suite G missing "mode-set, maxPasses-absent" test (MEDIUM)
+    2. FIX-R2: baseCompactParams missing runtimeContext/runtimeSettings (LOW)
+    3. FIX-R3: Test 8.20 setup description incomplete (LOW)
+    4. FIX-R4: MultiPassCompactResult type undocumented (LOW)
+    5. FIX-R5: Suite D source file ambiguity (LOW)
+
+  V4 (From-Scratch — 2026-06-28):
+    From-scratch rewrite incorporating all 27 corrections from V1-V3R PLUS
+    7 corrections from port plan Review V4. 112 tests across 9 suites.
+    Key: self-contained document, RV4-1 through RV4-7 integrated, Suite B
+    sub-pass 3 rewritten for object-based truncation, Suite C property paths
+    corrected, test 8.22 (runtimeContext passthrough) added, test 8.15
+    (stale compactParams) added.
+
+  Review V4 (Current — 2026-06-28):
+    Corrected 6 issues. 113 tests across 9 suites.
+    Key fixes:
+    1. FIX-RV1: Suite I file path — run.overflow-compaction.test.ts is in
+       embedded-agent-runner/, not in run/ subdirectory (LOW)
+    2. FIX-RV2: Suite G Zod import — compactionSchema doesn't exist as
+       standalone export; extract from AgentDefaultsSchema (MEDIUM)
+    3. FIX-RV3: Suite G defaults import — contradictory import line for
+       materializeCompactionConfig; correct to applyCompactionDefaults (LOW)
+    4. FIX-RV4: Tests 8.8 and 8.19 — constant mock causes anti-thrash to
+       fire coincidentally with maxPasses, making tests fragile; use
+       decreasing tokensAfter values (MEDIUM)
+    5. FIX-RV5: Test 8.21 — two test cases in one it() block without mock
+       reset; split into 8.21a and 8.21b (LOW-MEDIUM)
+    6. FIX-RV6: Suite F import pattern — uses dynamic import instead of the
+       existing static import convention; type annotation invalid (LOW)
+
+  CONVERGENCE ASSESSMENT:
+
+    The V4 plan was substantially correct. All 6 issues are LOW to MEDIUM
+    severity:
+    - 2 MEDIUM (Zod import, anti-thrash ambiguity)
+    - 1 LOW-MEDIUM (test 8.21 split)
+    - 3 LOW (file path, import lines, import pattern)
+
+    No structural redesign was needed. Suite organization, shard
+    assignments, mock strategies, and fixture patterns all verified
+    correct. The core logic of all tests is unchanged — only mock
+    setup details, import paths, and test splitting were affected.
+
+    The correction severity continues the converging trend:
+      V1→V1R: 15 issues (many structural, HIGH severity)
+      V2→V2R: 7 issues (2 HIGH, 2 MEDIUM, 3 LOW)
+      V3→V3R: 5 issues (1 MEDIUM, 4 LOW)
+      V4→V4R: 6 issues (2 MEDIUM, 1 LOW-MEDIUM, 3 LOW)
+
+    The issue COUNT is slightly higher than V3→V3R (6 vs 5), but the
+    SEVERITY is comparable. The increase is because V4 was a from-scratch
+    rewrite that introduced new content (test 8.22, rewritten sub-pass 3,
+    property path documentation) — more new content means more surface
+    area for errors. No HIGH severity issues were found, confirming that
+    the structural decisions from V3R are solid.
+
+    The plan is converged at a high confidence level.
+
+  EVOLUTION SUMMARY TABLE:
+  +-----------+-------+--------+----------+---------+--------------+
+  | Iteration | Tests | Suites | New Files| Modified| Issues        |
+  +-----------+-------+--------+----------+---------+--------------+
+  | V1 Init   | 107   | 8      | 7        | 3       | 15 found      |
+  | V1 Review | 102   | 9      | 6        | 3*      | 15 fixed      |
+  | V2        | 106   | 9      | 6        | 3*      | 7 found       |
+  | V2 Review | 107   | 9      | 6        | 3*      | 7 fixed       |
+  | V3        | 110   | 9      | 7        | 3*      | 5 found       |
+  | V3 Review | 111   | 9      | 7        | 3*      | 5 fixed       |
+  | V4        | 112   | 9      | 7        | 3*      | 6 found       |
+  | V4 Review | 113   | 9      | 7        | 3*      | 6 fixed       |
+  +-----------+-------+--------+----------+---------+--------------+
+  * Modified count = 1 test file + 2 harness/fixture files
+
+  CUMULATIVE CORRECTIONS BY CATEGORY:
+  +----------------------------+-------+---------------------+
+  | Category                   | Count | Severity Impact     |
+  +----------------------------+-------+---------------------+
+  | Type/interface mismatches  |   8   | 2 HIGH, 5 LOW, 1 MED|
+  | Path/import errors         |   8   | 2 HIGH, 4 LOW, 2 MED|
+  | Boundary math errors       |   2   | 1 MEDIUM, 1 LOW     |
+  | Convention misalignments   |   5   | 5 LOW                |
+  | Logic contradictions       |   2   | 2 HIGH               |
+  | Structural gaps            |   4   | 2 MEDIUM, 2 LOW      |
+  | Documentation inaccuracies |   5   | 5 LOW                |
+  | Port plan alignment        |   4   | 2 MEDIUM, 2 LOW      |
+  | Mock fragility             |   2   | 2 MEDIUM (NEW)       |
+  +----------------------------+-------+---------------------+
+  | TOTAL                      |  40   | 6 HIGH, 9 MED, 25 LOW|
+  +----------------------------+-------+---------------------+
+
+  The "Mock fragility" category is new in Review V4 and captures tests
+  that pass for the wrong reason due to coincidental mock behavior. This
+  is a subtle category that only emerges when the mock setup is analyzed
+  against the full loop semantics (progress tracking + anti-thrash +
+  maxPasses interacting across multiple passes).
+
+================================================================================
+END OF REVIEW SUMMARY (REVIEW V4)
+================================================================================

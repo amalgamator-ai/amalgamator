@@ -1,0 +1,3255 @@
+================================================================================
+OPENCLAW TEST SUITE RESULTS — V1
+================================================================================
+Date: 2026-06-28
+Command: cd /home/alexm-redhat/code/exper/openclaw && pnpm test
+Test Runner: Vitest v4.1.8
+Shards: 89 Vitest shards (parallelism 10, workers 2)
+Duration: ~548s (9.1 minutes)
+Exit Code: 1 (FAILED)
+
+================================================================================
+AGGREGATE SUMMARY (across all 89 shards)
+================================================================================
+Overall Result: FAILED
+
+Failed Shards: 8 / 89
+  1. test/vitest/vitest.tooling.config.ts
+  2. test/vitest/vitest.agents-core.config.ts
+  3. test/vitest/vitest.extension-providers.config.ts
+  4. test/vitest/vitest.unit-security.config.ts
+  5. test/vitest/vitest.media-understanding.config.ts
+  6. test/vitest/vitest.plugins.config.ts
+  7. test/vitest/vitest.extension-qa.config.ts
+  8. test/vitest/vitest.plugin-sdk.config.ts
+
+================================================================================
+FAILED TEST DETAILS (47 individual test failures)
+================================================================================
+
+--- SHARD: agents-core (5 failures) ---
+
+1. src/agents/compaction-planning-worker.test.ts
+   × plans summary chunks in the packaged worker
+   → Worker-level compaction planning test failure
+
+2. src/agents/model-compat.test.ts (3 failures)
+   × keeps supportsUsageInStreaming on for native Qwen endpoints
+   × keeps supportsUsageInStreaming on for DashScope-compatible endpoints regardless of provider id
+   × keeps supportsUsageInStreaming on for Moonshot-native endpoints regardless of provider id
+   → Streaming usage compatibility flags for Qwen/Moonshot not set correctly
+
+3. src/agents/models-config.providers.moonshot.test.ts
+   × uses explicit CN baseUrl when provided
+   → Moonshot provider CN baseUrl configuration failure
+
+--- SHARD: extension-providers (7 failures) ---
+
+4. extensions/qwen/provider-catalog.test.ts
+   × opts native Qwen baseUrls into streaming usage only inside the extension
+
+5. extensions/moonshot/provider-catalog.test.ts
+   × opts native Moonshot baseUrls into streaming usage only inside the extension
+
+6. extensions/moonshot/src/kimi-web-search-provider.test.ts
+   × inherits native Moonshot chat baseUrl when kimi baseUrl is unset
+
+7. extensions/ollama/provider-discovery.test.ts (4 failures)
+   × discovers per-model context windows from /api/show
+   × auto-registers ollama provider when models are discovered locally
+   × falls back to default context window when /api/show fails
+   × caps /api/show requests when /api/tags returns a very large model list
+   → Note: Ollama failures may be due to Ollama not running locally (http://127.0.0.1:11434)
+
+--- SHARD: unit-security (4 failures) ---
+
+8. src/security/install-policy.test.ts (4 failures)
+   × rejects policy interpreter script args under writable parent directories
+   × validates later interpreter script args after path-taking options
+   × validates interpreter option values that embed script paths
+   × rejects symlinked interpreter script args even when command symlinks are allowed
+   → Install policy security validation failures
+
+--- SHARD: media-understanding (1 failure) ---
+
+9. src/media-understanding/image.test.ts
+   × places DashScope image prompts in user content before images
+   → DashScope image prompt ordering failure
+
+--- SHARD: plugins (19 failures) ---
+
+10. src/plugins/status.test.ts (19 failures)
+    × uses the auto-enabled config snapshot for inspect policy summaries
+    × preserves raw config activation context when compatibility notices build their own report
+    × preserves raw config activation context for compatibility-derived reports
+    × normalizes bundled plugin versions to the core base release
+    × marks snapshot-loaded plugin modules as imported during full report loads
+    × marks errored plugin modules as imported when full diagnostics already evaluated them
+    × builds an inspect report with capability shape and policy
+    × builds inspect reports for every loaded plugin
+    × treats a CLI-command-only plugin as a plain capability
+    × treats a context-engine plugin as a plain capability
+    × builds compatibility warnings for legacy compatibility paths
+    × warns external plugins off deprecated memory embedding provider registration
+    × warns when external plugins register memory embedding providers at runtime only
+    × does not surface bundled memory embedding migration debt as user warnings
+    × builds structured compatibility notices with deterministic ordering
+    × does not warn for explicit startup-lazy metadata
+    × returns no compatibility warnings for modern capability plugins
+    × populates bundleCapabilities from plugin...
+    × returns empty bundleCapabilities and...
+    → Widespread plugin status reporting failures (likely a structural change)
+
+--- SHARD: extension-qa (2 failures) ---
+
+11. extensions/qa-lab/src/test-file-scenario-runner.test.ts (2 failures)
+    × runs Vitest scenarios with the declared test path and writes Vitest evidence
+    × imports producer QA evidence artifacts from failed script scenarios
+    → QA lab test scenario runner failures
+
+--- SHARD: plugin-sdk (2 failures) ---
+
+12. src/plugin-sdk/provider-catalog-shared.test.ts (2 failures)
+    × detects native streaming usage compat from the endpoint capabilities
+    × opts models into streaming usage for native endpoints while preserving explicit overrides
+    → Provider catalog streaming usage compatibility failures
+
+--- SHARD: tooling (7 failures) ---
+
+13. test/scripts/plugin-sdk-surface-report.test.ts (3 failures)
+    × accepts exact deprecated export budget overrides by public entrypoint
+    × keeps default public surface budgets pinned to current source counts
+    × keeps generated package declarations out of source surface counts
+    → Surface report budget assertions: actual public exports (10399/5215) exceed expected budgets (10388/5213)
+
+14. test/scripts/secret-provider-integrations.test.ts
+    × preserves timeout kill grace for descendants after the leader exits
+    → Timeout/process management issue
+
+15. test/scripts/run-additional-boundary-checks.test.ts
+    × waits for timed-out process groups after the wrapper exits
+    → Process group timeout management failure
+
+16. test/scripts/check-deadcode-unused-files.test.ts
+    × waits for timed-out Knip process groups after the wrapper exits
+    → Knip process timeout management failure
+
+17. test/scripts/bench-cli-startup.test.ts
+    × cleans timed-out benchmark process groups when the leader exits first
+    → Benchmark process cleanup timeout failure
+
+================================================================================
+FAILURE CATEGORY ANALYSIS
+================================================================================
+
+1. PORTED FEATURE RELATED (likely related to context compaction port):
+   - compaction-planning-worker.test.ts — compaction planning worker test
+   
+2. PROVIDER/STREAMING COMPAT (Qwen, Moonshot, DashScope):
+   - model-compat.test.ts (3 failures)
+   - provider-catalog.test.ts (Qwen + Moonshot)
+   - kimi-web-search-provider.test.ts
+   - provider-catalog-shared.test.ts (2 failures)
+   - models-config.providers.moonshot.test.ts
+   - image.test.ts (DashScope)
+   → These may be related to new streaming usage / provider catalog changes
+
+3. ENVIRONMENT-DEPENDENT (Ollama not running locally):
+   - provider-discovery.test.ts (4 failures)
+   → Ollama service not available at localhost:11434
+
+4. PLUGIN STATUS REPORTING (structural change):
+   - status.test.ts (19 failures)
+   → Likely a structural/API change in plugin status reporting
+
+5. SECURITY POLICY:
+   - install-policy.test.ts (4 failures)
+   → Install policy interpreter validation
+
+6. TOOLING/PROCESS MANAGEMENT (flaky/timeout issues):
+   - bench-cli-startup.test.ts
+   - check-deadcode-unused-files.test.ts
+   - run-additional-boundary-checks.test.ts
+   - secret-provider-integrations.test.ts
+   → Process group timeout management — likely flaky/environment-sensitive
+
+7. SURFACE BUDGET DRIFT:
+   - plugin-sdk-surface-report.test.ts (3 failures)
+   → Public API surface counts exceed pinned budgets (new exports added)
+
+8. QA LAB:
+   - test-file-scenario-runner.test.ts (2 failures)
+
+================================================================================
+RAW TEST OUTPUT FOLLOWS
+================================================================================
+
+$ node scripts/test-projects.mjs
+[test] warning: broad local run will start 89 Vitest shards; use `pnpm test:changed` for routine checks.
+[test] using host-aware local full-suite profile: shards=10 workers=2
+[test] running 89 Vitest shards with parallelism 10
+[test] starting test/vitest/vitest.tooling.config.ts
+[test] starting test/vitest/vitest.shared-core.config.ts
+[test] starting test/vitest/vitest.agents-core.config.ts
+[test] starting test/vitest/vitest.boundary.config.ts
+[test] starting test/vitest/vitest.infra.config.ts
+[test] starting test/vitest/vitest.process.config.ts
+[test] starting test/vitest/vitest.extension-providers.config.ts
+[test] starting test/vitest/vitest.extension-acpx.config.ts
+[test] starting test/vitest/vitest.unit-fast.config.ts
+[test] starting test/vitest/vitest.plugin-sdk-light.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  12 passed (12)
+      Tests  97 passed (97)
+   Start at  21:42:17
+   Duration  3.31s (transform 276ms, setup 110ms, import 766ms, tests 5.39s, environment 1ms)
+
+[test] starting test/vitest/vitest.commands.config.ts
+
+ Test Files  9 passed (9)
+      Tests  67 passed (67)
+   Start at  21:42:20
+   Duration  311ms (transform 95ms, setup 99ms, import 116ms, tests 49ms, environment 1ms)
+
+[test] starting test/vitest/vitest.acp.config.ts
+
+ Test Files  11 passed (11)
+      Tests  130 passed (130)
+   Start at  21:42:20
+   Duration  752ms (transform 316ms, setup 101ms, import 213ms, tests 823ms, environment 1ms)
+
+[test] starting test/vitest/vitest.gateway-server.config.ts
+ ❯ |extension-providers| extensions/qwen/provider-catalog.test.ts (3 tests | 1 failed) 81ms
+     × opts native Qwen baseUrls into streaming usage only inside the extension 23ms
+
+ Test Files  5 passed (5)
+      Tests  42 passed (42)
+   Start at  21:42:20
+   Duration  1.80s (transform 1.20s, setup 84ms, import 3.13s, tests 48ms, environment 1ms)
+
+[test] starting test/vitest/vitest.daemon.config.ts
+ ❯ |extension-providers| extensions/moonshot/provider-catalog.test.ts (2 tests | 1 failed) 51ms
+     × opts native Moonshot baseUrls into streaming usage only inside the extension 21ms
+
+ Test Files  13 passed (13)
+      Tests  146 passed (146)
+   Start at  21:42:20
+   Duration  2.70s (transform 751ms, setup 531ms, import 1.56s, tests 2.88s, environment 1ms)
+
+[test] starting test/vitest/vitest.gateway-server.config.ts
+ ❯ |extension-providers| extensions/moonshot/src/kimi-web-search-provider.test.ts (15 tests | 1 failed) 67ms
+     × inherits native Moonshot chat baseUrl when kimi baseUrl is unset 24ms
+ ❯ |agents-core| src/agents/compaction-planning-worker.test.ts (7 tests | 1 failed) 364ms
+     × plans summary chunks in the packaged worker 179ms
+ ❯ |agents-core| src/agents/model-compat.test.ts (57 tests | 3 failed) 48ms
+     × keeps supportsUsageInStreaming on for native Qwen endpoints 6ms
+     × keeps supportsUsageInStreaming on for DashScope-compatible endpoints regardless of provider id 1ms
+     × keeps supportsUsageInStreaming on for Moonshot-native endpoints regardless of provider id 1ms
+ ❯ |agents-core| src/agents/models-config.providers.moonshot.test.ts (3 tests | 1 failed) 16ms
+     × uses explicit CN baseUrl when provided 14ms
+stderr | extensions/ollama/provider-discovery.test.ts > Ollama provider > discovers per-model context windows from /api/show
+Ollama could not be reached at http://127.0.0.1:11434.
+
+stderr | extensions/ollama/provider-discovery.test.ts > Ollama provider > falls back to default context window when /api/show fails
+Ollama could not be reached at http://127.0.0.1:11434.
+
+stderr | extensions/ollama/provider-discovery.test.ts > Ollama provider > caps /api/show requests when /api/tags returns a very large model list
+Ollama could not be reached at http://127.0.0.1:11434.
+
+ ❯ |extension-providers| extensions/ollama/provider-discovery.test.ts (18 tests | 4 failed) 53ms
+     × discovers per-model context windows from /api/show 8ms
+     × auto-registers ollama provider when models are discovered locally 4ms
+     × falls back to default context window when /api/show fails 2ms
+     × caps /api/show requests when /api/tags returns a very large model list 2ms
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  10 passed (10)
+      Tests  63 passed (63)
+   Start at  21:42:24
+   Duration  2.21s (transform 1.17s, setup 475ms, import 2.45s, tests 703ms, environment 1ms)
+
+[test] starting test/vitest/vitest.unit-security.config.ts
+
+ Test Files  16 passed (16)
+      Tests  454 passed | 13 skipped (467)
+   Start at  21:42:25
+   Duration  2.02s (transform 994ms, setup 501ms, import 1.67s, tests 1.21s, environment 2ms)
+
+[test] starting test/vitest/vitest.gateway-server.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+ ❯ |unit-security| src/security/install-policy.test.ts (21 tests | 4 failed) 1224ms
+     × rejects policy interpreter script args under writable parent directories 10ms
+     × validates later interpreter script args after path-taking options 3ms
+     × validates interpreter option values that embed script paths 3ms
+     × rejects symlinked interpreter script args even when command symlinks are allowed 2ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |unit-security| src/security/install-policy.test.ts > runInstallPolicy > rejects policy interpreter script args under writable parent directories
+AssertionError: expected [] to include 'security.installPolicy.exec.args[0] p…'
+ ❯ src/security/install-policy.test.ts:546:61
+    544|     });
+    545|
+    546|     expect(validation.issues.map((issue) => issue.message)).toContain(
+       |                                                             ^
+    547|       `security.installPolicy.exec.args[0] parent directory permission…
+    548|     );
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  |unit-security| src/security/install-policy.test.ts > runInstallPolicy > validates later interpreter script args after path-taking options
+AssertionError: expected [] to include 'security.installPolicy.exec.args[2] p…'
+ ❯ src/security/install-policy.test.ts:574:61
+    572|     });
+    573|
+    574|     expect(validation.issues.map((issue) => issue.message)).toContain(
+       |                                                             ^
+    575|       `security.installPolicy.exec.args[2] parent directory permission…
+    576|     );
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+ FAIL  |unit-security| src/security/install-policy.test.ts > runInstallPolicy > validates interpreter option values that embed script paths
+AssertionError: expected [] to include 'security.installPolicy.exec.args[0] p…'
+ ❯ src/security/install-policy.test.ts:602:61
+    600|     });
+    601|
+    602|     expect(validation.issues.map((issue) => issue.message)).toContain(
+       |                                                             ^
+    603|       `security.installPolicy.exec.args[0] parent directory permission…
+    604|     );
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯
+
+ FAIL  |unit-security| src/security/install-policy.test.ts > runInstallPolicy > rejects symlinked interpreter script args even when command symlinks are allowed
+AssertionError: expected [] to include 'security.installPolicy.exec.args[0] m…'
+ ❯ src/security/install-policy.test.ts:629:63
+    627|       });
+    628|
+    629|       expect(validation.issues.map((issue) => issue.message)).toContai…
+       |                                                               ^
+    630|         `security.installPolicy.exec.args[0] must not be a symlink: ${…
+    631|       );
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯
+
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  4 failed | 19 passed (23)
+   Start at  21:42:30
+   Duration  2.39s (transform 1.27s, setup 474ms, import 2.55s, tests 1.25s, environment 0ms)
+
+[test] starting test/vitest/vitest.tooling-isolated.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  1 passed (1)
+      Tests  30 passed (30)
+   Start at  21:42:36
+   Duration  4.42s (transform 178ms, setup 214ms, import 9ms, tests 4.05s, environment 0ms)
+
+[test] starting test/vitest/vitest.gateway-server.config.ts
+
+ Test Files  28 passed (28)
+      Tests  394 passed (394)
+   Start at  21:42:25
+   Duration  19.68s (transform 3.89s, setup 331ms, import 6.62s, tests 12.36s, environment 0ms)
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[test] starting test/vitest/vitest.wizard.config.ts
+
+ Test Files  27 passed (27)
+      Tests  353 passed (353)
+   Start at  21:42:26
+   Duration  19.79s (transform 3.92s, setup 527ms, import 4.69s, tests 14.01s, environment 0ms)
+
+[test] starting test/vitest/vitest.extension-telegram.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 30000ms (test/vitest/vitest.unit-fast.config.ts).
+[vitest] still running with no output for 30000ms (test/vitest/vitest.infra.config.ts).
+[vitest] still running with no output for 30000ms (test/vitest/vitest.tooling.config.ts).
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  9 passed (9)
+      Tests  89 passed (89)
+   Start at  21:42:48
+   Duration  2.46s (transform 1.33s, setup 442ms, import 2.67s, tests 524ms, environment 1ms)
+
+[test] starting test/vitest/vitest.unit-ui.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 30000ms (test/vitest/vitest.agents-core.config.ts).
+[vitest] still running with no output for 30000ms (test/vitest/vitest.extension-providers.config.ts).
+[vitest] still running with no output for 30000ms (test/vitest/vitest.commands.config.ts).
+
+ Test Files  32 passed | 2 skipped (34)
+      Tests  752 passed | 25 skipped (777)
+   Start at  21:42:51
+   Duration  6.61s (transform 580ms, setup 398ms, import 1.95s, tests 3.70s, environment 18.13s)
+
+[test] starting test/vitest/vitest.media-understanding.config.ts
+[vitest] still running with no output for 30000ms (test/vitest/vitest.gateway-server.config.ts).
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+ ❯ |media-understanding| src/media-understanding/image.test.ts (29 tests | 1 failed) 2643ms
+     × places DashScope image prompts in user content before images 90ms
+│
+◇  Config ─────────────────────────────────────────────────────────╮
+│                                                                  │
+│  Restored openclaw.json from last-known-good; original saved as  │
+│  .clobbered.*.                                                   │
+│                                                                  │
+├──────────────────────────────────────────────────────────────────╯
+│
+◇  Config warnings ────────────────────────────────────────────────────╮
+│                                                                      │
+│  - plugins.deny: plugin not found: missing-deny (stale config entry  │
+│    ignored; remove it from plugins config)                           │
+│                                                                      │
+├──────────────────────────────────────────────────────────────────────╯
+│
+◇  Config ─────────────────────────────────────────────────────────╮
+│                                                                  │
+│  Restored openclaw.json from last-known-good; original saved as  │
+│  .clobbered.*.                                                   │
+│                                                                  │
+├──────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-6jTVkW/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-6jTVkW/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                             │
+│  - Migrated auth profile JSON for                                                                           │
+│    /tmp/openclaw-doctor-flat-auth-6jTVkW/state/agents/main/agent/auth-profiles.json                         │
+│    into SQLite (backups:                                                                                    │
+│    /tmp/openclaw-doctor-flat-auth-6jTVkW/state/agents/main/agent/auth-profiles.json.sqlite-import.456.bak,  │
+│    /tmp/openclaw-doctor-flat-auth-6jTVkW/state/agents/main/agent/auth-state.json.sqlite-import.456.bak).    │
+│                                                                                                             │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-hLz6CP/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-hLz6CP/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                              │
+│  - Migrated auth profile JSON for                                                                            │
+│    /tmp/openclaw-doctor-flat-auth-hLz6CP/state/agents/main/agent/auth-profiles.json                          │
+│    into SQLite (backup:                                                                                      │
+│    /tmp/openclaw-doctor-flat-auth-hLz6CP/state/agents/main/agent/auth-profiles.json.sqlite-import.457.bak).  │
+│  - Moved aws-sdk profile metadata from                                                                       │
+│    /tmp/openclaw-doctor-flat-auth-hLz6CP/state/agents/main/agent/auth-profiles.json                          │
+│    to auth.profiles before removing the legacy auth profile JSON.                                            │
+│                                                                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-ByD0Dz/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-ByD0Dz/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ──────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                           │
+│  - Migrated auth profile JSON for                                                                         │
+│    /tmp/openclaw-doctor-flat-auth-ByD0Dz/state/agents/main/agent/auth-profiles.json                       │
+│    into SQLite (backup:                                                                                   │
+│    /tmp/openclaw-doctor-flat-auth-ByD0Dz/state/agents/main/agent/auth-state.json.sqlite-import.459.bak).  │
+│                                                                                                           │
+├───────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-6bAo2U/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-6bAo2U/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor warnings ─────────────────────────────────────────────────────────────────────╮
+│                                                                                       │
+│  - Left 1 legacy OAuth sidecar profile in                                             │
+│    /tmp/openclaw-doctor-flat-auth-6bAo2U/state/agents/main/agent/auth-profiles.json;  │
+│    rerun openclaw doctor --fix after sidecar migration or                             │
+│    re-authenticate those profiles.                                                    │
+│  - Left auth profile JSON in place for                                                │
+│    /tmp/openclaw-doctor-flat-auth-6bAo2U/state/agents/main/agent/auth-profiles.json   │
+│    because no importable auth profiles or state were found.                           │
+│                                                                                       │
+├───────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-WVsmLr/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-WVsmLr/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                              │
+│  - Migrated auth profile JSON for                                                                            │
+│    /tmp/openclaw-doctor-flat-auth-WVsmLr/state/agents/main/agent/auth-profiles.json                          │
+│    into SQLite (backup:                                                                                      │
+│    /tmp/openclaw-doctor-flat-auth-WVsmLr/state/agents/main/agent/auth-profiles.json.sqlite-import.463.bak).  │
+│                                                                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor warnings ─────────────────────────────────────────────────────────────────────╮
+│                                                                                       │
+│  - Left 1 legacy OAuth sidecar profile in                                             │
+│    /tmp/openclaw-doctor-flat-auth-WVsmLr/state/agents/main/agent/auth-profiles.json;  │
+│    rerun openclaw doctor --fix after sidecar migration or                             │
+│    re-authenticate those profiles.                                                    │
+│                                                                                       │
+├───────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-uXFiDs/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-uXFiDs/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                              │
+│  - Migrated auth profile JSON for                                                                            │
+│    /tmp/openclaw-doctor-flat-auth-uXFiDs/state/agents/main/agent/auth-profiles.json                          │
+│    into SQLite (backup:                                                                                      │
+│    /tmp/openclaw-doctor-flat-auth-uXFiDs/state/agents/main/agent/auth-profiles.json.sqlite-import.461.bak).  │
+│                                                                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-PGZZJF/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-PGZZJF/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                             │
+│  - Migrated auth profile JSON for                                                                           │
+│    /tmp/openclaw-doctor-flat-auth-PGZZJF/state/agents/main/agent/auth-profiles.json                         │
+│    into SQLite (backups:                                                                                    │
+│    /tmp/openclaw-doctor-flat-auth-PGZZJF/state/agents/main/agent/auth-profiles.json.sqlite-import.462.bak,  │
+│    /tmp/openclaw-doctor-flat-auth-PGZZJF/state/agents/main/agent/auth-state.json.sqlite-import.462.bak).    │
+│                                                                                                             │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-QSU1fk/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-QSU1fk/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                              │
+│  - Migrated auth profile JSON for                                                                            │
+│    /tmp/openclaw-doctor-flat-auth-QSU1fk/state/agents/main/agent/auth-profiles.json                          │
+│    into SQLite (backup:                                                                                      │
+│    /tmp/openclaw-doctor-flat-auth-QSU1fk/state/agents/main/agent/auth-profiles.json.sqlite-import.458.bak).  │
+│                                                                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-fiswqX/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-fiswqX/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor warnings ────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - Left auth profile JSON in place for                                               │
+│    /tmp/openclaw-doctor-flat-auth-fiswqX/state/agents/main/agent/auth-profiles.json  │
+│    because SQLite verification did not find imported profile(s):                     │
+│    openrouter:default.                                                               │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-yeuATO/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-yeuATO/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - Migrated auth profile JSON for                                                    │
+│    /tmp/openclaw-doctor-flat-auth-yeuATO/state/agents/main/agent/auth-profiles.json  │
+│    into SQLite (no legacy JSON backup needed).                                       │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-SoEJCo/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-SoEJCo/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ──────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                           │
+│  - Migrated auth profile JSON for                                                                         │
+│    /tmp/openclaw-doctor-flat-auth-SoEJCo/state/agents/main/agent/auth-profiles.json                       │
+│    into SQLite (backup:                                                                                   │
+│    /tmp/openclaw-doctor-flat-auth-SoEJCo/state/agents/main/agent/auth-state.json.sqlite-import.467.bak).  │
+│                                                                                                           │
+├───────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-jWsHqf/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-jWsHqf/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - Migrated auth profile JSON for                                                    │
+│    /tmp/openclaw-doctor-flat-auth-jWsHqf/state/agents/main/agent/auth-profiles.json  │
+│    into SQLite (no legacy JSON backup needed).                                       │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-MJbHIq/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-MJbHIq/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - Migrated auth profile JSON for                                                    │
+│    /tmp/openclaw-doctor-flat-auth-MJbHIq/state/agents/main/agent/auth-profiles.json  │
+│    into SQLite (no legacy JSON backup needed).                                       │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-XxWTTC/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-XxWTTC/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - Migrated auth profile JSON for                                                    │
+│    /tmp/openclaw-doctor-flat-auth-XxWTTC/state/agents/main/agent/auth-profiles.json  │
+│    into SQLite (no legacy JSON backup needed).                                       │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-M38b8x/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-M38b8x/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                              │
+│  - Migrated auth profile JSON for                                                                            │
+│    /tmp/openclaw-doctor-flat-auth-M38b8x/state/agents/main/agent/auth-profiles.json                          │
+│    into SQLite (backup:                                                                                      │
+│    /tmp/openclaw-doctor-flat-auth-M38b8x/state/agents/main/agent/auth-profiles.json.sqlite-import.471.bak).  │
+│                                                                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-iJdRJX/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-iJdRJX/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - Migrated auth profile JSON for                                                    │
+│    /tmp/openclaw-doctor-flat-auth-iJdRJX/state/agents/main/agent/auth-profiles.json  │
+│    into SQLite (no legacy JSON backup needed).                                       │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-TF4uJh/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-TF4uJh/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - Migrated auth profile JSON for                                                    │
+│    /tmp/openclaw-doctor-flat-auth-TF4uJh/state/agents/main/agent/auth-profiles.json  │
+│    into SQLite (no legacy JSON backup needed).                                       │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-7Madco/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-7Madco/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - Migrated auth profile JSON for                                                    │
+│    /tmp/openclaw-doctor-flat-auth-7Madco/state/agents/main/agent/auth-profiles.json  │
+│    into SQLite (no legacy JSON backup needed).                                       │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-5Fcy1A/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-5Fcy1A/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - Migrated auth profile JSON for                                                    │
+│    /tmp/openclaw-doctor-flat-auth-5Fcy1A/state/agents/main/agent/auth-profiles.json  │
+│    into SQLite (no legacy JSON backup needed).                                       │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profile SQLite migration ──────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-RFY0rB/state/agents/main/agent/auth-profiles.json  │
+│    /                                                                                 │
+│    /tmp/openclaw-doctor-flat-auth-RFY0rB/state/agents/main/agent/auth-state.json     │
+│  - openclaw doctor --fix imports legacy auth profile JSON into the                   │
+│    per-agent SQLite database and removes the old files after backup.                 │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - Migrated auth profile JSON for                                                    │
+│    /tmp/openclaw-doctor-flat-auth-RFY0rB/state/agents/main/agent/auth-profiles.json  │
+│    into SQLite (no legacy JSON backup needed).                                       │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ──────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-qYV6ku/state/agents/main/agent/auth-profiles.json  │
+│    uses the legacy flat auth profile format.                                         │
+│  - The gateway expects the canonical version/profiles store; openclaw                │
+│    doctor --fix rewrites this legacy shape with a backup.                            │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ───────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                            │
+│  - Migrated                                                                                                │
+│    /tmp/openclaw-doctor-flat-auth-qYV6ku/state/agents/main/agent/auth-profiles.json                        │
+│    to the SQLite auth profile store (backup:                                                               │
+│    /tmp/openclaw-doctor-flat-auth-qYV6ku/state/agents/main/agent/auth-profiles.json.legacy-flat.123.bak).  │
+│                                                                                                            │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ──────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-uS62zO/state/agents/main/agent/auth-profiles.json  │
+│    uses the legacy flat auth profile format.                                         │
+│  - The gateway expects the canonical version/profiles store; openclaw                │
+│    doctor --fix rewrites this legacy shape with a backup.                            │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ──────────────────────────────────────────────────────────────────────╮
+│                                                                                      │
+│  - /tmp/openclaw-doctor-flat-auth-Vn9fcH/state/agents/main/agent/auth-profiles.json  │
+│    contains aws-sdk profile markers that belong in openclaw.json                     │
+│    auth.profiles.                                                                    │
+│  - AWS SDK profile markers are routing metadata, not stored                          │
+│    credentials; openclaw doctor --fix moves them to config with a                    │
+│    backup.                                                                           │
+│                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                │
+│  - Moved aws-sdk profile metadata from                                                                         │
+│    /tmp/openclaw-doctor-flat-auth-Vn9fcH/state/agents/main/agent/auth-profiles.json                            │
+│    to auth.profiles (backup:                                                                                   │
+│    /tmp/openclaw-doctor-flat-auth-Vn9fcH/state/agents/main/agent/auth-profiles.json.aws-sdk-profile.456.bak).  │
+│                                                                                                                │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ Test Files  28 passed (28)
+      Tests  371 passed (371)
+   Start at  21:42:31
+   Duration  42.91s (transform 4.13s, setup 362ms, import 9.01s, tests 33.18s, environment 0ms)
+
+[vitest] still running with no output for 30000ms (test/vitest/vitest.gateway-server.config.ts).
+[test] starting test/vitest/vitest.auto-reply-top-level.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 60000ms (test/vitest/vitest.unit-fast.config.ts).
+[vitest] still running with no output for 60000ms (test/vitest/vitest.infra.config.ts).
+[vitest] still running with no output for 60000ms (test/vitest/vitest.tooling.config.ts).
+[vitest] still running with no output for 30000ms (test/vitest/vitest.extension-telegram.config.ts).
+
+ Test Files  3 passed (3)
+      Tests  7 passed (7)
+   Start at  21:43:18
+   Duration  2.26s (transform 1.55s, setup 439ms, import 3.26s, tests 413ms, environment 0ms)
+
+[test] starting test/vitest/vitest.extension-memory.config.ts
+[vitest] still running with no output for 60000ms (test/vitest/vitest.agents-core.config.ts).
+[vitest] still running with no output for 60000ms (test/vitest/vitest.extension-providers.config.ts).
+
+ Test Files  28 passed (28)
+      Tests  217 passed (217)
+   Start at  21:42:44
+   Duration  38.89s (transform 4.23s, setup 341ms, import 9.82s, tests 28.37s, environment 0ms)
+
+[test] starting test/vitest/vitest.utils.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  6 passed (6)
+      Tests  68 passed (68)
+   Start at  21:43:27
+   Duration  2.94s (transform 1.57s, setup 80ms, import 3.60s, tests 989ms, environment 1ms)
+
+[test] starting test/vitest/vitest.cli.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 30000ms (test/vitest/vitest.media-understanding.config.ts).
+(node:1553008) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 end listeners added to [WritableWorkerStdio]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(Use `node-22 --trace-warnings ...` to show where the warning was created)
+(node:1553008) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 finish listeners added to [WritableWorkerStdio]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(node:1553008) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 error listeners added to [WritableWorkerStdio]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(node:1553008) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 close listeners added to [WritableWorkerStdio]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(node:1553008) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WritableWorkerStdio]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+│
+◇  Auth profiles ──────────────────────────────────────────────────────────────────────────╮
+│                                                                                          │
+│  - /tmp/openclaw-doctor-oauth-sidecar-q7Nevs/state/agents/main/agent/auth-profiles.json  │
+│    has legacy Codex OAuth profiles to migrate.                                           │
+│  - openclaw doctor --fix migrates active profiles back to inline OAuth                   │
+│    credentials and removes only sidecar files it successfully migrated.                  │
+│                                                                                          │
+├──────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                              │
+│  - Migrated 1 legacy Codex OAuth profile in                                                                  │
+│    /tmp/openclaw-doctor-oauth-sidecar-q7Nevs/state/agents/main/agent/auth-profiles.json                      │
+│    to inline credentials (backup:                                                                            │
+│    /tmp/openclaw-doctor-oauth-sidecar-q7Nevs/state/agents/main/agent/auth-profiles.json.oauth-ref.123.bak).  │
+│                                                                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ──────────────────────────────────────────────────────────────────────────╮
+│                                                                                          │
+│  - /tmp/openclaw-doctor-oauth-sidecar-mZL2VF/state/agents/main/agent/auth-profiles.json  │
+│    has legacy Codex OAuth profiles to migrate.                                           │
+│  - openclaw doctor --fix migrates active profiles back to inline OAuth                   │
+│    credentials and removes only sidecar files it successfully migrated.                  │
+│                                                                                          │
+├──────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ──────────────────────────────────────────────────────────────────────────╮
+│                                                                                          │
+│  - /tmp/openclaw-doctor-oauth-sidecar-r2URyk/state/agents/main/agent/auth-profiles.json  │
+│    has legacy Codex OAuth profiles to migrate.                                           │
+│  - openclaw doctor --fix migrates active profiles back to inline OAuth                   │
+│    credentials and removes only sidecar files it successfully migrated.                  │
+│                                                                                          │
+├──────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor warnings ─────────────────────────────────────────────────────────────────────────╮
+│                                                                                           │
+│  - Could not decrypt legacy OAuth sidecar for openai-codex:default in                     │
+│    /tmp/openclaw-doctor-oauth-sidecar-r2URyk/state/agents/main/agent/auth-profiles.json;  │
+│    re-authenticate this profile.                                                          │
+│                                                                                           │
+├───────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ──────────────────────────────────────────────────────────╮
+│                                                                          │
+│  - Found 1 unreferenced legacy Codex OAuth sidecar credential file.      │
+│  - Unreferenced sidecar files are left in place because external agent   │
+│    directories outside this scan may still reference them.               │
+│  - openclaw doctor --fix migrates active profiles back to inline OAuth   │
+│    credentials and removes only sidecar files it successfully migrated.  │
+│                                                                          │
+├──────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor warnings ──────────────────────────────────────────────────────╮
+│                                                                        │
+│  - Found 1 unreferenced legacy Codex OAuth sidecar credential file;    │
+│    left in place because external agent directories outside this scan  │
+│    may still reference it.                                             │
+│                                                                        │
+├────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ────────────────────────────────────────────────────────────────────────────╮
+│                                                                                            │
+│  - /tmp/openclaw-doctor-oauth-sidecar-lamHNH/state/agents/linked/agent/auth-profiles.json  │
+│    has legacy Codex OAuth profiles to migrate.                                             │
+│  - openclaw doctor --fix migrates active profiles back to inline OAuth                     │
+│    credentials and removes only sidecar files it successfully migrated.                    │
+│                                                                                            │
+├────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                          │
+│  - Migrated 1 legacy Codex OAuth profile in                                                                              │
+│    /tmp/openclaw-doctor-oauth-sidecar-lamHNH/state/agents/linked/agent/auth-profiles.json                                │
+│    to inline credentials (backup:                                                                                        │
+│    /tmp/openclaw-doctor-oauth-sidecar-lamHNH/state/agents/linked/agent/auth-profiles.json.oauth-ref.1782683021855.bak).  │
+│                                                                                                                          │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ─────────────────────────────────────────────────────────────────╮
+│                                                                                 │
+│  - /tmp/openclaw-doctor-oauth-sidecar-8ClyWN/external-agent/auth-profiles.json  │
+│    has legacy Codex OAuth profiles to migrate.                                  │
+│  - openclaw doctor --fix migrates active profiles back to inline OAuth          │
+│    credentials and removes only sidecar files it successfully migrated.         │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                     │
+│  - Migrated 1 legacy Codex OAuth profile in                                                         │
+│    /tmp/openclaw-doctor-oauth-sidecar-8ClyWN/external-agent/auth-profiles.json                      │
+│    to inline credentials (backup:                                                                   │
+│    /tmp/openclaw-doctor-oauth-sidecar-8ClyWN/external-agent/auth-profiles.json.oauth-ref.789.bak).  │
+│                                                                                                     │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ────────────────────────────────────────────────────────────────────────────╮
+│                                                                                            │
+│  - /tmp/openclaw-doctor-oauth-sidecar-O2z95L/state/agents/main/agent/auth-profiles.json    │
+│    has legacy Codex OAuth profiles to migrate.                                             │
+│  - /tmp/openclaw-doctor-oauth-sidecar-O2z95L/state/agents/worker/agent/auth-profiles.json  │
+│    has legacy Codex OAuth profiles to migrate.                                             │
+│  - openclaw doctor --fix migrates active profiles back to inline OAuth                     │
+│    credentials and removes only sidecar files it successfully migrated.                    │
+│                                                                                            │
+├────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                │
+│  - Migrated 1 legacy Codex OAuth profile in                                                                    │
+│    /tmp/openclaw-doctor-oauth-sidecar-O2z95L/state/agents/main/agent/auth-profiles.json                        │
+│    to inline credentials (backup:                                                                              │
+│    /tmp/openclaw-doctor-oauth-sidecar-O2z95L/state/agents/main/agent/auth-profiles.json.oauth-ref.456.bak).    │
+│  - Migrated 1 legacy Codex OAuth profile in                                                                    │
+│    /tmp/openclaw-doctor-oauth-sidecar-O2z95L/state/agents/worker/agent/auth-profiles.json                      │
+│    to inline credentials (backup:                                                                              │
+│    /tmp/openclaw-doctor-oauth-sidecar-O2z95L/state/agents/worker/agent/auth-profiles.json.oauth-ref.456.bak).  │
+│                                                                                                                │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ──────────────────────────────────────────────────────────────────────────────╮
+│                                                                                              │
+│  - /tmp/openclaw-doctor-canonical-api-key-P1NlAf/state/agents/main/agent/auth-profiles.json  │
+│    has 1 profile(s) using the non-canonical "api_key" field; the                             │
+│    canonical field is "key".                                                                 │
+│  - Runtime auth parsing only reads canonical "key" and "keyRef" fields,                      │
+│    so these profiles are silently skipped; openclaw doctor --fix                             │
+│    rewrites "api_key" to "key" with a backup.                                                │
+│                                                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                      │
+│  - Rewrote 1 "api_key" field(s) to "key" in                                                                          │
+│    /tmp/openclaw-doctor-canonical-api-key-P1NlAf/state/agents/main/agent/auth-profiles.json                          │
+│    (backup:                                                                                                          │
+│    /tmp/openclaw-doctor-canonical-api-key-P1NlAf/state/agents/main/agent/auth-profiles.json.api-key-alias.123.bak).  │
+│                                                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ──────────────────────────────────────────────────────────────────────────────╮
+│                                                                                              │
+│  - /tmp/openclaw-doctor-canonical-api-key-pBW99C/state/agents/main/agent/auth-profiles.json  │
+│    has 1 profile(s) using the non-canonical "api_key" field; the                             │
+│    canonical field is "key".                                                                 │
+│  - Runtime auth parsing only reads canonical "key" and "keyRef" fields,                      │
+│    so these profiles are silently skipped; openclaw doctor --fix                             │
+│    rewrites "api_key" to "key" with a backup.                                                │
+│                                                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                      │
+│  - Rewrote 1 "api_key" field(s) to "key" in                                                                          │
+│    /tmp/openclaw-doctor-canonical-api-key-pBW99C/state/agents/main/agent/auth-profiles.json                          │
+│    (backup:                                                                                                          │
+│    /tmp/openclaw-doctor-canonical-api-key-pBW99C/state/agents/main/agent/auth-profiles.json.api-key-alias.123.bak).  │
+│                                                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ─────────────────────────────────────────────────────────────────────╮
+│                                                                                     │
+│  - /tmp/openclaw-doctor-canonical-api-key-gNAjaw/external-agent/auth-profiles.json  │
+│    has 1 profile(s) using the non-canonical "api_key" field; the                    │
+│    canonical field is "key".                                                        │
+│  - Runtime auth parsing only reads canonical "key" and "keyRef" fields,             │
+│    so these profiles are silently skipped; openclaw doctor --fix                    │
+│    rewrites "api_key" to "key" with a backup.                                       │
+│                                                                                     │
+├─────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                             │
+│  - Rewrote 1 "api_key" field(s) to "key" in                                                                 │
+│    /tmp/openclaw-doctor-canonical-api-key-gNAjaw/external-agent/auth-profiles.json                          │
+│    (backup:                                                                                                 │
+│    /tmp/openclaw-doctor-canonical-api-key-gNAjaw/external-agent/auth-profiles.json.api-key-alias.123.bak).  │
+│                                                                                                             │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ────────────────────────────────────────────────────────────────────────────╮
+│                                                                                            │
+│  - /tmp/openclaw-doctor-canonical-api-key-N0PxHG/legacy-external-agent/auth-profiles.json  │
+│    has 1 profile(s) using the non-canonical "api_key" field; the                           │
+│    canonical field is "key".                                                               │
+│  - Runtime auth parsing only reads canonical "key" and "keyRef" fields,                    │
+│    so these profiles are silently skipped; openclaw doctor --fix                           │
+│    rewrites "api_key" to "key" with a backup.                                              │
+│                                                                                            │
+├────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor changes ───────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                    │
+│  - Rewrote 1 "api_key" field(s) to "key" in                                                                        │
+│    /tmp/openclaw-doctor-canonical-api-key-N0PxHG/legacy-external-agent/auth-profiles.json                          │
+│    (backup:                                                                                                        │
+│    /tmp/openclaw-doctor-canonical-api-key-N0PxHG/legacy-external-agent/auth-profiles.json.api-key-alias.123.bak).  │
+│                                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Auth profiles ──────────────────────────────────────────────────────────────────────────────╮
+│                                                                                              │
+│  - /tmp/openclaw-doctor-canonical-api-key-DgfH4W/state/agents/main/agent/auth-profiles.json  │
+│    has 1 profile(s) using the non-canonical "api_key" field; the                             │
+│    canonical field is "key".                                                                 │
+│  - Runtime auth parsing only reads canonical "key" and "keyRef" fields,                      │
+│    so these profiles are silently skipped; openclaw doctor --fix                             │
+│    rewrites "api_key" to "key" with a backup.                                                │
+│                                                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────╯
+[vitest] still running with no output for 90000ms (test/vitest/vitest.infra.config.ts).
+[vitest] still running with no output for 90000ms (test/vitest/vitest.tooling.config.ts).
+[vitest] still running with no output for 60000ms (test/vitest/vitest.extension-telegram.config.ts).
+[vitest] still running with no output for 90000ms (test/vitest/vitest.agents-core.config.ts).
+[vitest] still running with no output for 90000ms (test/vitest/vitest.extension-providers.config.ts).
+[vitest] still running with no output for 30000ms (test/vitest/vitest.extension-memory.config.ts).
+[live-cache] openai skipped: No openai openai-responses model available in registry.
+[live-cache] anthropic skipped: No anthropic anthropic-messages model available in registry.
+
+ Test Files  218 passed (218)
+      Tests  2258 passed (2258)
+   Start at  21:42:24
+   Duration  95.69s (transform 4.70s, setup 1.61s, import 30.28s, tests 61.17s, environment 0ms)
+
+[test] starting test/vitest/vitest.tui-pty.config.ts
+
+ Test Files  1099 passed (1099)
+      Tests  10804 passed | 3 skipped (10807)
+   Start at  21:42:21
+   Duration  99.50s (transform 8.26s, setup 0ms, import 28.55s, tests 167.62s, environment 117ms)
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[test] starting test/vitest/vitest.plugins.config.ts
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |media-understanding| src/media-understanding/image.test.ts > describeImageWithModel > places DashScope image prompts in user content before images
+AssertionError: expected 'Describe the image.' to be undefined
+
+- Expected:
+undefined
+
++ Received:
+"Describe the image."
+
+ ❯ src/media-understanding/image.test.ts:967:34
+    965|     const firstCall = requireFirstMockCall(completeMock, "DashScope im…
+    966|     const [, context] = firstCall;
+    967|     expect(context.systemPrompt).toBeUndefined();
+       |                                  ^
+    968|     const userMessage = context.messages[0];
+    969|     if (!userMessage) {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 22 passed (23)
+      Tests  1 failed | 261 passed (262)
+   Start at  21:43:02
+   Duration  61.65s (transform 2.08s, setup 530ms, import 5.38s, tests 65.42s, environment 2ms)
+
+[test] starting test/vitest/vitest.media.config.ts
+[vitest] still running with no output for 30000ms (test/vitest/vitest.cli.config.ts).
+
+ Test Files  125 passed (125)
+      Tests  2224 passed (2224)
+   Start at  21:42:50
+   Duration  74.64s (transform 4.41s, setup 992ms, import 37.11s, tests 34.88s, environment 0ms)
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[test] starting test/vitest/vitest.extensions.config.ts
+
+ Test Files  1 passed (1)
+      Tests  13 passed (13)
+   Start at  21:44:01
+   Duration  5.01s (transform 179ms, setup 198ms, import 17ms, tests 4.63s, environment 0ms)
+
+[test] starting test/vitest/vitest.logging.config.ts
+ ❯ |plugins| src/plugins/status.test.ts (27 tests | 19 failed) 1569ms
+     × uses the auto-enabled config snapshot for inspect policy summaries 6ms
+     × preserves raw config activation context when compatibility notices build their own report 1ms
+     × preserves raw config activation context for compatibility-derived reports 1ms
+     × normalizes bundled plugin versions to the core base release 1ms
+     × marks snapshot-loaded plugin modules as imported during full report loads 1ms
+     × marks errored plugin modules as imported when full diagnostics already evaluated them 1ms
+     × builds an inspect report with capability shape and policy 1ms
+     × builds inspect reports for every loaded plugin 1ms
+     × treats a CLI-command-only plugin as a plain capability 1ms
+     × treats a context-engine plugin as a plain capability 1ms
+     × builds compatibility warnings for legacy compatibility paths 1ms
+     × warns external plugins off deprecated memory embedding provider registration 1ms
+     × warns when external plugins register memory embedding providers at runtime only 1ms
+     × does not surface bundled memory embedding migration debt as user warnings 1ms
+     × builds structured compatibility notices with deterministic ordering 1ms
+     × does not warn for explicit startup-lazy metadata 1ms
+     × returns no compatibility warnings for modern capability plugins 0ms
+     × 'populates bundleCapabilities from plu…' 0ms
+     × 'returns empty bundleCapabilities and …' 0ms
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+Usage: openclaw gateway [options] [command]
+
+Run, inspect, and query the WebSocket Gateway
+
+Options:
+  --port <port>              Port for the gateway WebSocket
+  --bind <mode>              Bind mode
+                             ("loopback"|"lan"|"tailnet"|"auto"|"custom").
+                             Defaults to config gateway.bind (or loopback).
+  --token <token>            Shared token required in connect.params.auth.token
+                             (default: OPENCLAW_GATEWAY_TOKEN env if set)
+  --auth <mode>              Gateway auth mode
+                             ("none"|"token"|"password"|"trusted-proxy")
+  --password <password>      Password for auth mode=password
+  --password-file <path>     Read gateway password from file
+  --tailscale <mode>         Tailscale exposure mode ("off"|"serve"|"funnel")
+  --tailscale-reset-on-exit  Reset Tailscale serve/funnel configuration on
+                             shutdown (default: false)
+  --allow-unconfigured       Allow gateway start without enforcing
+                             gateway.mode=local in config (does not repair
+                             config) (default: false)
+  --dev                      Create a dev config + workspace if missing (no
+                             BOOTSTRAP.md) (default: false)
+  --reset                    Reset dev config + credentials + sessions +
+                             workspace (requires --dev) (default: false)
+  --force                    Kill any existing listener on the target port
+                             before starting (default: false)
+  --verbose                  Verbose logging to stdout/stderr (default: false)
+  --cli-backend-logs         Only show CLI backend logs in the console (includes
+                             stdout/stderr) (default: false)
+  --claude-cli-logs          Deprecated alias for --cli-backend-logs (default:
+                             false)
+  --ws-log <style>           WebSocket log style ("auto"|"full"|"compact")
+                             (default: "auto")
+  --compact                  Alias for "--ws-log compact" (default: false)
+  --raw-stream               Log raw model stream events to jsonl (default:
+                             false)
+  --raw-stream-path <path>   Raw stream jsonl path
+  -h, --help                 display help for command
+
+Commands:
+  run [options]              Run the WebSocket Gateway (foreground)
+  status [options]           Show gateway service status + probe
+                             connectivity/capability
+  install [options]          Install the Gateway service
+                             (launchd/systemd/schtasks)
+  uninstall [options]        Uninstall the Gateway service
+                             (launchd/systemd/schtasks)
+  start [options]            Start the Gateway service
+                             (launchd/systemd/schtasks)
+  stop [options]             Stop the Gateway service (launchd/systemd/schtasks)
+  restart [options]          Restart the Gateway service
+                             (launchd/systemd/schtasks)
+  call [options] <method>    Call a Gateway method
+  usage-cost [options]       Fetch usage cost summary from session logs
+  health [options]           Fetch Gateway health
+  stability [options]        Fetch payload-free Gateway stability diagnostics
+  diagnostics                Export local support diagnostics
+  probe [options]            Show gateway reachability, auth capability, and
+                             read-probe summary (local + remote)
+  discover [options]         Discover gateways via Bonjour (local + wide-area if
+                             configured)
+
+Examples:
+  openclaw gateway run
+    Run the gateway in the foreground.
+  openclaw gateway status
+    Show service status plus connectivity/capability.
+  openclaw gateway discover
+    Find local and wide-area gateway beacons.
+  openclaw gateway stability
+    Show recent stability diagnostics.
+  openclaw gateway call health
+    Call a gateway RPC method directly.
+
+Docs: https://docs.openclaw.ai/cli/gateway
+
+Usage: openclaw doctor [options]
+
+Health checks + quick fixes for the gateway and channels
+
+Options:
+  --no-workspace-suggestions  Disable workspace memory system suggestions
+  --yes                       Accept defaults without prompting (default: false)
+  --repair                    Apply recommended repairs without prompting
+                              (default: false)
+  --fix                       Apply recommended repairs (alias for --repair)
+                              (default: false)
+  --force                     Apply aggressive repairs (overwrites custom
+                              service config) (default: false)
+  --non-interactive           Run without prompts (safe migrations only)
+                              (default: false)
+  --generate-gateway-token    Generate and configure a gateway token (default:
+                              false)
+  --allow-exec                Allow doctor to execute exec SecretRefs while
+                              verifying configured secrets (default: false)
+  --deep                      Scan system services for extra gateway installs
+                              (default: false)
+  --lint                      Run read-only health checks and report findings
+                              (default: false)
+  --post-upgrade              Emit plugin-compat findings only (machine-readable
+                              with --json) (default: false)
+  --json                      With --lint or --post-upgrade: emit
+                              machine-readable JSON output (default: false)
+  --severity-min <level>      With --lint: drop findings below this severity
+                              (info|warning|error)
+  --all                       With --lint: run all registered checks, including
+                              opt-in checks (default: false)
+  --skip <id>                 With --lint: skip a specific check id (repeatable)
+                              (default: [])
+  --only <id>                 With --lint: run only the specified check id
+                              (repeatable) (default: [])
+  -h, --help                  display help for command
+
+Docs: https://docs.openclaw.ai/cli/doctor
+
+Usage: openclaw status [options]
+
+Show channel health and recent session recipients
+
+Options:
+  --json          Output JSON instead of text (default: false)
+  --all           Full diagnosis (read-only, pasteable) (default: false)
+  --usage         Show model provider usage/quota snapshots (default: false)
+  --deep          Probe channels (WhatsApp Web + Telegram + Discord + Slack +
+                  Signal) (default: false)
+  --timeout <ms>  Probe timeout in milliseconds (default: "10000")
+  --verbose       Verbose logging (default: false)
+  --debug         Alias for --verbose (default: false)
+  -h, --help      display help for command
+
+Examples:
+  openclaw status
+    Show channel health + session summary.
+  openclaw status --all
+    Full diagnosis (read-only).
+  openclaw status --json
+    Machine-readable output.
+  openclaw status --usage
+    Show model provider usage/quota snapshots.
+  openclaw status --deep
+    Run channel probes (WA + Telegram + Discord + Slack + Signal).
+  openclaw status --deep --timeout 5000
+    Tighten probe timeout.
+
+Docs: https://docs.openclaw.ai/cli/status
+
+Usage: openclaw health [options]
+
+Fetch health from the running gateway
+
+Options:
+  --json          Output JSON instead of text (default: false)
+  --timeout <ms>  Connection timeout in milliseconds (default: "10000")
+  --verbose       Verbose logging (default: false)
+  --debug         Alias for --verbose (default: false)
+  -h, --help      display help for command
+
+Docs: https://docs.openclaw.ai/cli/health
+
+Usage: openclaw configure [options]
+
+Interactive configuration for credentials, channels, gateway, and agent defaults
+
+Options:
+  --section <section>  Configuration sections (repeatable). Options: workspace,
+                       model, web, gateway, daemon, channels, plugins, skills,
+                       health (default: [])
+  -h, --help           display help for command
+
+Docs: https://docs.openclaw.ai/cli/configure
+
+Usage: openclaw setup [options]
+
+Create baseline config/workspace files; use --wizard for full onboarding
+
+Options:
+  --workspace <dir>         Agent workspace directory (default:
+                            ~/.openclaw/workspace; stored as
+                            agents.defaults.workspace)
+  --wizard                  Run interactive onboarding (default: false)
+  --non-interactive         Run onboarding without prompts (default: false)
+  --accept-risk             Acknowledge that agents are powerful and full system
+                            access is risky (required for --non-interactive)
+                            (default: false)
+  --mode <mode>             Onboard mode: local|remote
+  --import-from <provider>  Migration provider to run during onboarding
+  --import-source <path>    Source agent home for --import-from
+  --import-secrets          Import supported secrets during onboarding migration
+                            (default: false)
+  --remote-url <url>        Remote Gateway WebSocket URL
+  --remote-token <token>    Remote Gateway token (optional)
+  -h, --help                display help for command
+
+Examples:
+  openclaw setup
+    Create config, workspace, and session folders.
+  openclaw setup --wizard
+    Run full onboarding for auth, models, Gateway, and channels.
+
+Docs: https://docs.openclaw.ai/cli/setup
+
+Usage: openclaw onboard [options]
+
+Guided setup for auth, models, Gateway, workspace, channels, and skills
+
+Options:
+  --workspace <dir>                        Agent workspace directory (default: ~/.openclaw/workspace)
+  --reset                                  Reset config + credentials + sessions before running onboard (workspace only with --reset-scope full)
+  --reset-scope <scope>                    Reset scope: config|config+creds+sessions|full
+  --non-interactive                        Run without prompts (default: false)
+  --modern                                 Use the conversational setup/repair assistant (default: false)
+  --accept-risk                            Acknowledge that agents are powerful and full system access is risky (required for --non-interactive) (default: false)
+  --flow <flow>                            Onboard flow: quickstart|advanced|manual|import
+  --mode <mode>                            Onboard mode: local|remote
+  --auth-choice <choice>                   Auth: custom-api-key|skip|claude-cli|apiKey|anthropic-cli|setup-token|arceeai-api-key|brave-api-key|byteplus-api-key|cerebras-api-key|openai-device-code|openai|chutes|chutes-api-key|cloudflare-ai-gateway-api-key|zai-cn|qwen-api-key-cn|qwen-api-key|zai-coding-cn|zai-coding-global|cohere-api-key|copilot-proxy|deepinfra-api-key|deepseek-api-key|fireworks-api-key|google-gemini-cli|github-copilot|zai-global|gmi-api-key|gemini-api-key|google-vertex-api-key|groq-api-key|huggingface-api-key|kilocode-api-key|kimi-code-api-key|litellm-api-key|lmstudio|microsoft-foundry-apikey|microsoft-foundry-entra|minimax-cn-api|minimax-global-api|minimax-cn-oauth|minimax-global-oauth|mistral-api-key|moonshot-api-key|moonshot-api-key-cn|novita-api-key|nvidia-api-key|ollama|ollama-cloud|openai-api-key|opencode-go|opencode-zen|arceeai-openrouter|openrouter-api-key|openrouter-oauth|qianfan-api-key|qwen-oauth|sglang|qwen-standard-api-key-cn|qwen-standard-api-key|stepfun-standard-api-key-cn|stepfun-standard-api-key-intl|stepfun-plan-api-key-cn|stepfun-plan-api-key-intl|synthetic-api-key|tokenhub-api-key|together-api-key|venice-api-key|ai-gateway-api-key|vllm|volcengine-api-key|xai-api-key|xai-device-code|xai-oauth|xiaomi-api-key|xiaomi-token-plan-cn|xiaomi-token-plan-ams|xiaomi-token-plan-sgp|zai-api-key
+  --token-provider <id>                    Token provider id (non-interactive; used with --auth-choice token)
+  --token <token>                          Token value (non-interactive; used with --auth-choice token)
+  --token-profile-id <id>                  Auth profile id (non-interactive; default: <provider>:manual)
+  --token-expires-in <duration>            Optional token expiry duration (e.g. 365d, 12h)
+  --secret-input-mode <mode>               API key persistence mode: plaintext|ref (default: plaintext)
+  --cloudflare-ai-gateway-account-id <id>  Cloudflare Account ID
+  --cloudflare-ai-gateway-gateway-id <id>  Cloudflare AI Gateway ID
+  --alibaba-model-studio-api-key <key>     Alibaba Model Studio API key
+  --anthropic-api-key <key>                Anthropic API key
+  --byteplus-api-key <key>                 BytePlus API key
+  --cohere-api-key <key>                   Cohere API key
+  --comfy-api-key <key>                    Comfy Cloud API key
+  --fal-api-key <key>                      fal API key
+  --github-copilot-token <token>           GitHub Copilot OAuth token
+  --gemini-api-key <key>                   Gemini API key
+  --huggingface-api-key <key>              Hugging Face API key (HF token)
+  --litellm-api-key <key>                  LiteLLM API key
+  --lmstudio-api-key <key>                 LM Studio API key
+  --minimax-api-key <key>                  MiniMax API key
+  --mistral-api-key <key>                  Mistral API key
+  --novita-api-key <key>                   NovitaAI API key
+  --nvidia-api-key <key>                   NVIDIA API key
+  --ollama-cloud-api-key <key>             Ollama Cloud API key
+  --openai-api-key <key>                   OpenAI API Key
+  --opencode-zen-api-key <key>             OpenCode API key (Zen catalog)
+  --opencode-go-api-key <key>              OpenCode API key (Go catalog)
+  --openrouter-api-key <key>               OpenRouter API key
+  --runway-api-key <key>                   Runway API key
+  --synthetic-api-key <key>                Synthetic API key
+  --together-api-key <key>                 Together AI API key
+  --volcengine-api-key <key>               Volcano Engine API key
+  --vydra-api-key <key>                    Vydra API key
+  --xai-api-key <key>                      xAI API key
+  --xiaomi-api-key <key>                   Xiaomi MiMo pay-as-you-go API key
+  --xiaomi-token-plan-api-key <key>        Xiaomi MiMo Token Plan API key
+  --arceeai-api-key <key>                  Arcee AI API key
+  --cerebras-api-key <key>                 Cerebras API key
+  --chutes-api-key <key>                   Chutes API key
+  --cloudflare-ai-gateway-api-key <key>    Cloudflare AI Gateway API key
+  --deepinfra-api-key <key>                DeepInfra API key
+  --deepseek-api-key <key>                 DeepSeek API key
+  --fireworks-api-key <key>                Fireworks API key
+  --gmi-api-key <key>                      GMI Cloud API key
+  --kilocode-api-key <key>                 Kilo Gateway API key
+  --kimi-code-api-key <key>                Kimi Code API key (subscription)
+  --moonshot-api-key <key>                 Moonshot API key
+  --pixverse-api-key <key>                 PixVerse API key
+  --qianfan-api-key <key>                  QIANFAN API key
+  --modelstudio-standard-api-key-cn <key>  Qwen Cloud standard API key (China)
+  --modelstudio-standard-api-key <key>     Qwen Cloud standard API key (Global/Intl)
+  --modelstudio-api-key-cn <key>           Qwen Cloud Coding Plan API key (China)
+  --modelstudio-api-key <key>              Qwen Cloud Coding Plan API key (Global/Intl)
+  --qwen-oauth-token <token>               Qwen OAuth token
+  --stepfun-api-key <key>                  StepFun API key
+  --tokenhub-api-key <key>                 Tencent TokenHub API key
+  --venice-api-key <key>                   Venice API key
+  --ai-gateway-api-key <key>               Vercel AI Gateway API key
+  --zai-api-key <key>                      Z.AI API key
+  --groq-api-key <key>                     Groq API key
+  --custom-base-url <url>                  Custom provider base URL
+  --custom-api-key <key>                   Custom provider API key (optional)
+  --custom-model-id <id>                   Custom provider model ID
+  --custom-provider-id <id>                Custom provider ID (optional; auto-derived by default)
+  --custom-compatibility <mode>            Custom provider API compatibility: openai|openai-responses|anthropic (default: openai)
+  --custom-image-input                     Mark the custom provider model as image-capable
+  --custom-text-input                      Mark the custom provider model as text-only
+  --gateway-port <port>                    Gateway port
+  --gateway-bind <mode>                    Gateway bind: loopback|tailnet|lan|auto|custom
+  --gateway-auth <mode>                    Gateway auth: token|password
+  --gateway-token <token>                  Gateway token (token auth)
+  --gateway-token-ref-env <name>           Gateway token SecretRef env var name (token auth; e.g. OPENCLAW_GATEWAY_TOKEN)
+  --gateway-password <password>            Gateway password (password auth)
+  --remote-url <url>                       Remote Gateway WebSocket URL
+  --remote-token <token>                   Remote Gateway token (optional)
+  --tailscale <mode>                       Tailscale: off|serve|funnel
+  --tailscale-reset-on-exit                Reset tailscale serve/funnel on exit
+  --install-daemon                         Install gateway service
+  --no-install-daemon                      Skip gateway service install
+  --skip-daemon                            Skip gateway service install
+  --daemon-runtime <runtime>               Daemon runtime: node|bun
+  --skip-channels                          Skip channel setup
+  --skip-skills                            Skip skills setup
+  --skip-bootstrap                         Skip creating default agent workspace files
+  --skip-search                            Skip search provider setup
+  --skip-health                            Skip health check
+  --skip-ui                                Skip Control UI/TUI prompts
+  --suppress-gateway-token-output          Suppress token-bearing Gateway/UI output
+  --skip-hooks                             Skip hook setup
+  --node-manager <name>                    Node manager for skills: npm|pnpm|bun
+  --import-from <provider>                 Migration provider to run during onboarding
+  --import-source <path>                   Source agent home for --import-from
+  --import-secrets                         Import supported secrets during onboarding migration (default: false)
+  --json                                   Output JSON summary (default: false)
+  -h, --help                               display help for command
+
+Docs: https://docs.openclaw.ai/cli/onboard
+
+Usage: openclaw agents [options] [command]
+
+Manage isolated agents (workspaces + auth + routing)
+
+Options:
+  -h, --help              display help for command
+
+Commands:
+  list [options]          List configured agents
+  bindings [options]      List routing bindings
+  bind [options]          Add routing bindings for an agent
+  unbind [options]        Remove routing bindings for an agent
+  add [options] [name]    Add a new isolated agent
+  set-identity [options]  Update an agent identity (name/theme/emoji/avatar)
+  delete [options] <id>   Delete an agent and prune workspace/state
+
+Docs: https://docs.openclaw.ai/cli/agents
+
+Usage: openclaw secrets [options] [command]
+
+Secrets runtime controls
+
+Options:
+  -h, --help           display help for command
+
+Commands:
+  reload [options]     Re-resolve secret references and atomically swap runtime
+                       snapshot
+  audit [options]      Audit plaintext secrets, unresolved refs, and precedence
+                       drift
+  configure [options]  Interactive secrets helper (provider setup + SecretRef
+                       mapping + preflight)
+  apply [options]      Apply a previously generated secrets plan
+  help [command]       display help for command
+
+Docs: https://docs.openclaw.ai/gateway/security
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  19 passed (19)
+      Tests  262 passed (262)
+   Start at  21:44:07
+   Duration  3.05s (transform 1.59s, setup 523ms, import 2.28s, tests 2.87s, environment 2ms)
+
+[test] starting test/vitest/vitest.agents-embedded-agent.config.ts
+(node:1563906) Warning: Setting the NODE_TLS_REJECT_UNAUTHORIZED environment variable to '0' makes TLS connections and HTTPS requests insecure by disabling certificate verification.
+(Use `node-22 --trace-warnings ...` to show where the warning was created)
+
+ Test Files  29 passed (29)
+      Tests  363 passed (363)
+   Start at  21:44:09
+   Duration  3.12s (transform 1.52s, setup 580ms, import 3.54s, tests 1.44s, environment 3ms)
+
+[test] starting test/vitest/vitest.hooks.config.ts
+error: option '--limit <n>' argument '10ms' is invalid. --limit must be a positive integer.
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+error: option '--limit <n>' argument '10ms' is invalid. --limit must be a positive integer.
+ ❯ |tooling| test/scripts/plugin-sdk-surface-report.test.ts (8 tests | 3 failed) 119183ms
+     × accepts exact deprecated export budget overrides by public entrypoint 27711ms
+     × keeps default public surface budgets pinned to current source counts 29585ms
+     × keeps generated package declarations out of source surface counts 28099ms
+
+ Test Files  21 passed (21)
+      Tests  200 passed (200)
+   Start at  21:44:16
+   Duration  4.81s (transform 1.75s, setup 547ms, import 2.25s, tests 6.37s, environment 2ms)
+
+[test] starting test/vitest/vitest.cron.config.ts
+[vitest] still running with no output for 120000ms (test/vitest/vitest.agents-core.config.ts).
+[vitest] still running with no output for 120000ms (test/vitest/vitest.extension-providers.config.ts).
+[vitest] still running with no output for 60000ms (test/vitest/vitest.extension-memory.config.ts).
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+ ❯ |tooling| test/scripts/secret-provider-integrations.test.ts (29 tests | 1 failed) 12331ms
+     × preserves timeout kill grace for descendants after the leader exits 5055ms
+
+ Test Files  98 passed (98)
+      Tests  1314 passed (1314)
+   Start at  21:43:24
+   Duration  68.34s (transform 4.19s, setup 11.10s, import 76.15s, tests 34.32s, environment 11ms)
+
+[test] starting test/vitest/vitest.tui.config.ts
+ ❯ |tooling| test/scripts/run-additional-boundary-checks.test.ts (15 tests | 1 failed) 2958ms
+     × waits for timed-out process groups after the wrapper exits 2029ms
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 30000ms (test/vitest/vitest.plugins.config.ts).
+ ❯ |tooling| test/scripts/check-deadcode-unused-files.test.ts (15 tests | 1 failed) 2414ms
+     × waits for timed-out Knip process groups after the wrapper exits 2027ms
+[vitest] still running with no output for 30000ms (test/vitest/vitest.extensions.config.ts).
+ ❯ |tooling| test/scripts/bench-cli-startup.test.ts (15 tests | 1 failed) 2140ms
+     × cleans timed-out benchmark process groups when the leader exits first 522ms
+
+ Test Files  144 passed (144)
+      Tests  2612 passed | 1 skipped (2613)
+   Start at  21:43:34
+   Duration  65.92s (transform 3.19s, setup 1.08s, import 10.68s, tests 98.27s, environment 15ms)
+
+
+ Test Files  24 passed (24)
+      Tests  517 passed (517)
+   Start at  21:44:36
+   Duration  4.04s (transform 1.82s, setup 541ms, import 4.75s, tests 2.23s, environment 3ms)
+
+[test] starting test/vitest/vitest.agents-tools.config.ts
+[test] starting test/vitest/vitest.extension-diffs.config.ts
+[vitest] still running with no output for 30000ms (test/vitest/vitest.infra.config.ts).
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |extension-providers| extensions/moonshot/provider-catalog.test.ts > moonshot provider catalog > opts native Moonshot baseUrls into streaming usage only inside the extension
+Error: expected Moonshot model kimi-k2.6 compat
+ ❯ requireMoonshotCompat extensions/moonshot/provider-catalog.test.ts:31:11
+     29| function requireMoonshotCompat(model: MoonshotModel): NonNullable<Moon…
+     30|   if (!model.compat) {
+     31|     throw new Error(`expected Moonshot model ${model.id} compat`);
+       |           ^
+     32|   }
+     33|   return model.compat;
+ ❯ extensions/moonshot/provider-catalog.test.ts:79:7
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+ FAIL  |extension-providers| extensions/ollama/provider-discovery.test.ts > Ollama provider > discovers per-model context windows from /api/show
+AssertionError: expected undefined to be 131072 // Object.is equality
+
+- Expected:
+131072
+
++ Received:
+undefined
+
+ ❯ extensions/ollama/provider-discovery.test.ts:238:33
+    236|     const qwen = models.find((model) => model.id === "qwen3:32b");
+    237|     const llama = models.find((model) => model.id === "llama3.3:70b");
+    238|     expect(qwen?.contextWindow).toBe(131072);
+       |                                 ^
+    239|     expect(llama?.contextWindow).toBe(65536);
+    240|     expectDiscoveryCallCounts(fetchMock, { tags: 1, show: 2 });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/7]⎯
+
+ FAIL  |extension-providers| extensions/ollama/provider-discovery.test.ts > Ollama provider > auto-registers ollama provider when models are discovered locally
+AssertionError: expected [] to have a length of 2 but got +0
+
+- Expected
++ Received
+
+- 2
++ 0
+
+ ❯ extensions/ollama/provider-discovery.test.ts:268:32
+    266|       expect(provider?.api).toBe("ollama");
+    267|       expect(provider?.baseUrl).toBe("http://127.0.0.1:11434");
+    268|       expect(provider?.models).toHaveLength(2);
+       |                                ^
+    269|       expect(provider?.models?.[0]?.id).toBe("deepseek-r1:latest");
+    270|       expect(provider?.models?.[0]?.reasoning).toBe(true);
+ ❯ withoutAmbientOllamaEnv extensions/ollama/provider-discovery.test.ts:94:14
+ ❯ extensions/ollama/provider-discovery.test.ts:244:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/7]⎯
+
+ FAIL  |extension-providers| extensions/ollama/provider-discovery.test.ts > Ollama provider > falls back to default context window when /api/show fails
+AssertionError: expected undefined to be 128000 // Object.is equality
+
+- Expected:
+128000
+
++ Received:
+undefined
+
+ ❯ extensions/ollama/provider-discovery.test.ts:347:34
+    345|     });
+    346|     const model = provider?.models?.find((entry) => entry.id === "qwen…
+    347|     expect(model?.contextWindow).toBe(128000);
+       |                                  ^
+    348|     expectDiscoveryCallCounts(fetchMock, { tags: 1, show: 1 });
+    349|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/7]⎯
+
+ FAIL  |extension-providers| extensions/ollama/provider-discovery.test.ts > Ollama provider > caps /api/show requests when /api/tags returns a very large model list
+AssertionError: expected +0 to be 200 // Object.is equality
+
+- Expected
++ Received
+
+- 200
++ 0
+
+ ❯ expectDiscoveryCallCounts extensions/ollama/provider-discovery.test.ts:49:56
+     47|   ) => {
+     48|     expect(countFetchCallUrls(fetchMock, "/api/tags")).toBe(params.tag…
+     49|     expect(countFetchCallUrls(fetchMock, "/api/show")).toBe(params.sho…
+       |                                                        ^
+     50|   };
+     51|
+ ❯ extensions/ollama/provider-discovery.test.ts:379:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/7]⎯
+
+ FAIL  |extension-providers| extensions/qwen/provider-catalog.test.ts > qwen provider catalog > opts native Qwen baseUrls into streaming usage only inside the extension
+Error: expected Qwen model qwen3.5-plus compat
+ ❯ extensions/qwen/provider-catalog.test.ts:47:17
+     45|       nativeProvider.models.every((model) => {
+     46|         if (!model.compat) {
+     47|           throw new Error(`expected Qwen model ${model.id} compat`);
+       |                 ^
+     48|         }
+     49|         return model.compat.supportsUsageInStreaming === true;
+ ❯ extensions/qwen/provider-catalog.test.ts:45:29
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/7]⎯
+
+ FAIL  |extension-providers| extensions/moonshot/src/kimi-web-search-provider.test.ts > kimi web search provider > inherits native Moonshot chat baseUrl when kimi baseUrl is unset
+AssertionError: expected 'https://api.moonshot.ai/v1' to be 'https://api.moonshot.cn/v1' // Object.is equality
+
+Expected: "https://api.moonshot.cn/v1"
+Received: "https://api.moonshot.ai/v1"
+
+ ❯ extensions/moonshot/src/kimi-web-search-provider.test.ts:92:61
+     90|     } as unknown as OpenClawConfig;
+     91|
+     92|     expect(testing.resolveKimiBaseUrl(undefined, cnConfig)).toBe("http…
+       |                                                             ^
+     93|     expect(testing.resolveKimiBaseUrl(undefined, cnConfigWithTrailingS…
+     94|       "https://api.moonshot.cn/v1",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/7]⎯
+
+
+ Test Files  4 failed | 175 passed | 1 skipped (180)
+      Tests  7 failed | 2089 passed | 1 skipped (2097)
+   Start at  21:42:20
+   Duration  143.38s (transform 5.75s, setup 19.62s, import 206.16s, tests 34.62s, environment 20ms)
+
+[test] starting test/vitest/vitest.gateway-core.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 30000ms (test/vitest/vitest.agents-embedded-agent.config.ts).
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  10 passed (10)
+      Tests  136 passed (136)
+   Start at  21:44:44
+   Duration  4.45s (transform 1.56s, setup 746ms, import 3.64s, tests 2.60s, environment 700ms)
+
+[test] starting test/vitest/vitest.unit-fast-fake-timers.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 150000ms (test/vitest/vitest.agents-core.config.ts).
+[vitest] still running with no output for 30000ms (test/vitest/vitest.cron.config.ts).
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 19 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > uses the auto-enabled config snapshot for inspect policy summaries
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildPluginInspectReport src/plugins/status.ts:314:5
+ ❯ expectInspectReport src/plugins/status.test.ts:157:19
+ ❯ src/plugins/status.test.ts:571:21
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > preserves raw config activation context when compatibility notices build their own report
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildAllPluginInspectReports src/plugins/status.ts:455:18
+ ❯ buildPluginCompatibilityNotices src/plugins/status.ts:502:10
+ ❯ expectAutoEnabledDemoCompatibilityNoticesPreserveRawConfig src/plugins/status.test.ts:310:10
+ ❯ src/plugins/status.test.ts:586:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > preserves raw config activation context for compatibility-derived reports
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildAllPluginInspectReports src/plugins/status.ts:455:18
+ ❯ buildPluginCompatibilityNotices src/plugins/status.ts:502:10
+ ❯ expectAutoEnabledDemoCompatibilityNoticesPreserveRawConfig src/plugins/status.test.ts:310:10
+ ❯ src/plugins/status.test.ts:606:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > normalizes bundled plugin versions to the core base release
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildPluginReport src/plugins/status.ts:189:23
+ ❯ buildPluginDiagnosticsReport src/plugins/status.ts:299:10
+ ❯ src/plugins/status.test.ts:621:20
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > marks snapshot-loaded plugin modules as imported during full report loads
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildPluginReport src/plugins/status.ts:189:23
+ ❯ buildPluginDiagnosticsReport src/plugins/status.ts:299:10
+ ❯ src/plugins/status.test.ts:660:20
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > marks errored plugin modules as imported when full diagnostics already evaluated them
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildPluginReport src/plugins/status.ts:189:23
+ ❯ buildPluginDiagnosticsReport src/plugins/status.ts:299:10
+ ❯ src/plugins/status.test.ts:673:20
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > builds an inspect report with capability shape and policy
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildPluginInspectReport src/plugins/status.ts:314:5
+ ❯ expectInspectReport src/plugins/status.test.ts:157:19
+ ❯ src/plugins/status.test.ts:711:21
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > builds inspect reports for every loaded plugin
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildAllPluginInspectReports src/plugins/status.ts:455:18
+ ❯ src/plugins/status.test.ts:758:21
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > treats a CLI-command-only plugin as a plain capability
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildPluginInspectReport src/plugins/status.ts:314:5
+ ❯ expectInspectReport src/plugins/status.test.ts:157:19
+ ❯ src/plugins/status.test.ts:775:21
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > treats a context-engine plugin as a plain capability
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildPluginInspectReport src/plugins/status.ts:314:5
+ ❯ expectInspectReport src/plugins/status.test.ts:157:19
+ ❯ src/plugins/status.test.ts:799:21
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > builds compatibility warnings for legacy compatibility paths
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildAllPluginInspectReports src/plugins/status.ts:455:18
+ ❯ buildPluginCompatibilityNotices src/plugins/status.ts:502:10
+ ❯ buildPluginCompatibilityWarnings src/plugins/status.ts:492:10
+ ❯ expectCompatibilityOutput src/plugins/status.test.ts:336:12
+ ❯ src/plugins/status.test.ts:824:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > warns external plugins off deprecated memory embedding provider registration
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildAllPluginInspectReports src/plugins/status.ts:455:18
+ ❯ buildPluginCompatibilityNotices src/plugins/status.ts:502:10
+ ❯ expectCompatibilityOutput src/plugins/status.test.ts:333:12
+ ❯ src/plugins/status.test.ts:839:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > warns when external plugins register memory embedding providers at runtime only
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildAllPluginInspectReports src/plugins/status.ts:455:18
+ ❯ buildPluginCompatibilityNotices src/plugins/status.ts:502:10
+ ❯ expectCompatibilityOutput src/plugins/status.test.ts:333:12
+ ❯ src/plugins/status.test.ts:870:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[13/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > does not surface bundled memory embedding migration debt as user warnings
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildAllPluginInspectReports src/plugins/status.ts:455:18
+ ❯ buildPluginCompatibilityNotices src/plugins/status.ts:502:10
+ ❯ expectNoCompatibilityWarnings src/plugins/status.test.ts:327:10
+ ❯ src/plugins/status.test.ts:894:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[14/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > builds structured compatibility notices with deterministic ordering
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildAllPluginInspectReports src/plugins/status.ts:455:18
+ ❯ buildPluginCompatibilityNotices src/plugins/status.ts:502:10
+ ❯ expectCompatibilityOutput src/plugins/status.test.ts:333:12
+ ❯ src/plugins/status.test.ts:916:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[15/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > does not warn for explicit startup-lazy metadata
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildAllPluginInspectReports src/plugins/status.ts:455:18
+ ❯ buildPluginCompatibilityNotices src/plugins/status.ts:502:10
+ ❯ expectNoCompatibilityWarnings src/plugins/status.test.ts:327:10
+ ❯ src/plugins/status.test.ts:933:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[16/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > returns no compatibility warnings for modern capability plugins
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildAllPluginInspectReports src/plugins/status.ts:455:18
+ ❯ buildPluginCompatibilityNotices src/plugins/status.ts:502:10
+ ❯ expectNoCompatibilityWarnings src/plugins/status.test.ts:327:10
+ ❯ src/plugins/status.test.ts:945:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[17/19]⎯
+
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > 'populates bundleCapabilities from plu…'
+ FAIL  |plugins| src/plugins/status.test.ts > plugin status reports > 'returns empty bundleCapabilities and …'
+Error: [vitest] No "isPluginMetadataSnapshotCompatible" export is defined on the "./plugin-metadata-snapshot.js" mock. Did you forget to return it from "vi.mock"?
+If you need to partially mock a module, you can use "importOriginal" helper inside:
+
+vi.mock(import("./plugin-metadata-snapshot.js"), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    // your mocked methods
+  }
+})
+
+ ❯ resolvePluginRuntimeLoadContext src/plugins/runtime/load-context.ts:106:11
+    104|       ? undefined
+    105|       : initialMetadataSnapshot &&
+    106|           isPluginMetadataSnapshotCompatible({
+       |           ^
+    107|             snapshot: initialMetadataSnapshot,
+    108|             config,
+ ❯ buildPluginInspectReport src/plugins/status.ts:314:5
+ ❯ expectInspectReport src/plugins/status.test.ts:157:19
+ ❯ src/plugins/status.test.ts:980:21
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[18/19]⎯
+
+
+ Test Files  1 failed | 171 passed (172)
+      Tests  19 failed | 2536 passed (2555)
+   Start at  21:44:05
+   Duration  50.74s (transform 4.17s, setup 1.34s, import 15.20s, tests 32.76s, environment 0ms)
+
+[test] starting test/vitest/vitest.extension-discord.config.ts
+
+ Test Files  10 passed (10)
+      Tests  163 passed (163)
+   Start at  21:44:52
+   Duration  4.48s (transform 1.49s, setup 0ms, import 3.31s, tests 975ms, environment 0ms)
+
+[test] starting test/vitest/vitest.bundled.config.ts
+
+ Test Files  208 passed (208)
+      Tests  2702 passed (2702)
+   Start at  21:44:09
+   Duration  50.74s (transform 5.83s, setup 1.51s, import 39.77s, tests 49.84s, environment 22ms)
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[test] starting test/vitest/vitest.extension-slack.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  85 passed (85)
+      Tests  1551 passed (1551)
+   Start at  21:44:14
+   Duration  48.17s (transform 4.27s, setup 985ms, import 18.94s, tests 73.22s, environment 9ms)
+
+[test] starting test/vitest/vitest.unit-support.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  2 passed (2)
+      Tests  183 passed (183)
+   Start at  21:45:00
+   Duration  6.37s (transform 1.31s, setup 455ms, import 2.66s, tests 4.79s, environment 0ms)
+
+[test] starting test/vitest/vitest.auto-reply-reply.config.ts
+[vitest] still running with no output for 30000ms (test/vitest/vitest.tooling.config.ts).
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  59 passed (59)
+      Tests  446 passed (446)
+   Start at  21:45:06
+   Duration  4.63s (transform 2.32s, setup 699ms, import 6.06s, tests 1.84s, environment 7ms)
+
+[test] starting test/vitest/vitest.commands-light.config.ts
+
+ Test Files  111 passed (111)
+      Tests  1176 passed (1176)
+   Start at  21:44:25
+   Duration  46.55s (transform 1.92s, setup 715ms, import 15.23s, tests 29.78s, environment 0ms)
+
+[test] starting test/vitest/vitest.extension-codex-app-server-attempt-extra.config.ts
+[vitest] still running with no output for 60000ms (test/vitest/vitest.infra.config.ts).
+[vitest] still running with no output for 30000ms (test/vitest/vitest.agents-tools.config.ts).
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  142 passed (142)
+      Tests  2324 passed (2324)
+   Start at  21:44:47
+   Duration  29.14s (transform 5.26s, setup 1.13s, import 16.98s, tests 38.31s, environment 15ms)
+
+[test] starting test/vitest/vitest.channels.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 180000ms (test/vitest/vitest.agents-core.config.ts).
+
+ Test Files  18 passed (18)
+      Tests  419 passed (419)
+   Start at  21:45:15
+   Duration  8.12s (transform 1.86s, setup 121ms, import 2.61s, tests 13.02s, environment 2ms)
+
+[test] starting test/vitest/vitest.extension-qa.config.ts
+
+ Test Files  54 passed (54)
+      Tests  1011 passed (1011)
+   Start at  21:44:44
+   Duration  39.58s (transform 3.05s, setup 496ms, import 10.87s, tests 27.71s, environment 0ms)
+
+[test] starting test/vitest/vitest.tasks.config.ts
+
+ Test Files  161 passed (161)
+      Tests  1798 passed (1798)
+   Start at  21:45:00
+   Duration  26.30s (transform 4.82s, setup 1.33s, import 26.55s, tests 22.78s, environment 17ms)
+
+[test] starting test/vitest/vitest.extension-imessage.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  71 passed (71)
+      Tests  682 passed (682)
+   Start at  21:45:21
+   Duration  7.54s (transform 1.89s, setup 728ms, import 4.99s, tests 8.65s, environment 8ms)
+
+[test] starting test/vitest/vitest.auto-reply-core.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+ ❯ |extension-qa| extensions/qa-lab/src/test-file-scenario-runner.test.ts (14 tests | 2 failed) 4442ms
+     × runs Vitest scenarios with the declared test path and writes Vitest evidence 27ms
+     × imports producer QA evidence artifacts from failed script scenarios 15ms
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 30000ms (test/vitest/vitest.extension-slack.config.ts).
+
+ Test Files  103 passed (103)
+      Tests  1340 passed (1340)
+   Start at  21:45:04
+   Duration  30.73s (transform 4.27s, setup 548ms, import 16.40s, tests 12.85s, environment 0ms)
+
+[test] starting test/vitest/vitest.gateway-methods.config.ts
+
+ Test Files  10 passed (10)
+      Tests  182 passed (182)
+   Start at  21:45:27
+   Duration  10.43s (transform 1.33s, setup 229ms, import 3.18s, tests 6.82s, environment 0ms)
+
+[test] starting test/vitest/vitest.extension-codex-app-server-attempt-light.config.ts
+
+ Test Files  9 passed (9)
+      Tests  144 passed (144)
+   Start at  21:45:16
+   Duration  22.32s (transform 3.47s, setup 254ms, import 10.24s, tests 11.61s, environment 0ms)
+
+[test] starting test/vitest/vitest.runtime-config.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 60000ms (test/vitest/vitest.tooling.config.ts).
+[vitest] still running with no output for 30000ms (test/vitest/vitest.auto-reply-reply.config.ts).
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 90000ms (test/vitest/vitest.infra.config.ts).
+
+ Test Files  133 passed (133)
+      Tests  2520 passed (2520)
+   Start at  21:45:10
+   Duration  32.51s (transform 5.28s, setup 1.08s, import 27.30s, tests 34.29s, environment 14ms)
+
+
+ Test Files  11 passed (11)
+      Tests  417 passed (417)
+   Start at  21:45:32
+   Duration  10.45s (transform 2.98s, setup 481ms, import 7.27s, tests 8.29s, environment 1ms)
+
+[test] starting test/vitest/vitest.extension-voice-call.config.ts
+[test] starting test/vitest/vitest.agents-support.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  3 passed (3)
+      Tests  8 passed (8)
+   Start at  21:45:42
+   Duration  7.18s (transform 3.17s, setup 222ms, import 6.75s, tests 34ms, environment 0ms)
+
+[test] starting test/vitest/vitest.contracts-channel-registry.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  244 passed (244)
+      Tests  3887 passed | 3 skipped (3890)
+   Start at  21:42:20
+   Duration  211.58s (transform 5.74s, setup 32.58s, import 65.19s, tests 56.98s, environment 26ms)
+
+[test] starting test/vitest/vitest.extension-codex-app-server-attempt.config.ts
+[vitest] still running with no output for 210000ms (test/vitest/vitest.agents-core.config.ts).
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |extension-qa| extensions/qa-lab/src/test-file-scenario-runner.test.ts > qa test file scenario runner > runs Vitest scenarios with the declared test path and writes Vitest evidence
+AssertionError: expected { test: { …(4) }, …(4) } to match object { test: { …(3) }, …(3) }
+(3 matching properties omitted from actual)
+
+- Expected
++ Received
+
+@@ -19,11 +19,11 @@
+      ],
+      "runner": "vitest",
+    },
+    "result": {
+      "failure": {
+-       "reason": "node exited with 1",
++       "reason": "node-22 exited with 1",
+      },
+      "status": "fail",
+    },
+    "test": {
+      "id": "scenario-vitest",
+
+ ❯ extensions/qa-lab/src/test-file-scenario-runner.test.ts:295:33
+    293|       JSON.parse(await fs.readFile(result.evidencePath, "utf8")),
+    294|     );
+    295|     expect(evidence.entries[0]).toMatchObject({
+       |                                 ^
+    296|       test: {
+    297|         kind: "vitest-test",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  |extension-qa| extensions/qa-lab/src/test-file-scenario-runner.test.ts > qa test file scenario runner > imports producer QA evidence artifacts from failed script scenarios
+AssertionError: expected { scenario: { …(11) }, …(6) } to match object { status: 'fail', …(2) }
+(15 matching properties omitted from actual)
+
+- Expected
++ Received
+
+@@ -1,7 +1,7 @@
+  {
+-   "failureMessage": "node exited with 1",
++   "failureMessage": "node-22 exited with 1",
+    "producerEvidence": {
+      "entries": [
+        {
+          "result": {
+            "status": "fail",
+
+ ❯ extensions/qa-lab/src/test-file-scenario-runner.test.ts:661:31
+    659|     });
+    660|
+    661|     expect(result.results[0]).toMatchObject({
+       |                               ^
+    662|       status: "fail",
+    663|       failureMessage: "node exited with 1",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed | 98 passed (99)
+      Tests  2 failed | 1188 passed (1190)
+   Start at  21:45:27
+   Duration  25.75s (transform 5.39s, setup 1.05s, import 23.18s, tests 26.07s, environment 12ms)
+
+[test] starting test/vitest/vitest.extension-line.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  50 passed (50)
+      Tests  469 passed (469)
+   Start at  21:45:47
+   Duration  10.99s (transform 4.40s, setup 708ms, import 14.66s, tests 5.93s, environment 5ms)
+
+[test] starting test/vitest/vitest.contracts-plugin.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  55 passed (55)
+      Tests  636 passed (636)
+   Start at  21:45:31
+   Duration  27.91s (transform 4.68s, setup 740ms, import 17.12s, tests 37.14s, environment 7ms)
+
+[test] starting test/vitest/vitest.gateway-client.config.ts
+
+ Test Files  11 passed (11)
+      Tests  27 passed (27)
+   Start at  21:45:49
+   Duration  9.68s (transform 8.58s, setup 102ms, import 8.89s, tests 9.72s, environment 1ms)
+
+[test] starting test/vitest/vitest.extension-browser.config.ts
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |agents-core| src/agents/compaction-planning-worker.test.ts > compaction planning worker > plans summary chunks in the packaged worker
+CompactionPlanningWorkerError: Cannot find module '/home/alexm-redhat/code/exper/openclaw/src/agents/compaction-planning.js' imported from /home/alexm-redhat/code/exper/openclaw/src/agents/compaction-planning.worker.ts
+ ❯ src/agents/compaction-planning-worker.ts:145:27
+    143|     worker.once("error", (error) => {
+    144|       const message = error instanceof Error ? error.message : String(…
+    145|       settle(() => reject(new CompactionPlanningWorkerError(message, "…
+       |                           ^
+    146|     });
+    147|     worker.once("exit", (code) => {
+ ❯ settle src/agents/compaction-planning-worker.ts:129:7
+ ❯ Worker.<anonymous> src/agents/compaction-planning-worker.ts:145:7
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+ FAIL  |agents-core| src/agents/model-compat.test.ts > normalizeModelCompat > keeps supportsUsageInStreaming on for native Qwen endpoints
+ FAIL  |agents-core| src/agents/model-compat.test.ts > normalizeModelCompat > keeps supportsUsageInStreaming on for DashScope-compatible endpoints regardless of provider id
+ FAIL  |agents-core| src/agents/model-compat.test.ts > normalizeModelCompat > keeps supportsUsageInStreaming on for Moonshot-native endpoints regardless of provider id
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ expectNativeStreamingSupported src/agents/model-compat.test.ts:86:48
+     84|   const normalized = normalizeModelCompat(model as Model);
+     85|   expect(supportsDeveloperRole(normalized)).toBe(false);
+     86|   expect(supportsUsageInStreaming(normalized)).toBe(true);
+       |                                                ^
+     87|   expect(supportsStrictMode(normalized)).toBe(false);
+     88| }
+ ❯ src/agents/model-compat.test.ts:218:7
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯
+
+ FAIL  |agents-core| src/agents/models-config.providers.moonshot.test.ts > moonshot implicit provider (#33637) > uses explicit CN baseUrl when provided
+AssertionError: expected undefined to be true // Object.is equality
+
+- Expected:
+true
+
++ Received:
+undefined
+
+ ❯ src/agents/models-config.providers.moonshot.test.ts:78:7
+     76|         providerConfig: provider,
+     77|       }).models?.[0]?.compat?.supportsUsageInStreaming,
+     78|     ).toBe(true);
+       |       ^
+     79|   });
+     80|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯
+
+
+ Test Files  3 failed | 309 passed (312)
+      Tests  5 failed | 5528 passed | 4 skipped (5537)
+   Start at  21:42:20
+   Duration  220.94s (transform 4.61s, setup 3.39s, import 59.94s, tests 150.42s, environment 0ms)
+
+[test] starting test/vitest/vitest.extension-provider-openai.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  24 passed (24)
+      Tests  267 passed (267)
+   Start at  21:45:57
+   Duration  8.11s (transform 6.35s, setup 600ms, import 9.39s, tests 5.62s, environment 2ms)
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[test] starting test/vitest/vitest.extension-active-memory.config.ts
+
+ Test Files  59 passed (59)
+      Tests  1251 passed (1251)
+   Start at  21:45:39
+   Duration  27.73s (transform 5.18s, setup 687ms, import 20.44s, tests 32.97s, environment 6ms)
+
+[test] starting test/vitest/vitest.contracts-channel-session.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[vitest] still running with no output for 90000ms (test/vitest/vitest.tooling.config.ts).
+
+ Test Files  158 passed (158)
+      Tests  1996 passed (1996)
+   Start at  21:45:42
+   Duration  27.76s (transform 1.91s, setup 588ms, import 16.61s, tests 36.98s, environment 16ms)
+
+[test] starting test/vitest/vitest.extension-codex-app-server-runtime.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  95 passed (95)
+      Tests  1309 passed (1309)
+   Start at  21:45:47
+   Duration  26.88s (transform 4.51s, setup 877ms, import 18.49s, tests 33.08s, environment 10ms)
+
+
+ Test Files  28 passed (28)
+      Tests  264 passed (264)
+   Start at  21:46:03
+   Duration  11.35s (transform 3.21s, setup 3.41s, import 9.93s, tests 5.13s, environment 3ms)
+
+[test] starting test/vitest/vitest.extension-media.config.ts
+[test] starting test/vitest/vitest.extension-matrix.config.ts
+warn: requested VM Ubuntu missing not found; using Ubuntu 26.04
+
+ Test Files  26 passed (26)
+      Tests  328 passed (328)
+   Start at  21:46:05
+   Duration  9.41s (transform 5.20s, setup 586ms, import 14.10s, tests 3.62s, environment 3ms)
+
+[test] starting test/vitest/vitest.contracts-channel-config.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+==> Resume Suspended VM before update phase
+warn: requested VM Ubuntu missing not found; using Ubuntu 23.10
+warn: requested VM macOS Tahoe not found; using macOS
+==> noisy
+==> oversized
+
+ Test Files  11 passed (11)
+      Tests  34 passed (34)
+   Start at  21:46:07
+   Duration  9.72s (transform 5.16s, setup 96ms, import 7.10s, tests 11.75s, environment 1ms)
+
+[test] starting test/vitest/vitest.extension-whatsapp.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  1 passed (1)
+      Tests  115 passed (115)
+   Start at  21:45:55
+   Duration  23.63s (transform 3.53s, setup 196ms, import 6.71s, tests 16.55s, environment 0ms)
+
+[test] starting test/vitest/vitest.extension-zalo.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  43 passed (43)
+      Tests  961 passed (961)
+   Start at  21:45:58
+   Duration  24.20s (transform 4.88s, setup 236ms, import 16.29s, tests 30.97s, environment 5ms)
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[test] starting test/vitest/vitest.tooling-docker.config.ts
+
+ Test Files  11 passed (11)
+      Tests  36 passed (36)
+   Start at  21:46:15
+   Duration  10.12s (transform 8.29s, setup 109ms, import 8.72s, tests 10.83s, environment 1ms)
+
+[test] starting test/vitest/vitest.extension-irc.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  24 passed (24)
+      Tests  190 passed (190)
+   Start at  21:46:18
+   Duration  9.14s (transform 5.56s, setup 550ms, import 15.88s, tests 1.13s, environment 2ms)
+
+
+ Test Files  122 passed (122)
+      Tests  1390 passed | 1 skipped (1391)
+   Start at  21:46:03
+   Duration  24.08s (transform 5.01s, setup 1.11s, import 27.94s, tests 17.59s, environment 12ms)
+
+[test] starting test/vitest/vitest.extension-codex-app-server-tools.config.ts
+[test] starting test/vitest/vitest.extension-signal.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  3 passed (3)
+      Tests  162 passed (162)
+   Start at  21:46:09
+   Duration  22.78s (transform 3.57s, setup 477ms, import 6.47s, tests 16.33s, environment 0ms)
+
+[test] starting test/vitest/vitest.extension-messaging.config.ts
+
+ Test Files  16 passed (16)
+      Tests  417 passed (417)
+   Start at  21:46:14
+   Duration  19.23s (transform 3.56s, setup 322ms, import 11.29s, tests 7.36s, environment 0ms)
+
+
+ Test Files  45 passed (45)
+      Tests  269 passed (269)
+   Start at  21:46:23
+   Duration  10.17s (transform 4.88s, setup 678ms, import 15.21s, tests 3.81s, environment 5ms)
+
+[test] starting test/vitest/vitest.plugin-sdk.config.ts
+[test] starting test/vitest/vitest.secrets.config.ts
+
+ Test Files  122 passed (122)
+      Tests  1412 passed (1412)
+   Start at  21:46:18
+   Duration  17.41s (transform 4.98s, setup 1.10s, import 17.35s, tests 14.57s, environment 16ms)
+
+[test] starting test/vitest/vitest.extension-misc.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+timeout command not found; using Node watchdog for Docker command timeout 30s
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  16 passed (16)
+      Tests  64 passed (64)
+   Start at  21:46:29
+   Duration  8.29s (transform 5.95s, setup 528ms, import 13.32s, tests 2.30s, environment 2ms)
+
+[test] starting test/vitest/vitest.unit-src.config.ts
+ ❯ |plugin-sdk| src/plugin-sdk/provider-catalog-shared.test.ts (14 tests | 2 failed) 407ms
+     × detects native streaming usage compat from the endpoint capabilities 27ms
+     × opts models into streaming usage for native endpoints while preserving explicit overrides 2ms
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  28 passed (28)
+      Tests  363 passed (363)
+   Start at  21:46:31
+   Duration  9.49s (transform 5.82s, setup 585ms, import 15.91s, tests 1.97s, environment 3ms)
+
+[test] starting test/vitest/vitest.contracts-channel-surface.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  85 passed (85)
+      Tests  964 passed (964)
+   Start at  21:46:21
+   Duration  21.21s (transform 8.59s, setup 1.01s, import 24.45s, tests 15.55s, environment 10ms)
+
+[test] starting test/vitest/vitest.extension-codex-app-server-support.config.ts
+[vitest] still running with no output for 30000ms (test/vitest/vitest.tooling.config.ts).
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |plugin-sdk| src/plugin-sdk/provider-catalog-shared.test.ts > provider-catalog-shared native streaming usage compat > detects native streaming usage compat from the endpoint capabilities
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ src/plugin-sdk/provider-catalog-shared.test.ts:189:7
+    187|         baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    188|       }),
+    189|     ).toBe(true);
+       |       ^
+    190|     expect(
+    191|       supportsNativeStreamingUsageCompat({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  |plugin-sdk| src/plugin-sdk/provider-catalog-shared.test.ts > provider-catalog-shared native streaming usage compat > opts models into streaming usage for native endpoints while preserving explicit overrides
+AssertionError: expected undefined to be true // Object.is equality
+
+- Expected:
+true
+
++ Received:
+undefined
+
+ ❯ src/plugin-sdk/provider-catalog-shared.test.ts:214:68
+    212|     });
+    213|
+    214|     expect(provider.models?.[0]?.compat?.supportsUsageInStreaming).toB…
+       |                                                                    ^
+    215|     expect(provider.models?.[1]?.compat?.supportsUsageInStreaming).toB…
+    216|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed | 61 passed (62)
+      Tests  2 failed | 456 passed (458)
+   Start at  21:46:37
+   Duration  10.76s (transform 4.84s, setup 725ms, import 8.14s, tests 11.73s, environment 8ms)
+
+[test] starting test/vitest/vitest.extension-mattermost.config.ts
+live stdout
+live stderr
+live stdout
+
+ Test Files  56 passed (56)
+      Tests  652 passed (652)
+   Start at  21:46:40
+   Duration  11.77s (transform 4.25s, setup 740ms, import 15.75s, tests 6.15s, environment 6ms)
+
+[test] starting test/vitest/vitest.extension-codex-surface.config.ts
+
+ Test Files  16 passed (16)
+      Tests  331 passed (331)
+   Start at  21:46:31
+   Duration  20.81s (transform 3.37s, setup 292ms, import 11.01s, tests 9.24s, environment 0ms)
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+[test] starting test/vitest/vitest.extension-codex-app-server-attempt-support.config.ts
+xxxxxxxxxxxx
+[stdout relay truncated after 12 bytes]
+
+ Test Files  155 passed (155)
+      Tests  1556 passed (1556)
+   Start at  21:46:36
+   Duration  17.10s (transform 4.97s, setup 1.24s, import 18.99s, tests 12.20s, environment 20ms)
+
+[test] starting test/vitest/vitest.extension-msteams.config.ts
+timeout command not found; using Node watchdog for Docker command timeout 30s
+
+ Test Files  1 passed (1)
+      Tests  159 passed (159)
+   Start at  21:46:27
+   Duration  27.50s (transform 214ms, setup 200ms, import 21ms, tests 27.12s, environment 0ms)
+
+[test] starting test/vitest/vitest.ui.config.ts
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  12 passed (12)
+      Tests  208 passed (208)
+   Start at  21:46:42
+   Duration  14.46s (transform 9.73s, setup 129ms, import 9.86s, tests 18.25s, environment 1ms)
+
+[test] starting test/vitest/vitest.extension-feishu.config.ts
+plugin-tools-serve: no plugin tools found
+openclaw mcp: notification notifications/claude/channel/permission failed
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  58 passed (58)
+      Tests  511 passed (511)
+   Start at  21:46:37
+   Duration  22.15s (transform 2.11s, setup 677ms, import 8.20s, tests 34.74s, environment 6ms)
+
+
+ Test Files  140 passed (140)
+      Tests  1292 passed (1292)
+   Start at  21:46:42
+   Duration  18.11s (transform 4.83s, setup 1.08s, import 12.74s, tests 21.11s, environment 15ms)
+
+
+ RUN  v4.1.8 /home/alexm-redhat/code/exper/openclaw
+
+
+ Test Files  41 passed (41)
+      Tests  509 passed (509)
+   Start at  21:46:52
+   Duration  10.36s (transform 5.45s, setup 639ms, import 16.10s, tests 3.06s, environment 6ms)
+
+
+ Test Files  23 passed (23)
+      Tests  354 passed (354)
+   Start at  21:46:47
+   Duration  18.92s (transform 3.50s, setup 342ms, import 11.71s, tests 6.56s, environment 0ms)
+
+
+ Test Files  5 passed (5)
+      Tests  45 passed (45)
+   Start at  21:46:56
+   Duration  13.14s (transform 3.34s, setup 234ms, import 7.20s, tests 5.52s, environment 0ms)
+
+
+ Test Files  70 passed (70)
+      Tests  985 passed (985)
+   Start at  21:46:57
+   Duration  14.17s (transform 5.94s, setup 824ms, import 20.64s, tests 5.86s, environment 8ms)
+
+
+ Test Files  17 passed (17)
+      Tests  284 passed (284)
+   Start at  21:46:55
+   Duration  16.16s (transform 3.45s, setup 311ms, import 10.39s, tests 5.18s, environment 0ms)
+
+
+ Test Files  115 passed | 2 skipped (117)
+      Tests  1673 passed | 6 skipped (1679)
+   Start at  21:46:55
+   Duration  19.40s (transform 1.31s, setup 1.04s, import 6.98s, tests 14.41s, environment 59.73s)
+
+
+ Test Files  72 passed (72)
+      Tests  963 passed (963)
+   Start at  21:47:00
+   Duration  14.73s (transform 8.18s, setup 363ms, import 12.54s, tests 15.46s, environment 7ms)
+
+[vitest] still running with no output for 30000ms (test/vitest/vitest.tooling.config.ts).
+[vitest] still running with no output for 60000ms (test/vitest/vitest.tooling.config.ts).
+unexpected plugin ClawHub package-dir option: --wat
+unexpected plugin ClawHub publish argument: extra
+ℹ entry: extensions/demo-plugin/index.ts
+ℹ Build start
+ℹ extensions/demo-plugin/dist/index.js  0.10 kB │ gzip: 0.10 kB
+ℹ 1 files, total: 0.10 kB
+✔ Build complete in 46ms
+[plugin-npm-runtime-build] built demo-plugin runtime (1 entries)
+[plugin-npm-publish] overlaying package-local runtime metadata for demo-plugin
+ℹ entry: extensions/demo-plugin/index.ts
+ℹ Build start
+ℹ extensions/demo-plugin/dist/index.js  0.10 kB │ gzip: 0.10 kB
+ℹ 1 files, total: 0.10 kB
+✔ Build complete in 41ms
+[plugin-npm-runtime-build] built demo-plugin runtime (1 entries)
+[plugin-npm-publish] overlaying package-local runtime metadata for demo-plugin
+ℹ entry: extensions/demo-plugin/index.ts
+ℹ Build start
+ℹ extensions/demo-plugin/dist/index.js  0.10 kB │ gzip: 0.10 kB
+ℹ 1 files, total: 0.10 kB
+✔ Build complete in 45ms
+[plugin-npm-runtime-build] built demo-plugin runtime (1 entries)
+[plugin-npm-publish] overlaying package-local runtime metadata for demo-plugin
+[vitest] still running with no output for 30000ms (test/vitest/vitest.tooling.config.ts).
+[vitest] still running with no output for 60000ms (test/vitest/vitest.tooling.config.ts).
+
+added 1 package in 480ms
+[vitest] still running with no output for 30000ms (test/vitest/vitest.tooling.config.ts).
+[vitest] still running with no output for 60000ms (test/vitest/vitest.tooling.config.ts).
+Automatic merge went well; stopped before committing as requested
+Missing repo dependencies: cannot run oxfmt without node_modules.
+Run pnpm install in a normal checkout, or bypass the hook only after separate formatting proof.
+Switched to a new branch 'feature'
+Switched to branch 'main'
+→ Running opengrep (precise) against scripts/run-opengrep.sh
+  Using exclusions from .semgrepignore
+→ No changed first-party paths for opengrep.
+→ Running opengrep (precise) against src/pr.ts
+  Using exclusions from .semgrepignore
+[vitest] still running with no output for 30000ms (test/vitest/vitest.tooling.config.ts).
+QA self-check report: /tmp/qa-self-check.md
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |tooling| test/scripts/bench-cli-startup.test.ts > bench-cli-startup > cleans timed-out benchmark process groups when the leader exits first
+Error: ENOENT: no such file or directory, open '/tmp/openclaw-cli-startup-timeout-group-ys6Bvy/child.pid'
+ ❯ test/scripts/bench-cli-startup.test.ts:165:27
+    163|         );
+    164|
+    165|         childPid = Number(readFileSync(childPidPath, "utf8"));
+       |                           ^
+    166|         expect(result.status).toBe(1);
+    167|         expect(result.signal).toBeNull();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+ FAIL  |tooling| test/scripts/check-deadcode-unused-files.test.ts > check-deadcode-unused-files > waits for timed-out Knip process groups after the wrapper exits
+Error: timeout waiting for /tmp/openclaw-knip-timeout-l4xdS1/child.pid
+ ❯ waitForFile test/scripts/check-deadcode-unused-files.test.ts:55:9
+     53|     await sleep(25);
+     54|   }
+     55|   throw new Error(`timeout waiting for ${filePath}`);
+       |         ^
+     56| }
+     57|
+ ❯ test/scripts/check-deadcode-unused-files.test.ts:368:9
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/7]⎯
+
+ FAIL  |tooling| test/scripts/plugin-sdk-surface-report.test.ts > plugin SDK surface report > accepts exact deprecated export budget overrides by public entrypoint
+AssertionError: expected 1 to be +0 // Object.is equality
+
+- Expected
++ Received
+
+- 0
++ 1
+
+ ❯ test/scripts/plugin-sdk-surface-report.test.ts:131:27
+    129|     });
+    130|
+    131|     expect(result.status).toBe(0);
+       |                           ^
+    132|     expect(result.stderr).toBe("");
+    133|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/7]⎯
+
+ FAIL  |tooling| test/scripts/plugin-sdk-surface-report.test.ts > plugin SDK surface report > keeps default public surface budgets pinned to current source counts
+AssertionError: expected 1 to be +0 // Object.is equality
+
+- Expected
++ Received
+
+- 0
++ 1
+
+ ❯ readCurrentPublicSurfaceCounts test/scripts/plugin-sdk-surface-report.test.ts:43:25
+     41| function readCurrentPublicSurfaceCounts(): PublicSurfaceCounts {
+     42|   const result = runSurfaceReport({});
+     43|   expect(result.status).toBe(0);
+       |                         ^
+     44|   expect(result.stderr).toBe("");
+     45|
+ ❯ test/scripts/plugin-sdk-surface-report.test.ts:136:55
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/7]⎯
+
+ FAIL  |tooling| test/scripts/plugin-sdk-surface-report.test.ts > plugin SDK surface report > keeps generated package declarations out of source surface counts
+AssertionError: expected 'plugin SDK surface budget failed:\n- …' to contain 'public callable exports 5214 > 5213'
+
+- Expected
++ Received
+
+- public callable exports 5214 > 5213
++ plugin SDK surface budget failed:
++ - public exports 10399 > 10388
++ - public callable exports 5215 > 5213
++
+
+ ❯ test/scripts/plugin-sdk-surface-report.test.ts:146:27
+    144|
+    145|     expect(result.status).toBe(1);
+    146|     expect(result.stderr).toContain(`public callable exports ${budget}…
+       |                           ^
+    147|   });
+    148|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/7]⎯
+
+ FAIL  |tooling| test/scripts/run-additional-boundary-checks.test.ts > run-additional-boundary-checks > waits for timed-out process groups after the wrapper exits
+Error: timeout waiting for /tmp/openclaw-boundary-timeout-G2bW6b/child.pid
+ ❯ waitForFile test/scripts/run-additional-boundary-checks.test.ts:71:9
+     69|     await sleep(25);
+     70|   }
+     71|   throw new Error(`timeout waiting for ${filePath}`);
+       |         ^
+     72| }
+     73|
+ ❯ test/scripts/run-additional-boundary-checks.test.ts:325:9
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/7]⎯
+
+ FAIL  |tooling| test/scripts/secret-provider-integrations.test.ts > secret provider integration proof harness > preserves timeout kill grace for descendants after the leader exits
+Error: condition was not met before timeout
+ ❯ waitFor test/scripts/secret-provider-integrations.test.ts:34:9
+     32|     });
+     33|   }
+     34|   throw new Error("condition was not met before timeout");
+       |         ^
+     35| }
+     36|
+ ❯ test/scripts/secret-provider-integrations.test.ts:795:9
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/7]⎯
+
+⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯
+
+Vitest caught 1 unhandled error during the test run.
+This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.
+
+⎯⎯⎯⎯ Unhandled Rejection ⎯⎯⎯⎯⎯
+Error: command timed out: /usr/bin/node-22 /tmp/openclaw-secret-provider-proof-897oaw/spawn-cleaning-descendant.mjs
+ ❯ scripts/e2e/secret-provider-integrations.mjs?case=timeout-grace-1782683065162:477:18
+ ❯ processTicksAndRejections node:internal/process/task_queues:105:5
+
+This error originated in "test/scripts/secret-provider-integrations.test.ts" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "preserves timeout kill grace for descendants after the leader exits". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+
+
+ Test Files  5 failed | 276 passed | 1 skipped (282)
+      Tests  7 failed | 4428 passed | 25 skipped (4460)
+     Errors  1 error
+   Start at  21:42:20
+   Duration  544.00s (transform 6.32s, setup 1.54s, import 23.37s, tests 517.73s, environment 0ms)
+
+[test] failed 89 Vitest shards in 547.99s; Vitest summaries above are per-shard, not aggregate totals.
+[test] failed shard digest (8):
+[test] - test/vitest/vitest.tooling.config.ts (exit 1)
+[test]   rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.tooling.config.ts --reporter=verbose
+[test] - test/vitest/vitest.agents-core.config.ts (exit 1)
+[test]   rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.agents-core.config.ts --reporter=verbose
+[test] - test/vitest/vitest.extension-providers.config.ts (exit 1)
+[test]   rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.extension-providers.config.ts --reporter=verbose
+[test] - test/vitest/vitest.unit-security.config.ts (exit 1)
+[test]   rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.unit-security.config.ts --reporter=verbose
+[test] - test/vitest/vitest.media-understanding.config.ts (exit 1)
+[test]   rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.media-understanding.config.ts --reporter=verbose
+[test] - test/vitest/vitest.plugins.config.ts (exit 1)
+[test]   rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.plugins.config.ts --reporter=verbose
+[test] - test/vitest/vitest.extension-qa.config.ts (exit 1)
+[test]   rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.extension-qa.config.ts --reporter=verbose
+[test] - test/vitest/vitest.plugin-sdk.config.ts (exit 1)
+[test]   rerun: node scripts/run-vitest.mjs run --config test/vitest/vitest.plugin-sdk.config.ts --reporter=verbose
+[ELIFECYCLE] Test failed. See above for more details.

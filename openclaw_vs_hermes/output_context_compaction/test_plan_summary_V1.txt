@@ -1,0 +1,176 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — TEST PLAN SUMMARY (V1)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Date: 2026-06-28
+Iteration: V1 (initial)
+
+================================================================================
+1. EXPLANATION OF THE TEST PLAN
+================================================================================
+
+  The test plan in test_plan_V1.txt provides comprehensive test coverage for
+  the Multi-Pass Context Compaction feature being ported from Hermes Agent
+  (Python) to OpenClaw (TypeScript), as specified in code_port_plan_review_V4.txt.
+
+  SCOPE:
+    107 test cases organized across 8 test suites (A–H), covering all 9 steps
+    of the porting plan. Tests span the full spectrum from isolated unit tests
+    for pure functions to end-to-end integration tests that exercise the
+    complete compaction pipeline.
+
+  APPROACH:
+    The plan was developed by triangulating three sources of information:
+
+    1. HERMES SOURCE TESTS — Analyzed 25+ Hermes test files (pytest) covering
+       context compaction, including test_compression_progress.py (9 tests for
+       progress detection), test_context_compressor.py (2,695 lines covering
+       threshold logic, tool result pruning, boundary protection, summary
+       generation), and test_compression_boundary.py (boundary alignment).
+       Every Hermes regression test with a corresponding concept in the port
+       has a mapped test case in the OpenClaw plan.
+
+    2. OPENCLAW TESTING CONVENTIONS — Analyzed 45+ existing OpenClaw compaction
+       test files to extract conventions: Vitest framework, co-located test
+       files (*.test.ts adjacent to source), vi.hoisted() for module-level
+       mocks, vi.mock() with vi.importActual() for partial overrides, fixture
+       factories (makeAgentAssistantMessage, makeAgentUserMessage), and the
+       shard-based test runner architecture.
+
+    3. REVIEW V4 CORRECTIONS — All 5 corrections from Review V4 (FIX-1 through
+       FIX-5) have explicit regression tests ensuring the corrected property
+       paths and type adaptations are verified:
+       - FIX-1: ToolCall field names (id/name vs toolCallId/toolName) → Tests 5.4, 5.14
+       - FIX-2: ToolCall.arguments as Record<> vs JSON string → Tests 5.11-5.13, 5.16
+       - FIX-3: entry.message.role vs entry.role → Tests 6.1, 6.13
+       - FIX-4: entry.message.content vs entry.content → Tests 6.4, 6.14
+       - FIX-5: baseMessagesToSummarize already `let` → No test needed (no change)
+
+  TEST SUITES:
+
+    A. Progress Detection & Anti-Thrashing (18 tests)
+       Pure function tests for compressionMadeProgress() and shouldContinueMultiPass().
+       Directly maps all 9 Hermes TestCompressionMadeProgress test cases plus
+       additional OpenClaw-specific tests for custom thresholds and edge cases.
+       No mocks required — pure logic.
+
+    B. Pre-Compaction Pruning (23 tests)
+       Tests the 3 sub-passes (deduplication, old result summarization, tool
+       call argument truncation) individually and as a combined pipeline.
+       Special attention to FIX-1 and FIX-2 corrections: verifying ToolCall
+       uses id/name fields and arguments are handled as Record<string, unknown>.
+       Includes immutability verification (original messages not mutated).
+
+    C. Cut Point Enhancement / Message Anchoring (14 tests)
+       Tests findCutPoint() enhancements for user message anchoring and
+       assistant message anchoring. Verifies the monotonic property (tail only
+       grows), safety floor (at least one entry summarized), and correct
+       property paths (FIX-3 and FIX-4). Tests hasVisibleContent() behavior
+       for various content types (text, tool calls, thinking blocks, empty).
+
+    D. Summary Prefix Disambiguation (7 tests)
+       Tests summary prefix generation with pass numbering for multi-pass
+       scenarios, previous summary chaining, disambiguation language, and
+       end markers with token count metadata.
+
+    E. Multi-Pass Compaction Loop (20 tests)
+       Tests the core multiPassCompact() gateway-layer function. Covers
+       happy path (single and multi-pass), abort handling (between passes and
+       during passes), error handling (partial results, first-pass failure),
+       compactParams forwarding (REF-2/D10 stale params behavior), progress
+       tracking (incremental measurement, anti-thrashing counter reset), and
+       configuration defaults (maxPasses, minProgressThreshold, clamping).
+
+    F. Embedded Runner Integration (8 tests)
+       Tests the two call sites in the embedded runner that switch from
+       single compact() to multiPassCompact(). Covers the ownsCompaction
+       bypass, hook callback integration, safety timeout wrapping, prompt
+       cache context forwarding, and partial result handling.
+
+    G. Configuration Schema Extension (11 tests)
+       Tests new config fields (maxPasses, minProgressThreshold) including
+       defaults, user overrides, clamping, Zod validation, and backwards
+       compatibility with pre-multi-pass configurations.
+
+    H. End-to-End Integration (6 tests)
+       Full vertical-slice tests exercising the pipeline from trigger to
+       result with only LLM calls mocked. Verifies multi-pass convergence,
+       anchoring preservation, pre-pruning effectiveness, session tree
+       validity, single-pass compatibility, and edge cases.
+
+  INFRASTRUCTURE:
+
+    - NEW SHARED FIXTURES: test-helpers/compaction-fixtures.ts provides
+      reusable message builders, session tree builders, progress metric
+      builders, and a deterministic token estimator mock.
+
+    - MODIFIED EXISTING TESTS: 3 existing test files receive additions
+      for new anchoring and pre-pruning integration point behavior.
+
+    - CI INTEGRATION: Tests are assigned to existing vitest shards
+      (agents-core, agents-support, agents-embedded-agent, config).
+
+    - PERFORMANCE: Total suite expected under 10 seconds; individual suite
+      budgets range from 50ms (prefix) to 5s (e2e).
+
+================================================================================
+2. ITERATION EVOLUTION
+================================================================================
+
+  V1 (Current — 2026-06-28):
+    Initial test plan. This is the first iteration.
+
+    Inputs analyzed:
+    - code_port_plan_review_V4.txt (the porting plan being tested)
+    - hermes_code_trace.txt (source feature architecture)
+    - openclaw_code_trace.txt (target feature architecture)
+    - Hermes test files: test_compression_progress.py, test_context_compressor.py,
+      test_compression_boundary.py, and 22+ additional compression test files
+    - OpenClaw test files: 45+ compaction-related test files including
+      compaction.test.ts, compaction-safeguard.test.ts,
+      compaction-partial-summary.test.ts, preemptive-compaction.test.ts,
+      run.overflow-compaction.test.ts,
+      embedded-agent-runner.compaction-safety-timeout.test.ts,
+      config.compaction-settings.test.ts
+
+    Key decisions:
+    1. Organized tests by porting step (8 suites mapping to Steps 1-8)
+       rather than by test file, because each step introduces a distinct
+       module with its own testing surface.
+    2. Prioritized pure-function testing for progress detection (Suite A)
+       and configuration (Suite G) — these have zero mocking overhead.
+    3. Used OpenClaw's vi.hoisted() pattern for the multi-pass loop tests
+       (Suite E) where module-level mocking of contextEngine.compact() is
+       required.
+    4. Created explicit regression tests for all 5 Review V4 corrections
+       (FIX-1 through FIX-5) to prevent re-introduction of the property
+       path and type errors found during review.
+    5. Added end-to-end tests (Suite H) that exercise the full pipeline
+       with minimal mocking, complementing the unit tests.
+    6. Designed shared fixture library (compaction-fixtures.ts) to avoid
+       duplication across the 7 new test files.
+
+    Coverage assessment:
+    - All 9 steps in the porting plan have corresponding test coverage
+    - All 9 Hermes progress detection tests are mapped
+    - All 5 Review V4 corrections have explicit regression tests
+    - Both REF-1 (AbortSignal.any — non-issue) and REF-2 (stale compactParams)
+      have coverage (REF-2 tested in Suite E, test 8.12)
+    - Risk 9 (stale compactParams on session rotation) is documented but
+      not explicitly tested as it's a known limitation for plugin edge cases
+
+    Potential gaps for future iterations:
+    - Concurrency testing (parallel compaction requests) — deferred as
+      OpenClaw's existing concurrency tests cover the base case
+    - Session rotation with multi-pass — explicitly out of scope per REF-2
+    - Performance regression testing (execution time, memory) — could be
+      added in V2 if implementation reveals hot paths
+    - Interaction with quality guard (retries within a pass) during
+      multi-pass iteration — complex interaction surface
+    - Interaction with tool result truncation (the secondary recovery path
+      in overflow handling) when multi-pass is active
+
+================================================================================
+END OF SUMMARY (V1)
+================================================================================

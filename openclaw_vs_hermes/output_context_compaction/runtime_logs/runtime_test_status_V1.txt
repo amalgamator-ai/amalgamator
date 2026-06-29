@@ -1,0 +1,15 @@
+FAILED
+
+OpenClaw test suite did not pass. 8 of 89 Vitest shards failed with 47 individual test failures.
+See runtime_test_results_V1.txt for full details.
+
+Key failure categories:
+1. Compaction planning worker (1 failure) — may be related to ported feature
+2. Provider/streaming compat - Qwen, Moonshot, DashScope (9 failures)
+3. Ollama provider discovery (4 failures) — environment-dependent (Ollama not running)
+4. Plugin status reporting (19 failures) — likely structural change
+5. Security install policy (4 failures)
+6. Tooling/process timeout management (4 failures) — likely flaky/environment-sensitive
+7. Surface budget drift (3 failures) — new exports exceed pinned budgets
+8. QA lab scenario runner (2 failures)
+9. Plugin SDK provider catalog (2 failures)

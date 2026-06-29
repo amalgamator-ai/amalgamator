@@ -1,0 +1,705 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — CORRECTED TEST PLAN (REVIEW V4)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python) — pytest, tests/agent/test_compression_*.py
+Target: OpenClaw (TypeScript) — Vitest, co-located *.test.ts files
+Porting Plan: code_port_plan_review_V4.txt (Steps 1-9)
+Date: 2026-06-28
+Revision: Review V4 (corrected from V4 initial)
+
+================================================================================
+REVIEW CHANGE LOG (V4 -> Review V4)
+================================================================================
+
+  This plan corrects 6 issues found during code-level verification of the
+  V4 test plan against the actual OpenClaw codebase. See the companion
+  test_plan_review_summary_V4.txt for full documentation of each issue.
+
+  CORRECTIONS APPLIED:
+
+  FIX-RV1:  SUITE I FILE PATH CORRECTED.
+
+            V4 specified:
+              src/agents/embedded-agent-runner/run/run.overflow-compaction.test.ts
+
+            Actual file location (verified via file system):
+              src/agents/embedded-agent-runner/run.overflow-compaction.test.ts
+
+            The "run." is part of the FILENAME, not a subdirectory.
+            The file lives directly in embedded-agent-runner/, alongside
+            the harness file (run.overflow-compaction.harness.ts).
+
+            FIX: Corrected path in Section 2 item #10 and Section 12.
+
+  FIX-RV2:  SUITE G ZOD SCHEMA IMPORT CORRECTED.
+
+            V4 specified:
+              import { compactionSchema } from "./zod-schema.agent-defaults.js";
+
+            Actual: There is NO standalone "compactionSchema" export.
+            The compaction schema is a nested field within AgentDefaultsSchema
+            (zod-schema.agent-defaults.ts lines 158-205):
+
+              export const AgentDefaultsSchema = z.object({
+                compaction: z.object({
+                  mode: ...,
+                  ...
+                }).strict().optional(),
+                ...
+              });
+
+            FIX: All Suite G schema tests now extract the compaction
+            sub-schema from AgentDefaultsSchema:
+
+              import { AgentDefaultsSchema } from "./zod-schema.agent-defaults.js";
+              const compactionSchema = AgentDefaultsSchema.shape.compaction.unwrap();
+
+            The .unwrap() call removes the .optional() wrapper, giving
+            access to the inner ZodObject for .safeParse() calls.
+
+  FIX-RV3:  SUITE G IMPORT LINE FOR materializeCompactionConfig CORRECTED.
+
+            V4 had contradictory import:
+              Line 1310: import { materializeCompactionConfig } from "./defaults.js";
+              Lines 1315-1322: function materializeCompactionConfig(...) { ... }
+
+            materializeCompactionConfig is NOT exported from defaults.js.
+            It is a LOCAL test helper wrapping applyCompactionDefaults.
+
+            FIX: Changed import to:
+              import { applyCompactionDefaults } from "./defaults.js";
+            And materializeCompactionConfig remains a locally-defined helper.
+
+  FIX-RV4:  TESTS 8.8 AND 8.19 MOCK SETUP CORRECTED TO AVOID ANTI-THRASH
+            AMBIGUITY.
+
+            V4 specified for both tests:
+              mockEngine.compact always resolves to
+              makeCompactSuccess({ tokensAfter: 150000 })
+
+            PROBLEM: makeCompactSuccess defaults tokensBefore to 200000.
+            So every call returns tokensBefore=200000, tokensAfter=150000.
+
+            The multi-pass loop tracks progress as:
+              Pass 1: origTokens = result.tokensBefore (200000), newTokens = tokensAfter (150000).
+                      Progress: 25%. Counter stays 0.
+              Pass 2: origTokens = pass 1 tokensAfter (150000), newTokens = 150000.
+                      Progress: 0%. Counter = 1.
+              Pass 3: origTokens = 150000, newTokens = 150000.
+                      Progress: 0%. Counter = 2. Anti-thrash fires.
+
+            Result: loop stops at 3 passes due to ANTI-THRASH (counter=2),
+            which COINCIDENTALLY equals maxPasses=3. The tests pass but
+            for the WRONG reason. If maxPasses were 10 (or any value >= 3),
+            the tests would still pass — anti-thrash, not maxPasses, is
+            what actually limits the loop.
+
+            NOTE: This analysis assumes the loop tracks inter-pass progress
+            (previous tokensAfter vs current tokensAfter). If the loop uses
+            each pass's result.tokensBefore instead, every pass shows 25%
+            progress and only maxPasses limits it. But since this is an
+            implementation detail, the test should be robust to EITHER
+            approach.
+
+            FIX for 8.8: Use .mockResolvedValueOnce() with DECREASING
+            tokensAfter values (all above budget), ensuring every pass
+            shows sufficient progress (>5%). Only maxPasses limits the loop.
+
+            FIX for 8.19: Same — use decreasing tokensAfter values so that
+            ONLY the default maxPasses=3 stops the loop, not anti-thrash.
+
+  FIX-RV5:  TEST 8.21 SPLIT INTO TWO it() BLOCKS.
+
+            V4 specified two test cases in a single it() block:
+              CALL 1: multiPassCompact(..., { maxPasses: 50 })
+              EXPECT: at most 10 calls
+              CALL 2: multiPassCompact(..., { maxPasses: 0 })
+              EXPECT: exactly 1 call
+
+            PROBLEM 1: The mock is not reset between calls, so the
+            second assertion ("exactly 1 call") would fail — the mock
+            shows accumulated calls from BOTH scenarios.
+
+            PROBLEM 2: With the "always returns tokensAfter=150000" mock,
+            anti-thrash fires at pass 3, so the first scenario never
+            reaches 10 calls. The assertion "at most 10" passes trivially
+            (3 calls is indeed <= 10), but doesn't verify the clamping.
+
+            PROBLEM 3: This violates principle P1 (one assertion focus
+            per test).
+
+            FIX: Split into two separate it() blocks (8.21a and 8.21b).
+            Test 8.21a uses decreasing tokensAfter values to avoid
+            anti-thrash and verify the 10-pass maximum clamp.
+            Test 8.21b verifies the 1-pass minimum clamp.
+
+  FIX-RV6:  SUITE F TEST SETUP IMPORT PATTERN CORRECTED.
+
+            V4 specified dynamic import:
+              let harness: Awaited<ReturnType<
+                typeof import("../run.overflow-compaction.harness.js")
+              >>;
+              beforeAll(async () => {
+                const mod = await import("../run.overflow-compaction.harness.js");
+                harness = await mod.loadRunOverflowCompactionHarness();
+              });
+
+            PROBLEMS:
+            1. The type annotation is wrong. typeof import(...) returns
+               a Promise, not a function. ReturnType<Promise<T>> is invalid.
+            2. The existing test file (run.overflow-compaction.test.ts)
+               uses STATIC imports from the harness — not dynamic import.
+               The existing pattern is:
+
+                 import {
+                   loadRunOverflowCompactionHarness,
+                   mockedContextEngine,
+                   resetRunOverflowCompactionHarnessMocks,
+                 } from "./run.overflow-compaction.harness.js";
+
+               The harness module's vi.doMock calls execute at module load
+               time, setting up mocks BEFORE the test imports run.ts.
+               loadRunOverflowCompactionHarness() then dynamically imports
+               run.ts and returns { runEmbeddedAgent }.
+            3. The test needs to access mockedMultiPassCompact (a top-level
+               export from the harness module), not from the harness return
+               value.
+
+            FIX: Use static imports matching the existing pattern:
+
+              import {
+                loadRunOverflowCompactionHarness,
+                mockedMultiPassCompact,
+                mockedContextEngine,
+                resetRunOverflowCompactionHarnessMocks,
+              } from "../run.overflow-compaction.harness.js";
+
+              let runEmbeddedAgent: Awaited<
+                ReturnType<typeof loadRunOverflowCompactionHarness>
+              >["runEmbeddedAgent"];
+
+              beforeAll(async () => {
+                const loaded = await loadRunOverflowCompactionHarness();
+                runEmbeddedAgent = loaded.runEmbeddedAgent;
+              });
+
+              beforeEach(() => {
+                resetRunOverflowCompactionHarnessMocks();
+              });
+
+            NOTE: The import path uses "../run.overflow-compaction.harness.js"
+            (up from run/ to embedded-agent-runner/). This is correct for
+            the new test file at:
+              src/agents/embedded-agent-runner/run/multi-pass-compaction-integration.test.ts
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  [UNCHANGED FROM V4 — same 15 sections]
+
+================================================================================
+1. TESTING STRATEGY OVERVIEW
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 1]
+
+  TOTAL PLANNED TESTS: 113 across 9 suites (was 112 in V4; +1 from FIX-RV5
+  splitting test 8.21 into 8.21a and 8.21b)
+
+================================================================================
+2. TEST FILE INVENTORY & SHARD ASSIGNMENTS
+================================================================================
+
+  ── NEW TEST FILES (7) ────────────────────────────────────────────────────────
+
+  [Items 1-7 UNCHANGED FROM V4]
+
+  ── MODIFIED TEST/SUPPORT FILES (3) ──────────────────────────────────────────
+
+  8. src/agents/agent-hooks/compaction-safeguard.test.ts (EXISTING, ADD TESTS)
+     [UNCHANGED FROM V4]
+
+  9. src/agents/embedded-agent-runner/run.overflow-compaction.harness.ts (MODIFY)
+     [UNCHANGED FROM V4]
+
+  CHANGE FROM V4 (FIX-RV1): Path corrected.
+
+  10. src/agents/embedded-agent-runner/run.overflow-compaction.test.ts (EXISTING, ADD)
+      SHARD: agents-embedded-agent
+      SUITE: I (4 tests added)
+
+      NOTE: This file is in embedded-agent-runner/ directly, NOT in a
+      run/ subdirectory. The "run." prefix is part of the filename.
+      Verified against actual file system.
+
+================================================================================
+3. SHARED TEST UTILITIES & FIXTURES
+================================================================================
+
+  ── EXISTING UTILITIES (NO CHANGES NEEDED) ────────────────────────────────────
+
+  [M1-M4 UNCHANGED FROM V4]
+
+  ── NEW UTILITIES (INLINE IN TEST FILES) ──────────────────────────────────────
+
+  [N1 UNCHANGED FROM V4 — mock factories, types, baseCompactParams]
+
+  [N2 UNCHANGED FROM V4 — Suite C message helpers]
+
+  CHANGE FROM V4 (FIX-RV6): N3 import pattern corrected.
+
+  N3: Harness extension additions (run.overflow-compaction.harness.ts)
+
+      Add to existing harness:
+
+        export const mockedMultiPassCompact = vi.fn(async () => ({
+          ok: true,
+          compacted: true,
+          passesCompleted: 1,
+          result: {
+            summary: "Compacted",
+            tokensAfter: 80000,
+            tokensBefore: 200000,
+            firstKeptEntryId: "entry-5",
+          },
+        }));
+
+      [vi.doMock path and reset code UNCHANGED FROM V4]
+
+      IMPORT PATTERN for test files using the harness:
+
+        The existing run.overflow-compaction.test.ts uses STATIC imports
+        from the harness (not dynamic import). The harness module's
+        vi.doMock calls execute at module load time. The test then uses
+        the exported mock variables directly:
+
+          import {
+            loadRunOverflowCompactionHarness,
+            mockedMultiPassCompact,
+            mockedContextEngine,
+            resetRunOverflowCompactionHarnessMocks,
+          } from "../run.overflow-compaction.harness.js";
+
+        Suite F's new test file follows this same static import pattern.
+        See Suite F (Section 9) for the corrected setup.
+
+================================================================================
+4. TEST SUITE A — PROGRESS DETECTION & ANTI-THRASHING
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 4]
+
+  All 19 tests (4.1 through 4.19) remain exactly as specified.
+
+  TEST COUNT: 19 tests (12 + 7)
+
+================================================================================
+5. TEST SUITE B — PRE-COMPACTION PRUNING
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 5]
+
+  All 20 tests (5.1 through 5.20) remain exactly as specified.
+
+  TEST COUNT: 20 tests
+
+================================================================================
+6. TEST SUITE C — CUT POINT ENHANCEMENT (MESSAGE ANCHORING)
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 6]
+
+  All 12 tests (6.1 through 6.12) remain exactly as specified.
+
+  TEST COUNT: 12 tests
+
+================================================================================
+7. TEST SUITE D — SUMMARY PREFIX DISAMBIGUATION
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 7]
+
+  All 8 tests (7.1 through 7.8) remain exactly as specified.
+
+  TEST COUNT: 8 tests
+
+================================================================================
+8. TEST SUITE E — MULTI-PASS COMPACTION LOOP
+================================================================================
+
+  FILE: src/agents/multi-pass-compaction.test.ts
+  SOURCE: src/agents/multi-pass-compaction.ts (NEW gateway-layer module)
+  PORTED FROM: Hermes agent/turn_context.py multi-pass loop (lines 384-413)
+  SHARD: agents-core
+
+  FRAMEWORK SETUP:
+
+    [UNCHANGED FROM V4 — same imports, mock factories, baseCompactParams]
+
+  ── describe("multiPassCompact single-pass behavior") ────────────────────────
+
+    8.1 through 8.5: [UNCHANGED FROM V4]
+
+  ── describe("multiPassCompact multi-pass iteration") ────────────────────────
+
+    8.6 and 8.7: [UNCHANGED FROM V4]
+
+    CHANGE FROM V4 (FIX-RV4): Test 8.8 mock setup corrected.
+
+    8.8  it("stops at maxPasses even if still above budget")
+         SETUP: mockEngine.compact resolves in sequence:
+                Pass 1: makeCompactSuccess({ tokensBefore: 200000, tokensAfter: 170000 })
+                Pass 2: makeCompactSuccess({ tokensBefore: 170000, tokensAfter: 145000 })
+                Pass 3: makeCompactSuccess({ tokensBefore: 145000, tokensAfter: 125000 })
+                Each pass shows >5% progress (15%, 14.7%, 13.8%), so
+                anti-thrash never triggers. All tokensAfter remain above
+                budget (100000).
+         CALL: multiPassCompact(mockEngine, baseCompactParams, {
+                 maxPasses: 3, tokenBudget: 100000
+               })
+         EXPECT: result.passesCompleted === 3
+                 mockEngine.compact called exactly 3 times
+                 (capped at maxPasses, NOT stopped by anti-thrash)
+
+         VERIFICATION:
+           Pass 1: 170000 < 200000 * 0.95 = 190000? → yes → progress ✓
+           Pass 2: 145000 < 170000 * 0.95 = 161500? → yes → progress ✓
+           Pass 3: 125000 < 145000 * 0.95 = 137750? → yes → progress ✓
+           Budget: 125000 > 100000 → still above budget ✓
+           Only maxPasses=3 stops the loop.
+
+  ── describe("multiPassCompact abort handling") ──────────────────────────────
+
+    8.9 through 8.11: [UNCHANGED FROM V4]
+
+  ── describe("multiPassCompact error handling") ──────────────────────────────
+
+    8.12 through 8.15: [UNCHANGED FROM V4]
+
+  ── describe("multiPassCompact progress tracking") ───────────────────────────
+
+    8.16 through 8.18: [UNCHANGED FROM V4]
+
+  ── describe("multiPassCompact configuration defaults") ──────────────────────
+
+    CHANGE FROM V4 (FIX-RV4): Test 8.19 mock setup corrected.
+
+    8.19 it("defaults maxPasses to 3 when not specified")
+         SETUP: mockEngine.compact resolves in sequence:
+                Pass 1: makeCompactSuccess({ tokensBefore: 200000, tokensAfter: 170000 })
+                Pass 2: makeCompactSuccess({ tokensBefore: 170000, tokensAfter: 145000 })
+                Pass 3: makeCompactSuccess({ tokensBefore: 145000, tokensAfter: 125000 })
+                Each pass shows >5% progress, so anti-thrash never triggers.
+                All tokensAfter remain above the baseCompactParams.tokenBudget
+                of 100000, so the budget check never stops the loop.
+         CALL: multiPassCompact(mockEngine, baseCompactParams)
+                (no options — defaults apply)
+         EXPECT: mockEngine.compact called exactly 3 times
+                 (default maxPasses=3 is the ONLY reason the loop stops)
+
+         WHY THIS FIX MATTERS: V4's original mock (always returns
+         tokensAfter=150000) caused anti-thrash to fire at pass 3
+         coincidentally. With this fix, each pass shows genuine progress,
+         isolating maxPasses=3 as the sole stopping condition.
+
+    8.20: [UNCHANGED FROM V4]
+
+    CHANGE FROM V4 (FIX-RV5): Test 8.21 split into two it() blocks.
+
+    8.21a it("clamps maxPasses to 10 at maximum")
+          SETUP: mockEngine.compact resolves in sequence using
+                 .mockImplementation() that returns decreasing tokensAfter:
+                   Pass N: tokensAfter = 200000 - (N * 5000)
+                   i.e., 195000, 190000, 185000, ..., 150000
+                 Each pass shows ~2.6% absolute reduction but sufficient
+                 relative progress (>5% from the previous pass's after
+                 when tokensBefore matches previous tokensAfter).
+
+                 CORRECTION: Use a mock that ALWAYS shows >5% relative
+                 progress. For example, each pass reduces by 10%:
+
+                   let callCount = 0;
+                   let currentTokens = 200000;
+                   mockEngine.compact.mockImplementation(async () => {
+                     callCount++;
+                     const before = currentTokens;
+                     currentTokens = Math.floor(currentTokens * 0.88);
+                     return makeCompactSuccess({
+                       tokensBefore: before,
+                       tokensAfter: currentTokens,
+                     });
+                   });
+
+                 12% reduction per pass → well above 5% threshold.
+                 After 10 passes: 200000 * 0.88^10 ≈ 55,719 (below budget
+                 but the mock's tokensAfter is always above budget since
+                 we need 10 passes).
+
+                 Actually, simpler: keep all tokensAfter above budget:
+                   let callCount = 0;
+                   mockEngine.compact.mockImplementation(async () => {
+                     callCount++;
+                     return makeCompactSuccess({
+                       tokensBefore: 200000 - (callCount - 1) * 5000,
+                       tokensAfter: 200000 - callCount * 5000,
+                     });
+                   });
+                 Passes: 200→195, 195→190, ..., 155→150. Each is ~2.6%.
+                 This is BELOW 5% threshold. Anti-thrash would fire.
+
+                 USE INSTEAD:
+                   mockEngine.compact.mockImplementation(async () => {
+                     callCount++;
+                     const before = 200000 - (callCount - 1) * 8000;
+                     const after = before - Math.ceil(before * 0.06);
+                     return makeCompactSuccess({ tokensBefore: before, tokensAfter: after });
+                   });
+                 6% reduction per pass — above 5% threshold.
+
+                 Alternatively, the simplest correct approach:
+                   Use a single mock that always reports tokensBefore=200000,
+                   tokensAfter=150000 (25% reduction). With method A
+                   (progress from result.tokensBefore), every pass shows
+                   25% progress. With method B (inter-pass tracking),
+                   pass 2 shows 0% because prev-tokensAfter=150000 and
+                   new-tokensAfter=150000. This is the same ambiguity as
+                   FIX-RV4.
+
+                   Safest: use the implementation-agnostic mock where each
+                   pass's tokensBefore = previous pass's tokensAfter, with
+                   >5% reduction each time.
+
+          CALL: multiPassCompact(mockEngine, baseCompactParams, { maxPasses: 50 })
+          EXPECT: mockEngine.compact called exactly 10 times (clamped from 50 to 10)
+
+    8.21b it("clamps maxPasses to 1 at minimum")
+          SETUP: mockEngine.compact resolves to
+                 makeCompactSuccess({ tokensAfter: 150000 })
+          CALL: multiPassCompact(mockEngine, baseCompactParams, { maxPasses: 0 })
+          EXPECT: mockEngine.compact called exactly 1 time (clamped from 0 to 1)
+
+    8.22: [UNCHANGED FROM V4]
+
+  TEST COUNT: 23 tests (was 22; +1 from splitting 8.21)
+
+================================================================================
+9. TEST SUITE F — EMBEDDED RUNNER INTEGRATION
+================================================================================
+
+  FILE: src/agents/embedded-agent-runner/run/
+        multi-pass-compaction-integration.test.ts
+  SOURCE: src/agents/embedded-agent-runner/run.ts (MODIFIED)
+  SHARD: agents-embedded-agent
+
+  CHANGE FROM V4 (FIX-RV6): Test setup import pattern corrected.
+
+  FRAMEWORK SETUP:
+
+    Uses the existing run.overflow-compaction.harness.ts pattern:
+    Static imports for mock variables, dynamic loadRunOverflowCompactionHarness
+    for the code-under-test.
+
+    HARNESS EXTENSION:
+
+      [vi.doMock path and mock exports UNCHANGED FROM V4]
+
+    TEST FILE SETUP (CORRECTED):
+
+      import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+      import {
+        loadRunOverflowCompactionHarness,
+        mockedMultiPassCompact,
+        mockedContextEngine,
+        resetRunOverflowCompactionHarnessMocks,
+      } from "../run.overflow-compaction.harness.js";
+
+      let runEmbeddedAgent: Awaited<
+        ReturnType<typeof loadRunOverflowCompactionHarness>
+      >["runEmbeddedAgent"];
+
+      beforeAll(async () => {
+        const loaded = await loadRunOverflowCompactionHarness();
+        runEmbeddedAgent = loaded.runEmbeddedAgent;
+      });
+
+      beforeEach(() => {
+        resetRunOverflowCompactionHarnessMocks();
+      });
+
+    WHY THIS FIX MATTERS:
+      The V4 setup used `await import(...)` for the harness module,
+      which is inconsistent with the existing test pattern. The existing
+      run.overflow-compaction.test.ts uses static imports from the harness.
+      Static imports work because the harness's vi.doMock calls execute at
+      module load time, and the mock variables are top-level exports that
+      persist across tests.
+
+      The type annotation was also wrong: typeof import(...) returns a
+      Promise, not a callable. ReturnType<Promise<T>> is invalid TS.
+
+  ── describe("embedded runner — multiPassCompact integration") ───────────────
+
+    9.1 through 9.7: [UNCHANGED FROM V4 — same test cases and assertions]
+
+    ACCESS PATTERN NOTE: Tests reference mockedMultiPassCompact directly
+    (a static import from the harness module), not via a harness object.
+    Example: expect(mockedMultiPassCompact).toHaveBeenCalledOnce()
+
+  TEST COUNT: 7 tests
+
+================================================================================
+10. TEST SUITE G — CONFIGURATION SCHEMA EXTENSION
+================================================================================
+
+  FILE: src/config/config.multi-pass-compaction.test.ts
+  SOURCE: src/config/defaults.ts (MODIFIED — applyCompactionDefaults)
+          src/config/zod-schema.agent-defaults.ts (MODIFIED — compaction schema)
+  SHARD: runtime-config
+
+  CHANGE FROM V4 (FIX-RV2, FIX-RV3): Import lines corrected.
+
+  FRAMEWORK SETUP:
+
+    import { describe, expect, it } from "vitest";
+    import { applyCompactionDefaults } from "./defaults.js";
+    import { AgentDefaultsSchema } from "./zod-schema.agent-defaults.js";
+
+    // Extract the compaction sub-schema from AgentDefaultsSchema.
+    // AgentDefaultsSchema.shape.compaction is ZodOptional<ZodObject<...>>.
+    // .unwrap() removes the .optional() wrapper.
+    const compactionSchema = AgentDefaultsSchema.shape.compaction.unwrap();
+
+    // Helper to test full config materialization:
+    function materializeCompactionConfig(input: Record<string, unknown>) {
+      const cfg = applyCompactionDefaults({
+        agents: { defaults: { compaction: input } },
+      } as any);
+      return cfg.agents?.defaults?.compaction;
+    }
+
+    NOTE: materializeCompactionConfig is a LOCAL test helper, NOT an import
+    from defaults.js. V4 incorrectly imported it from defaults.js.
+
+  IMPORTANT CONTEXT:
+
+    [UNCHANGED FROM V4 — same applyCompactionDefaults description]
+
+  ── describe("multi-pass compaction configuration defaults") ─────────────────
+
+    10.1 through 10.7: [UNCHANGED FROM V4]
+
+  ── describe("multi-pass compaction Zod schema validation") ──────────────────
+
+    10.8 through 10.16: [UNCHANGED FROM V4]
+
+    NOTE on 10.16: The .strict() mode is CONFIRMED present on the actual
+    compaction schema (zod-schema.agent-defaults.ts line 204). The test
+    expectation (rejects unknown keys) is correct.
+
+  TEST COUNT: 16 tests (7 defaults + 9 schema)
+
+================================================================================
+11. TEST SUITE H — COMPACTION-SAFEGUARD INTEGRATION
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 11]
+
+  All 4 tests (11.1 through 11.4) remain exactly as specified.
+
+  TEST COUNT: 4 tests
+
+================================================================================
+12. TEST SUITE I — INTEGRATION / VERTICAL SLICE
+================================================================================
+
+  CHANGE FROM V4 (FIX-RV1): File path corrected.
+
+  FILE: src/agents/embedded-agent-runner/run.overflow-compaction.test.ts
+        (EXISTING, ADD TESTS — in embedded-agent-runner/ directly,
+        NOT in the run/ subdirectory)
+  SOURCE: Multiple (end-to-end path through run.ts → multiPassCompact →
+          contextEngine.compact → adoptTranscript)
+  SHARD: agents-embedded-agent
+
+  [Rest of Section 12 UNCHANGED FROM V4 — same 4 tests]
+
+  TEST COUNT: 4 tests
+
+================================================================================
+13. REGRESSION COVERAGE MATRIX
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 13]
+
+  All entries remain exactly as specified. No new regression scenarios
+  identified.
+
+================================================================================
+14. MOCK & FIXTURE DEPENDENCY MAP
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 14]
+
+  ADDITION: Note that Suite F tests access mockedMultiPassCompact via
+  static import from the harness module (not via the harness return
+  object). This matches the existing test pattern.
+
+================================================================================
+15. TEST EXECUTION & CI NOTES
+================================================================================
+
+  15.1 VITEST SHARD ASSIGNMENT SUMMARY
+
+    [UNCHANGED FROM V4 except Suite I file path]
+
+    ┌──────────────────────┬─────────────┬───────────────────────────────────┐
+    │ Shard                │ Suites      │ Test Files                        │
+    ├──────────────────────┼─────────────┼───────────────────────────────────┤
+    │ agents-core          │ A, E        │ progress-detection.test.ts        │
+    │                      │             │ multi-pass-compaction.test.ts     │
+    ├──────────────────────┼─────────────┼───────────────────────────────────┤
+    │ agents-support       │ B, H        │ pre-compaction-pruning.test.ts    │
+    │                      │             │ compaction-safeguard.test.ts (+)  │
+    ├──────────────────────┼─────────────┼───────────────────────────────────┤
+    │ unit-support         │ C, D        │ compaction-cut-point-anchoring    │
+    │                      │             │   .test.ts                        │
+    │                      │             │ compaction-summary-prefix.test.ts │
+    ├──────────────────────┼─────────────┼───────────────────────────────────┤
+    │ agents-embedded-agent│ F, I        │ multi-pass-compaction-integration │
+    │                      │             │   .test.ts                        │
+    │                      │             │ run.overflow-compaction.test.ts(+)│
+    ├──────────────────────┼─────────────┼───────────────────────────────────┤
+    │ runtime-config       │ G           │ config.multi-pass-compaction      │
+    │                      │             │   .test.ts                        │
+    └──────────────────────┴─────────────┴───────────────────────────────────┘
+
+    NOTE: unit-support shard confirmed (vitest.unit-support.config.ts)
+    with includePatterns: ["packages/**/*.test.ts"]. This covers both
+    Suite C and Suite D files in packages/agent-core/src/harness/compaction/.
+
+  15.2 through 15.3: [UNCHANGED FROM V4]
+
+  15.4 EXPECTED TEST COUNT
+
+    Suite A: 19 tests  (progress detection & anti-thrashing)
+    Suite B: 20 tests  (pre-compaction pruning)
+    Suite C: 12 tests  (cut point anchoring)
+    Suite D:  8 tests  (summary prefix disambiguation)
+    Suite E: 23 tests  (multi-pass loop)  ← was 22, now 23 (split 8.21)
+    Suite F:  7 tests  (embedded runner integration)
+    Suite G: 16 tests  (configuration schema extension)
+    Suite H:  4 tests  (compaction-safeguard integration)
+    Suite I:  4 tests  (vertical integration)
+    ──────────────────
+    TOTAL: 113 tests   ← was 112, now 113
+
+  15.5 PRIORITY ORDER FOR IMPLEMENTATION
+
+    [UNCHANGED FROM V4]
+
+================================================================================
+END OF CORRECTED TEST PLAN (REVIEW V4)
+================================================================================

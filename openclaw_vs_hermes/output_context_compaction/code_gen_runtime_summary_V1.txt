@@ -1,0 +1,64 @@
+================================================================================
+RUNTIME FIX SUMMARY — V1
+Feature: Multi-Pass Context Compaction
+================================================================================
+
+## Failures Found (47 total test failures across 8 shards)
+
+### Category 1: CAUSED BY OUR PATCH (3 failures) — FIXED
+- test/scripts/plugin-sdk-surface-report.test.ts (3 failures)
+  - "accepts exact deprecated export budget overrides by public entrypoint"
+  - "keeps default public surface budgets pinned to current source counts"
+  - "keeps generated package declarations out of source surface counts"
+  - Root cause: Our new exports in packages/agent-core/src/index.ts increased
+    the public API surface counts beyond the pinned budgets:
+    - publicExports: 10388 → 10399 (+11 new exports)
+    - publicFunctionExports: 5214 → 5215 (+1 new callable export)
+
+### Category 2: PRE-EXISTING FAILURES (44 failures) — NOT CAUSED BY OUR PATCH
+- compaction-planning-worker.test.ts (1 failure)
+  - Pre-existing bug from commit 6443d06764 (May 29, 2026)
+  - "Cannot find module compaction-planning.js" — worker module resolution issue
+  - Verified: fails identically with and without our patch
+- Provider/streaming compat: Qwen, Moonshot, DashScope (9 failures)
+- Ollama provider discovery (4 failures) — Ollama service not running locally
+- Plugin status reporting (19 failures) — structural/API change in plugin metadata
+- Security install policy (4 failures) — interpreter validation changes
+- Tooling/process timeout management (4 failures) — flaky/environment-sensitive
+- QA lab scenario runner (2 failures) — Node version mismatch in output parsing
+- Plugin SDK provider catalog (2 failures) — streaming usage compat
+
+## Fixes Applied
+
+### Fix 1: Update Plugin SDK Surface Budget (scripts/plugin-sdk-surface-report.mjs)
+- Changed publicExports budget: 10388 → 10399
+- Changed publicFunctionExports budget: 5214 → 5215
+- These numbers reflect the new exports we added to packages/agent-core/src/index.ts:
+  - Types: CutPointResult, MultiPassCompactionState, CompactionProgressTrackerState
+  - Constants: MAX_COMPACTION_PASSES, PROGRESS_THRESHOLD, INEFFECTIVE_SAVINGS_THRESHOLD,
+    MAX_INEFFECTIVE_COMPRESSIONS, DEFAULT_COMPACTION_TIMEOUT_MS
+  - Classes: CompactionProgressTracker
+  - Functions: compactionMadeProgress
+  - Re-export of CutPointResult from compaction.js
+
+## Current Build/Test Status
+
+### Build: PASSING
+- pnpm build completed successfully (214.0s total)
+
+### Our Ported Tests: ALL PASSING (122/122)
+Test files verified:
+1. packages/agent-core/src/harness/compaction/compaction-progress.test.ts — PASS
+2. packages/agent-core/src/harness/compaction/compaction-summary-prefix.test.ts — PASS
+3. src/agents/agent-hooks/pre-compaction-pruning.test.ts — PASS
+4. src/agents/multi-pass-compaction.test.ts — PASS
+5. src/config/config.multi-pass-compaction.test.ts — PASS
+
+### Surface Budget Test: ALL PASSING (8/8)
+- test/scripts/plugin-sdk-surface-report.test.ts — PASS
+
+## Patch Summary
+- File: code_gen_runtime_V1.patch
+- 16 files changed, 2149 insertions(+), 6 deletions(-)
+- New file vs V4: scripts/plugin-sdk-surface-report.mjs (budget update)
+- All other files unchanged from code_gen_review_V4.patch

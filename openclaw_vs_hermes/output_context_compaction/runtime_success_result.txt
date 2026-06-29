@@ -1,0 +1,54 @@
+================================================================================
+RUNTIME SUCCESS RESULT
+Feature: Multi-Pass Context Compaction
+Iteration: V1
+Date: 2026-06-28
+================================================================================
+
+STATUS: SUCCESS (with pre-existing failures in unrelated test areas)
+
+## Our Ported Code
+- Build: PASSING
+- Tests: 122/122 PASSING (all 5 new test files)
+- Surface budget: 8/8 PASSING (after budget update)
+
+## Files Modified (16 total)
+New files (ported feature):
+  - packages/agent-core/src/harness/compaction/compaction-progress.ts
+  - packages/agent-core/src/harness/compaction/compaction-progress.test.ts
+  - packages/agent-core/src/harness/compaction/compaction-summary-prefix.test.ts
+  - src/agents/agent-hooks/pre-compaction-pruning.ts
+  - src/agents/agent-hooks/pre-compaction-pruning.test.ts
+  - src/agents/multi-pass-compaction.ts
+  - src/agents/multi-pass-compaction.test.ts
+  - src/config/config.multi-pass-compaction.test.ts
+
+Modified files (integration + config):
+  - packages/agent-core/src/harness/compaction/compaction.ts
+  - packages/agent-core/src/harness/messages.ts
+  - packages/agent-core/src/index.ts
+  - src/agents/agent-hooks/compaction-safeguard.ts
+  - src/config/defaults.ts
+  - src/config/types.agent-defaults.ts
+  - src/config/zod-schema.agent-defaults.ts
+
+Runtime fix:
+  - scripts/plugin-sdk-surface-report.mjs (budget update for new exports)
+
+## Runtime Fix Applied
+- Updated surface budget in scripts/plugin-sdk-surface-report.mjs:
+  - publicExports: 10388 → 10399 (+11 new exports)
+  - publicFunctionExports: 5214 → 5215 (+1 new callable export)
+
+## Pre-existing Failures (not caused by our patch)
+44 test failures across 7 categories are pre-existing in the codebase:
+- compaction-planning-worker (1) — module resolution bug from May 2026
+- Provider/streaming compat (9) — Qwen/Moonshot/DashScope
+- Ollama discovery (4) — service not running
+- Plugin status (19) — structural API change
+- Security policy (4) — validation changes
+- Process management (4) — flaky/environment
+- QA lab + Plugin SDK (4) — version/compat issues
+
+## Patch File
+code_gen_runtime_V1.patch — 2329 lines, 16 files changed

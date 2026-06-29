@@ -1,0 +1,398 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — TEST PLAN REVIEW SUMMARY (REVIEW V1)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Date: 2026-06-28
+Iteration: Review V1 (review of V1 initial)
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+  15 issues were found during code-level verification of the V1 test plan
+  against the actual OpenClaw codebase. Each issue was verified by reading
+  the relevant source files, test files, vitest configuration, and harness
+  code.
+
+  ── FIX-T1: VITEST SHARD ASSIGNMENTS CORRECTED ──────────────────────────────
+
+    SEVERITY: Medium (tests would run but in wrong shard, affecting CI
+    parallelism and potentially causing test isolation failures)
+
+    V1 STATED:
+      - compaction-anchoring.test.ts        -> vitest.agents-core.config.ts
+      - compaction-summary-prefix.test.ts   -> vitest.agents-support.config.ts
+      - multi-pass-compaction.test.ts       -> vitest.agents-support.config.ts
+      - config.multi-pass-compaction.test.ts-> vitest.config.config.config.ts
+
+    ACTUAL (verified against vitest.agents-paths.mjs):
+      agents-core = src/agents/*.test.ts (TOP-LEVEL ONLY)
+      agents-support = src/agents/*/**/*.test.ts (subdirs, excl.
+        embedded-agent-runner/ and tools/)
+      packages shard = packages/**/*.test.ts (global pattern)
+      runtime-config = src/config/**/*.test.ts
+
+    CORRECTED:
+      - compaction-anchoring.test.ts        -> packages shard
+        (it's in packages/agent-core/..., not src/agents/)
+      - compaction-summary-prefix.test.ts   -> agents-support (Suite D
+        now lives as additions to compaction-safeguard.test.ts, which is
+        in src/agents/agent-hooks/ — a subdirectory of src/agents/)
+      - multi-pass-compaction.test.ts       -> agents-core
+        (it's at src/agents/*.test.ts — top-level, not in a subdir)
+      - config.multi-pass-compaction.test.ts-> runtime-config
+        (the shard name "vitest.config.config.config.ts" was an obvious
+        typo; the actual shard is vitest.runtime-config.config.ts)
+
+  ── FIX-T2: FIXTURE DUPLICATION ELIMINATED ───────────────────────────────────
+
+    SEVERITY: Medium (code duplication, naming convention violation)
+
+    V1 PROPOSED: New fixture factories in compaction-fixtures.ts:
+      makeUserMessage, makeAssistantTextMessage, createTestModel,
+      createDeterministicTokenEstimator
+
+    PROBLEM: These duplicate existing factories with different names:
+      - makeUserMessage duplicates makeAgentUserMessage (existing, at
+        src/agents/test-helpers/agent-message-fixtures.ts)
+      - makeAssistantTextMessage duplicates makeAgentAssistantMessage
+      - createTestModel duplicates createAnthropicModelFixture pattern
+      - createDeterministicTokenEstimator duplicates the vi.hoisted pattern
+        already used in agent-session-token-mock.ts
+
+    OpenClaw NAMING CONVENTION: Existing factories use makeAgent* prefix.
+
+    CORRECTED: compaction-fixtures.ts now only adds GENUINELY NEW helpers:
+      - makeToolResultMessage (no existing equivalent with this signature)
+      - makeAssistantWithToolCalls (combines ToolCall creation with
+        makeAgentAssistantMessage delegation)
+      - makeAlternatingConversation (conversation builder, no equivalent)
+      - makeConversationWithToolCalls (conversation builder)
+      - messageEntry / buildSessionTree (session tree builders)
+    All factories that duplicate existing ones were removed.
+
+  ── FIX-T3: SUITE C TOKEN ESTIMATION CORRECTED ──────────────────────────────
+
+    SEVERITY: High (would produce a fundamentally different test approach
+    than the codebase convention)
+
+    V1 STATED: Suite C mock dependency map lists "Token estimation mock
+    (for findCutPoint's token walk)" as required.
+
+    ACTUAL: Existing findCutPoint tests (compaction-image-tokens.test.ts,
+    compaction-trailing-toolresult.test.ts) use the REAL estimateTokens
+    function. estimateTokens is a deterministic char/4 heuristic — it's
+    co-located in compaction.ts alongside findCutPoint and imported with:
+      import { estimateTokens, findCutPoint } from "./compaction.js";
+
+    Tests construct messages with known text sizes (e.g., "x".repeat(N))
+    to control the token count and thus the cut point position.
+
+    CORRECTED: Suite C uses real estimateTokens. No mock. Test setup
+    constructs messages with controlled text sizes to produce predictable
+    initial cut points that anchoring then adjusts. Mock dependency map
+    updated to "None (real estimateTokens)."
+
+  ── FIX-T4: SUITE E MOCK PATTERN CORRECTED ──────────────────────────────────
+
+    SEVERITY: High (tests would fail to compile / run with wrong mock
+    target)
+
+    V1 STATED:
+      vi.mock("../context-engine.js", () => ({
+        compact: compactionMocks.compact,
+      }));
+
+    PROBLEM: contextEngine is NOT imported from a module. It is resolved
+    at runtime via resolveContextEngine() and passed as an OBJECT parameter
+    to functions that call compact(). The existing overflow compaction tests
+    pass a mock object:
+      mockedContextEngine = {
+        info: { ownsCompaction: false },
+        compact: vi.fn(async () => ({ ok: false, ... })),
+      };
+
+    CORRECTED: multiPassCompact receives a contextEngine (or compact
+    function) as a function parameter. Tests inject a mock object directly:
+      const mockEngine = createMockContextEngine();
+      mockEngine.compact.mockResolvedValueOnce(makeCompactSuccess({...}));
+      await multiPassCompact(mockEngine, baseCompactParams, config);
+
+  ── FIX-T5: SUITE E CompactResult TYPE DOCUMENTED ───────────────────────────
+
+    SEVERITY: Low (type definition not needed for test plan to be correct,
+    but aids implementability)
+
+    V1 omitted the CompactResult type definition. Added: the actual
+    compact() return type is a discriminated union:
+      | { ok: true; compacted: true; result: { summary, tokensBefore,
+          tokensAfter, firstKeptEntryId, sessionId?, sessionFile? } }
+      | { ok: false; compacted: false; reason: string }
+      | { ok: true; compacted: false; reason: string }
+
+    Also documented the full compact() parameter shape from the
+    ContextEngine interface in context-engine/types.ts (sessionId,
+    sessionKey, sessionFile, tokenBudget, force, currentTokenCount,
+    compactionTarget, customInstructions, runtimeSettings, runtimeContext,
+    abortSignal).
+
+  ── FIX-T6: SUITE G CONFIG IMPORT PATH CORRECTED ────────────────────────────
+
+    SEVERITY: High (test would fail to compile with wrong import)
+
+    V1 STATED:
+      import { materializeCompactionConfig } from "./config-helpers.js";
+
+    ACTUAL: materializeCompactionConfig is NOT an exported function. It is
+    defined LOCALLY in config.compaction-settings.test.ts as a test helper:
+      function materializeCompactionConfig(compaction) {
+        const cfg = applyCompactionDefaults({
+          agents: { defaults: { compaction } },
+        });
+        return cfg.agents?.defaults?.compaction;
+      }
+
+    The real import is:
+      import { applyCompactionDefaults } from "./defaults.js";
+
+    Zod schema tests import:
+      import { OpenClawSchema } from "./zod-schema.js";
+
+    CORRECTED: Test imports applyCompactionDefaults from "./defaults.js"
+    and defines materializeCompactionConfig locally, matching the existing
+    config.compaction-settings.test.ts pattern.
+
+  ── FIX-T7: SUITE F HARNESS COMPLEXITY DOCUMENTED ───────────────────────────
+
+    SEVERITY: Medium (implementer would discover the complexity, but
+    documentation prevents wasted effort)
+
+    V1 said tests "follow the pattern of run.overflow-compaction.test.ts"
+    without acknowledging the 40+ mock harness infrastructure. The actual
+    pattern involves:
+      - run.overflow-compaction.harness.ts (harness file with
+        loadRunOverflowCompactionHarness(), 20+ mock exports, vi.doMock
+        chains for every dependency)
+      - run.overflow-compaction.fixture.ts (fixture factories)
+      - resetRunOverflowCompactionHarnessMocks() for per-test cleanup
+
+    CORRECTED: Suite F now explicitly describes the harness extension
+    strategy:
+      1. Add mockedMultiPassCompact to the harness
+      2. Add vi.doMock for the multi-pass module in the loader
+      3. Add reset logic in resetRunOverflowCompactionHarnessMocks()
+    This keeps all overflow mocking centralized.
+
+  ── FIX-T8: COMPACTION-SAFEGUARD INTEGRATION TESTS ADDED ────────────────────
+
+    SEVERITY: High (missing test coverage for a critical integration point)
+
+    V1 listed compaction-safeguard.test.ts as a modified test file but
+    provided ZERO specific test cases for the pre-pruning injection point
+    (Step 3 in the port plan). The injection happens at ~line 965 of
+    compaction-safeguard.ts, between runtime knob resolution and
+    summarization.
+
+    CORRECTED: Added Suite H (4 tests) covering:
+      - preCompactionPrune is called before summarization (11.1)
+      - Pruned messages (not originals) reach the summarizer (11.2)
+      - Pruning metrics are logged (11.3)
+      - Pre-pruning short-circuits for non-tool conversations (11.4)
+
+  ── FIX-T9: REDUNDANT PROPERTY PATH TESTS MERGED ────────────────────────────
+
+    SEVERITY: Low (test redundancy, not incorrectness)
+
+    V1 tests 6.13-6.14 ("property path correctness") were explicitly
+    testing that the code does NOT access entry.role / entry.content
+    (which don't exist on SessionTreeEntry). These tests are redundant
+    with tests 6.1/6.4 because ANY test that verifies correct anchoring
+    behavior IMPLICITLY verifies the correct property path.
+
+    In TypeScript, accessing entry.role would return undefined (the
+    property doesn't exist on the type), causing the anchoring predicate
+    to fail. So tests 6.1/6.4 already catch this regression — if
+    anchoring works, the property paths are correct.
+
+    CORRECTED: Tests 6.13-6.14 removed. Tests 6.1 and 6.4 annotated with
+    "VERIFIES FIX-3/FIX-4" to document that they serve as property path
+    regression tests. Suite C test count reduced from 14 to 12.
+
+  ── FIX-T10: SUITE B METRICS RETURN TYPE ALIGNED ────────────────────────────
+
+    SEVERITY: Medium (test assumed a return type not specified in port plan)
+
+    V1 test 5.21 stated preCompactionPrune "returns metrics" with type
+    { deduplicated, summarized, truncatedArgs, totalReduction }. But the
+    port plan's function description in Step 3 does not specify a metrics
+    return type — it describes the pruning behavior and mentions logging.
+
+    CORRECTED: preCompactionPrune returns { messages: AgentMessage[],
+    metrics: PruneMetrics } where PruneMetrics = { deduplicated: number;
+    summarized: number; truncatedArgs: number }. The metrics are a
+    secondary output for logging purposes (consistent with the port plan's
+    logging instruction). The totalReduction field was removed as it's
+    computable from the inputs. Test 5.20 now explicitly tests the metrics
+    output. Test count adjusted.
+
+  ── FIX-T11: SESSION TREE ENTRY CONSTRUCTION CORRECTED ───────────────────────
+
+    SEVERITY: Medium (tests would produce entries with wrong timestamp
+    format)
+
+    V1's proposed makeMessageEntry helper omitted the timestamp field
+    entirely. The actual SessionTreeEntry (as constructed in
+    compaction-image-tokens.test.ts and compaction-trailing-toolresult.test.ts)
+    requires an ISO string timestamp:
+      timestamp: new Date(message.timestamp).toISOString()
+
+    Also, parentId uses null (not undefined) for the first entry.
+
+    CORRECTED: The messageEntry helper in Suite C and buildSessionTree in
+    compaction-fixtures.ts now include the ISO string timestamp conversion
+    and null parentId for the first entry, matching the existing test
+    pattern exactly.
+
+  ── FIX-T12: SUITE D MODULE LOCATION DISAMBIGUATED ──────────────────────────
+
+    SEVERITY: Medium (ambiguous source location leads to wrong test file
+    location and import paths)
+
+    V1 said the source could be "src/agents/compaction-summary-prefix.ts
+    (or integration in compaction-safeguard.ts)" — ambiguous. The existing
+    compaction-safeguard.ts module has a well-established testing export
+    pattern that exposes internal functions for testing. New summary prefix
+    functions should be added to this module and exposed via the testing
+    export, not placed in a separate file.
+
+    CORRECTED: Suite D tests are ADDITIONS to compaction-safeguard.test.ts,
+    not a separate file. They test via the testing export:
+      testing.buildMultiPassSummaryPrefix(...)
+      testing.buildCompactionEndMarker(...)
+    This eliminates the separate compaction-summary-prefix.test.ts file.
+
+  ── FIX-T13: SUITE H (former) E2E SCOPE CLARIFIED ───────────────────────────
+
+    SEVERITY: Medium (overly ambitious scope without clear implementation
+    path)
+
+    V1 proposed "end-to-end integration tests" that exercise "the full
+    pipeline from trigger to result with only LLM calls mocked." This is
+    problematic because:
+      1. The "full pipeline" requires the overflow compaction harness
+         (40+ mocks) — not "only LLM calls mocked"
+      2. The existing codebase has no compaction E2E tests of this scope
+      3. The test plan didn't explain how the harness would be set up
+
+    CORRECTED: The E2E suite (now Suite I: "Integration / Vertical Slice")
+    is scoped to test multiPassCompact with realistic mock compact behavior
+    (verifying multi-pass convergence, single-pass compatibility, and
+    edge cases). The full runner-level integration is covered by Suite F
+    which uses the established harness infrastructure.
+
+  ── FIX-T14: contextEngine.compact() PARAMETER SHAPE REFLECTED ───────────────
+
+    SEVERITY: Low-Medium (mock fidelity)
+
+    V1's mocks didn't reflect the full compact() parameter shape. The
+    actual ContextEngineCompactParams includes sessionId, sessionKey,
+    sessionFile, tokenBudget, force, currentTokenCount, compactionTarget,
+    customInstructions, runtimeSettings, runtimeContext, abortSignal.
+
+    CORRECTED: Suite E's baseCompactParams now includes the key fields
+    (sessionId, sessionKey, sessionFile, tokenBudget, force,
+    compactionTarget). Test 8.13 verifies passNumber is added to
+    runtimeContext for each pass.
+
+  ── FIX-T15: multiPassCompact INTEGRATION WITH SAFETY TIMEOUT CLARIFIED ─────
+
+    SEVERITY: Medium (architectural question affects Suite F test design)
+
+    V1 test 9.6 said "safety timeout wraps multi-pass compaction" but
+    didn't clarify HOW. The existing compaction path uses
+    compactContextEngineWithSafetyTimeout() which wraps contextEngine.compact().
+    For multi-pass, the safety timeout should wrap the ENTIRE multiPassCompact
+    sequence (not individual compact() calls within it).
+
+    CORRECTED: Test 9.6 now specifies that multiPassCompact is called
+    WITHIN the existing compactContextEngineWithSafetyTimeout wrapper
+    (or an equivalent wrapper). The timeout abort signal is passed through
+    to multiPassCompact which propagates it to individual compact() calls.
+
+  ── ADDITIONAL: compressionMadeProgress FUNCTION SIGNATURE CORRECTED ─────────
+
+    V1 proposed a ProgressMetrics wrapper object for compressionMadeProgress.
+    The Hermes function _compression_made_progress takes 4 plain parameters:
+    (orig_len, new_len, orig_tokens, new_tokens). The OpenClaw port should
+    match this simple signature: (origLen, newLen, origTokens, newTokens).
+
+    CORRECTED: Suite A tests now call compressionMadeProgress with 4
+    positional parameters matching the Hermes convention. Test values
+    updated to use exact Hermes values where meaningful (e.g., 288_028
+    and 183_180 for #39548 regression).
+
+================================================================================
+2. SUMMARY OF CHANGES
+================================================================================
+
+  V1 (Initial) → Review V1 (Corrected):
+
+  STRUCTURAL CHANGES:
+    - Removed: Suite D as separate file (merged into compaction-safeguard
+      test additions)
+    - Added: Suite H (compaction-safeguard pre-pruning integration, 4 tests)
+    - Renamed: Suite H (E2E) → Suite I (Integration / Vertical Slice),
+      scoped down from 6 to 4 tests
+    - Suite F reduced from 8 to 7 tests (merged 2 similar tests)
+
+  TEST COUNT:
+    V1 total:     107 tests across 8 suites (A-H)
+    Review V1:    102 tests across 9 suites (A-I)
+    Delta: -5 tests (removed redundant/duplicated tests, added
+           integration tests)
+
+  FILES:
+    V1: 7 new test files, 3 modified test files
+    Review V1: 6 new test files, 2 modified test files, 1 modified harness
+    Delta: -1 new file (summary prefix test merged into safeguard test),
+           -1 modified test file (replaced by harness modification)
+
+  FIXTURES:
+    V1: compaction-fixtures.ts with 12 factory functions
+    Review V1: compaction-fixtures.ts with 6 factory functions (reusing
+               existing factories for the other 6)
+
+  MOCK PATTERNS:
+    V1: vi.mock + vi.hoisted for contextEngine in Suite E
+    Review V1: Direct object injection for contextEngine in Suite E;
+               harness extension for Suite F
+
+================================================================================
+3. ITERATION EVOLUTION
+================================================================================
+
+  V1 (Initial — 2026-06-28):
+    Initial test plan. 107 tests across 8 suites.
+    Triangulated from Hermes tests, OpenClaw conventions, and port plan.
+    Covered all 9 porting steps and 5 Review V4 corrections.
+
+  Review V1 (Current — 2026-06-28):
+    Corrected 15 issues found during code-level verification.
+    Key improvements:
+    1. Fixed vitest shard assignments (4 files in wrong shards)
+    2. Eliminated fixture duplication with existing factories
+    3. Corrected mock patterns to match actual codebase architecture
+       (contextEngine is injected, not imported)
+    4. Added missing compaction-safeguard integration tests (4 new tests)
+    5. Fixed import paths and function signatures to match actual code
+    6. Clarified harness extension strategy for runner tests
+    7. Aligned function signatures with Hermes convention (plain params)
+    8. Scoped E2E tests to feasible integration level
+
+    102 tests across 9 suites. 6 new files, 2 modified test files,
+    1 modified harness file.
+
+================================================================================
+END OF REVIEW SUMMARY (REVIEW V1)
+================================================================================

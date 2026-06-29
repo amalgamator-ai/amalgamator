@@ -1,0 +1,313 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — PLAN SUMMARY V2
+================================================================================
+
+Date: 2026-06-28
+Iteration: V2 (from scratch, incorporates all V1 + Review V1 learnings)
+
+================================================================================
+1. WORK DONE TO GENERATE THIS PLAN
+================================================================================
+
+This V2 plan was generated from scratch through the following process:
+
+─── PHASE 1: PREVIOUS ITERATION ANALYSIS ─────────────────────────────────────
+
+  Read and analyzed in detail:
+    - code_port_plan_review_V1.txt (707 lines, 9 steps, full corrected plan)
+    - code_port_plan_review_summary_V1.txt (332 lines, 15 issues found)
+
+  Extracted all 15 issues found in the V1 review, categorized as:
+    - 5 CRITICAL (would cause incorrect behavior)
+    - 7 SIGNIFICANT (would cause implementation errors)
+    - 3 MINOR (documentation/clarity)
+
+─── PHASE 2: CODE TRACE ANALYSIS ─────────────────────────────────────────────
+
+  Read and analyzed in detail:
+    - hermes_code_trace.txt (1410 lines, 18 sections)
+    - openclaw_code_trace.txt (1282 lines, 18 sections)
+
+  Cross-referenced the gap analysis table (18 features compared) to
+  confirm porting targets and existing OpenClaw strengths to preserve.
+
+─── PHASE 3: SOURCE CODE VERIFICATION ────────────────────────────────────────
+
+  Launched 5 parallel exploration agents to verify code details against
+  the ACTUAL OpenClaw and Hermes source code. This phase went deeper
+  than the V1 review, checking:
+
+  OPENCLAW VERIFICATIONS:
+    - CompactionSettings: confirmed duplicate at compaction.ts:132 and
+      types.ts:748 (both 3 fields: enabled, reserveTokens, keepRecentTokens)
+    - CutPointResult: confirmed at compaction.ts:378-385 (not exported from
+      index.ts — noted for fix)
+    - findCutPoint(): confirmed at compaction.ts:388-439 (4 params, returns
+      CutPointResult)
+    - index.ts exports: confirmed lines 30-48 (CutPointResult NOT exported)
+    - compactContextEngineWithSafetyTimeout: confirmed 2 calls (lines 2503, 2707)
+    - adoptCompactionTranscript: confirmed definition at 1808-1817, THREE call
+      sites at lines 2531, 2726, 2768 (V1 review only noted 2)
+    - runContextEngineMaintenance: confirmed import at line 152, call at
+      2727-2737 (only in overflow path, NOT in timeout path)
+    - EMBEDDED_COMPACTION_TIMEOUT_MS: confirmed NOT exported (private const,
+      line 9 of compaction-safety-timeout.ts)
+    - ContextEngineCompactParams: confirmed PRIVATE type alias (line 140)
+    - compactContextEngineWithSafetyTimeout: confirmed exported, signature at
+      lines 162-176
+    - compactWithSafetyTimeout: confirmed exported, signature at lines 67-137
+    - resolveCompactionTimeoutMs: confirmed exported, lines 59-65
+    - Module exports: confirmed 3 exports (resolveCompactionTimeoutMs,
+      compactWithSafetyTimeout, compactContextEngineWithSafetyTimeout)
+    - Package name: confirmed @openclaw/agent-core from package.json line 2
+    - COMPACTION_SUMMARY_PREFIX: confirmed at messages.ts:42-45 (minimal)
+    - COMPACTION_SUMMARY_SUFFIX: confirmed at messages.ts:47-48 ("</summary>")
+    - convertToLlm compactionSummary: confirmed at messages.ts:159-169
+    - buildEmbeddedContextEngineRuntimeSettings: confirmed locally scoped in
+      run.ts at lines 1408-1427 (NOT exported)
+    - ContextEngine.compact() params: confirmed at context-engine/types.ts:402-423
+      (11 optional params including sessionId, tokenBudget, force, abortSignal)
+    - CompactResult: confirmed at context-engine/types.ts:126-141
+    - shouldCompact (agent-core): simple threshold check at compaction.ts:236-245
+    - Compaction-safeguard hook flow: verified line-by-line:
+      884: stripRuntimeContextCustomMessages
+      1077-1139: buildHistoryPrunePlanWithWorker
+      1141-1147: splitPreservedRecentTurns
+      1184-1278: quality guard loop → summarizeViaLLM → summarizeInStages
+    - Overflow recovery at lines 2700-2798: verified two-branch adoption
+      pattern (ok && compacted at 2725, compacted-only at 2767)
+    - runOwnsCompactionAfterHook: confirmed at lines 2533 and 2749
+
+  HERMES VERIFICATIONS:
+    - Multi-pass loop: confirmed at turn_context.py:384-413 (for _pass in
+      range(3), with progress check and should_compress gate)
+    - _compression_made_progress: confirmed at turn_context.py:41-61 (message
+      count OR >5% token reduction)
+    - should_compress with anti-thrashing: confirmed at context_compressor.py:
+      964-984 (_ineffective_compression_count >= 2 → skip)
+    - SUMMARY_PREFIX: confirmed at context_compressor.py:43-69 (extensive
+      disambiguation directives)
+    - _SUMMARY_END_MARKER: confirmed at context_compressor.py:92-95
+    - _summarize_tool_result: confirmed at context_compressor.py:490-528
+      (tool-specific 1-line summaries)
+    - _prune_old_tool_results: confirmed at context_compressor.py:990-1020
+      (3 sub-passes: dedup, replace, truncate)
+
+─── PHASE 4: ISSUE DISCOVERY ─────────────────────────────────────────────────
+
+  Through the deeper verification in Phase 3, discovered 6 additional
+  issues beyond the 15 found in V1 review:
+
+    L16: EMBEDDED_COMPACTION_TIMEOUT_MS not exported
+    L17: Third adoptCompactionTranscript call site at line 2768
+    L18: Two-branch overflow adoption pattern (ok && compacted vs compacted)
+    L19: runOwnsCompactionAfterHook must fire once per invocation
+    L20: buildEmbeddedContextEngineRuntimeSettings is locally scoped
+    L21: shouldCompact function identity (agent-core vs preemptive)
+
+─── PHASE 5: PLAN CONSTRUCTION ───────────────────────────────────────────────
+
+  Built the V2 plan from scratch, incorporating all 21 learnings (15 from
+  V1 review + 6 new). The plan follows the same 9-step structure as the
+  Review V1 but with:
+
+    - More precise line numbers and verified code references
+    - Correct handling of non-exported constants (L16)
+    - Complete accounting of all adoption call sites (L17, L18)
+    - Explicit hook boundary preservation (L19, P8 principle)
+    - Conditional multi-pass/single-pass selection for safe rollback
+    - runMaintenance made optional (timeout path doesn't need it)
+    - Improved risk analysis (8 risks vs 7 in Review V1)
+    - Full traceability section mapping V1 issues to V2 solutions
+
+================================================================================
+2. PLAN SUMMARY
+================================================================================
+
+The V2 plan ports Hermes's multi-pass context compaction into OpenClaw
+through 9 incremental steps:
+
+  Step 1: Types, Interfaces & Constants
+    - Define MultiPassCompactionState, MultiPassCompactionResult,
+      CompactionProgressTrackerState in new compaction-progress.ts
+    - Add maxPasses, progressThreshold to CompactionSettings
+    - Export new types from agent-core index
+
+  Step 2: Progress Detection & Anti-Thrashing
+    - compactionMadeProgress(): token-only progress check (>5%)
+    - CompactionProgressTracker class with anti-thrashing (2x <10% → block)
+
+  Step 3: Tool Result Pre-Pruning
+    - NEW pre-compaction-pruning.ts with summarizeToolResult() and
+      pruneMessagesForCompaction()
+    - Injected into compaction-safeguard.ts AFTER stripRuntimeContextCustomMessages
+      (line 884), BEFORE buildHistoryPrunePlanWithWorker (line 1077)
+    - 3 sub-passes: MD5 dedup, 1-line summaries, arg truncation
+
+  Step 4: Cut Point Enhancement (Message Anchoring)
+    - Add last-user-message anchor to findCutPoint()
+    - Add last-assistant-message anchor (text content only)
+    - Re-alignment to prevent tool pair splitting
+    - Monotonicity invariant (tail only grows)
+
+  Step 5: Summary Prefix Disambiguation
+    - Enhanced prefix with REFERENCE ONLY directives
+    - End marker after summary suffix
+    - Backward-compatible (both minimal and enhanced available)
+
+  Step 6: Multi-Pass Compaction Loop (CENTRAL STEP)
+    - NEW multi-pass-compaction.ts in gateway layer
+    - multiPassCompact() wraps existing single-pass infrastructure
+    - Per-pass lifecycle: adopt → maintenance → record → check
+    - Timeout sharing, abort propagation, session consistency
+
+  Step 7: Embedded Runner Integration
+    - Replace 2 compactContextEngineWithSafetyTimeout calls in run.ts
+    - Lifecycle callbacks for per-pass adopt/maintenance
+    - Conditional multi-pass/single-pass selection
+    - Result mapping to CompactResult for existing code compatibility
+
+  Step 8: Configuration
+    - multiPass section in config (enabled, maxPasses, progressThreshold)
+    - prePruning section (enabled, minContentLength, deduplication)
+    - All optional with sane defaults
+
+  Step 9: Tests
+    - 5 test files (2 new in agent-core, 3 new/modified in gateway)
+    - Coverage: progress detection, tracker, pre-pruning, anchoring,
+      multi-pass loop, prefix/end marker, integration
+
+FILE COUNTS:
+  New files: 6 (3 modules + 3 test files)
+  Modified files: 9
+
+DEPENDENCIES:
+  New: node:crypto (built-in)
+  External npm: none
+
+================================================================================
+3. ITERATION EVOLUTION
+================================================================================
+
+─── ITERATION 1: V1 (Initial Plan) ───────────────────────────────────────────
+
+  The V1 plan was generated from code trace analysis and partial source
+  verification. It established the 9-step structure and identified the
+  core porting targets. However, it had 15 issues across critical,
+  significant, and minor severity levels.
+
+  Key errors in V1:
+    - Pre-pruning injection point in run.ts (dead code location)
+    - Per-pass lifecycle not recognized (adopt + maintenance)
+    - Wrong file locations for types (CompactionSettings, CutPointResult)
+    - Wrong package name (@anthropic/ instead of @openclaw/)
+    - Message count estimation hand-waved (impossible in session tree)
+    - estimateTokensFn unnecessary (tokensAfter is reliable)
+    - 3 call sites assumed (actually 2)
+
+─── ITERATION 1.5: Review V1 (Corrected Plan) ────────────────────────────────
+
+  The Review V1 phase performed deep code-level verification against
+  the actual OpenClaw source. It found and fixed all 15 issues, with
+  the most important fixes being:
+
+    - Pre-pruning moved to compaction-safeguard hook (correct pipeline)
+    - Per-pass lifecycle callbacks added (adoptTranscript + runMaintenance)
+    - All file locations and package names corrected
+    - Progress detection simplified to token-only
+    - Call site count corrected to 2
+
+  The Review V1 was a CORRECTED plan, not a from-scratch rebuild. It
+  maintained the same structure as V1 but with fixes applied in-place.
+
+─── ITERATION 2: V2 (Current — From Scratch) ─────────────────────────────────
+
+  V2 was built from scratch with all Review V1 learnings pre-incorporated.
+  Additionally, 6 new issues were discovered through even deeper source
+  verification:
+
+    L16: EMBEDDED_COMPACTION_TIMEOUT_MS is a private constant, not exported.
+         V2 defines DEFAULT_COMPACTION_TIMEOUT_MS as a public alternative
+         and passes resolved timeout from the caller.
+
+    L17: Third adoptCompactionTranscript call site at run.ts:2768 was not
+         documented. This is a safety fallback for partial-ok compaction
+         results. V2 accounts for all 3 call sites and subsumes them
+         via per-pass adoption.
+
+    L18: The overflow recovery has a two-branch adoption pattern:
+         (ok && compacted) at line 2725 triggers adopt + maintenance,
+         while (compacted only) at line 2767 is a fallback. V2's
+         per-pass adoption handles both branches correctly.
+
+    L19: runOwnsCompactionBeforeHook and runOwnsCompactionAfterHook must
+         fire once per invocation (not per pass). V2 adds Principle P8
+         and preserves hooks at the caller level.
+
+    L20: buildEmbeddedContextEngineRuntimeSettings is a locally-scoped
+         closure, not an exported function. V2 notes that callbacks
+         defined in run()'s scope have access to it.
+
+    L21: shouldCompact has two identities: the agent-core function
+         (simple threshold check, correct for post-pass use) and the
+         preemptive decision function (complex, not used in multi-pass).
+         V2 clarifies which is used where.
+
+  V2 STRUCTURAL IMPROVEMENTS over Review V1:
+
+    1. Conditional multi-pass/single-pass selection via isMultiPassEnabled()
+       provides a safe rollback mechanism at each call site.
+
+    2. runMaintenance callback is OPTIONAL in multiPassCompact — the timeout
+       path doesn't call runContextEngineMaintenance (verified), so the
+       callback is omitted for site 1.
+
+    3. Result mapping from MultiPassCompactionResult to CompactResult is
+       explicitly documented, ensuring compatibility with existing
+       post-compaction code (hooks, token tracking, truncation).
+
+    4. Anti-thrashing stopReason is "anti_thrash" (distinct from
+       "no_progress") for clearer diagnostics.
+
+    5. 8 risks analyzed (vs 7 in Review V1), including a new risk for
+       result mapping correctness.
+
+    6. shouldCompact import in multiPassCompact uses dynamic import
+       with documented rationale (D8) to avoid confusion with the
+       preemptive decision function.
+
+    7. Full traceability section (Section 9) maps all 21 issues from
+       V1 through V2 with exact locations of each fix.
+
+  V2 UNCHANGED from Review V1:
+
+    - 9-step structure (types → progress → pruning → anchoring →
+      prefix → loop → integration → config → tests)
+    - 6 new files, 9 modified files
+    - Gateway layer placement for multi-pass loop
+    - Agent-core placement for types and tracker
+    - Pre-pruning inside compaction-safeguard hook
+    - Per-pass lifecycle via callbacks
+    - Token-only progress detection
+    - No new npm dependencies (node:crypto is built-in)
+
+─── PROGRESSION SUMMARY ──────────────────────────────────────────────────────
+
+  V1 (Initial):      9 steps, 15 issues (5 critical)
+  Review V1:         9 steps, 15 issues fixed
+  V2 (Final):        9 steps, 15 + 6 = 21 issues addressed
+
+  Cumulative quality improvements:
+    - Pre-pruning: dead-code location → correct hook injection point →
+      verified exact line numbers (884, before 1077)
+    - Per-pass lifecycle: missing → callback pattern → optional maintenance
+    - Type locations: 3 wrong → all corrected → exports verified
+    - Package name: wrong → corrected → verified from package.json
+    - Call sites: 3 → 2 → 2 with 3 adoption points documented
+    - Token tracking: manual estimation → tokensAfter field → verified source
+    - Timeout constant: imported (wrong) → defined locally → resolveCompactionTimeoutMs
+    - Hook boundaries: not mentioned → noted → principle P8 + explicit preservation
+
+================================================================================
+END OF PLAN SUMMARY V2
+================================================================================

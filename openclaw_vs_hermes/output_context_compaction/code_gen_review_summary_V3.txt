@@ -1,0 +1,286 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION -- CODE REVIEW SUMMARY (REVIEW V3)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python)
+Target: OpenClaw (TypeScript)
+Review Iteration: 3 (reviewing code_gen_V3.patch)
+Date: 2026-06-28
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+ISSUE 1 -- MEDIUM: tracker.recordCompaction() never called in multiPassCompact
+
+  AFFECTED CODE:
+    src/agents/multi-pass-compaction.ts, multiPassCompact function (line ~219)
+
+  WHAT IS WRONG:
+    The CompactionProgressTracker's state is never updated within the
+    multiPassCompact function. The function checks
+    tracker.shouldSuppressCompaction() at entry (the anti-thrashing gate)
+    but never calls tracker.recordCompaction() after each pass. This means
+    the tracker's state never evolves from its initial empty state during
+    production use.
+
+  WHY IT MATTERS:
+    The anti-thrashing feature is a key part of the ported Hermes
+    functionality. Without tracker updates:
+
+    1. The anti-thrashing gate can never activate organically in
+       production. The tracker's consecutiveIneffective counter stays
+       at 0 forever, so shouldSuppressCompaction() always returns false.
+
+    2. The tracker is dead code in production -- it only works in
+       tests where it's pre-loaded with tracker.recordCompaction()
+       calls before invoking multiPassCompact.
+
+    3. Over a long session, repeated ineffective compactions would
+       thrash the system instead of being suppressed, which is the
+       exact problem the tracker was designed to prevent.
+
+  FIX APPLIED:
+    Added tracker.recordCompaction(tokensBefore, tokensAfter) after
+    each successful compaction pass, between the pass recording and
+    the per-pass lifecycle calls. This ensures the tracker accumulates
+    accurate effectiveness data across passes and invocations.
+
+    Location: After line 219 (lastCompactResult = compactResult):
+      // -- Record pass outcome for cross-invocation anti-thrashing --
+      tracker.recordCompaction(tokensBefore, tokensAfter);
+
+    This correctly updates the tracker with each pass's token reduction,
+    allowing the anti-thrashing gate to activate after consecutive
+    ineffective compactions.
+
+--------------------------------------------------------------------------------
+
+ISSUE 2 -- LOW: "clamps maxPasses to 10" test does not exercise the clamp
+
+  AFFECTED CODE:
+    src/agents/multi-pass-compaction.test.ts, test "clamps maxPasses to 10
+    at maximum" (line ~445)
+
+  WHAT IS WRONG:
+    The test mock starts with before=500000 and reduces by 6% per pass.
+    After pass 1, tokensAfter=470000. The shouldCompact threshold is
+    contextWindow - reserveTokens = 500000 - 16384 = 483616. Since
+    470000 < 483616, shouldCompact returns false and the loop stops
+    with "threshold_met" after just 1 pass.
+
+    The assertion expect(calls.length).toBeLessThanOrEqual(10) passes
+    trivially (1 <= 10) but for the WRONG reason -- it's threshold_met
+    that stops the loop, not the maxPasses=10 clamp.
+
+  WHY IT MATTERS:
+    The test is supposed to verify that maxPasses=50 gets clamped to 10.
+    But it never reaches 10 passes, so it doesn't actually prove the
+    clamp works. It passes vacuously.
+
+  FIX APPLIED:
+    Changed the mock to start at 2_000_000 tokens (well above the
+    threshold of 483616) with 6% reduction per pass. After 10 passes:
+    2_000_000 * 0.94^10 ≈ 1_077_230, still above threshold. This
+    ensures the loop runs until the 10-pass clamp stops it.
+
+    Changed assertion from toBeLessThanOrEqual(10) to:
+      expect(calls.length).toBe(10)
+      expect(result.stopReason).toBe("max_passes")
+
+    This now verifies that:
+    - Exactly 10 passes ran (not fewer due to threshold)
+    - The stop reason was "max_passes" (the clamp), not "threshold_met"
+    - The clamp from 50 -> 10 actually occurred
+
+================================================================================
+2. ISSUES REVIEWED BUT NOT REQUIRING FIXES
+================================================================================
+
+REVIEW ITEM A: Correctness of multi-pass loop vs Hermes original
+
+  The multiPassCompact() implementation faithfully ports Hermes's 3-pass
+  loop from agent/turn_context.py:
+  - Max 3 iterations (configurable, clamped [1, 10])
+  - 5% progress threshold matching Hermes's 0.95 multiplier
+  - Anti-thrashing via CompactionProgressTracker (2 consecutive <10%)
+  - Per-pass lifecycle (adoptTranscript + runMaintenance)
+  - Token-only progress detection (vs Hermes's dual-dimension check)
+
+  VERDICT: CORRECT -- Faithful port.
+
+REVIEW ITEM B: CompactionSettings optional field backward compatibility
+
+  maxPasses? and progressThreshold? are optional with ? modifier.
+  DEFAULT_COMPACTION_SETTINGS omits them (defaults applied by consuming
+  code). Existing callers see undefined -> defaults apply. TypeScript
+  structural typing ensures backward compatibility.
+
+  VERDICT: CORRECT -- Backward compatible.
+
+REVIEW ITEM C: findCutPoint anchoring property paths
+
+  The anchoring code uses (entry.message as HarnessMessage).role,
+  matching the existing findValidCutPoints pattern at line 327. The
+  guard threshold (lastUserIdx - startIndex >= 3) prevents degenerate
+  cases where anchoring would leave nothing to summarize.
+
+  VERDICT: CORRECT -- Property paths match existing patterns.
+
+REVIEW ITEM D: Pre-compaction pruning prunedCount semantics
+
+  prunedCount accumulates across all 3 sub-passes. A message deduped in
+  sub-pass 1 gets a 60-char placeholder, below MIN_CONTENT_LENGTH (200),
+  so sub-pass 2 skips it. Sub-pass 3 operates on assistant messages (not
+  tool results). No double-counting occurs.
+
+  VERDICT: CORRECT -- No double-counting.
+
+REVIEW ITEM E: Summary prefix change impact
+
+  The COMPACTION_SUMMARY_PREFIX uses "[COMPACTION -- REFERENCE ONLY]"
+  directive with clear instructions to not answer questions from the
+  summary. COMPACTION_SUMMARY_END_MARKER provides a clear boundary.
+  Both are appropriately shorter than Hermes's full 30-line prefix.
+
+  VERDICT: CORRECT -- Appropriate adaptation.
+
+REVIEW ITEM F: AbortSignal.any() usage
+
+  AbortSignal.any() is used in multiPassCompact() to compose timeout
+  and external signals. OpenClaw targets Node >= 22.19.0 and already
+  uses AbortSignal.any() in 5+ files across the codebase. Not a risk.
+
+  VERDICT: CORRECT -- No compatibility concern.
+
+REVIEW ITEM G: Resource management
+
+  The setTimeout is cleaned up in a finally block. The composed signal
+  from AbortSignal.any() is GC-eligible once the function returns.
+
+  VERDICT: CORRECT -- No resource leaks.
+
+REVIEW ITEM H: Lint compliance
+
+  All files checked for:
+  - curly rule (all if/else/for bodies have braces): PASS
+  - unicorn/prefer-node-protocol (uses "node:crypto"): PASS
+  - oxc/no-map-spread (uses Object.assign in map): PASS
+  - Import ordering (preCompactionPrune after node: imports): PASS
+
+  VERDICT: ALL PASS -- No lint violations.
+
+REVIEW ITEM I: Type safety
+
+  MessageWithRole intersection type (AgentMessage & { role: string })
+  is a reasonable narrowing approach, better than `as any`. The
+  structural type cast in hasVisibleContent uses a specific shape
+  rather than `any`.
+
+  VERDICT: ACCEPTABLE -- Good balance of type safety and pragmatism.
+
+REVIEW ITEM J: Security
+
+  SHA-256 hashing for dedup (48-bit hash key, negligible collision risk
+  at expected cardinalities < 1000 tool results per session). No user
+  input is used in dynamic imports, shell commands, or HTML rendering.
+
+  VERDICT: NO SECURITY ISSUES.
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+ITERATION 1 (V1 -- code_gen_V1.patch):
+  - First implementation of Steps 1-6 and Step 8
+  - 129 tests across test files
+  - Review found 4 issues:
+    1. CRITICAL: Silent no-op test (double-wrapped async function)
+    2. MEDIUM: `as any` in hasVisibleContent -> structural type cast
+    3. MEDIUM: 4x `as any` in pruning -> NarrowedMessage type
+    4. LOW: Unused DEFAULT_COMPACTION_SETTINGS import
+
+ITERATION 2 (V2 -- code_gen_V2.patch):
+  - From-scratch rewrite incorporating all V1 learnings
+  - 120 tests across 6 test files
+  - Review found 4 lint/style issues:
+    1. MEDIUM: 15x curly brace rule violations
+    2. MEDIUM: Missing `node:` protocol prefix on crypto import
+    3. LOW: Inefficient object spread in map (no-map-spread)
+    4. LOW: Import ordering (preCompactionPrune before node: imports)
+
+ITERATION 3 (V3 -- code_gen_V3.patch):
+  - From-scratch rewrite incorporating all V1+V2 learnings
+  - All V1/V2 review fixes applied from the start:
+    * No double-wrapped async tests (V1 fix #1)
+    * Structural type cast in hasVisibleContent (V1 fix #2)
+    * Typed MessageWithRole instead of `as any` (V1 fix #3)
+    * No unused imports (V1 fix #4)
+    * All if bodies have curly braces (V2 fix #1)
+    * node:crypto import prefix (V2 fix #2)
+    * Object.assign in map (V2 fix #3)
+    * Correct import ordering (V2 fix #4)
+  - All Review V4 plan corrections applied:
+    * ToolCall uses id/name (not toolCallId/toolName) (RV4-1)
+    * ToolCall.arguments is Record<string, unknown> (RV4-2)
+    * findCutPoint uses entry.message.role (RV4-3)
+    * hasVisibleContent uses entry.message.content (RV4-4)
+    * baseMessagesToSummarize already let (RV4-5)
+    * AbortSignal.any() confirmed safe (RV4-6)
+  - 141 tests across 8 test files (with shard duplication), all passing
+  - Build: SUCCESS (170s)
+
+REVIEW 3 (this review -- code_gen_review_V3.patch):
+  - Found and fixed 2 issues:
+    1. MEDIUM: tracker.recordCompaction() never called in multiPassCompact
+       -> anti-thrashing feature was dead code in production
+    2. LOW: "clamps maxPasses to 10" test passed vacuously, not exercising
+       the actual clamp code path
+  - All fixes are behavioral (ISSUE 1) and test quality (ISSUE 2)
+  - No lint/style issues found (all V1/V2 fixes properly incorporated)
+  - 121 tests still pass (same tests, run without shard duplication)
+  - Build: SUCCESS (170s)
+
+CONVERGENCE STATUS:
+  The V3 code is close to converged. The V3 review found one behavioral
+  issue (tracker not updated) and one test quality issue (weak assertion).
+  Both have clear, surgical fixes. No architectural, lint, type safety,
+  or security issues remain.
+
+================================================================================
+4. BUILD AND TEST RESULTS (POST-REVIEW)
+================================================================================
+
+BUILD:
+  npx pnpm build -> SUCCESS (170s)
+  No TypeScript compilation errors
+
+TESTS:
+  7 test files, 121 tests, ALL PASSING
+  - Suite A (compaction-progress.test.ts): 24 tests PASS
+  - Suite B (pre-compaction-pruning.test.ts): 20 tests PASS
+  - Suite D (compaction-summary-prefix.test.ts): 8 tests PASS
+  - Suite E (multi-pass-compaction.test.ts): 26 tests PASS
+  - Suite G (config.multi-pass-compaction.test.ts): 16 tests PASS
+  - Existing compaction.test.ts: 1 test PASS (no regressions)
+
+  NOTE: Test count 121 (vs V3's 141) because this run does not use
+  shard duplication. The same tests pass in both modes.
+
+================================================================================
+5. FILES MODIFIED BY THIS REVIEW
+================================================================================
+
+  src/agents/multi-pass-compaction.ts
+    -> Added tracker.recordCompaction(tokensBefore, tokensAfter) after
+       each successful pass (1 line + 1 comment line added)
+
+  src/agents/multi-pass-compaction.test.ts
+    -> Fixed "clamps maxPasses to 10" test: start at 2_000_000 tokens
+       instead of 500_000, stronger assertion (toBe(10) + stopReason
+       check instead of toBeLessThanOrEqual(10))
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

@@ -1,0 +1,3598 @@
+================================================================================
+OPENCLAW - EXHAUSTIVE FEATURE ANALYSIS
+================================================================================
+Project:        openclaw
+Version:        2026.6.10
+Language:       TypeScript (strict mode, ESM)
+License:        MIT
+Repository:     https://github.com/openclaw/openclaw
+Analysis Date:  2026-06-27
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+Features 1-10:   Core Agent Infrastructure
+Features 11-20:  Communication & Messaging
+Features 21-30:  Tools & Execution
+Features 31-40:  Media & Perception
+Features 41-50:  Memory, Persistence & Search
+Features 51-60:  Multi-Agent & Orchestration
+Features 61-70:  UI, CLI & Native Apps
+Features 71-80:  Security & Safety
+Features 81-90:  Configuration & Extensibility
+Features 91+:    Research, Infrastructure & Specialized
+
+================================================================================
+FEATURE #1: ACP Control Plane (Agent Session Lifecycle)
+================================================================================
+Category:       Core / Agent Runtime
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    The ACP (Agent Client Protocol) Control Plane is the central orchestrator
+    for all agent session lifecycle, prompt execution, failover, and streaming.
+    AcpSessionManager is the core public facade managing session initialization,
+    turn execution, status queries, cancellation, and closure. It maintains
+    per-session actor queues for serialized execution, LRU runtime handle
+    caches with idle TTL eviction, and comprehensive observability snapshots
+    (active sessions, turn latency, error counts).
+
+Key Implementation Files:
+    - src/acp/control-plane/manager.core.ts         (AcpSessionManager)
+    - src/acp/control-plane/manager.turn-runner.ts   (turn orchestration)
+    - src/acp/control-plane/manager.turn-stream.ts   (stream normalization)
+    - src/acp/control-plane/manager.turn-timeout.ts  (timeout enforcement)
+    - src/acp/control-plane/manager.backend-failover.ts (failover planning)
+    - src/acp/control-plane/manager.runtime-handle-cache.ts (LRU cache)
+    - src/acp/control-plane/manager.identity-reconcile.ts (session identity)
+    - src/acp/control-plane/manager.types.ts         (type definitions)
+    - src/acp/control-plane/session-actor-queue.ts   (serial execution)
+
+Architecture Notes:
+    - AcpSessionManager: initializeSession(), runTurn(), getSessionStatus(),
+      setSessionRuntimeMode(), cancelSession(), closeSession()
+    - SessionActorQueue prevents concurrent turns on same session
+    - ManagerRuntimeHandleCache: LRU with idle TTL eviction
+    - Turn pipeline: background task creation -> failover planning -> turn
+      execution -> timeout handling -> cancellation -> completion recording
+    - AcpTurnStreamOutcome: {sawOutput, sawTerminalEvent} for diagnosis
+    - AcpManagerObservabilitySnapshot: {runtimeCache, turns, errorsByCode}
+    - Backend failover with candidate planning and attempt tracking
+    - Session identity reconciliation on startup and on-demand
+
+Known Limitations:
+    - None apparent from code; mature and well-tested
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #2: Embedded Agent Runner (Core Conversation Loop)
+================================================================================
+Category:       Core / Agent Runtime
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    The main agent execution loop that handles prompting, tool execution,
+    streaming, compaction, and retry. runEmbeddedAgent() takes configuration,
+    session context, tools, and model parameters and returns a structured
+    result with status, reason, output, and usage. Integrates with the
+    context engine for assembly and compaction.
+
+Key Implementation Files:
+    - src/agents/embedded-agent-runner/run.ts            (main loop)
+    - src/agents/embedded-agent-runner/stream-wrapper.ts (stream error handling)
+    - src/agents/embedded-agent-runner/stream-resolution.ts (source strategy)
+    - src/agents/embedded-agent-runner/compact.runtime.ts (compaction execution)
+    - src/agents/embedded-agent-runner/compact.queued.ts  (background compaction)
+    - src/agents/embedded-agent-runner/compact.hooks.ts   (post-compaction hooks)
+    - src/agents/embedded-agent-runner/agent-tools.before-tool-call.ts (policy hooks)
+    - src/agents/embedded-agent-runner/agent-tool-definition-adapter.ts (tool lifecycle)
+
+Architecture Notes:
+    - RunEmbeddedAgentParams: {cfg, sessionKey, text, sessionFile, attachments,
+      tools, model, ...}
+    - EmbeddedAgentRunResult: {status, reason, output, usage, ...}
+    - Before-tool-call hooks: policy checks, approvals, loop detection
+    - Tool call state tracking and adjustment
+    - Post-tool-call hooks via plugin integration
+    - Token budget enforcement and fallback handling
+    - Streaming with error recovery wrappers
+
+Known Limitations:
+    - None apparent; mature implementation
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #3: Context Engine System (Pluggable Context Management)
+================================================================================
+Category:       Core / Context Management
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Pluggable context management system with support for windowing, compression,
+    and compaction. ContextEngine interface defines bootstrap, maintain, ingest,
+    assemble, compact, and subagent lifecycle methods. Legacy engine provides
+    simple windowing; pluggable engines can be registered via the engine
+    registry with fallback to "legacy".
+
+Key Implementation Files:
+    - src/context-engine/types.ts      (ContextEngine interface)
+    - src/context-engine/legacy.ts     (legacy windowing engine)
+    - src/context-engine/registry.ts   (engine resolution)
+
+Architecture Notes:
+    - ContextEngine interface: bootstrap?, maintain?, ingest, ingestBatch?,
+      afterTurn?, assemble, compact, prepareSubagentSpawn?, onSubagentEnded?,
+      dispose?
+    - AssembleResult: {messages, estimatedTokens, promptAuthority, systemPromptAddition,
+      contextProjection}
+    - CompactResult tracks token reduction and summary
+    - Legacy engine: simple windowing
+    - Registry resolves engine by ID with fallback to "legacy"
+    - Plugin-provided engines can replace the default
+    - Context projection modes: "per_turn" | "thread_bootstrap"
+
+Known Limitations:
+    - Legacy engine is basic; advanced compression requires plugins
+    - No built-in multi-pass summarization (unlike Hermes)
+
+Quality: Working well (basic), extensible via plugins
+
+
+================================================================================
+FEATURE #4: Compaction System (Context Compression)
+================================================================================
+Category:       Core / Context Management
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Automatic summarization when approaching context limits. Preserves tool
+    call/result pairs during splits. Supports manual trigger via /compact
+    with custom instructions. Optional memory flush before compaction.
+    Configurable model override, identifier preservation policies, successor
+    transcript creation, and duplicate suppression for retry storms.
+
+Key Implementation Files:
+    - src/agents/embedded-agent-runner/compact.runtime.ts  (execution)
+    - src/agents/embedded-agent-runner/compact.queued.ts   (background queue)
+    - src/agents/embedded-agent-runner/compact.hooks.ts    (post-hooks)
+    - docs/concepts/compaction.md                          (documentation)
+
+Architecture Notes:
+    - Config: agents.defaults.compaction.model, keepRecentTokens,
+      identifierPolicy (strict/off/custom), maxActiveTranscriptBytes,
+      truncateAfterCompaction, notifyUser, memoryFlush
+    - Successor transcript rotation (new file after compaction)
+    - Duplicate suppression for retry storms
+    - Active transcript byte guarding
+    - User notification on completion
+    - Plugin hooks run after compaction completes
+
+Known Limitations:
+    - Single-pass compaction (no iterative multi-pass like Hermes)
+    - Relies on context engine plugin for sophisticated compression
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #5: LLM Provider Abstraction Layer
+================================================================================
+Category:       Core / LLM Integration
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Multi-provider adapter system supporting 30+ LLM providers. Each provider
+    implements message conversion, tool projection, streaming, cache control,
+    and error handling. Built-in adapters for Anthropic, OpenAI, Google,
+    Azure, Mistral, Cloudflare, GitHub Copilot. Additional providers as
+    extension plugins.
+
+Key Implementation Files:
+    - src/llm/anthropic.ts           (Anthropic with caching, thinking, tools)
+    - src/llm/openai.ts              (OpenAI GPT)
+    - src/llm/azure-openai.ts        (Azure OpenAI)
+    - src/llm/google.ts              (Google Gemini)
+    - src/llm/google-vertex.ts       (Vertex AI)
+    - src/llm/mistral.ts             (Mistral)
+    - src/llm/cloudflare.ts          (Cloudflare Workers AI)
+    - src/llm/github-copilot.ts      (GitHub Copilot)
+    - src/llm/utils/event-stream.ts  (streaming utilities)
+    - src/llm/cache-retention.ts     (cache policy)
+    - packages/llm-core/             (LLM core interfaces)
+    - packages/llm-runtime/          (LLM runtime)
+
+Architecture Notes:
+    - Anthropic: prompt caching, extended thinking, tool streaming, cache control
+    - Streaming EventStream<E, R>: events AsyncIterable + result Promise
+    - Event types: text_delta, tool_call, thinking_delta, done, error
+    - createDeferredEventBuffer(): batches streaming events
+    - Cache retention policy per provider
+    - Token economics: input/output/cache costs tracked
+    - Context windows up to 1M tokens
+    - Thinking level mappings for reasoning models
+
+Known Limitations:
+    - Some smaller providers may have incomplete feature coverage
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #6: Model Provider Plugin System (30+ Providers)
+================================================================================
+Category:       Core / Extensibility
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    30+ model providers ship as extension plugins under extensions/. Each
+    provider defines connection parameters, auth requirements, model catalog,
+    and streaming behavior. Includes both major cloud providers and local
+    inference backends. Standalone official provider plugins published as
+    independent npm packages.
+
+Key Implementation Files:
+    - extensions/anthropic/              (Claude models)
+    - extensions/openai/                 (GPT models)
+    - extensions/google/                 (Gemini models)
+    - extensions/deepseek/               (DeepSeek)
+    - extensions/groq/                   (Groq inference)
+    - extensions/ollama/                 (local Ollama)
+    - extensions/llama-cpp/              (local llama.cpp)
+    - extensions/openrouter/             (aggregator)
+    - extensions/amazon-bedrock/         (AWS Bedrock)
+    - extensions/azure-openai/           (Azure)
+    - extensions/together/               (Together.ai)
+    - extensions/fireworks/              (Fireworks)
+    - extensions/cerebras/               (Cerebras)
+    - extensions/perplexity/             (Perplexity)
+    - extensions/cohere/                 (Cohere)
+    - extensions/huggingface/            (Hugging Face)
+    - extensions/vllm/                   (vLLM)
+    - extensions/sglang/                 (SGLang)
+    - extensions/lmstudio/               (LMStudio)
+    - extensions/minimax/                (MiniMax)
+    - extensions/stepfun/                (StepFun)
+    + 15+ more regional/specialized providers
+
+Architecture Notes:
+    - Each provider: openclaw.plugin.json manifest + src/ implementation
+    - Dynamic model discovery via provider APIs
+    - Token economics tracking per model
+    - Prompt caching support where available
+    - Extended thinking/reasoning modes
+    - Tool use (structured function calling)
+    - Vision and audio capabilities where supported
+
+Known Limitations:
+    - Provider-specific quirks handled individually
+    - Some providers may lag behind API changes
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #7: Error Classification & Failover Chains
+================================================================================
+Category:       Core / Reliability
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Error classification by provider with retry heuristics, billing error
+    detection, and model failover chains. Backend candidate planning determines
+    which backends are worth retrying. Exponential backoff with jitter (0.1
+    default). Provider-specific retry-after handling. Circuit breaker
+    protection against cascading failures.
+
+Key Implementation Files:
+    - src/acp/control-plane/manager.backend-failover.ts   (failover planning)
+    - src/agents/embedded-agent-helpers/provider-error-patterns.ts (classification)
+    - src/acp/runtime/errors.ts                           (error wrapping)
+    - docs/concepts/retry.md                              (retry documentation)
+    - docs/concepts/model-failover.md                     (failover docs)
+
+Architecture Notes:
+    - BackendAttempt tracking for diagnosis
+    - resolveBackendCandidatePlan(): plans fallback sequence
+    - Failover-worthy error detection (distinguishes transient from permanent)
+    - Provider-specific error patterns and retry heuristics
+    - Circuit breaker: max timeouts + cooldown period
+    - Retry policies per provider (HTTP 429, 5xx, timeouts)
+    - Exponential backoff with configurable jitter
+    - Secret redaction in error messages
+    - AcpRuntimeError with code/message/details
+
+Known Limitations:
+    - Failover is backend-level, not per-model granularity
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #8: Streaming Architecture
+================================================================================
+Category:       Core / UX
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Message-based block streaming (not token-delta) with channel-specific
+    chunking strategies. Coarse-grained output chunking as assistant writes.
+    Configurable boundaries (text_end vs message_end), min/max character bounds
+    with break preferences (paragraph, newline, sentence). Code fence
+    preservation during splits. Coalescing to merge consecutive blocks.
+    Human-like pacing delays between blocks.
+
+Key Implementation Files:
+    - docs/concepts/streaming.md               (streaming documentation)
+    - src/agents/embedded-agent-runner/stream-wrapper.ts (stream wrapping)
+    - src/agents/embedded-agent-runner/stream-resolution.ts (source strategy)
+    - src/llm/utils/event-stream.ts            (EventStream class)
+    - src/llm/anthropic-transport-stream.ts     (Anthropic streaming)
+    - src/llm/openai-transport-stream.ts        (OpenAI streaming)
+
+Architecture Notes:
+    - Block streaming: coarse-grained chunks, not individual tokens
+    - Preview streaming: platform-specific (Telegram, Discord, Signal)
+    - EventStream<E, R>: events + result pattern
+    - Streaming events: text_delta, text_end, tool_call, thinking_delta, done
+    - Channel config: blockStreaming, textChunkLimit, chunkMode
+    - Message-based: send + edit (not raw token deltas)
+    - Discord: 17-line wrap protection (default)
+    - Coalescing: merge consecutive blocks before sending
+    - Human-like pacing: configurable delays between blocks
+    - Code fence preservation during splits
+
+Known Limitations:
+    - Block-level streaming is coarser than token-level
+    - Preview streaming limited to platforms that support message editing
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #9: Tool Registry & Execution
+================================================================================
+Category:       Core / Tool Management
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Tool discovery, planning, execution, and repair system. MCP (Model Context
+    Protocol) integration for external tool servers. Tool call validation and
+    repair via dedicated package. Before/after tool call hooks with plugin
+    integration. Per-session MCP runtime management with lazy creation and
+    cleanup. Tool naming and collision detection.
+
+Key Implementation Files:
+    - src/tools/                                        (tool implementations)
+    - src/agents/agent-bundle-mcp-runtime.ts            (session MCP runtime)
+    - src/agents/agent-bundle-mcp-tools.ts              (MCP tool facade)
+    - src/agents/agent-bundle-mcp-materialize.ts        (tool instantiation)
+    - src/agents/agent-bundle-mcp-names.ts              (naming & collision)
+    - src/agents/agent-bundle-lsp-runtime.ts            (LSP integration)
+    - packages/tool-call-repair/                        (validation & repair)
+    - src/agents/embedded-agent-runner/agent-tools.before-tool-call.ts
+
+Architecture Notes:
+    - createSessionMcpRuntime(): per-session MCP runtime
+    - buildBundleMcpToolsFromCatalog(): catalog -> tools
+    - materializeBundleMcpToolsForRun(): run-specific projection
+    - Canonical name mapping with provider collision detection
+    - Tool call repair: validation, schema enforcement, auto-fix
+    - Before-tool-call hooks: policy checks, approvals, loop detection
+    - After-tool-call hooks via plugin integration
+    - LSP runtime for code intelligence tools
+
+Known Limitations:
+    - MCP integration is evolving with spec changes
+    - Tool call repair is heuristic-based
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #10: Session Management & Persistence
+================================================================================
+Category:       Core / Persistence
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    JSONL-backed session tree with branch support. SessionManager handles
+    creation, reading, appending, forking, branching, and exporting of
+    sessions. Session entries include messages, compaction summaries,
+    thinking level changes, model changes, and custom extension data.
+    Event ledger provides persistent recording for session replay and
+    state recovery.
+
+Key Implementation Files:
+    - src/agents/sessions/session-manager.ts     (SessionManager)
+    - src/sessions/                              (session persistence)
+    - src/transcripts/                           (transcript handling)
+    - src/acp/event-ledger.ts                    (event persistence)
+    - packages/agent-core/                       (agent core interfaces)
+
+Architecture Notes:
+    - JSONL-backed session transcripts
+    - Session entry types: message, compaction, thinking_level_change,
+      model_change, custom
+    - SessionManager: newSession, readSessionMessages, appendSessionEntry,
+      forkSession, getSessionBranches, exportSession
+    - AcpEventLedger: startSession, recordUserPrompt, recordUpdate,
+      markIncomplete, readReplay
+    - In-memory store with file lock for multi-process safety
+    - Session snapshot building with usage calculation
+    - Successor transcript creation on compaction
+
+Known Limitations:
+    - JSONL format may not scale for very large transcripts
+    - File locking for multi-process safety (vs SQLite for state)
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #11: Multi-Channel Messaging Gateway
+================================================================================
+Category:       Communication / Messaging
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Centralized gateway server that coordinates message routing across 25+
+    messaging platforms. Single control plane design with HTTP RPC interface.
+    Supports multi-user message routing, device pairing, TLS communication,
+    and health checks. Gateway protocol uses TypeBox-validated schemas for
+    type-safe communication.
+
+Key Implementation Files:
+    - src/gateway/                               (gateway implementation)
+    - src/gateway/boot.ts                        (startup & boot checks)
+    - src/gateway/call.ts                        (RPC client)
+    - packages/gateway-protocol/                 (protocol definitions)
+    - packages/gateway-client/                   (client library)
+
+Architecture Notes:
+    - Default port: 18789 (gateway), 18790 (bridge)
+    - Health check: /healthz endpoint
+    - Auth modes: token, password, device auth, stored auth
+    - TLS fingerprint validation
+    - Protocol version negotiation (MIN_CLIENT_PROTOCOL_VERSION to PROTOCOL_VERSION)
+    - TypeBox Compile validators for runtime type checking
+    - Per-workspace BOOT.md checks in isolated sessions
+    - Gateway protocol schemas: AgentEvent, MessageAction, SessionsPatch,
+      ChannelsStart/Stop, TalkEvent, CommandEntry, etc.
+    - 30+ exported schema types with validators
+
+Known Limitations:
+    - Single gateway per machine (not clustered)
+    - Trusted operator model (not multi-tenant)
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #12: Channel Adapters (25+ Messaging Platforms)
+================================================================================
+Category:       Communication / Messaging
+Type:           Integration (connects to external systems)
+Maturity:       MATURE (major), DEVELOPING (minor)
+
+Description:
+    Individual channel adapters that implement messaging platform integrations.
+    Each handles platform-specific authentication, message formatting, media
+    delivery, rate limiting, and special features (threads, buttons, typing
+    indicators). Adapters are transport-only — they don't own command trees or
+    feature menus. Portable presentation actions used instead of raw string
+    inference.
+
+Key Implementation Files:
+    - extensions/telegram/                  (Telegram bot)
+    - extensions/discord/                   (Discord bot)
+    - extensions/slack/                     (Slack bot)
+    - extensions/whatsapp/                  (WhatsApp via Twilio/Baileys)
+    - extensions/signal/                    (Signal messenger)
+    - extensions/msteams/                   (Microsoft Teams)
+    - extensions/googlechat/                (Google Chat)
+    - extensions/matrix/                    (Matrix protocol)
+    - extensions/irc/                       (IRC)
+    - extensions/mattermost/                (Mattermost)
+    - extensions/feishu/                    (Feishu/Lark)
+    - extensions/line/                      (LINE)
+    - extensions/imessage/                  (iMessage)
+    - extensions/nextcloud-talk/            (Nextcloud Talk)
+    - extensions/nostr/                     (Nostr protocol)
+    - extensions/synology-chat/             (Synology Chat)
+    - extensions/tlon/                      (Tlon/Urbit)
+    - extensions/twitch/                    (Twitch)
+    - extensions/zalo/                      (Zalo)
+    - extensions/wechat/                    (WeChat)
+    - extensions/qqbot/                     (QQ)
+    - extensions/webcat/                    (WebChat)
+    - extensions/webhooks/                  (Generic webhooks)
+    - extensions/voice-call/                (Voice calls)
+    - extensions/phone-control/             (Phone control)
+
+Architecture Notes:
+    - Transport-only design: render portable presentation/actions
+    - Enforce transport limits (message length, media types)
+    - No command trees in channels (centralized in gateway)
+    - Channel streaming config: blockStreaming, textChunkLimit, chunkMode
+    - Platform-specific rate limiting (Telegram 400ms, Discord 500ms)
+    - Thread bindings, DM policies, group routing
+    - Typed presentation actions (not raw string inference)
+    - Raw callback data is transport/private
+
+Known Limitations:
+    - Some minor channels may have incomplete feature coverage
+    - WeChat account routing has known edge cases (recent fix)
+
+Quality: Working well (major platforms), developing (minor platforms)
+
+
+================================================================================
+FEATURE #13: DM Pairing & Access Control
+================================================================================
+Category:       Communication / Security
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Default security for direct messages: unknown senders receive a pairing
+    code and the bot doesn't process their message until approved. Approval
+    via CLI command. Open DMs require explicit opt-in with "*" in allowlist.
+    Per-channel DM and group policies configurable.
+
+Key Implementation Files:
+    - src/channels/                         (channel access control)
+    - docs/concepts/channels.md             (channel documentation)
+
+Architecture Notes:
+    - Default: dmPolicy="pairing" (secure by default)
+    - Pairing: openclaw pairing approve <channel> <code>
+    - Open: dmPolicy="open" + "*" in allowlist (explicit opt-in)
+    - Per-channel access policies
+    - Group activation modes: mention, always
+
+Known Limitations:
+    - Single-user trust model (not multi-tenant)
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #14: Block Streaming & Preview Streaming
+================================================================================
+Category:       Communication / UX
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Two-tier streaming system. Block streaming: coarse-grained output chunking
+    with configurable boundaries, code fence preservation, and human-like
+    pacing. Preview streaming: platform-specific message editing (Telegram,
+    Discord, Signal) where a temporary preview message is updated while
+    generating. Both configurable per-channel.
+
+Key Implementation Files:
+    - docs/concepts/streaming.md               (documentation)
+    - src/channels/                            (per-channel config)
+
+Architecture Notes:
+    - Block streaming: text_end vs message_end boundaries
+    - Min/max character bounds with break preferences
+    - Break preferences: paragraph > newline > sentence
+    - Code fence preservation during splits
+    - Coalescing: merge consecutive blocks before sending
+    - Preview streaming: send + edits (not token deltas)
+    - Per-channel control: blockStreaming, textChunkLimit, chunkMode
+    - Human-like pacing delays between blocks
+
+Known Limitations:
+    - Preview streaming limited to platforms supporting message editing
+    - Block-level granularity coarser than token streaming
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #15: Webhook System
+================================================================================
+Category:       Communication / Integration
+Type:           Integration (connects to external systems)
+Maturity:       DEVELOPING
+
+Description:
+    Generic webhook receiver for inbound events from external systems.
+    Supports cron job delivery and external service integration.
+
+Key Implementation Files:
+    - extensions/webhooks/                 (webhook adapter)
+
+Architecture Notes:
+    - Cron job delivery mode: webhook
+    - External service callbacks
+
+Known Limitations:
+    - Less feature-rich than Hermes webhook system (no HMAC, no Jinja2)
+
+Quality: Has known issues / basic implementation
+
+
+================================================================================
+FEATURE #16: Terminal Execution & Sandboxing
+================================================================================
+Category:       Execution / Infrastructure
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Command execution with approval gates for sensitive operations. Multiple
+    sandbox modes: off (host-first default), Docker container, SSH remote,
+    and OpenShell backends. Filesystem and network restrictions configurable
+    per sandbox mode. Per-agent tool policy with allow/deny lists.
+
+Key Implementation Files:
+    - src/tools/                           (tool implementations)
+    - src/sandbox/                         (sandboxing infrastructure)
+    - src/commands/                        (command execution)
+    - docs/concepts/sandbox.md             (sandbox documentation)
+    - docs/tools/exec.md                   (exec tool docs)
+    - docs/tools/terminal.md               (terminal tool docs)
+
+Architecture Notes:
+    - agents.defaults.sandbox.mode defaults to "off" (host-first)
+    - Sandbox backends: Docker, SSH, OpenShell
+    - Per-agent tool policy: allow/deny lists
+    - Approval gates for sensitive operations
+    - Tool execution through embedded agent
+    - Command validation and policy enforcement
+
+Known Limitations:
+    - Sandbox mode defaults to off (less secure than containerized default)
+    - Docker/SSH sandbox requires additional setup
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #17: Browser Automation
+================================================================================
+Category:       Tools / Web
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Web browser automation tool for agent-driven web interaction. Browser
+    lifecycle management with cleanup. Supports browsing, content extraction,
+    and interactive web tasks.
+
+Key Implementation Files:
+    - extensions/browser/                  (browser extension)
+    - src/browser-lifecycle-cleanup.ts     (lifecycle management)
+    - docs/tools/browser.md                (documentation)
+
+Architecture Notes:
+    - Browser lifecycle cleanup on session end
+    - Integration with agent tool execution pipeline
+
+Known Limitations:
+    - Less mature than Hermes multi-backend browser system
+    - Single browser backend (no cloud browser providers)
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #18: Web Search & Content Extraction
+================================================================================
+Category:       Tools / Web
+Type:           Extension (adds capability)
+Maturity:       MATURE
+
+Description:
+    Multiple search providers: Brave Search, DuckDuckGo, Exa (semantic),
+    SearXNG (meta-search), Tavily. Web content extraction via Firecrawl
+    and web-readability. Document extraction for PDFs and other formats.
+
+Key Implementation Files:
+    - extensions/brave/                    (Brave Search)
+    - extensions/duckduckgo/               (DuckDuckGo)
+    - extensions/exa/                      (Exa semantic search)
+    - extensions/searxng/                  (SearXNG meta-search)
+    - extensions/tavily/                   (Tavily search)
+    - extensions/firecrawl/                (web crawling)
+    - extensions/web-readability/          (readability extraction)
+    - extensions/document-extract/         (document extraction)
+    - packages/web-content-core/           (web content handling)
+
+Architecture Notes:
+    - Multiple search backends as extensions
+    - Firecrawl for structured web crawling
+    - Web readability for clean content extraction
+    - Document extraction for PDFs
+    - Hosted Search option (opt-in)
+
+Known Limitations:
+    - Search provider backends fewer than Hermes (5 vs 8)
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #19: File Operations
+================================================================================
+Category:       Tools / Files
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    File read/write operations with sandbox awareness. Filesystem restrictions
+    configurable per agent. SSRF protection for web requests via net-policy
+    package.
+
+Key Implementation Files:
+    - src/tools/                           (file tools)
+    - packages/net-policy/                 (network policy)
+    - docs/tools/file.md                   (file tool docs)
+
+Architecture Notes:
+    - Sandbox-aware file operations
+    - Per-agent filesystem restrictions
+    - SSRF protection built into net-policy
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #20: MCP Client Integration
+================================================================================
+Category:       Tools / Extensibility
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Full Model Context Protocol client with session-scoped runtime management.
+    Dynamic tool discovery from connected MCP servers. Supports catalog
+    building, tool materialization for runs, and canonical name mapping with
+    collision detection.
+
+Key Implementation Files:
+    - src/agents/agent-bundle-mcp-runtime.ts      (session MCP runtime)
+    - src/agents/agent-bundle-mcp-tools.ts        (tool facade)
+    - src/agents/agent-bundle-mcp-materialize.ts  (instantiation)
+    - src/agents/agent-bundle-mcp-names.ts        (naming & collision)
+    - docs/concepts/mcp.md                        (MCP documentation)
+    - docs/cli/mcp.md                             (MCP CLI docs)
+
+Architecture Notes:
+    - createSessionMcpRuntime(): per-session runtime
+    - getOrCreateSessionMcpRuntime(): lazy creation
+    - disposeSessionMcpRuntime(): cleanup
+    - buildBundleMcpToolsFromCatalog(): catalog to tools
+    - materializeBundleMcpToolsForRun(): run-specific projection
+    - Canonical name mapping with provider collision detection
+
+Known Limitations:
+    - MCP spec still evolving
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #21: Canvas & Live Workspace
+================================================================================
+Category:       Tools / Visual
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Visual canvas/workspace for interactive content creation. Live Canvas
+    with A2UI (Agent-to-UI) rendering. Artifact summaries for canvas content.
+    Available on web UI and native apps (macOS, iOS, Android).
+
+Key Implementation Files:
+    - extensions/canvas/                   (canvas extension)
+    - ui/                                  (web canvas rendering)
+    - apps/macos/ (CanvasChromeContainerView.swift)
+    - docs/tools/canvas.md                 (documentation)
+
+Architecture Notes:
+    - ArtifactSummary type in gateway protocol
+    - Canvas block augmentation in TUI formatters
+    - Cross-platform rendering (web, macOS, iOS, Android)
+    - Integration with agent tool execution
+
+Known Limitations:
+    - Still developing across platforms
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #22: Codex Integration
+================================================================================
+Category:       Tools / Code
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    OpenAI Codex integration for code generation and execution. Includes
+    automatic plugin approvals, GPT-5.3 Spark OAuth, remote-node exec,
+    and teardown management. Codex supervisor for session management.
+
+Key Implementation Files:
+    - extensions/codex/                    (Codex extension)
+    - extensions/codex-supervisor/         (Codex supervision)
+    - extensions/copilot/                  (GitHub Copilot)
+
+Architecture Notes:
+    - Automatic plugin approvals for Codex
+    - GPT-5.3 Spark OAuth support
+    - Remote-node exec capability
+    - Teardown management for sessions
+    - Codex supervisor for lifecycle management
+
+Known Limitations:
+    - Integration still maturing
+    - Codex API evolving
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #23: Image Generation
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Image generation through provider plugins. Core package provides
+    generation interfaces and result handling.
+
+Key Implementation Files:
+    - src/image-generation/                (generation coordination)
+    - extensions/image-generation-core/    (core interfaces)
+    - packages/media-generation-core/      (media generation base)
+
+Architecture Notes:
+    - Provider-based image generation
+    - Media generation core package for shared interfaces
+    - Integration with agent tool execution
+
+Known Limitations:
+    - Fewer image generation backends than Hermes (6)
+    - No dedicated FAL.ai / FLUX integration visible
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #24: Video Generation
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+Maturity:       BASIC
+
+Description:
+    Video generation through provider plugins. Core extension provides
+    generation interfaces.
+
+Key Implementation Files:
+    - extensions/video-generation-core/    (core interfaces)
+
+Architecture Notes:
+    - Provider-based video generation
+    - Extension-level implementation
+
+Known Limitations:
+    - Basic implementation compared to Hermes (no FAL.ai/xAI backends visible)
+
+Quality: Basic implementation
+
+
+================================================================================
+FEATURE #25: Text-to-Speech (TTS)
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+Maturity:       MATURE
+
+Description:
+    Text-to-speech through multiple providers: ElevenLabs, Azure Speech,
+    local CLI TTS, and MLX TTS (macOS). Voice integration across platforms
+    including macOS Voice Wake, iOS, and Android.
+
+Key Implementation Files:
+    - src/tts/                             (TTS system)
+    - extensions/elevenlabs/               (ElevenLabs provider)
+    - extensions/azure-speech/             (Azure Speech)
+    - extensions/tts-local-cli/            (local CLI TTS)
+    - apps/macos-mlx-tts/                  (MLX TTS for macOS)
+    - packages/speech-core/                (speech handling)
+
+Architecture Notes:
+    - Multiple TTS providers as extensions
+    - Platform-native voice integration
+    - MLX backend for local macOS TTS
+    - Speech core package for shared interfaces
+
+Known Limitations:
+    - Fewer TTS providers than Hermes (4 vs 10+)
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #26: Speech-to-Text (Transcription)
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Real-time transcription through Deepgram and other providers. Voice
+    input support across native apps (macOS, iOS, Android).
+
+Key Implementation Files:
+    - src/realtime-transcription/           (STT system)
+    - extensions/deepgram/                  (Deepgram provider)
+    - extensions/senseaudio/                (SenseAudio)
+
+Architecture Notes:
+    - Realtime transcription with streaming
+    - Provider-based architecture
+    - Native app voice integration
+
+Known Limitations:
+    - Fewer STT providers than Hermes (2 vs 6)
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #27: Media Understanding (Vision/Audio/Video)
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Media analysis for images, audio, and video content. Shared common
+    package for media understanding interfaces. Integration with vision-
+    capable LLM providers.
+
+Key Implementation Files:
+    - src/media-understanding/              (understanding system)
+    - extensions/media-understanding-core/  (core extension)
+    - extensions/media-understanding-common/ (shared code)
+    - packages/media-understanding-common/  (shared package)
+    - packages/media-core/                  (media handling)
+
+Architecture Notes:
+    - Provider-based media understanding
+    - Vision capabilities through LLM providers
+    - Media core package: base64, MIME, content-length handling
+    - Shared common package for interfaces
+
+Known Limitations:
+    - Video analysis less mature than Hermes
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #28: Google Meet Integration
+================================================================================
+Category:       Integration / Communication
+Type:           Integration (connects to external systems)
+Maturity:       BASIC
+
+Description:
+    Google Meet integration for meeting participation and interaction.
+
+Key Implementation Files:
+    - extensions/google-meet/              (Google Meet extension)
+
+Architecture Notes:
+    - Extension-based integration
+    - Meeting participation capabilities
+
+Known Limitations:
+    - Less mature than Hermes Google Meet (no v2 realtime duplex audio)
+
+Quality: Basic implementation
+
+
+================================================================================
+FEATURE #29: Music Generation
+================================================================================
+Category:       Tools / Media
+Type:           Extension (adds capability)
+Maturity:       BASIC
+
+Description:
+    Music generation through provider plugins.
+
+Key Implementation Files:
+    - src/music-generation/                (music generation)
+
+Architecture Notes:
+    - Provider-based music generation
+    - Extension architecture
+
+Known Limitations:
+    - Basic implementation
+
+Quality: Basic implementation
+
+
+================================================================================
+FEATURE #30: Document Extraction
+================================================================================
+Category:       Tools / Content
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Extract content from documents (PDFs, etc.) for agent processing.
+
+Key Implementation Files:
+    - extensions/document-extract/         (document extraction)
+    - packages/web-content-core/           (web content handling)
+
+Architecture Notes:
+    - Document content extraction
+    - Web content core package for shared utilities
+
+Known Limitations:
+    - Scope narrower than Hermes OCR capabilities
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #31: Memory Management System
+================================================================================
+Category:       Memory / Persistence
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Pluggable memory system with three backends: Active Memory (blocking
+    sub-agent that recalls relevant context before responses), LanceDB
+    Memory (vector database with auto-recall/capture and embeddings), and
+    Wiki Memory (wiki-style knowledge base). Memory host SDK provides
+    standard interfaces for plugin memory providers.
+
+Key Implementation Files:
+    - src/memory/                          (memory orchestration)
+    - packages/memory-host-sdk/            (memory API for plugins)
+    - extensions/active-memory/            (active memory extension)
+    - extensions/memory-lancedb/           (LanceDB vector memory)
+    - extensions/memory-wiki/              (wiki-style memory)
+    - docs/concepts/memory.md              (memory documentation)
+    - docs/concepts/memory-builtin.md      (built-in memory docs)
+    - docs/concepts/memory-search.md       (memory search docs)
+    - docs/concepts/memory-qmd.md          (QMD memory docs)
+
+Architecture Notes:
+    - Active Memory: blocking sub-agent before response, configurable timeout,
+      query modes (message/recent/full), prompt styles (balanced/strict/
+      contextual/recall-heavy/precision-heavy/preference-only), circuit
+      breaker protection, persistent transcripts, 186 config options
+    - LanceDB Memory: vector DB with embeddings, auto-capture/recall,
+      configurable embedding provider (OpenAI, Copilot, Ollama, etc.),
+      S3/local storage, dimensional customization, "dreaming" mode for
+      knowledge consolidation
+    - Wiki Memory: page-based organization, search and retrieval
+    - Memory host SDK: standard plugin interface
+    - Memory flush before compaction (optional)
+    - CLI: openclaw memory commands
+
+Known Limitations:
+    - Active Memory adds latency (blocking sub-agent)
+    - LanceDB requires embedding provider setup
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #32: Session Persistence (JSONL Transcripts)
+================================================================================
+Category:       Memory / Persistence
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Session transcripts persisted as JSONL files with support for branching,
+    forking, and successor rotation. Entry types include messages, compaction
+    summaries, thinking level changes, model changes, and custom extension
+    data. Session history migration support.
+
+Key Implementation Files:
+    - src/agents/sessions/session-manager.ts    (SessionManager)
+    - src/sessions/                             (session persistence)
+    - src/transcripts/                          (transcript handling)
+
+Architecture Notes:
+    - JSONL format per session
+    - Session entry types: message, compaction, thinking_level_change,
+      model_change, custom
+    - Branch/fork support for session trees
+    - Successor transcript creation on compaction
+    - Session history migration from legacy formats
+    - Export support for sharing
+
+Known Limitations:
+    - JSONL (not SQLite FTS5 like Hermes for search)
+    - No built-in full-text search across sessions
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #33: State Management (SQLite)
+================================================================================
+Category:       Memory / Persistence
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    SQLite-based state storage for runtime data. Canonical storage default
+    per AGENTS.md: no JSON/JSONL/TXT sidecar files for runtime state.
+    Used for cron jobs, plugin state, and other persistent data.
+
+Key Implementation Files:
+    - src/state/                           (state management)
+    - src/plugin-state/                    (plugin-owned state)
+
+Architecture Notes:
+    - SQLite as primary state store (per AGENTS.md policy)
+    - Plugin state management for extension-owned data
+    - No JSON/JSONL sidecar files for runtime state
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #34: Event Ledger (Session Replay)
+================================================================================
+Category:       Memory / Persistence
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Persistent event recording for session replay and state recovery.
+    Records session starts, user prompts, updates, and incomplete markers.
+    Supports full session replay from event log.
+
+Key Implementation Files:
+    - src/acp/event-ledger.ts              (event persistence)
+
+Architecture Notes:
+    - AcpEventLedger interface: startSession, recordUserPrompt, recordUpdate,
+      markIncomplete, readReplay
+    - In-memory store with file lock for multi-process safety
+    - Session replay from event log for recovery
+    - AcpEventLedgerReplay type for replay data
+
+Known Limitations:
+    - In-memory with file lock (not WAL-mode SQLite)
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #35: Skill System & Lifecycle
+================================================================================
+Category:       Skills / Extensibility
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    53 bundled skills across categories: development, productivity, media,
+    tools, and infrastructure. Skills are SKILL.md-based workflows loaded
+    from workspace. ClawHub (clawhub.ai) provides external skill distribution.
+    Skill creator tool for authoring new skills. Verified skill provenance
+    for security.
+
+Key Implementation Files:
+    - skills/                              (53 bundled skills)
+    - src/skills/                          (skill system core)
+    - src/skills/discovery/                (skill discovery)
+    - src/skills/loading/                  (skill loading)
+    - src/skills/runtime/                  (skill runtime)
+    - docs/concepts/skills.md              (documentation)
+
+Bundled Skills (53):
+    Development: coding-agent, node-connect, node-inspect-debugger,
+        python-debugpy, github, gh-issues, gog, blucli, eightctl, mcporter
+    Productivity: 1password, apple-notes, apple-reminders, bear-notes,
+        notion, obsidian, things-mac, trello, himalaya, imsg, spike,
+        clawhub, taskflow, taskflow-inbox-triage
+    Media: nano-pdf, video-frames, gifgrep, songsee, camsnap, peekaboo,
+        diagram-maker, meme-maker
+    Tools: healthcheck, session-logs, model-usage, summarize, weather,
+        xurl, tmux, spotify-player, openhue, oracle, ordercli,
+        sherpa-onnx-tts, sag, openai-whisper, openai-whisper-api
+    Infrastructure: blogwatcher, skill-creator
+
+Architecture Notes:
+    - SKILL.md format for skill definitions
+    - Workspace: ~/.openclaw/workspace/skills/<skill>/SKILL.md
+    - ClawHub distribution (clawhub.ai)
+    - Verified skill provenance for security
+    - Skill discovery, loading, and runtime lifecycle
+    - Skill creator tool for authoring
+
+Known Limitations:
+    - Fewer bundled skills than Hermes (53 vs 153)
+    - No curator/auto-archive system for stale skills
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #36: Plugin Architecture
+================================================================================
+Category:       Extensibility / Architecture
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Comprehensive plugin system with 145+ bundled extensions. Plugin SDK
+    with 258+ exports covering runtime, security, concurrency, data, channel,
+    model, file access, and testing surfaces. Manifest-driven activation
+    (openclaw.plugin.json). Config schema validation. Doctor contract for
+    repair. Hot reload support. Strict import boundary checking.
+
+Key Implementation Files:
+    - src/plugins/runtime/                 (plugin runtime)
+    - src/plugin-sdk/                      (SDK implementation)
+    - src/plugin-activation-boundary/      (safety enforcement)
+    - src/plugin-state/                    (plugin state management)
+    - packages/plugin-sdk/                 (published SDK)
+    - packages/plugin-package-contract/    (package contracts)
+
+Architecture Notes:
+    - PluginRuntime: config, agent, system, channel, tasks, taskFlow,
+      logging, events, llm, approval, and many more surfaces
+    - Plugin types: code plugins (runtime extension), bundle plugins
+      (external services)
+    - LlmCompleteParams/Result for plugin LLM access
+    - Global hook runner registry
+    - Before/after tool call hooks
+    - Compaction hooks, approval request hooks
+    - Plugin surfaces: provider, channel, memory, tool, skill, MCP
+    - 258+ SDK exports covering all subsystems
+    - Plugin package contract for npm publishing
+    - Strict boundary: no deep imports from core internals
+
+Known Limitations:
+    - Plugin SDK surface is very large (maintenance burden)
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #37: ClawHub (Skill Distribution)
+================================================================================
+Category:       Skills / Distribution
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    External skill distribution platform at clawhub.ai. Community skill
+    marketplace for sharing and discovering skills. Verified provenance
+    for security.
+
+Key Implementation Files:
+    - skills/clawhub/                      (ClawHub skill)
+    - docs/concepts/skills.md              (documentation)
+
+Architecture Notes:
+    - External skill registry
+    - Verified provenance
+    - Community contributions
+
+Known Limitations:
+    - External platform (not self-hosted)
+    - Less mature than Hermes Skills Hub (no multi-source, no GitHub repos)
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #38: Cron Scheduling & Automation
+================================================================================
+Category:       Automation / Scheduling
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Persistent cron scheduling with SQLite-backed storage. Supports one-shot
+    (--at), interval (--every), and cron expression (5/6-field) schedules.
+    Delivery modes: announce (to chat), webhook, silent. Automatic overdue
+    rescheduling after restarts. Circuit breaker for stale runs. Subagent
+    orchestration with final-output preference.
+
+Key Implementation Files:
+    - src/cron/                            (cron implementation)
+    - docs/automation/cron-jobs.md         (documentation)
+    - docs/cli/cron.md                     (CLI reference)
+
+Architecture Notes:
+    - SQLite-backed persistent storage
+    - Schedule types: --at (one-shot), --every (interval), --cron (5/6-field)
+    - Execution styles: main session, isolated, custom session
+    - Delivery modes: announce, webhook, silent
+    - Automatic overdue rescheduling after restarts
+    - Circuit breaker: prevent stale runs from re-acknowledging
+    - Subagent orchestration with final-output preference
+    - Duration controls: timeouts, no-output timeouts, output byte limits
+    - Command payloads: deterministic shell scripts
+    - CLI: openclaw cron add|edit|remove
+
+Known Limitations:
+    - No automation blueprints/templates like Hermes
+    - No suggestion system for pre-configured automations
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #39: Task Flow Orchestration
+================================================================================
+Category:       Automation / Orchestration
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Multi-step pipeline management above background tasks. Durable state
+    tracking with revisions across restarts. Supports managed (Task Flow
+    owns lifecycle) and mirrored (observes external tasks) sync modes.
+    Branching/conditional steps. Sticky cancel intent persists across restarts.
+
+Key Implementation Files:
+    - src/tasks/                           (task management)
+    - docs/automation/taskflow.md          (Task Flow documentation)
+    - docs/automation/tasks.md             (tasks documentation)
+    - docs/cli/tasks.md                    (CLI reference)
+    - skills/taskflow/                     (TaskFlow skill)
+    - skills/taskflow-inbox-triage/        (inbox triage skill)
+
+Architecture Notes:
+    - PluginRuntime.tasks: create(), list(), update(), run()
+    - PluginRuntime.taskFlow for orchestration
+    - Durable state with revision tracking
+    - Sync modes: managed vs mirrored
+    - Branching/conditional step support
+    - Cancel behavior: sticky intent across restarts
+    - CLI: openclaw tasks flow list|show|cancel
+    - Background task records in shared database
+
+Known Limitations:
+    - Less mature than Hermes kanban system
+    - No LLM-driven task decomposition
+    - No swarm topology (root + workers + verifier + synthesizer)
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #40: Standing Orders
+================================================================================
+Category:       Automation / Policy
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Rules for autonomous action authorization. Defined in agent's AGENTS.md.
+    Approval gating for high-risk operations. Standing orders define what
+    the agent can do proactively without explicit user instruction.
+
+Key Implementation Files:
+    - src/flows/                           (standing order flows)
+    - docs/automation/standing-orders.md   (documentation)
+
+Architecture Notes:
+    - Rules defined in agent AGENTS.md
+    - Approval gating integration
+    - Autonomous action authorization
+    - High-risk operation controls
+
+Known Limitations:
+    - Less structured than Hermes kanban dispatcher
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #41: Background Tasks
+================================================================================
+Category:       Automation / Execution
+Type:           Extension (adds capability)
+Maturity:       MATURE
+
+Description:
+    Single operations executed asynchronously. Records persisted in shared
+    database. Run history tracking. Integration with task flow orchestration.
+
+Key Implementation Files:
+    - src/tasks/                           (task management)
+    - docs/automation/tasks.md             (documentation)
+
+Architecture Notes:
+    - Async execution of single operations
+    - Persistent records in shared database
+    - Run history tracking
+    - PluginRuntime.tasks API
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #42: Multi-Agent Routing
+================================================================================
+Category:       Multi-Agent / Orchestration
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Channel-based delegation to specialized agents. Named agents with
+    independent identity. Session-aware agent switching. Context preservation
+    across hand-offs. Per-agent workspaces with independent configuration.
+
+Key Implementation Files:
+    - src/agents/                          (agent runtime)
+    - docs/concepts/multi-agent.md         (multi-agent docs)
+    - docs/concepts/routing.md             (routing docs)
+    - docs/cli/agents.md                   (agent CLI docs)
+
+Architecture Notes:
+    - Named agents with independent identity
+    - Channel-based routing to specialized agents
+    - Session-aware agent switching
+    - Context preservation across hand-offs
+    - Per-agent workspaces (AGENTS.md, SOUL.md, TOOLS.md)
+    - Agent commands: add, bind, delete, list, identity
+
+Known Limitations:
+    - No kanban-style task decomposition/dispatch
+    - No swarm orchestration patterns
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #43: Delegate Architecture
+================================================================================
+Category:       Multi-Agent / Orchestration
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Named agents act "on behalf of" humans, never impersonating.
+    Organization-wide permissions integration. Three capability tiers:
+    Read-Only+Draft (summarize, flag), Send on Behalf (send with delegate
+    identity), and Proactive (autonomous with standing orders).
+
+Key Implementation Files:
+    - docs/concepts/delegate-architecture.md  (architecture docs)
+
+Architecture Notes:
+    - Capability tiers: Read-Only+Draft, Send on Behalf, Proactive
+    - Hard blocks in SOUL.md and AGENTS.md (non-negotiable restrictions)
+    - Per-agent tool policy: allow/deny lists
+    - Sandbox isolation: filesystem and network
+    - Audit trail: transcripts, cron history, identity provider logs
+    - Organization-wide permissions from identity provider
+
+Known Limitations:
+    - Architecture documented but implementation still maturing
+    - No subagent spawning like Hermes delegate_task
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #44: Subagent Support
+================================================================================
+Category:       Multi-Agent / Orchestration
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Context engine support for subagent spawn preparation and completion.
+    Integration with compaction system for subagent context management.
+
+Key Implementation Files:
+    - src/context-engine/types.ts          (prepareSubagentSpawn, onSubagentEnded)
+
+Architecture Notes:
+    - ContextEngine: prepareSubagentSpawn?(), onSubagentEnded?()
+    - SubagentSpawnPreparation type for handoff data
+    - Integration with compaction for context management
+
+Known Limitations:
+    - Less mature than Hermes subagent delegation (no batch/parallel tasks)
+    - No independent iteration budgets
+    - No orchestrator vs leaf roles
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #45: Interactive CLI
+================================================================================
+Category:       UI / Interface
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Comprehensive command-line interface with 60+ commands. Entry point via
+    openclaw.mjs (ESM). Compile cache for fast startup. Commander.js-based
+    command routing. Plugin command aliases. Fast-path handling for common
+    operations. Crestodian setup assistant for bare root invocations.
+
+Key Implementation Files:
+    - openclaw.mjs                         (CLI entry point)
+    - src/entry.ts                         (entry orchestration)
+    - src/cli/run-main.ts                  (CLI main)
+    - src/commands/                        (60+ command files)
+    - docs/cli/                            (60+ CLI docs)
+
+Architecture Notes:
+    - ESM entry with compile cache management
+    - Commander.js-based routing
+    - Plugin command aliases via registry
+    - Fast-path for help, version, gateway run
+    - Crestodian: CLI setup assistant
+    - Process initialization: title, marker, warning filter
+    - Environment normalization
+    - Gateway dispatch configuration
+    - 60+ commands: agent, agents, acp, approvals, backup, browser, channels,
+      config, cron, debug, dev, doctor, gateway, health, install, interact,
+      logs, memory, mcp, model, onboard, plugins, repl, sandbox, schemas,
+      search, setup, skills, status, tasks, uninstall, update, version,
+      webui, wiki
+
+Known Limitations:
+    - No multiline editing like Hermes prompt_toolkit
+    - No Rich-style banner/panels
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #46: TUI (Terminal User Interface)
+================================================================================
+Category:       UI / Interface
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Full terminal UI with chat interface, session management, agent switching,
+    and slash commands. Transport-agnostic backend interface (TuiBackend).
+    Embedded backend for local sessions. Gateway backend for remote sessions.
+    25+ slash commands. Streaming watchdog for long-running requests.
+
+Key Implementation Files:
+    - src/tui/tui-backend.ts               (backend interface)
+    - src/tui/tui-launch.ts                (TUI launch)
+    - src/tui/embedded-backend.ts          (local backend)
+    - src/tui/tui-event-handlers.ts        (event handlers)
+    - src/tui/tui-formatters.ts            (message formatting)
+    - src/tui/commands.ts                  (slash commands)
+    - packages/terminal-core/              (terminal utilities)
+
+Architecture Notes:
+    - TuiBackend interface: sendChat, abortChat, listSessions, listAgents,
+      listModels, patchSession, resetSession, loadHistory, runGoalCommand
+    - Slash commands: /help, /agent, /session, /model, /think, /fast,
+      /verbose, /trace, /reasoning, /usage, /elevated, /activation,
+      /abort, /new, /reset, /settings, /exit
+    - Embedded backend for local sessions (no gateway)
+    - Streaming watchdog: 30s timeout for long requests
+    - BTW presenter for async background results
+    - Token counting and history projection
+    - Markdown rendering and hyperlink extraction
+
+Known Limitations:
+    - Uses pi-tui (ink-based), different from Hermes Rich/prompt_toolkit
+    - No animated kawaii spinner
+    - No skin/theme engine
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #47: Web UI (Control Dashboard)
+================================================================================
+Category:       UI / Web
+Type:           Extension (adds capability)
+Maturity:       MATURE
+
+Description:
+    Web-based control interface built with Vite + TypeScript + React (Lit
+    web components with legacy decorators). Chat message rendering, gateway
+    integration, channel management, activity state management, and native
+    platform bridging (macOS/iOS/Android).
+
+Key Implementation Files:
+    - ui/                                  (web UI source)
+    - ui/src/ui/app-chat.ts                (77KB - chat rendering)
+    - ui/src/ui/app-gateway.ts             (49KB - gateway integration)
+    - ui/src/ui/app-render.helpers.ts      (30KB - rendering helpers)
+    - ui/src/ui/app-lifecycle.ts           (lifecycle management)
+    - ui/src/ui/app-channels.ts            (channel management)
+    - ui/src/ui/activity-model.ts          (activity state)
+    - ui/src/ui/app-native-bridge.ts       (native bridge)
+
+Architecture Notes:
+    - Vite build system
+    - React with Lit web components
+    - Gateway RPC integration
+    - Session workspace rail
+    - Extension health monitoring
+    - Native platform bridging (macOS/iOS/Android WebView)
+    - Extensive test coverage (110KB+ test files)
+
+Known Limitations:
+    - Lit web components (unusual choice vs React/Vue)
+    - Legacy decorator support needed
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #48: macOS App
+================================================================================
+Category:       UI / Native
+Type:           Extension (adds capability)
+Maturity:       MATURE
+
+Description:
+    Native macOS application built with SwiftUI + Observation framework.
+    Menu bar integration, Voice Wake support with configurable triggers,
+    canvas live rendering, CLI installation prompt, remote gateway
+    configuration, and camera/screenshot capture.
+
+Key Implementation Files:
+    - apps/macos/Sources/OpenClaw/         (Swift source)
+    - apps/macos/Sources/OpenClaw/AppState.swift (main state)
+    - apps/macos/Sources/OpenClaw/AgentEventStore.swift (events)
+    - apps/macos/Sources/OpenClaw/CanvasChromeContainerView.swift (canvas)
+    - apps/macos/Sources/OpenClaw/CLIInstaller.swift (CLI install)
+    - apps/macos/Sources/OpenClaw/CameraCaptureService.swift (camera)
+    - apps/macos-mlx-tts/                  (MLX TTS variant)
+
+Architecture Notes:
+    - @Observable application state
+    - Connection modes: unconfigured, local, remote
+    - Remote transport: SSH, direct
+    - Voice Wake with configurable triggers and chimes
+    - Canvas rendering in native view
+    - Dock icon visibility control
+    - Theme mode support
+    - Launch at login integration
+    - Gateway config sync/draft management
+
+Known Limitations:
+    - macOS-only (no Linux/Windows desktop app equivalent)
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #49: iOS App
+================================================================================
+Category:       UI / Native
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    iOS application with device pairing, voice trigger, canvas, activity
+    widget, share extension, and watchOS companion app.
+
+Key Implementation Files:
+    - apps/ios/Sources/                    (Swift source)
+
+Architecture Notes:
+    - SwiftUI interface
+    - Device pairing node
+    - Voice trigger integration
+    - Canvas rendering
+    - Activity widget
+    - Share extension
+    - WatchOS companion
+
+Known Limitations:
+    - Still developing features
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #50: Android App
+================================================================================
+Category:       UI / Native
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Android application with Node.js runtime integration, chat interface,
+    voice capture/wake modes, foreground service for background operation,
+    and device pairing.
+
+Key Implementation Files:
+    - apps/android/                        (Kotlin source)
+    - apps/android/.../MainActivity.kt     (main entry)
+    - apps/android/.../NodeApp.kt          (Node.js runtime)
+    - apps/android/.../ChatController.kt   (chat interface)
+    - apps/android/.../MainViewModel.kt    (state management)
+    - apps/android/.../NodeForegroundService.kt (background service)
+    - apps/android/.../VoiceCaptureMode.kt (voice input)
+    - apps/android/.../VoiceWakeMode.kt    (voice wake)
+
+Architecture Notes:
+    - Kotlin with Jetpack Compose
+    - Embedded Node.js runtime
+    - Foreground service for continuous operation
+    - Voice capture and wake modes
+    - Device pairing protocol
+
+Known Limitations:
+    - Still developing
+    - Node.js runtime on mobile adds complexity
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #51: Voice Wake & Talk Mode
+================================================================================
+Category:       UI / Voice
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Voice wake word detection (Swabble) and talk mode across macOS, iOS,
+    and Android. Configurable wake triggers and chimes. Integration with
+    TTS and STT systems. Live voice conversation support.
+
+Key Implementation Files:
+    - apps/swabble/                        (wake word detection)
+    - extensions/talk-voice/               (voice talk extension)
+    - extensions/voice-call/               (voice call extension)
+
+Architecture Notes:
+    - Swabble: wake word detection system (SwabbleCore, SwabbleKit)
+    - Configurable triggers and chimes
+    - Voice capture modes per platform
+    - Integration with TTS providers
+    - Integration with STT providers
+
+Known Limitations:
+    - Platform-specific implementations
+    - Wake word detection maturity varies
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #52: Approval & Permission System
+================================================================================
+Category:       Security / Safety
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    ACP-based fine-grained permission enforcement. Execution approval gates
+    for sensitive operations. Per-agent tool policy with allow/deny lists.
+    Approval classifier for exec needs. Permission relay between gateway
+    and plugins. Exec approval manager for lifecycle.
+
+Key Implementation Files:
+    - src/acp/approval-classifier.ts       (approval classification)
+    - src/acp/permission-relay.ts          (gateway<->plugin relay)
+    - src/gateway/exec-approval-manager.ts (approval lifecycle)
+    - docs/concepts/permissions.md         (documentation)
+    - docs/cli/approvals.md                (CLI reference)
+
+Architecture Notes:
+    - ACP-based permission enforcement
+    - Approval classifier: classify exec approval needs
+    - Permission relay: gateway <-> plugin approval protocol
+    - Per-agent tool policy: allow/deny lists
+    - Exec approval manager: approval lifecycle
+    - Plugin hooks: approval request hooks
+    - Trusted tool policy enforcement (recent enhancement)
+
+Known Limitations:
+    - No auxiliary LLM review for borderline cases (like Hermes)
+    - No YOLO mode for batch/automation bypass
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #53: Sandbox System
+================================================================================
+Category:       Security / Safety
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Configurable sandbox modes for agent execution: off (host-first default),
+    Docker container, SSH remote, and OpenShell backends. Filesystem and
+    network restrictions per mode. SSRF protection via net-policy package.
+
+Key Implementation Files:
+    - src/sandbox/                         (sandbox infrastructure)
+    - packages/net-policy/                 (IP, URL, redaction)
+    - docs/concepts/sandbox.md             (documentation)
+
+Architecture Notes:
+    - agents.defaults.sandbox.mode defaults to "off"
+    - Backends: Docker, SSH, OpenShell
+    - Filesystem restrictions per mode
+    - Network restrictions per mode
+    - SSRF protection in net-policy
+    - URL and IP blocking/allowlisting
+    - Secret redaction in net-policy
+
+Known Limitations:
+    - Default is "off" (host-first, not sandboxed)
+    - Fewer sandbox backends than Hermes (3 vs 6)
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #54: Secret Management
+================================================================================
+Category:       Security / Credentials
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Credential storage at ~/.openclaw/credentials/ for channel and provider
+    secrets. Auth profiles encrypted at ~/.openclaw/agents/<agentId>/agent/
+    auth-profiles.json. Environment variable support with precedence.
+    Secret reference system in plugin SDK.
+
+Key Implementation Files:
+    - src/secrets/                         (secret management)
+    - src/config/                          (credential handling)
+
+Architecture Notes:
+    - Channel/provider creds: ~/.openclaw/credentials/
+    - Auth profiles: ~/.openclaw/agents/<agentId>/agent/auth-profiles.json
+    - Environment variable precedence
+    - secret-ref-runtime in plugin SDK
+    - OPENCLAW_AUTH_PROFILE_SECRET_DIR configurable
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #55: SSRF Protection
+================================================================================
+Category:       Security / Network
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Network policy enforcement via net-policy package. IP and URL blocking/
+    allowlisting. Secret redaction in outbound requests. SSRF protection
+    for web fetch operations.
+
+Key Implementation Files:
+    - packages/net-policy/                 (IP, URL, redaction)
+    - src/web-fetch/                       (HTTP client wrapper)
+
+Architecture Notes:
+    - IP address blocking
+    - URL pattern blocking
+    - Secret redaction
+    - Integration with web fetch tools
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #56: Security Scanning & Code Analysis
+================================================================================
+Category:       Security / Analysis
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    CodeQL security scanning in CI/CD. Semgrep integration. Security audit
+    tools in security/ directory. Dependency guard checks.
+
+Key Implementation Files:
+    - security/                            (security audit tools)
+    - .github/workflows/codeql*.yml        (CodeQL scanning)
+    - .semgrepignore                        (Semgrep config)
+
+Architecture Notes:
+    - CodeQL for code analysis (critical quality, Android, macOS)
+    - Semgrep for pattern matching
+    - Dependency guard checks in CI
+    - Security directory for custom tools
+
+Known Limitations:
+    - No runtime security guidance plugin like Hermes (25 code patterns)
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #57: Configuration System
+================================================================================
+Category:       Configuration / Management
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    JSON-based configuration at ~/.openclaw/openclaw.json with 20+ sections:
+    auth, accessGroups, acp, agents, approvals, channels, commands, cron,
+    gateway, hooks, llm (providers, models), logging, memory, mcp, plugins,
+    skills, tools, security, and more. Atomic config mutations with hot-reload.
+    TypeBox/Zod validation. Doctor utility for migration and repair.
+
+Key Implementation Files:
+    - src/config/                          (configuration system)
+    - src/config/types.openclaw.ts         (OpenClawConfig type)
+    - src/config/config.ts                 (read/write with hot-reload)
+    - src/config/mutate.ts                 (atomic mutations)
+    - docs/cli/config.md                   (CLI reference)
+    - docs/cli/doctor.md                   (doctor reference)
+
+Architecture Notes:
+    - OpenClawConfig: 20+ sections with typed schemas
+    - JSON format (not YAML like Hermes)
+    - Atomic patch mutations with afterWrite callbacks
+    - Hot-reload support for runtime changes
+    - TypeBox/Zod validation on startup and change
+    - Doctor contract tests for compatibility
+    - No silent compat for old config keys (require explicit migration)
+    - Per-section validators and defaults
+    - $include directives for config composition
+
+Known Limitations:
+    - JSON (less human-friendly than YAML for large configs)
+    - No GUI config editor
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #58: Doctor Utility (Migration & Repair)
+================================================================================
+Category:       Configuration / Management
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Configuration repair and migration utility. Runs diagnostics and applies
+    fixes for breaking config changes. Doctor contract tests ensure
+    compatibility. Plugin-level doctor integration.
+
+Key Implementation Files:
+    - src/commands/doctor.ts               (doctor command)
+    - docs/cli/doctor.md                   (documentation)
+
+Architecture Notes:
+    - openclaw doctor --fix: apply all migrations
+    - Contract tests for compatibility
+    - Plugin doctor integration
+    - Config migration on breaking changes
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #59: Onboarding & Setup Wizard
+================================================================================
+Category:       Configuration / UX
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Guided setup wizard for first-time users. Installs daemon, configures
+    model provider, sets up channels. Crestodian: CLI setup assistant for
+    bare root invocations.
+
+Key Implementation Files:
+    - src/commands/onboard.ts              (onboard command)
+    - src/crestodian/                      (setup assistant)
+    - docs/install/wizard.md               (documentation)
+
+Architecture Notes:
+    - openclaw onboard --install-daemon
+    - Crestodian for interactive setup
+    - Provider configuration
+    - Channel setup guidance
+    - Daemon installation
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #60: Daemon Mode (launchd/systemd)
+================================================================================
+Category:       Infrastructure / Deployment
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    System daemon support for running OpenClaw as a background service.
+    launchd (macOS) and systemd (Linux) integration. Daemon lifecycle
+    management via CLI.
+
+Key Implementation Files:
+    - src/daemon/                          (daemon implementation)
+    - docs/gateway/                        (gateway/daemon docs)
+
+Architecture Notes:
+    - launchd integration for macOS
+    - systemd integration for Linux
+    - Daemon lifecycle via CLI commands
+    - Gateway runs as daemon process
+
+Known Limitations:
+    - No Windows service support visible
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #61: Docker & Container Support
+================================================================================
+Category:       Infrastructure / Deployment
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Multi-stage Docker build with workspace-deps, bun-binary, build, and
+    runtime stages. Docker Compose with gateway and CLI services. Podman
+    compatibility. Health checks, volume mounts, TLS support.
+
+Key Implementation Files:
+    - Dockerfile                           (multi-stage build)
+    - docker-compose.yml                   (services config)
+    - .dockerignore                        (exclusions)
+    - deploy/                              (deployment configs)
+    - docs/install/docker.md               (documentation)
+
+Architecture Notes:
+    - Multi-stage: workspace-deps -> bun-binary -> build -> runtime
+    - Node 24 build stage
+    - Slim runtime image
+    - OPENCLAW_EXTENSIONS build arg for plugin inclusion
+    - Services: openclaw-gateway, openclaw-cli
+    - Health check: /healthz
+    - Volume mounts: .openclaw config/state
+    - TLS support with device auth
+    - Podman compatibility
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #62: Cloud Deployment
+================================================================================
+Category:       Infrastructure / Deployment
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Cloud deployment support for Fly.io (fly.toml), Render (render.yaml),
+    Vercel AI Gateway, and Cloudflare AI Gateway.
+
+Key Implementation Files:
+    - fly.toml                             (Fly.io config)
+    - render.yaml                          (Render config)
+    - extensions/vercel-ai-gateway/        (Vercel integration)
+    - extensions/cloudflare-ai-gateway/    (Cloudflare integration)
+
+Architecture Notes:
+    - Fly.io deployment configuration
+    - Render.com deployment
+    - Vercel and Cloudflare AI gateway bridges
+
+Known Limitations:
+    - No Modal/Daytona serverless like Hermes
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #63: Device Pairing & Nodes
+================================================================================
+Category:       Infrastructure / Multi-Device
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Multi-device coordination through device pairing protocol. Nodes allow
+    remote devices (phones, tablets) to connect to the central gateway.
+    Bonjour discovery for local network devices. Secure TLS communication.
+
+Key Implementation Files:
+    - src/nodes/                           (node support)
+    - extensions/device-pair/              (device pairing)
+    - extensions/bonjour/                  (local discovery)
+    - docs/nodes/                          (node documentation)
+    - docs/concepts/nodes.md               (concepts)
+
+Architecture Notes:
+    - Device pairing protocol
+    - Node mode for remote devices
+    - Bonjour local network discovery
+    - TLS communication security
+    - Gateway auth token management
+
+Known Limitations:
+    - Still developing feature set
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #64: Logging & Diagnostics
+================================================================================
+Category:       Infrastructure / Monitoring
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Comprehensive logging system with OpenTelemetry and Prometheus metrics
+    integration. Diagnostic event system throughout codebase. Log commands
+    for viewing and filtering.
+
+Key Implementation Files:
+    - src/logging/                         (logging infrastructure)
+    - src/logger.ts                        (logger implementation)
+    - extensions/diagnostics-otel/         (OpenTelemetry)
+    - extensions/diagnostics-prometheus/   (Prometheus metrics)
+    - docs/cli/logs.md                     (CLI reference)
+    - docs/debug/                          (debug docs)
+
+Architecture Notes:
+    - Structured logging system
+    - OpenTelemetry integration for distributed tracing
+    - Prometheus metrics export
+    - CLI: openclaw logs for viewing
+    - Diagnostic event system integrated throughout
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #65: Health Monitoring
+================================================================================
+Category:       Infrastructure / Monitoring
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Gateway health checks via /healthz endpoint. Health status commands.
+    Heartbeat system for liveness detection. Extension health monitoring
+    in Control UI.
+
+Key Implementation Files:
+    - src/monitoring/                      (health monitoring)
+    - docs/cli/health.md                   (CLI reference)
+
+Architecture Notes:
+    - /healthz HTTP endpoint
+    - Health CLI commands
+    - Heartbeat-triggered monitoring
+    - Extension health in Control UI
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #66: Prompt Caching (Anthropic)
+================================================================================
+Category:       Core / Cost Optimization
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Prompt caching support for Anthropic models. Cache retention policy
+    resolution per provider. Long cache retention support flag. Integration
+    with context assembly for cache-optimal message ordering.
+
+Key Implementation Files:
+    - src/llm/anthropic.ts                 (Anthropic caching)
+    - src/llm/cache-retention.ts           (retention policy)
+
+Architecture Notes:
+    - AnthropicMessagesCompat.supportsLongCacheRetention
+    - getCacheControl(model, cacheRetention): manages prompt cache
+    - Per-provider cache retention resolution
+    - Integration with context engine assembly
+
+Known Limitations:
+    - Anthropic-specific (not multi-provider caching)
+    - No system_and_3 layout documented like Hermes
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #67: Extended Thinking / Reasoning Modes
+================================================================================
+Category:       Core / LLM Integration
+Type:           Extension (adds capability)
+Maturity:       MATURE
+
+Description:
+    Support for extended thinking and reasoning modes in compatible models.
+    Thinking level control via /think command. Thinking deltas in streaming.
+    Per-model thinking level mappings.
+
+Key Implementation Files:
+    - src/llm/anthropic.ts                 (thinking support)
+    - src/tui/commands.ts                  (/think command)
+    - docs/concepts/thinking.md            (documentation)
+
+Architecture Notes:
+    - /think <level> slash command
+    - Thinking deltas in streaming events
+    - Per-model thinking level mappings
+    - thinking_level_change session entry type
+
+Known Limitations:
+    - Provider-specific implementation
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #68: Model Catalog & Discovery
+================================================================================
+Category:       Core / LLM Integration
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Dynamic model discovery with provider-specific catalogs. Token economics
+    tracking (input/output/cache costs). Context window support up to 1M
+    tokens. Max output token limits. Media input capabilities detection.
+
+Key Implementation Files:
+    - packages/model-catalog-core/         (model catalog)
+    - src/models/                          (model management)
+    - docs/providers/                      (provider docs)
+
+Architecture Notes:
+    - Dynamic model discovery via provider APIs
+    - Token cost tracking per model
+    - Context window reporting
+    - Max output token limits
+    - Media capability detection (text, image, video)
+    - Platform-specific model variants
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #69: Tool Call Repair
+================================================================================
+Category:       Core / Reliability
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Dedicated package for tool call validation and repair. Schema enforcement
+    and auto-fix for malformed tool calls. Integration with agent execution
+    pipeline.
+
+Key Implementation Files:
+    - packages/tool-call-repair/           (repair package)
+
+Architecture Notes:
+    - Validation against tool schemas
+    - Auto-fix for common malformations
+    - Integration with agent before-tool-call pipeline
+
+Known Limitations:
+    - Heuristic-based repair
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #70: Commitments System
+================================================================================
+Category:       Core / Tracking
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Commitment/promise tracking for agent obligations. Records commitments
+    made during conversations and tracks fulfillment.
+
+Key Implementation Files:
+    - src/commitments/                     (commitment tracking)
+    - docs/concepts/commitments.md         (documentation)
+    - docs/cli/commitments.md              (CLI reference)
+
+Architecture Notes:
+    - Commitment tracking during conversations
+    - Fulfillment monitoring
+    - CLI: openclaw commitments
+
+Known Limitations:
+    - Developing feature
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #71: Markdown Processing
+================================================================================
+Category:       Core / Content
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Markdown parsing and rendering via dedicated core package. Used for
+    message formatting, document processing, and UI rendering.
+
+Key Implementation Files:
+    - packages/markdown-core/              (markdown package)
+
+Architecture Notes:
+    - Core package for markdown processing
+    - Integration with message rendering
+    - Used across TUI, web UI, and native apps
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #72: Normalization System
+================================================================================
+Category:       Core / Data Processing
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    String/number coercion and normalization via dedicated package. Used
+    for consistent data handling across the system.
+
+Key Implementation Files:
+    - packages/normalization-core/         (normalization package)
+
+Architecture Notes:
+    - String normalization
+    - Number coercion
+    - Cross-system consistency
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #73: Auto-Reply
+================================================================================
+Category:       Communication / Automation
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Auto-reply functionality for automated responses in messaging channels.
+
+Key Implementation Files:
+    - src/auto-reply/                      (auto-reply system)
+
+Architecture Notes:
+    - Automatic response generation
+    - Channel integration
+
+Known Limitations:
+    - Developing feature
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #74: Compatibility Layer (Migration)
+================================================================================
+Category:       Infrastructure / Migration
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Compatibility layers for migration from other AI assistants. Extensions
+    for migrating from Claude Code and Hermes Agent configurations.
+
+Key Implementation Files:
+    - src/compat/                          (compatibility layer)
+    - extensions/migrate-claude/           (Claude migration)
+    - extensions/migrate-hermes/           (Hermes migration)
+
+Architecture Notes:
+    - Migration extensions for competing products
+    - Configuration format conversion
+    - Data import utilities
+
+Known Limitations:
+    - Migration scope may be limited
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #75: Hooks System
+================================================================================
+Category:       Extensibility / Lifecycle
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Lifecycle hooks for agent execution events. Global hook runner registry.
+    Before/after tool call hooks. Compaction hooks. Approval request hooks.
+    Plugin-driven hook registration.
+
+Key Implementation Files:
+    - src/hooks/                           (hooks system)
+    - src/plugins/runtime/                 (plugin hooks)
+
+Architecture Notes:
+    - Global hook runner registry
+    - Hook types: before/after tool call, compaction, approval
+    - Plugin-driven registration
+    - Integration with agent execution pipeline
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #76: Testing Infrastructure
+================================================================================
+Category:       Quality / Testing
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Comprehensive test infrastructure with 3,757+ test files. Vitest runner
+    with colocated *.test.ts files. Live provider tests. E2E tests. Contract
+    tests for plugin boundaries. Performance benchmarks. Heap leak detection.
+    QA scenarios in YAML. CI/CD via GitHub Actions.
+
+Key Implementation Files:
+    - vitest.config.ts                     (Vitest config)
+    - test/                                (test helpers)
+    - qa/                                  (QA scenarios)
+    - .github/workflows/ci.yml             (CI pipeline)
+    - .crabbox.yaml                        (Crabbox config)
+
+Architecture Notes:
+    - 3,757+ test files
+    - Vitest with colocated tests
+    - Live tests: OPENCLAW_LIVE_TEST=1
+    - Contract tests for plugin SDK
+    - Performance benchmarks
+    - Heap leak detection
+    - QA scenarios: qa/scenarios/index.yaml
+    - CI matrix: preflight, fast core, plugin contracts, channel contracts,
+      node core, macOS Swift, macOS Node, Android, Windows, iOS
+    - Crabbox for remote/full/E2E proof
+    - Blacksmith runners for x86/ARM
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #77: Documentation System
+================================================================================
+Category:       Documentation / Reference
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    289 markdown documentation files covering concepts (49), plugins (180),
+    CLI reference (60), automation (5), channels (20+), platforms (8+),
+    and installation (10+). Internationalization glossary and translation
+    workflow. Auto-generated documentation.
+
+Key Implementation Files:
+    - docs/                                (289 markdown files)
+    - docs/concepts/                       (49 concept docs)
+    - docs/plugins/                        (180 plugin docs)
+    - docs/cli/                            (60 CLI docs)
+    - docs/automation/                     (5 automation docs)
+    - docs/channels/                       (20+ channel docs)
+    - docs/platforms/                      (8+ platform docs)
+    - docs/.i18n/                          (internationalization)
+
+Architecture Notes:
+    - Comprehensive coverage of all features
+    - Concept documentation for architecture
+    - Per-plugin documentation
+    - Per-CLI-command documentation
+    - i18n glossary and translation workflow
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #78: Taxonomy System
+================================================================================
+Category:       Configuration / Organization
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Taxonomy/skill classification system defined in taxonomy.yaml.
+    Categorization of skills and capabilities.
+
+Key Implementation Files:
+    - taxonomy.yaml                        (taxonomy definitions)
+
+Architecture Notes:
+    - YAML-based taxonomy
+    - Skill categorization
+
+Known Limitations:
+    - Developing
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #79: LLM Task System
+================================================================================
+Category:       Core / Structured Calls
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Structured LLM calls for specific tasks. LlmCompleteParams/Result types
+    for plugin LLM access with purpose tracking and audit.
+
+Key Implementation Files:
+    - src/llm-task/                        (LLM task system)
+    - extensions/llm-task/                 (LLM task extension)
+
+Architecture Notes:
+    - LlmCompleteParams: messages, model, maxTokens, temperature, systemPrompt,
+      signal, purpose, agentId
+    - LlmCompleteResult: text, provider, model, agentId, usage, audit
+    - Purpose tracking for audit
+    - Plugin SDK integration
+
+Known Limitations:
+    - Developing
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #80: Session Identity & Cross-Channel
+================================================================================
+Category:       Core / Identity
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Session identity management with cross-channel continuity. Identity
+    reconciliation between runtime-reported IDs and persisted metadata.
+    Startup batch reconciliation for pending identities.
+
+Key Implementation Files:
+    - src/acp/control-plane/manager.identity-reconcile.ts (reconciliation)
+    - src/acp/control-plane/manager.startup-identity-reconcile.ts (startup)
+
+Architecture Notes:
+    - reconcileManagerRuntimeSessionIdentifiers(): runtime vs persisted IDs
+    - runManagerStartupIdentityReconcile(): batch startup reconciliation
+    - AcpStartupIdentityReconcileResult: {checked, resolved, failed}
+    - Cross-channel session identity preservation
+
+Known Limitations:
+    - Recent fixes for cross-channel identity issues
+
+Quality: Working well (recently improved)
+
+
+================================================================================
+FEATURE #81: Fast Mode
+================================================================================
+Category:       Core / Performance
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Automatic fast mode: short conversations start quickly with a faster
+    model, returning to normal/fallback mode for longer work. Controllable
+    via /fast command (status, auto, on, off).
+
+Key Implementation Files:
+    - src/tui/commands.ts                  (/fast command)
+
+Architecture Notes:
+    - /fast <status|auto|on|off>
+    - Automatic mode detection based on conversation length
+    - Faster model for short interactions
+    - Fallback to full model for complex work
+
+Known Limitations:
+    - New feature (2026.6.10)
+    - Heuristics may not always match user intent
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #82: Elevation Mode
+================================================================================
+Category:       Security / Permissions
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Elevation mode for controlling permission levels during sessions.
+    Modes: on, off, ask, full. Controls approval behavior for tool
+    execution.
+
+Key Implementation Files:
+    - src/tui/commands.ts                  (/elevated command)
+
+Architecture Notes:
+    - /elevated <on|off|ask|full>
+    - Controls approval behavior
+    - Per-session permission escalation
+
+Known Limitations:
+    - Developing
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #83: Workspace & Context Files
+================================================================================
+Category:       Context / Project
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Workspace root at ~/.openclaw/workspace. Injected prompt files:
+    AGENTS.md (agent instructions), SOUL.md (persona), TOOLS.md (tool
+    guidance). Per-agent workspace directories with independent configuration.
+
+Key Implementation Files:
+    - src/agents/                          (workspace management)
+    - docs/concepts/agent-workspace.md     (documentation)
+
+Architecture Notes:
+    - Workspace root: ~/.openclaw/workspace
+    - AGENTS.md: agent instructions
+    - SOUL.md: persona/identity
+    - TOOLS.md: tool guidance
+    - Per-agent directories
+    - Context file injection into system prompt
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #84: Chat Commands (Slash Commands)
+================================================================================
+Category:       UI / Commands
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    25+ built-in slash commands available in TUI and messaging channels.
+    Dynamic commands from plugins. Central command registry with config-
+    driven listing.
+
+Key Implementation Files:
+    - src/tui/commands.ts                  (TUI commands)
+    - src/commands/                        (CLI commands)
+
+Architecture Notes:
+    - Built-in: /help, /agent, /session, /model, /think, /fast, /verbose,
+      /trace, /usage, /elevated, /activation, /abort, /new, /reset,
+      /settings, /exit, /compact, /status, /restart, /gateway-status
+    - Dynamic: from listChatCommandsForConfig() and backend
+    - Plugin-contributed commands via aliases
+
+Known Limitations:
+    - Fewer chat commands than Hermes CLI
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #85: Backup & Restore
+================================================================================
+Category:       Infrastructure / Data
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Backup functionality for OpenClaw state and configuration.
+
+Key Implementation Files:
+    - docs/cli/backup.md                   (CLI reference)
+
+Architecture Notes:
+    - CLI: openclaw backup
+    - State and config backup
+
+Known Limitations:
+    - Developing
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #86: ACP Translator (Protocol Bridge)
+================================================================================
+Category:       Core / Integration
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Translates between Agent Client Protocol (ACP) sessions and Gateway
+    chat sessions. Protocol translation for initialize, prompt, tool calls.
+    Event mapping, permission relay, session replay, rate limiting, and
+    cancellation scoping.
+
+Key Implementation Files:
+    - src/acp/translator.ts                (protocol bridge)
+
+Architecture Notes:
+    - InitializeRequest -> NewSessionRequest translation
+    - PromptRequest -> chat translation
+    - Tool call translation and streaming
+    - extractTextFromPrompt(), extractToolCallContent()
+    - extractAttachmentsFromPrompt()
+    - Permission relay for exec approvals
+    - Session replay from event ledger
+    - Rate limiting integration
+    - Cancellation scoping
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #87: Parallel Execution Extension
+================================================================================
+Category:       Tools / Execution
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Parallel execution support for concurrent task execution.
+
+Key Implementation Files:
+    - extensions/parallel/                 (parallel extension)
+
+Architecture Notes:
+    - Concurrent task execution
+    - Extension-based implementation
+
+Known Limitations:
+    - Less mature than Hermes concurrent tool execution (8 workers)
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #88: Diff System
+================================================================================
+Category:       Tools / Code
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Diff generation and application with language pack support.
+
+Key Implementation Files:
+    - extensions/diffs/                    (diff extension)
+    - extensions/diffs-language-pack/      (language support)
+
+Architecture Notes:
+    - Diff generation and application
+    - Language-specific handling
+
+Known Limitations:
+    - Developing
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #89: Concurrency & Async Infrastructure
+================================================================================
+Category:       Infrastructure / Runtime
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Comprehensive concurrency primitives in plugin SDK: async locks,
+    delivery queues, deduplication, and rate limiting. Used across
+    channel adapters and tool execution.
+
+Key Implementation Files:
+    - Plugin SDK exports: concurrency-runtime, async-lock-runtime,
+      delivery-queue-runtime, dedupe-runtime
+
+Architecture Notes:
+    - Async lock runtime for mutual exclusion
+    - Delivery queue runtime for ordered processing
+    - Dedupe runtime for message deduplication
+    - Rate limiting per channel/provider
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #90: Channel Streaming Configuration
+================================================================================
+Category:       Communication / Configuration
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Per-channel streaming configuration including block streaming mode,
+    text chunk limits, and chunk mode selection. Platform-specific defaults
+    and overrides.
+
+Key Implementation Files:
+    - Plugin SDK: channel-streaming
+    - Channel extensions (per-platform config)
+
+Architecture Notes:
+    - blockStreaming config per channel
+    - textChunkLimit per channel
+    - chunkMode selection
+    - Platform-specific defaults
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #91: Model Session Runtime
+================================================================================
+Category:       Core / LLM Integration
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Model session management in plugin SDK. Manages active model sessions
+    with provider connections and token budgets.
+
+Key Implementation Files:
+    - Plugin SDK: model-session-runtime
+
+Architecture Notes:
+    - Session-scoped model connections
+    - Token budget management
+    - Provider connection lifecycle
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #92: Provider Auth Runtime
+================================================================================
+Category:       Security / Authentication
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Authentication runtime for model providers. Manages API keys, OAuth
+    tokens, and provider-specific auth flows.
+
+Key Implementation Files:
+    - Plugin SDK: provider-auth-runtime
+    - src/providers/                       (provider management)
+
+Architecture Notes:
+    - Multi-provider auth management
+    - API key handling
+    - OAuth flow support
+    - Provider-specific auth patterns
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #93: File Access Runtime
+================================================================================
+Category:       Tools / Files
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    File access abstraction in plugin SDK. Manages file read/write
+    operations with sandbox awareness.
+
+Key Implementation Files:
+    - Plugin SDK: file-access-runtime
+
+Architecture Notes:
+    - Sandbox-aware file operations
+    - Read/write abstraction
+    - Path resolution
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #94: Outbound Media
+================================================================================
+Category:       Communication / Media
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Media delivery to messaging channels. Handles image, audio, video,
+    and document attachments across platforms.
+
+Key Implementation Files:
+    - Plugin SDK: outbound-media
+    - packages/media-core/                 (media handling)
+
+Architecture Notes:
+    - Base64, MIME, content-length handling
+    - Cross-platform media delivery
+    - Deduplication for media messages
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #95: System Events
+================================================================================
+Category:       Infrastructure / Events
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    System event infrastructure for broadcasting internal events. Event
+    enqueueing and heartbeat request mechanisms.
+
+Key Implementation Files:
+    - Plugin SDK: system-event-runtime, heartbeat-runtime
+
+Architecture Notes:
+    - enqueueSystemEvent() for broadcasting
+    - requestHeartbeat() for liveness
+    - Event-driven architecture throughout
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #96: Cron Store Runtime
+================================================================================
+Category:       Automation / Persistence
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Persistent cron job storage runtime in plugin SDK. SQLite-backed
+    schedule persistence.
+
+Key Implementation Files:
+    - Plugin SDK: cron-store-runtime
+
+Architecture Notes:
+    - SQLite-backed storage
+    - Job lifecycle management
+    - Overdue detection and rescheduling
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #97: Thread Ownership
+================================================================================
+Category:       Communication / Threading
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Thread ownership tracking across messaging channels. Manages which
+    agent/session owns a conversation thread.
+
+Key Implementation Files:
+    - extensions/thread-ownership/         (thread ownership extension)
+
+Architecture Notes:
+    - Per-thread agent/session binding
+    - Channel-specific thread handling
+
+Known Limitations:
+    - Developing
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #98: Channel Activity Runtime
+================================================================================
+Category:       Communication / Monitoring
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Channel activity tracking and monitoring in plugin SDK.
+
+Key Implementation Files:
+    - Plugin SDK: channel-activity-runtime
+
+Architecture Notes:
+    - Activity state tracking per channel
+    - Integration with monitoring system
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #99: Channel Secret Runtime
+================================================================================
+Category:       Security / Channels
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Channel-specific secret management in plugin SDK. Manages authentication
+    credentials per messaging channel.
+
+Key Implementation Files:
+    - Plugin SDK: channel-secret-runtime
+
+Architecture Notes:
+    - Per-channel credential management
+    - Secret isolation between channels
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #100: QA Infrastructure
+================================================================================
+Category:       Quality / Testing
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    QA testing infrastructure with specialized channel extensions (qa-channel,
+    qa-lab, qa-matrix). YAML-based QA scenarios. Agent skills for testing
+    (openclaw-qa-testing, openclaw-testing, performance testing, heap leak
+    detection, Docker E2E authoring).
+
+Key Implementation Files:
+    - qa/                                  (QA infrastructure)
+    - qa/scenarios/index.yaml              (scenario definitions)
+    - extensions/qa-channel/               (QA test channel)
+    - extensions/qa-lab/                   (QA lab)
+    - extensions/qa-matrix/                (QA matrix)
+    - .agents/skills/                      (QA agent skills)
+
+Architecture Notes:
+    - YAML-based scenario definitions
+    - Dedicated QA channel extensions
+    - Agent skills for automated testing
+    - Performance benchmarks
+    - Heap leak detection
+
+Known Limitations:
+    - QA infrastructure is internal/developing
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #101: Version Management & Updates
+================================================================================
+Category:       Infrastructure / Lifecycle
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    Self-update system with version management. Versioning: YYYY.M.PATCH
+    format. Release channels: stable, beta, dev. Appcast.xml (Sparkle)
+    for native app updates.
+
+Key Implementation Files:
+    - docs/cli/update.md                   (CLI reference)
+    - docs/cli/version.md                  (version reference)
+    - appcast.xml                          (Sparkle update feed)
+
+Architecture Notes:
+    - YYYY.M.PATCH versioning (monthly release train)
+    - Release channels: stable, beta (prerelease), dev (main head)
+    - openclaw update CLI command
+    - Sparkle appcast for macOS app updates
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #102: REPL Mode
+================================================================================
+Category:       UI / Interactive
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Interactive REPL mode for direct agent interaction from command line.
+
+Key Implementation Files:
+    - src/interactive/                     (REPL implementation)
+    - docs/cli/repl.md                     (CLI reference)
+
+Architecture Notes:
+    - Direct agent interaction
+    - Command-line REPL loop
+
+Known Limitations:
+    - Less feature-rich than full TUI
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #103: Schema System
+================================================================================
+Category:       Core / Validation
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    TypeBox and Zod-based schema validation throughout the codebase.
+    Gateway protocol schemas with compiled validators. Config schema
+    validation. Plugin manifest schemas.
+
+Key Implementation Files:
+    - packages/gateway-protocol/           (protocol schemas)
+    - src/config/                          (config schemas)
+
+Architecture Notes:
+    - TypeBox Compile validators for runtime checks
+    - Zod for external boundaries
+    - 30+ exported schema types
+    - Plugin manifest validation
+
+Known Limitations:
+    - None apparent
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #104: Admin HTTP RPC
+================================================================================
+Category:       Infrastructure / API
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Admin HTTP RPC extension for gateway management operations.
+
+Key Implementation Files:
+    - extensions/admin-http-rpc/           (admin RPC)
+
+Architecture Notes:
+    - HTTP-based administration
+    - Gateway management operations
+
+Known Limitations:
+    - Extension-level (not core)
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #105: OpenAI-Compatible API
+================================================================================
+Category:       Core / API
+Type:           Core (fundamental to operation)
+Maturity:       MATURE
+
+Description:
+    HTTP compatibility endpoints: POST /v1/chat/completions, /v1/responses,
+    POST /tools/invoke. Trusted-operator access level. OpenAI-compatible
+    API surface for integration with existing tooling.
+
+Key Implementation Files:
+    - SECURITY.md                          (API documentation)
+
+Architecture Notes:
+    - OpenAI-compatible chat completions endpoint
+    - Responses endpoint
+    - Tool invocation endpoint
+    - Trusted-operator access model
+
+Known Limitations:
+    - Not a full drop-in OpenAI replacement
+
+Quality: Working well
+
+
+================================================================================
+FEATURE #106: Migration Tools (Hermes & Claude)
+================================================================================
+Category:       Infrastructure / Migration
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Migration extensions for importing configuration and data from
+    Hermes Agent and Claude Code.
+
+Key Implementation Files:
+    - extensions/migrate-hermes/           (Hermes migration)
+    - extensions/migrate-claude/           (Claude migration)
+
+Architecture Notes:
+    - Configuration format conversion
+    - Data import utilities
+    - Extension-based implementation
+
+Known Limitations:
+    - Migration scope may be limited
+    - Bidirectional (Hermes also has openclaw-migration)
+
+Quality: Developing
+
+
+================================================================================
+FEATURE #107: Lobster Tool
+================================================================================
+Category:       Tools / Specialized
+Type:           Extension (adds capability)
+Maturity:       DEVELOPING
+
+Description:
+    Specialized tool for OpenClaw (lobster mascot themed). Details unclear
+    from extension listing.
+
+Key Implementation Files:
+    - extensions/lobster/                  (lobster extension)
+    - docs/tools/lobster.md                (documentation)
+
+Architecture Notes:
+    - Extension-based tool
+    - Integration with agent execution
+
+Known Limitations:
+    - Specialized/niche
+
+Quality: Developing
+
+
+================================================================================
+SUMMARY STATISTICS
+================================================================================
+
+Total Features Identified:    107
+Core Features:                ~45  (fundamental to operation)
+Extension Features:           ~40  (add capability, not required)
+Integration Features:         ~22  (connect to external systems)
+
+By Category:
+  Core Agent Infrastructure:     10
+  Communication & Messaging:     10
+  Tools & Execution:              8
+  Media & Perception:             8
+  Memory, Persistence & Search:   5
+  Multi-Agent & Orchestration:    4
+  UI, CLI & Native Apps:          9
+  Security & Safety:              7
+  Configuration & Extensibility:  8
+  Automation & Scheduling:        5
+  Infrastructure & Monitoring:   12
+  Documentation & Quality:        5
+  Specialized & Other:           16
+
+Maturity Distribution:
+  MATURE:        ~60 features
+  DEVELOPING:    ~40 features
+  BASIC:          ~4 features
+  PLANNED:        ~3 features
+
+Quality Assessment:
+  Working well:              ~55 features
+  Developing:                ~40 features
+  Has known issues:           ~5 features
+  Basic/incomplete:           ~7 features
+
+Technology Stack:
+  Language:     TypeScript (strict ESM), Swift, Kotlin
+  Runtime:      Node.js 24 (recommended), 22.19+
+  Package Mgr:  pnpm (monorepo workspace)
+  Build:        Bun, TypeScript compiler, tsdown
+  Web:          Vite, React, Lit web components
+  CLI:          Commander.js
+  TUI:          pi-tui (ink-based)
+  Database:     SQLite (primary state store)
+  Validation:   TypeBox, Zod
+  Testing:      Vitest (3,757+ test files)
+  Linting:      Oxlint
+  Formatting:   Oxfmt
+  Mobile:       SwiftUI (iOS/macOS), Kotlin/Compose (Android)
+  Desktop:      SwiftUI (macOS)
+  Container:    Docker (multi-stage), Podman
+  CI/CD:        GitHub Actions, Blacksmith, Crabbox
+
+================================================================================
+COMPARATIVE GAPS vs HERMES AGENT
+================================================================================
+
+Features MISSING or significantly LESS MATURE in OpenClaw vs Hermes:
+
+1. SKIN/THEME ENGINE
+   Status: Missing entirely
+   Hermes has: YAML-based skins, 4 built-in presets, custom spinner faces,
+   branding, tool emojis
+   OpenClaw has: No theming system visible
+
+2. BATCH PROCESSING & TRAJECTORY GENERATION
+   Status: Missing entirely
+   Hermes has: Multiprocessing pool, checkpointing, JSONL output, tool stats
+   OpenClaw has: No batch processing or trajectory generation
+
+3. TRAJECTORY COMPRESSION (Training Data)
+   Status: Missing entirely
+   Hermes has: Token-budget-aware compression, summarization API, concurrent
+   processing, metrics tracking
+   OpenClaw has: No trajectory compression
+
+4. MINI SWE RUNNER
+   Status: Missing entirely
+   Hermes has: SWE task execution with Docker/Modal backends
+   OpenClaw has: No dedicated SWE runner
+
+5. KANBAN MULTI-AGENT ORCHESTRATION
+   Status: Missing (has basic multi-agent routing)
+   Hermes has: SQLite-backed board, LLM-driven decomposition, swarm topology,
+   shared blackboard, dispatcher daemon, 9 kanban tools, dashboard REST API
+   OpenClaw has: Task Flow (simpler, no decomposition/swarm)
+
+6. SUBAGENT DELEGATION (Parallel Spawning)
+   Status: Basic (has subagent context engine hooks only)
+   Hermes has: delegate_task tool, batch/parallel execution, leaf/orchestrator
+   roles, independent iteration budgets, auto-approval callbacks
+   OpenClaw has: Context engine subagent hooks, no dedicated delegation tool
+
+7. PROMPT CACHING (Multi-Provider)
+   Status: Anthropic-only
+   Hermes has: system_and_3 layout, 5m/1h TTL, sacred design invariant
+   OpenClaw has: Anthropic caching support, no documented multi-provider strategy
+
+8. CONVERSATION COMPRESSION (Multi-Pass)
+   Status: Basic (single-pass compaction)
+   Hermes has: Multi-pass iterative compression, tail/head protection, summary
+   prefix disambiguation, progress threshold (>5%), fallback mode
+   OpenClaw has: Single-pass compaction with identifier preservation
+
+9. CURATED MEMORY (Agent-Curated Files)
+   Status: Different approach (plugin-based memory)
+   Hermes has: MEMORY.md + USER.md files, agent-curated with periodic nudges,
+   frozen snapshot at session start, section delimiter system
+   OpenClaw has: Active Memory (blocking sub-agent), LanceDB (vector), Wiki
+
+10. SESSION FULL-TEXT SEARCH (FTS5)
+    Status: Missing
+    Hermes has: SQLite FTS5 search across sessions, LLM summarization of results
+    OpenClaw has: JSONL transcripts (no built-in FTS)
+
+11. AUTOMATION BLUEPRINTS & SUGGESTIONS
+    Status: Missing
+    Hermes has: 15 curated blueprints, fillable slots, suggestion lifecycle
+    OpenClaw has: Cron jobs (no blueprint/template system)
+
+12. EXECUTE CODE (Python RPC)
+    Status: Missing
+    Hermes has: Python scripts with tool RPC (Unix sockets / file-based),
+    sandboxed, 5min timeout, 50 tool calls max
+    OpenClaw has: Terminal execution (no embedded Python RPC)
+
+13. RICH CLI (Animated Spinners, Panels)
+    Status: Simpler
+    Hermes has: Rich panels, KawaiiSpinner with emoji states, activity feed
+    OpenClaw has: pi-tui (ink-based), simpler formatting
+
+14. SECURITY GUIDANCE PLUGIN (Code Patterns)
+    Status: Missing
+    Hermes has: 25 pattern rules for file writes, warn/block modes
+    OpenClaw has: CodeQL/Semgrep in CI (not runtime)
+
+15. COMPUTER USE (Vision-Based Screen Control)
+    Status: Missing
+    Hermes has: CUA backend (81KB), permissions, vision routing, macOS/Win/Linux
+    OpenClaw has: No computer use tool visible
+
+16. ITERATION BUDGET SYSTEM
+    Status: Missing
+    Hermes has: Thread-safe per-agent counters, parent/subagent budgets
+    OpenClaw has: No explicit iteration budget
+
+17. PROFILE SYSTEM (Multi-Instance)
+    Status: Different approach (per-agent workspaces)
+    Hermes has: Fully isolated instances with own HERMES_HOME
+    OpenClaw has: Per-agent workspaces (less isolated)
+
+18. DISK CLEANUP PLUGIN
+    Status: Missing
+    Hermes has: Auto-track and clean ephemeral files
+    OpenClaw has: No automatic cleanup
+
+19. ACHIEVEMENT/GAMIFICATION SYSTEM
+    Status: Missing
+    Hermes has: Badges and achievements with dashboard
+    OpenClaw has: No gamification
+
+20. GOOGLE MEET INTEGRATION (Advanced)
+    Status: Basic
+    Hermes has: 3 modes (transcribe, duplex audio, remote host), 5 tools
+    OpenClaw has: Basic google-meet extension
+
+================================================================================
+COMPARATIVE STRENGTHS vs HERMES AGENT
+================================================================================
+
+Features WHERE OpenClaw is STRONGER or UNIQUE:
+
+1. NATIVE APPS (macOS, iOS, Android)
+   OpenClaw has: Full native apps with SwiftUI/Kotlin, voice wake, canvas
+   Hermes has: Electron desktop app only
+
+2. ACP CONTROL PLANE (Enterprise Orchestration)
+   OpenClaw has: Sophisticated ACP with LRU caching, failover planning,
+   session actor queues, observability snapshots
+   Hermes has: Simpler session management
+
+3. DELEGATE ARCHITECTURE (Organizational)
+   OpenClaw has: Formal delegate tiers (Read-Only, Send on Behalf, Proactive),
+   organization-wide permissions, identity provider integration
+   Hermes has: Technical delegation (subagent spawning)
+
+4. PLUGIN SDK SURFACE (258+ Exports)
+   OpenClaw has: Massive SDK with typed contracts and boundaries
+   Hermes has: Simpler plugin system (register function pattern)
+
+5. TESTING INFRASTRUCTURE (3,757+ Tests)
+   OpenClaw has: Comprehensive test coverage with contract testing
+   Hermes has: ~900 test files
+
+6. VOICE WAKE / TALK MODE
+   OpenClaw has: Swabble wake word detection, multi-platform voice
+   Hermes has: Voice memo transcription only
+
+7. CANVAS / LIVE WORKSPACE
+   OpenClaw has: Visual canvas with A2UI rendering
+   Hermes has: No canvas/workspace concept
+
+8. COMMITMENTS TRACKING
+   OpenClaw has: Promise/commitment tracking
+   Hermes has: No commitment system
+
+9. TASK FLOW ORCHESTRATION
+   OpenClaw has: Durable multi-step pipelines with branching
+   Hermes has: Cron jobs + kanban (different paradigm)
+
+10. DOCTOR UTILITY
+    OpenClaw has: Comprehensive config repair/migration tool
+    Hermes has: hermes doctor (simpler diagnostics)
+
+================================================================================
+END OF ANALYSIS
+================================================================================

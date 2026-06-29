@@ -15,9 +15,9 @@ import asyncio
 from common.utils import setup_logging, safe_clean_dir
 from common.claude_utils import claude_run, PipelineStep, _all_steps_complete
 
-from agent.agent_config import AgentConfig
-from agent.use_case import FeaturePortingUseCase
-from agent.agent_prompts import (
+from openclaw_vs_hermes.agent_config import AgentConfig
+from openclaw_vs_hermes.use_case import FeaturePortingUseCase
+from openclaw_vs_hermes.agent_prompts import (
     DETECTED_FEATURES_JSON,
     CODE_PORT_PLAN_FILE_PREFIX,
     CODE_GEN_FILE_PREFIX,

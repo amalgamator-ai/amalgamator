@@ -1,0 +1,767 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — CORRECTED PORTING PLAN (REVIEW V2)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python)
+Target: OpenClaw (TypeScript)
+Complexity: MEDIUM
+Date: 2026-06-28
+Revision: Review V2 (corrected from V2)
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1. Executive Summary
+  2. Architectural Mapping (Hermes -> OpenClaw)
+  3. Porting Strategy & Principles
+  4. Step-by-Step Implementation Plan
+     Step 1: Types, Interfaces & Constants
+     Step 2: Progress Detection & Anti-Thrashing Module
+     Step 3: Tool Result Pre-Pruning (Compaction-Safeguard Integration)
+     Step 4: Cut Point Enhancement (Message Anchoring)
+     Step 5: Summary Prefix Disambiguation & End Marker
+     Step 6: Multi-Pass Compaction Loop (Gateway Layer)
+     Step 7: Embedded Runner Integration (2 Call Sites)
+     Step 8: Configuration Schema Extension
+     Step 9: Tests
+  5. File Inventory (New & Modified)
+  6. Dependency Analysis
+  7. Risk Analysis & Mitigation
+  8. Integration Verification Checklist
+
+================================================================================
+REVIEW CHANGE LOG (V2 -> Review V2)
+================================================================================
+
+  This plan corrects 8 issues found during code-level verification of the
+  V2 plan against the actual OpenClaw source code. Fixes:
+
+  FIX-1:  shouldCompact dynamic import replaced with static top-level
+          import. No precedent in OpenClaw for dynamic imports of
+          @openclaw/agent-core; all gateway-layer usage is top-level.
+
+  FIX-2:  Pre-pruning injection point moved from "after line 889" to
+          "after line 960" (after both `runtime` and `recentTurnsPreserve`
+          are resolved). V2's injection at line 889 references variables
+          declared at lines 940 and 952 — a compilation error.
+
+  FIX-3:  Tool call content block type corrected from "tool_use" to
+          "toolCall". OpenClaw's ToolCall interface uses
+          type: "toolCall", NOT type: "tool_use".
+
+  FIX-4:  ToolResultMessage field corrected from `tool_use_id` to
+          `toolCallId`. OpenClaw's ToolResultMessage interface uses
+          `toolCallId: string`, NOT `tool_use_id`.
+
+  FIX-5:  ToolCall arguments field corrected from `input` to
+          `arguments`. OpenClaw's ToolCall interface uses
+          `arguments: Record<string, unknown>`, NOT `input`.
+
+  FIX-6:  Timeout path post-compaction code explicitly preserved.
+          V2 only mentioned preserving runOwnsCompactionAfterHook
+          but omitted lastCompactionTokensAfter, runPostCompactionSideEffects,
+          and post-compaction guard arming (lines 2534-2550).
+
+  FIX-7:  Redundant anti-thrashing check removed from end of loop body.
+          The tracker is not updated inside the loop (by design —
+          caller records), so the check at the end of each iteration
+          always returns the same value as the gate at the top.
+
+  FIX-8:  Tool result summarization simplified: ToolResultMessage already
+          has a `toolName` field. No need to walk backward through
+          assistant messages to find the tool name.
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 1]
+
+================================================================================
+2. ARCHITECTURAL MAPPING (HERMES -> OPENCLAW)
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 2]
+
+================================================================================
+3. PORTING STRATEGY & PRINCIPLES
+================================================================================
+
+  [UNCHANGED FROM V2 — see V2 plan Section 3, Principles P1-P8]
+
+================================================================================
+4. STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 1: Types, Interfaces & Constants
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V2 — see V2 plan Step 1]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 2: Progress Detection & Anti-Thrashing Module
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V2 — see V2 plan Step 2]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 3: Tool Result Pre-Pruning (Compaction-Safeguard Integration)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Port Hermes's _prune_old_tool_results() as a pre-summarization
+pass that cheaply reduces messages within the compaction-safeguard hook
+before the expensive LLM summarization call.
+
+INJECTION POINT RATIONALE (corrected in Review V2):
+
+  The compaction-safeguard hook flow (verified against actual source):
+
+    Line 884:  stripRuntimeContextCustomMessages → baseMessagesToSummarize
+    Line 904-929: Early return check for real conversation content
+    Line 930-960: Setup: file ops, tool failures, runtime resolution,
+                  custom instructions, identifier policy,
+                  recentTurnsPreserve resolution (line 952)
+    Line 970-1026: Provider path (may return early if provider succeeds)
+    Line 1031-1054: Model auth resolution (may return early on failure)
+    Line 1056-1074: Context window, quality guard, max history share
+    Line 1077-1139: buildHistoryPrunePlanWithWorker (drops oldest chunks)
+    Line 1141-1147: splitPreservedRecentTurns (keep last N user turns)
+    Line 1184-1278: Quality guard loop → summarizeViaLLM
+
+  CHANGE FROM V2: The injection point must be AFTER line 952 (where
+  both `runtime` and `recentTurnsPreserve` are resolved). V2 proposed
+  "after line 889" which is BEFORE these variables are declared —
+  this would cause TypeScript compilation errors.
+
+  Pre-pruning goes at approximately line 960 (after setup, before the
+  provider path). This way:
+    - Both `runtime` and `recentTurnsPreserve` are in scope ✓
+    - Both provider and LLM paths benefit from smaller inputs ✓
+    - Early return paths (no real content) skip pruning naturally ✓
+
+─── FILE: src/agents/agent-hooks/pre-compaction-pruning.ts (NEW)
+
+  Ported from: agent/context_compressor.py lines 490-528, 990-1150.
+
+  1. FUNCTION: summarizeToolResult()
+
+     /**
+      * Create an informative 1-line summary of a tool call + result.
+      *
+      * Replaces large tool outputs with a short description, e.g.:
+      *   [Bash] ran `npm test` -> exit 0, 47 lines output
+      *   [Read] read config.ts from line 1 (1,200 chars)
+      *   [Write] wrote to config.ts (15 lines)
+      *   [Grep] searched for 'compress' -> 12 matches
+      *
+      * Uses OpenClaw tool names and input field conventions.
+      */
+     export function summarizeToolResult(
+       toolName: string,
+       toolInput: Record<string, unknown> | string,
+       resultContent: string,
+     ): string
+
+     Tool-specific handlers for OpenClaw's tool set:
+       - "Bash" / "bash":
+         `[Bash] ran \`{cmd}\` -> exit {code}, {n} lines output`
+         cmd from input.command; exit code parsed from result with regex
+         cmd truncated at 80 chars
+       - "Read":
+         `[Read] read {path} from line {offset} ({n} chars)`
+         path from input.file_path; offset from input.offset ?? 1
+       - "Write":
+         `[Write] wrote to {path} ({n} lines)`
+         path from input.file_path; line count from input.content
+       - "Edit":
+         `[Edit] edited {path} ({n} chars result)`
+         path from input.file_path
+       - "Grep":
+         `[Grep] searched for '{pattern}' -> {n} matches`
+         pattern from input.pattern; match count from result lines
+       - "Glob":
+         `[Glob] matched '{pattern}' -> {n} files`
+         pattern from input.pattern; file count from result lines
+       - "WebFetch":
+         `[WebFetch] fetched {url} ({n} chars)`
+         url from input.url
+       - "WebSearch":
+         `[WebSearch] searched '{query}' ({n} chars result)`
+         query from input.query
+       - "Agent":
+         `[Agent] delegated: {description} ({n} chars result)`
+         description from input.description (truncated 60 chars)
+       - "NotebookEdit":
+         `[NotebookEdit] edited {path} cell {n}`
+         path from input.notebook_path
+       - Default:
+         `[{toolName}] ({n} chars result)`
+
+     IMPLEMENTATION:
+       - Parse toolInput with try/catch (may be string JSON)
+       - Compute line count via resultContent.split('\n').length
+       - Compute content length via resultContent.length
+       - Return formatted string
+
+  2. FUNCTION: pruneMessagesForCompaction()
+
+     Ported from: _prune_old_tool_results(), adapted for AgentMessage[].
+
+     /**
+      * Cheap LLM-free pre-pass that reduces messagesToSummarize before
+      * the expensive LLM summarization call.
+      *
+      * Three sub-passes:
+      *   1. Deduplicate identical tool results (MD5 hash, keep newest)
+      *   2. Replace old tool results with 1-line summaries
+      *   3. Truncate large tool call arguments in assistant messages
+      *
+      * Operates on messages extracted from the session tree
+      * (preparation.messagesToSummarize), NOT on the tree itself.
+      *
+      * @param messages       Messages to prune (from preparation)
+      * @param keepRecentCount  Number of messages to protect at the end
+      * @returns { messages: pruned list, prunedCount: count of pruned items }
+      */
+     export function pruneMessagesForCompaction(
+       messages: AgentMessage[],
+       keepRecentCount: number,
+     ): { messages: AgentMessage[]; prunedCount: number }
+
+     SUB-PASS 1: Deduplication
+       - Walk backward through messages
+       - For each message with role "toolResult":
+         - Extract text content from content blocks:
+             msg.content
+               .filter(b => b.type === "text")
+               .map(b => b.text)
+               .join("")
+         - Skip if text length < 200 chars
+         - Compute MD5 hash (first 12 hex chars)
+         - If hash seen before (newer copy exists), replace all text
+           content blocks with:
+           "[Duplicate tool output — same content as a more recent call]"
+       - Uses: import { createHash } from "node:crypto";
+
+       CHANGE FROM V2: The text extraction pattern matches OpenClaw's
+       ToolResultMessage.content type: (TextContent | ImageContent)[].
+       TextContent has { type: "text", text: string }.
+
+     SUB-PASS 2: Old Tool Result Replacement
+       - Protection boundary: keepRecentCount messages from the end
+       - For messages BEFORE boundary with role "toolResult":
+         - CHANGE FROM V2: Use `msg.toolName` directly from the
+           ToolResultMessage — no backward walk needed. OpenClaw's
+           ToolResultMessage has `toolName: string` on every instance.
+         - To get tool input (for richer summaries), find the
+           corresponding assistant message by walking backward for
+           an assistant message whose content array contains a
+           block with type === "toolCall" and id matching
+           msg.toolCallId. Extract the `arguments` field from
+           that block for the tool input.
+
+           CHANGE FROM V2: Field is `toolCallId`, NOT `tool_use_id`.
+           Block type is `"toolCall"`, NOT `"tool_use"`.
+           Input field on ToolCall is `arguments`, NOT `input`.
+
+         - Call summarizeToolResult(msg.toolName, toolArguments, textContent)
+         - Replace content blocks with single text block containing summary
+         - Only replace when text content > 200 chars
+
+     SUB-PASS 3: Tool Call Argument Truncation
+       - For assistant messages BEFORE boundary:
+
+         CHANGE FROM V2: OpenClaw tool call blocks use type === "toolCall"
+         (NOT "tool_use"). The ToolCall interface is:
+           interface ToolCall {
+             type: "toolCall";
+             id: string;
+             name: string;
+             arguments: Record<string, unknown>;
+           }
+
+         - For each content block with type === "toolCall":
+           - Serialize block.arguments to JSON
+           - If serialized length > 500 chars:
+             - Deep-clone the arguments object
+             - Call truncateToolCallInput(clone) to shorten string values
+             - Replace the content block's arguments with the truncated clone
+
+  3. FUNCTION: truncateToolCallInput()
+
+     [UNCHANGED FROM V2 — see V2 plan Step 3 item 3]
+
+─── FILE: src/agents/agent-hooks/compaction-safeguard.ts (MODIFY)
+
+  CHANGE FROM V2: Injection point moved from "after line 889" to
+  "after line 960" to fix variable scope issue.
+
+  VERIFIED VARIABLE AVAILABILITY AT LINE ~960:
+    - `runtime` ← declared at line 940 ✓
+    - `recentTurnsPreserve` ← resolved at line 952 ✓
+    - `baseMessagesToSummarize` ← declared at line 884 ✓
+    - `log` ← module-level constant (line 56) ✓
+
+  Add pre-pruning call at approximately line 960 (after setup,
+  before the provider path at line 970):
+
+    import { pruneMessagesForCompaction } from "./pre-compaction-pruning.js";
+
+    // After: recentTurnsPreserve resolved at line 952
+    // Before: provider path at line 970
+
+    // Pre-prune old tool results (cheap, no LLM call)
+    if (runtime?.prePruningEnabled !== false) {  // default: enabled
+      const pruneResult = pruneMessagesForCompaction(
+        baseMessagesToSummarize,
+        recentTurnsPreserve * 4,  // ~4 messages per user turn
+      );
+      if (pruneResult.prunedCount > 0) {
+        log.info(
+          `[compaction-safeguard] pre-pruned ${pruneResult.prunedCount} tool results`,
+        );
+        baseMessagesToSummarize = pruneResult.messages;
+      }
+    }
+
+  NOTE: This runs BEFORE the provider path, so both provider-based and
+  LLM-based compaction benefit from smaller inputs. Each compaction pass
+  fires the hook independently with its own preparation from the session
+  tree; the hook prunes each pass's messagesToSummarize independently.
+
+─── OPENCLAW MESSAGE TYPE REFERENCE (corrected in Review V2):
+
+  ToolResultMessage:
+    role: "toolResult"           // camelCase, NOT "tool_result"
+    toolCallId: string           // NOT tool_use_id
+    toolName: string             // ← available directly, no backward walk
+    content: (TextContent | ImageContent)[]
+    isError: boolean
+    timestamp: number
+
+  AssistantMessage:
+    role: "assistant"
+    content: (TextContent | ThinkingContent | ToolCall)[]
+
+  ToolCall (content block type):
+    type: "toolCall"             // NOT "tool_use"
+    id: string
+    name: string
+    arguments: Record<string, unknown>  // NOT input
+
+  TextContent:
+    type: "text"
+    text: string
+
+─── REUSE:
+  - AgentMessage, ToolResultMessage types from @openclaw/agent-core
+  - node:crypto for MD5 (built-in, zero-dep)
+  - Existing text extraction pattern: collectTextContentBlocks() from
+    src/agents/content-blocks.ts can be used as reference
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 4: Cut Point Enhancement (Message Anchoring)
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V2 — see V2 plan Step 4]
+
+  NOTE: The existing findCutPoint() casts entry.message to HarnessMessage
+  to access .role — the anchoring code should use the same pattern:
+    const role = (entry.message as HarnessMessage).role;
+  This matches the convention in findValidCutPoints() (line 323).
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 5: Summary Prefix Disambiguation & End Marker
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V2 — see V2 plan Step 5]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 6: Multi-Pass Compaction Loop (Gateway Layer)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Implement the core multi-pass compaction loop in the gateway
+layer, wrapping the existing single-pass compaction with iterative
+progress checks.
+
+This is the CENTRAL STEP of the port.
+
+─── FILE: src/agents/multi-pass-compaction.ts (NEW)
+
+  Ported from: agent/turn_context.py lines 384-413 (multi-pass loop),
+  agent/conversation_compression.py compress_context() orchestration.
+
+  1. TYPE: CompactionPassParams
+
+     [UNCHANGED FROM V2 — see V2 plan Step 6 item 1]
+
+  2. TYPE: MultiPassCompactParams
+
+     [UNCHANGED FROM V2 — see V2 plan Step 6 item 2]
+
+  3. FUNCTION: multiPassCompact()
+
+     CHANGE FROM V2: shouldCompact is now a top-level static import,
+     not a dynamic import inside the loop. OpenClaw's gateway layer
+     consistently uses top-level imports from @openclaw/agent-core.
+
+     CHANGE FROM V2: Redundant anti-thrashing check at end of loop body
+     removed. The tracker is not updated inside the loop (by design —
+     the caller records overall effectiveness after the loop). So
+     tracker.shouldAttemptCompaction() cannot change within the loop.
+     The gate at the top of the function is sufficient.
+
+     // TOP-LEVEL IMPORTS (not inside the function):
+     import {
+       compactionMadeProgress,
+       shouldCompact,
+       MAX_COMPACTION_PASSES,
+       PROGRESS_THRESHOLD,
+       DEFAULT_COMPACTION_TIMEOUT_MS,
+       type MultiPassCompactionResult,
+       type MultiPassCompactionState,
+       type CompactionSettings,
+     } from "@openclaw/agent-core";
+     import { compactWithSafetyTimeout } from
+       "./embedded-agent-runner/compaction-safety-timeout.js";
+
+     export async function multiPassCompact(
+       params: MultiPassCompactParams,
+     ): Promise<MultiPassCompactionResult> {
+
+       const {
+         contextEngine, compactParams, settings, contextWindow,
+         tracker, adoptTranscript, runMaintenance,
+         abortSignal, logger,
+       } = params;
+
+       const maxPasses = settings.maxPasses ?? MAX_COMPACTION_PASSES;
+       const progressThreshold = settings.progressThreshold ?? PROGRESS_THRESHOLD;
+       const timeoutMs = params.timeoutMs ?? DEFAULT_COMPACTION_TIMEOUT_MS;
+
+       const passes: MultiPassCompactionState[] = [];
+       const startTime = Date.now();
+       let lastCompactResult: CompactResult | undefined;
+
+       // ── Anti-thrashing gate ──
+       if (!tracker.shouldAttemptCompaction()) {
+         logger?.warn(
+           "[multi-pass-compaction] skipped — last %d compressions saved <10%% each",
+           tracker.getState().ineffectiveCompressionCount,
+         );
+         return buildResult(passes, lastCompactResult, "anti_thrash", startTime);
+       }
+
+       // ── Mutable copy of compactParams for session ID updates ──
+       let currentParams = { ...compactParams };
+
+       for (let pass = 0; pass < maxPasses; pass++) {
+         // Check timeout budget — need at least 15s for a meaningful pass
+         const elapsed = Date.now() - startTime;
+         const remainingMs = timeoutMs - elapsed;
+         if (remainingMs < 15_000) {
+           logger?.warn(
+             "[multi-pass-compaction] stopping — only %dms remaining (need 15s minimum)",
+             remainingMs,
+           );
+           return buildResult(passes, lastCompactResult, "timeout", startTime);
+         }
+
+         // Check abort signal
+         if (abortSignal?.aborted) {
+           return buildResult(passes, lastCompactResult, "aborted", startTime);
+         }
+
+         const passStart = Date.now();
+
+         // ── Run one compaction pass with remaining timeout budget ──
+         let compactResult: CompactResult;
+         try {
+           compactResult = await compactWithSafetyTimeout(
+             (signal) =>
+               contextEngine.compact(
+                 signal
+                   ? { ...currentParams, abortSignal: signal }
+                   : currentParams,
+               ),
+             remainingMs,
+             abortSignal ? { abortSignal } : undefined,
+           );
+         } catch (err) {
+           logger?.warn(
+             "[multi-pass-compaction] pass %d threw: %s",
+             pass + 1, String(err),
+           );
+           return buildResult(
+             passes,
+             lastCompactResult,
+             abortSignal?.aborted ? "aborted" : "timeout",
+             startTime,
+           );
+         }
+
+         const passElapsed = Date.now() - passStart;
+
+         // ── Handle non-compaction result ──
+         if (!compactResult.ok || !compactResult.compacted) {
+           passes.push({
+             pass,
+             tokensBefore: compactResult.result?.tokensBefore ?? 0,
+             tokensAfter: compactResult.result?.tokensBefore ?? 0,
+             madeProgress: false,
+             elapsedMs: passElapsed,
+           });
+           return buildResult(passes, lastCompactResult, "no_progress", startTime);
+         }
+
+         // ═══════════════════════════════════════════════════════════
+         // PER-PASS LIFECYCLE (matches OpenClaw post-compaction pattern)
+         // ═══════════════════════════════════════════════════════════
+
+         // Step A: Update session ID/file if rotated
+         adoptTranscript(compactResult);
+
+         // Step B: Update params for next pass with potentially new session info
+         if (compactResult.result?.sessionId) {
+           currentParams = {
+             ...currentParams,
+             sessionId: compactResult.result.sessionId,
+           };
+         }
+         if (compactResult.result?.sessionFile) {
+           currentParams = {
+             ...currentParams,
+             sessionFile: compactResult.result.sessionFile,
+           };
+         }
+
+         // Step C: Run context engine maintenance (if callback provided)
+         if (runMaintenance) {
+           await runMaintenance();
+         }
+
+         // Step D: Extract token counts
+         const tokensBefore = compactResult.result?.tokensBefore ?? 0;
+         const tokensAfter = compactResult.result?.tokensAfter ?? tokensBefore;
+
+         // Step E: Record pass outcome
+         lastCompactResult = compactResult;
+
+         const madeProgress = compactionMadeProgress(
+           tokensBefore, tokensAfter, progressThreshold,
+         );
+
+         passes.push({
+           pass,
+           tokensBefore,
+           tokensAfter,
+           madeProgress,
+           elapsedMs: passElapsed,
+         });
+
+         logger?.info(
+           "[multi-pass-compaction] pass %d: %d -> %d tokens (%.1f%% reduction, %dms)",
+           pass + 1, tokensBefore, tokensAfter,
+           tokensBefore > 0
+             ? ((tokensBefore - tokensAfter) / tokensBefore) * 100
+             : 0,
+           passElapsed,
+         );
+
+         // ── Check if we're below the compaction threshold ──
+         if (!shouldCompact(tokensAfter, contextWindow, settings)) {
+           return buildResult(passes, lastCompactResult, "threshold_met", startTime);
+         }
+
+         // ── Check if progress stalled ──
+         if (!madeProgress) {
+           return buildResult(passes, lastCompactResult, "no_progress", startTime);
+         }
+
+         // CHANGE FROM V2: Removed redundant anti-thrashing check here.
+         // The tracker is not updated inside the loop (by design), so
+         // shouldAttemptCompaction() cannot change between iterations.
+         // The gate at the top of the function is sufficient.
+       }
+
+       return buildResult(passes, lastCompactResult, "max_passes", startTime);
+     }
+
+  4. HELPER: buildResult()
+
+     [UNCHANGED FROM V2 — see V2 plan Step 6 item 4]
+
+─── KEY DESIGN DECISIONS:
+
+  D1-D7, D9: [UNCHANGED FROM V2]
+
+  D8. CHANGE FROM V2: shouldCompact is imported at the top level via:
+      import { shouldCompact } from "@openclaw/agent-core";
+      This matches OpenClaw's convention — the gateway layer imports
+      from agent-core at the module level. There is NO precedent in
+      OpenClaw for dynamic `await import()` of @openclaw/agent-core.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 7: Embedded Runner Integration (2 Call Sites)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Wire the multi-pass loop into OpenClaw's compaction trigger
+paths in the embedded runner.
+
+─── FILE: src/agents/embedded-agent-runner/run.ts (MODIFY)
+
+  1-3: [UNCHANGED FROM V2 — imports, tracker, lifecycle callbacks]
+
+  ──── CALL SITE 1: TIMEOUT RECOVERY PATH (line ~2503) ────────────────────
+
+  REPLACE the compactContextEngineWithSafetyTimeout call with
+  multiPassCompact, then KEEP all post-compaction code EXCEPT the
+  adoptCompactionTranscript call (handled per-pass).
+
+  CHANGE FROM V2: Explicitly list ALL preserved post-compaction code.
+
+  REPLACE compactContextEngineWithSafetyTimeout call (line ~2503) WITH:
+    const timeoutMultiPassResult = await multiPassCompact({
+      contextEngine,
+      compactParams: {
+        sessionId: activeSessionId,
+        sessionKey: params.sessionKey,
+        sessionFile: activeSessionFile,
+        tokenBudget: ctxInfo.tokens,
+        force: true,
+        compactionTarget: "budget",
+        runtimeContext: timeoutCompactionRuntimeContext,
+        runtimeSettings: buildEmbeddedContextEngineRuntimeSettings({
+          tokenBudget: ctxInfo.tokens,
+        }),
+      },
+      settings: {
+        ...DEFAULT_COMPACTION_SETTINGS,
+        maxPasses: resolveMaxPasses(params.config),
+        progressThreshold: resolveProgressThreshold(params.config),
+      },
+      contextWindow: ctxInfo.tokens,
+      tracker: compactionProgressTracker,
+      adoptTranscript: multiPassAdoptTranscript,
+      // NOTE: No runMaintenance for timeout path — matches existing behavior.
+      timeoutMs: resolveCompactionTimeoutMs(params.config),
+      abortSignal: params.abortSignal,
+      logger: log,
+    });
+
+    // Map result back to CompactResult for existing post-compaction code
+    const timeoutCompactResult = timeoutMultiPassResult.lastCompactResult ?? {
+      ok: false,
+      compacted: false,
+      reason: timeoutMultiPassResult.stopReason,
+    };
+
+    // Track overall effectiveness
+    if (timeoutMultiPassResult.totalPasses > 0) {
+      const firstPass = timeoutMultiPassResult.passes[0];
+      compactionProgressTracker.recordCompaction(
+        firstPass?.tokensBefore ?? 0,
+        timeoutMultiPassResult.finalTokens,
+      );
+    }
+
+  REMOVE from existing post-compaction code:
+    - adoptCompactionTranscript(timeoutCompactResult) at line 2531
+      (now handled per-pass inside multiPassCompact)
+
+  PRESERVE from existing post-compaction code (lines 2533-2554):
+    - runOwnsCompactionAfterHook at line 2533 (fires once)
+    - lastCompactionTokensAfter update (line 2541)
+    - runPostCompactionSideEffects (lines 2544-2549, for ownsCompaction)
+    - Post-compaction guard arming and continue statement
+
+  ──── CALL SITE 2: OVERFLOW / PREEMPTIVE RECOVERY PATH (line ~2707) ──────
+
+  [MOSTLY UNCHANGED FROM V2 — same multiPassCompact call and result mapping]
+
+  CHANGE FROM V2: More precise about which existing code to preserve.
+
+  REMOVE from existing post-compaction code:
+    - adoptCompactionTranscript at line 2726 (handled per-pass)
+    - runContextEngineMaintenance at lines 2727-2737 (handled per-pass)
+    - adoptCompactionTranscript at line 2768 (handled per-pass)
+
+  PRESERVE from existing post-compaction code:
+    - Catch block at lines 2739-2748
+    - runOwnsCompactionAfterHook at line 2749 (fires once)
+    - isNoRealConversationCompactionNoop handling at lines 2750-2765
+    - lastCompactionTokensAfter update at line 2774
+    - Post-compaction truncation at lines 2776+
+
+  4-6: [UNCHANGED FROM V2 — config helpers, conditional, session reset]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 8: Configuration Schema Extension
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V2 — see V2 plan Step 8]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 9: Tests
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V2 — see V2 plan Step 9]
+
+  ADDITIONAL tests for Review V2 corrections:
+
+  ─── pre-compaction-pruning.test.ts additions:
+
+    - ToolResultMessage.toolName used directly (no backward walk)
+    - ToolCall blocks matched via type === "toolCall" (not "tool_use")
+    - ToolCall.arguments used for arg truncation (not "input")
+    - ToolResultMessage.toolCallId used for ID matching (not tool_use_id)
+
+  ─── multi-pass-compaction.test.ts additions:
+
+    - shouldCompact is a static import (no dynamic await import)
+    - Anti-thrashing check only at function entry, not per-iteration
+
+================================================================================
+5. FILE INVENTORY (NEW & MODIFIED)
+================================================================================
+
+  [UNCHANGED FROM V2 — same 6 new files, 9 modified files]
+
+================================================================================
+6. DEPENDENCY ANALYSIS
+================================================================================
+
+  [UNCHANGED FROM V2 — same deps, no new npm packages]
+
+================================================================================
+7. RISK ANALYSIS & MITIGATION
+================================================================================
+
+  [UNCHANGED FROM V2 — same 8 risks with mitigations]
+
+================================================================================
+8. INTEGRATION VERIFICATION CHECKLIST
+================================================================================
+
+Before shipping, verify:
+
+  [ALL ITEMS FROM V2 — see V2 plan Section 8]
+
+  ADDITIONAL items for Review V2 corrections:
+  [ ] Pre-pruning injection is AFTER line 952 (runtime + recentTurnsPreserve in scope)
+  [ ] Tool call blocks checked via type === "toolCall" (NOT "tool_use")
+  [ ] ToolResultMessage.toolCallId used (NOT tool_use_id)
+  [ ] ToolCall.arguments used (NOT input)
+  [ ] ToolResultMessage.toolName used directly for summarization
+  [ ] shouldCompact is a top-level static import (NO dynamic import)
+  [ ] Anti-thrashing check only at function entry (not per-iteration)
+  [ ] Timeout path preserves lastCompactionTokensAfter update
+  [ ] Timeout path preserves runPostCompactionSideEffects call
+  [ ] Timeout path preserves post-compaction guard arming
+
+================================================================================
+END OF CORRECTED PORTING PLAN (REVIEW V2)
+================================================================================

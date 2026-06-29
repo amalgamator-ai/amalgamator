@@ -2,9 +2,9 @@
 # Run ONLY the feature detection step
 #
 # Usage:
-#   ./agent/run_detect_features.sh
-#   ./agent/run_detect_features.sh --resume
-#   ./agent/run_detect_features.sh --config path/to/config
+#   ./openclaw_vs_hermes/run_detect_features.sh
+#   ./openclaw_vs_hermes/run_detect_features.sh --resume
+#   ./openclaw_vs_hermes/run_detect_features.sh --config path/to/config
 
 set -euo pipefail
 
@@ -35,4 +35,4 @@ echo "============================================"
 echo "Config: ${CONFIG}"
 echo "============================================"
 
-python -m agent.run_detect_features --config "${CONFIG}" "${EXTRA_ARGS[@]}"
+python -m openclaw_vs_hermes.run_detect_features --config "${CONFIG}" "${EXTRA_ARGS[@]}"

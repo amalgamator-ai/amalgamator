@@ -1,0 +1,315 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — TEST PLAN REVIEW SUMMARY (REVIEW V2)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Date: 2026-06-28
+Iteration: Review V2 (review of V2 initial)
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+  7 issues were found during code-level verification of the V2 test plan
+  against the actual OpenClaw codebase. Each issue was verified by reading
+  the relevant source files, type definitions, test files, vitest
+  configuration, and harness code.
+
+  ── FIX-T1: TEST 4.12 BOUNDARY MATH ERROR CORRECTED ────────────────────────────
+
+    SEVERITY: Medium (wrong expected value would make the test incorrect)
+
+    V2 STATED:
+      NOTE: Hermes uses `new_tokens < orig_tokens * 0.95` which means
+      exactly 5% reduction (950 out of 1000) returns true.
+
+    ACTUAL:
+      `950 < 1000 * 0.95` = `950 < 950` = FALSE.
+      The strict `<` operator means exactly 5% reduction does NOT count
+      as progress. You need MORE than 5% (e.g., 949/1000 = 5.1%).
+
+    CORRECTED:
+      Test 4.12 now expects:
+        compressionMadeProgress(10, 10, 1000, 950) → false
+        compressionMadeProgress(10, 10, 1000, 949) → true
+      The NOTE text was corrected to state "returns false."
+
+    VERIFICATION:
+      Hermes code trace line 198:
+        `return orig_tokens > 0 and new_tokens < orig_tokens * 0.95`
+      950 < 950 is unambiguously false in both Python and TypeScript.
+
+  ── FIX-T2: SUITE C MODEL NAME CONVENTION ALIGNED ──────────────────────────────
+
+    SEVERITY: Low (cosmetic, no functional impact)
+
+    V2 STATED: Inline helpers use `model: "test-model"`
+
+    ACTUAL: Existing compaction test files consistently use:
+      - compaction-trailing-toolresult.test.ts line 20: `model: "claude-fable-5"`
+      - compaction-image-tokens.test.ts line 17: `model: "claude-fable-5"`
+
+    CORRECTED: All inline helpers in Suite C now use `model: "claude-fable-5"`
+    to match the established convention. No functional impact (estimateTokens
+    does not use the model field), but consistency with existing tests.
+
+    VERIFICATION: Direct file reads of both existing compaction test files.
+
+  ── FIX-T3: CompactResult TYPE DOCUMENTATION CORRECTED ──────────────────────────
+
+    SEVERITY: Low (documentation inaccuracy, no test correctness impact)
+
+    V2 STATED (IMP-6):
+      "VERIFIED CompactResult DISCRIMINATED UNION. All three variants
+       are now precisely defined..."
+
+    ACTUAL (context-engine/types.ts lines 126-141):
+      ```typescript
+      export type CompactResult = {
+        ok: boolean;
+        compacted: boolean;
+        reason?: string;
+        result?: { ... };
+      };
+      ```
+      This is a FLAT TYPE with `ok: boolean` and `compacted: boolean`.
+      It is NOT a TypeScript discriminated union (which requires literal
+      types like `ok: true` or `ok: false` on each variant).
+
+    IMPACT: The mock factories work correctly at runtime — `true` and
+    `false` values are assignable to `boolean`. The `as const` narrowing
+    in V2's factories was unnecessary but harmless.
+
+    CORRECTED: IMP-6 text replaced with accurate description. Factory
+    functions simplified to use plain `true`/`false` without `as const`.
+    All references to "discriminated union" removed.
+
+    VERIFICATION: Direct read of context-engine/types.ts lines 126-141.
+
+  ── FIX-T4: SUITE F vi.doMock PATH CORRECTED ───────────────────────────────────
+
+    SEVERITY: High (wrong path would cause mock to not work at all)
+
+    V2 STATED:
+      vi.doMock("../../multi-pass-compaction.js", () => ({
+        multiPassCompact: mockedMultiPassCompact,
+      }));
+
+    ACTUAL: From the harness at
+      `src/agents/embedded-agent-runner/run.overflow-compaction.harness.ts`:
+      - `../../` resolves to `src/` (two levels up from embedded-agent-runner/)
+      - `../` resolves to `src/agents/` (one level up)
+      The target module is `src/agents/multi-pass-compaction.ts`.
+
+    CORRECTED: Path changed to `"../multi-pass-compaction.js"`.
+
+    VERIFICATION: Confirmed against 25+ existing vi.doMock paths in
+    the harness file (lines 506-751):
+      `../defaults.js`        → src/agents/defaults.js         ✓
+      `../auth-profiles.js`   → src/agents/auth-profiles.js    ✓
+      `../../plugins/...`     → src/plugins/...                ✓
+      `./run/attempt.js`      → src/agents/embedded-agent-runner/run/attempt.js ✓
+
+  ── FIX-T5: SUITE G CLAMPING LOCATION CLARIFIED ────────────────────────────────
+
+    SEVERITY: Medium (wrong test expectations for defaults function behavior)
+
+    V2 STATED:
+      Test 10.5: materializeCompactionConfig({ maxPasses: 0 })
+                 → result.maxPasses === 1 (clamped)
+      Test 10.6: materializeCompactionConfig({ minProgressThreshold: 0 })
+                 → result.minProgressThreshold === 0.01 (clamped)
+
+    ACTUAL: applyCompactionDefaults (defaults.ts:529-552) ONLY sets
+    missing defaults. It does NOT clamp values. The function:
+      1. Returns unchanged if no `agents.defaults` block
+      2. Returns unchanged if `compaction.mode` already set
+      3. Otherwise sets `mode: "safeguard"` — nothing else
+
+    No existing defaults function in OpenClaw clamps values. The
+    convention is:
+      Layer 1: Zod schema `.min()/.max()` REJECTS out-of-range input
+      Layer 2: Runtime code clamps as safety measure
+
+    CORRECTED:
+      - Tests 10.5/10.6 (clamping in defaults) → REMOVED from defaults section
+      - NEW tests 10.10/10.11/10.12 added to Zod schema section for range
+        REJECTION (not clamping)
+      - Suite E test 8.20 retained for runtime clamping (belt-and-suspenders)
+      - Suite G test count: 13 → 14 (net +1 from restructuring)
+
+    VERIFICATION: Direct read of applyCompactionDefaults implementation
+    and existing Zod schema patterns (recentTurnsPreserve uses
+    z.number().int().min(0).max(12) which rejects, not clamps).
+
+  ── FIX-T6: TESTS 4.15 AND 8.16/8.17 CONTRADICTION RESOLVED ───────────────────
+
+    SEVERITY: High (contradictory test expectations in core multi-pass logic)
+
+    V2 STATED:
+      Test 4.15: shouldContinueMultiPass with progressMade=false
+                 → { continue: false, reason: "no_progress" }
+      Test 8.17: Multi-pass loop CONTINUES after first sub-5% pass
+                 (only stops after 2 consecutive)
+
+    CONTRADICTION: If shouldContinueMultiPass returns false on ANY
+    no-progress pass (test 4.15), then the loop in multiPassCompact
+    would stop immediately — making it impossible for test 8.17 to see
+    the loop continue past a marginal pass.
+
+    DESIGN RESOLUTION:
+      shouldContinueMultiPass does NOT receive `progressMade` directly.
+      Instead, the caller (multiPassCompact) maintains a
+      `consecutiveNoProgress` counter:
+        - After each pass: call compressionMadeProgress
+        - If false: counter++
+        - If true: counter = 0
+        - Pass counter to shouldContinueMultiPass
+
+      shouldContinueMultiPass checks:
+        1. abortSignal → false, "aborted"
+        2. passNumber >= maxPasses → false, "max_passes_reached"
+        3. tokensAfter <= targetTokens → false, "target_reached"
+        4. consecutiveNoProgress >= 2 → false, "anti_thrash"
+        5. Otherwise → true
+
+      This matches tests 8.16/8.17 (loop continues past one marginal
+      pass) and is an INTENTIONAL enhancement over Hermes (which stops
+      immediately). The enhancement gives the compactor a second chance
+      when a pass makes marginal progress.
+
+    CORRECTED:
+      - Old test 4.15 (progressMade=false → continue: false): REPLACED
+        with new 4.15 (consecutiveNoProgress=1 → continue: true)
+      - Test 4.18 (consecutiveNoProgress=2 → continue: false): unchanged
+      - Tests 8.16/8.17: no change needed (they were correct; it was
+        4.15 that contradicted them)
+      - `progressMade` field removed from shouldContinueMultiPass params;
+        replaced by `consecutiveNoProgress: number`
+
+  ── FIX-T7: SUITE G materializeCompactionConfig TYPING ──────────────────────────
+
+    SEVERITY: Low (convention divergence)
+
+    V2 STATED:
+      function materializeCompactionConfig(
+        compaction: Record<string, unknown>,
+      ) {
+        const cfg = applyCompactionDefaults({
+          agents: { defaults: { compaction } },
+        } as any);
+
+    ACTUAL (config.compaction-settings.test.ts):
+      function materializeCompactionConfig(
+        compaction: NonNullable<
+          NonNullable<OpenClawConfig["agents"]>["defaults"]
+        >["compaction"],
+      ) {
+        const cfg = applyCompactionDefaults({
+          agents: { defaults: { compaction } },
+        });
+
+    The existing test uses proper type narrowing via NonNullable<>,
+    avoiding the `as any` escape hatch. The parameter type ensures
+    only valid compaction fields can be passed.
+
+    CORRECTED: Suite G now uses the existing type pattern with
+    NonNullable<>. Also imports `OpenClawConfig` from `"./types.js"`
+    matching the existing test's import pattern.
+
+================================================================================
+2. SUMMARY OF CHANGES
+================================================================================
+
+  V2 (Initial) → Review V2 (Corrected):
+
+  STRUCTURAL CHANGES:
+    - Test 4.12: Expected value corrected (true → false for 950/1000)
+    - Test 4.15: Replaced entirely (progressMade → consecutiveNoProgress)
+    - Tests 10.5/10.6: Moved from defaults section to Zod schema section,
+      changed from clamping to rejection expectations
+    - Tests 10.10/10.11/10.12: New Zod range rejection tests added
+    - Suite F harness vi.doMock path corrected
+
+  TEST COUNT:
+    V2 total:      106 tests across 9 suites (A-I)
+    Review V2:     107 tests across 9 suites (A-I)
+    Delta: +1 test (Suite G gained 1 from restructuring: 2 defaults-clamping
+           tests removed, 3 schema-range tests added = net +1)
+
+  FILES:
+    V2:        6 new test files, 2 modified test files, 1 modified harness
+    Review V2: Same file count (corrections are within existing files)
+
+  DOCUMENTATION:
+    - CompactResult "discriminated union" language removed
+    - shouldContinueMultiPass API contract clarified
+    - Clamping location documented (schema rejects, runtime clamps)
+
+================================================================================
+3. ITERATION EVOLUTION
+================================================================================
+
+  V1 (Initial — 2026-06-28):
+    Initial test plan. 107 tests across 8 suites.
+    Triangulated from Hermes tests, OpenClaw conventions, and port plan.
+    Covered all 9 porting steps and attempted to map Hermes tests.
+
+  V1 Review (Corrected — 2026-06-28):
+    Corrected 15 issues found during code-level verification.
+    102 tests across 9 suites. Key fixes:
+    1. Fixed vitest shard assignments for 4 files
+    2. Eliminated fixture duplication with existing factories
+    3. Corrected mock patterns (contextEngine is injected, not imported)
+    4. Added missing compaction-safeguard integration tests (Suite H)
+    5. Fixed import paths and function signatures
+    6. Documented harness extension strategy
+    7. Aligned function signatures with Hermes convention (plain params)
+    8. Scoped E2E tests to feasible integration level
+
+  V2 (From-Scratch Rewrite — 2026-06-28):
+    From-scratch rewrite incorporating all V1 Review learnings.
+    106 tests across 9 suites. Key improvements:
+    1. Zod .strict() handling in Suite G
+    2. Precise token estimation in Suite C
+    3. CompactResult type variants tested
+    4. Exact 5% boundary test added
+    5. Verified testing export contents
+    6. Referenced existing summary prefix patterns
+
+  Review V2 (Current — 2026-06-28):
+    Corrected 7 issues found during code-level verification.
+    107 tests across 9 suites. Key fixes:
+    1. Test 4.12 boundary math: 950<950 is false, not true (FIX-T1)
+    2. Suite C model name: "claude-fable-5" not "test-model" (FIX-T2)
+    3. CompactResult is flat type, not discriminated union (FIX-T3)
+    4. Suite F vi.doMock: "../" not "../../" for multi-pass module (FIX-T4)
+    5. Suite G clamping: schema rejects, defaults don't clamp (FIX-T5)
+    6. Tests 4.15/8.17: resolved contradiction via counter design (FIX-T6)
+    7. Suite G typing: NonNullable<> pattern, not Record<> + as any (FIX-T7)
+
+  CONVERGENCE ASSESSMENT:
+    The V2 plan was substantially correct. The 7 issues found are all
+    targeted fixes rather than structural problems:
+    - 2 HIGH severity (FIX-T4 vi.doMock path, FIX-T6 logic contradiction)
+    - 2 MEDIUM severity (FIX-T1 math error, FIX-T5 clamping location)
+    - 3 LOW severity (FIX-T2 convention, FIX-T3 documentation, FIX-T7 typing)
+
+    No structural redesign was needed. Suite organization, file locations,
+    shard assignments, and fixture strategy all verified correct. The plan
+    is approaching convergence.
+
+  EVOLUTION SUMMARY TABLE:
+  +-----------+-------+--------+----------+---------+-----------+
+  | Iteration | Tests | Suites | New Files| Modified| Issues    |
+  +-----------+-------+--------+----------+---------+-----------+
+  | V1 Init   | 107   | 8      | 7        | 3       | 15 found  |
+  | V1 Review | 102   | 9      | 6        | 3*      | 15 fixed  |
+  | V2        | 106   | 9      | 6        | 3*      | 7 found   |
+  | V2 Review | 107   | 9      | 6        | 3*      | 7 fixed   |
+  +-----------+-------+--------+----------+---------+-----------+
+  * Modified count = 2 test files + 1 harness file
+
+================================================================================
+END OF REVIEW SUMMARY (REVIEW V2)
+================================================================================

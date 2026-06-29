@@ -1,0 +1,310 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — TEST PLAN SUMMARY (V2)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Date: 2026-06-28
+Iteration: V2 (from-scratch rewrite)
+
+================================================================================
+1. EXPLANATION OF THE V2 TEST PLAN
+================================================================================
+
+  The V2 test plan is a from-scratch rewrite that incorporates ALL 15
+  corrections from the V1 Review iteration. Rather than patching the
+  V1 plan, V2 was rebuilt from first principles with every pattern,
+  type definition, mock strategy, and shard assignment verified directly
+  against the actual OpenClaw codebase via file reads and exploration.
+
+  1.1 SCOPE AND STRUCTURE
+
+    The plan covers 9 test suites (A through I) totaling 106 tests across
+    6 new test files, 2 modified test files, and 1 modified harness file.
+    Tests are organized to match the 9-step implementation plan from
+    code_port_plan_review_V4.txt:
+
+      Suite A: Progress Detection & Anti-Thrashing (18 tests)
+        -> Validates Step 2: compressionMadeProgress and shouldContinueMultiPass
+        -> Pure functions, zero mocks needed
+
+      Suite B: Pre-Compaction Pruning (22 tests)
+        -> Validates Step 3: preCompactionPrune with 3 sub-passes
+        -> Pure function, uses shared fixture factories
+
+      Suite C: Cut Point Anchoring (12 tests)
+        -> Validates Step 4: findCutPoint user/assistant message anchoring
+        -> Uses REAL estimateTokens (char/4), inline helpers matching
+           existing compaction test convention
+
+      Suite D: Summary Prefix Disambiguation (6 tests)
+        -> Validates Step 5: buildMultiPassSummaryPrefix, buildCompactionEndMarker
+        -> Added to existing compaction-safeguard.test.ts via testing export
+
+      Suite E: Multi-Pass Compaction Loop (20 tests)
+        -> Validates Step 6: multiPassCompact gateway-layer function
+        -> Mock contextEngine injected as parameter (not vi.mock)
+
+      Suite F: Embedded Runner Integration (7 tests)
+        -> Validates Step 7: integration with overflow/preemptive compaction
+        -> Extends existing run.overflow-compaction.harness.ts
+
+      Suite G: Configuration Schema Extension (13 tests)
+        -> Validates Step 8: Zod schema + applyCompactionDefaults changes
+        -> Explicitly tests .strict() constraint and backward compatibility
+
+      Suite H: Compaction-Safeguard Integration (4 tests)
+        -> Validates Steps 3+5 integration in compaction-safeguard.ts
+        -> Uses existing createCompactionHandler and setSummarizeInStagesForTest
+
+      Suite I: Vertical Integration (4 tests)
+        -> Validates full feature interaction across components
+        -> Uses same mock infrastructure as Suite E
+
+  1.2 KEY V2 IMPROVEMENTS OVER V1 REVIEW
+
+    IMP-1: ZOD STRICT SCHEMA HANDLING
+      The compaction Zod schema uses .strict() which rejects unknown keys.
+      Suite G now includes explicit tests for:
+        - New fields being accepted (10.9)
+        - Invalid types being rejected (10.10, 10.11)
+        - Backward compatibility (old configs without new fields: 10.12)
+        - Strictness regression (unknown keys still rejected: 10.13)
+      V1 Review did not account for the .strict() constraint.
+
+    IMP-2: PRECISE TOKEN ESTIMATION IN SUITE C
+      Tests now specify exact character counts mapped to expected token
+      values via the char/4 heuristic:
+        "x".repeat(80000) = 20000 tokens
+        "x".repeat(4000)  = 1000 tokens
+        "x".repeat(400)   = 100 tokens
+      This ensures deterministic cut point positioning. V1 Review described
+      this approach but V2 provides specific character/token mappings.
+
+    IMP-3: VERIFIED TESTING EXPORT CONTENTS
+      The compaction-safeguard.ts testing export was verified to contain
+      30+ entries (lines 1318-1351). V2 specifies exactly where
+      buildMultiPassSummaryPrefix and buildCompactionEndMarker fit within
+      the existing export structure.
+
+    IMP-4: VERIFIED compactionSafeguardDeps INJECTION PATTERN
+      The summarizeInStages mock uses a module-level deps object
+      (compactionSafeguardDeps), not constructor injection. Suite H tests
+      follow this exact pattern via testing.setSummarizeInStagesForTest().
+
+    IMP-5: VERIFIED applyCompactionDefaults IMPLEMENTATION
+      The current function (defaults.ts:529-552) only sets mode:"safeguard".
+      Suite G tests explicitly verify that the function is extended to
+      handle maxPasses and minProgressThreshold defaults.
+
+    IMP-6: ALL THREE CompactResult VARIANTS
+      Suite E now provides factory functions for all three discriminated
+      union variants of CompactResult, and tests each code path:
+        makeCompactSuccess: { ok: true, compacted: true, result: {...} }
+        makeCompactNotCompacted: { ok: true, compacted: false, reason }
+        makeCompactFailure: { ok: false, compacted: false, reason }
+
+    IMP-7: REFINED INLINE HELPERS FOR SUITE C
+      The inline helper functions match the exact pattern from
+      compaction-trailing-toolresult.test.ts, including ISO timestamp
+      conversion, null parentId for first entry, and the HarnessMessage
+      type system.
+
+    IMP-8: EXISTING SUMMARY PREFIX PATTERNS REFERENCED
+      Suite D references PREVIOUS_SUMMARY_REDISTILL_PREFIX and
+      SUMMARY_TRUNCATED_MARKER as design anchors for the new multi-pass
+      prefix functions.
+
+  1.3 DESIGN DECISIONS
+
+    D1: PURE FUNCTION TESTING (Suites A, B, C, G)
+      Functions with no side effects are tested with real inputs and
+      real return values. No mocks. This gives highest confidence and
+      simplest test maintenance.
+
+    D2: DEPENDENCY INJECTION TESTING (Suites E, I)
+      multiPassCompact receives contextEngine as a parameter. Tests
+      inject a mock object directly, matching the run.overflow-compaction
+      harness pattern. No vi.mock() needed.
+
+    D3: TESTING EXPORT PATTERN (Suites D, H)
+      New internal functions are exposed via the existing testing export
+      on compaction-safeguard.ts. Tests import them via
+      `import { testing } from "./compaction-safeguard.js"`.
+
+    D4: HARNESS EXTENSION (Suite F)
+      New mock (mockedMultiPassCompact) is added to the existing overflow
+      compaction harness rather than creating a parallel harness. This
+      keeps all overflow-related mocking centralized.
+
+    D5: FIXTURE REUSE OVER CREATION
+      New fixture factories (compaction-fixtures.ts) only add genuinely
+      new helpers. makeToolResultMessage, makeAssistantWithToolCalls,
+      makeAlternatingConversation, and makeConversationWithToolCalls
+      have no existing equivalents. All other message construction
+      reuses existing factories.
+
+  1.4 WHAT CHANGED IN TEST COUNT (V1 Review -> V2)
+
+    Suite A: 17 -> 18 (+1: added exact 5% boundary test 4.12)
+    Suite B: 22 -> 22 (no change)
+    Suite C: 12 -> 12 (no change)
+    Suite D:  6 ->  6 (no change)
+    Suite E: 19 -> 20 (+1: added makeCompactFailure/NotCompacted handling)
+    Suite F:  7 ->  7 (no change)
+    Suite G: 11 -> 13 (+2: added Zod strict constraint tests 10.12, 10.13)
+    Suite H:  4 ->  4 (no change)
+    Suite I:  4 ->  4 (no change)
+    --
+    Total: 102 -> 106 (+4 tests)
+
+================================================================================
+2. ITERATION EVOLUTION
+================================================================================
+
+  V1 (Initial — 2026-06-28):
+  ---------------------------
+    Initial test plan. 107 tests across 8 suites (A-H).
+    Triangulated from Hermes tests, OpenClaw conventions, and port plan.
+    Covered all 9 porting steps and attempted to map Hermes tests.
+
+    ISSUES:
+    - 4 files assigned to wrong vitest shards
+    - 6+ factory functions duplicated existing OpenClaw helpers
+    - Suite C mocked estimateTokens instead of using real function
+    - Suite E used vi.mock() for contextEngine (wrong: it's parameter-injected)
+    - Suite E omitted CompactResult type definition
+    - Suite G imported non-existent materializeCompactionConfig function
+    - Suite F underestimated harness complexity (40+ mock infrastructure)
+    - Missing safeguard integration tests (Suite H was originally E2E scope)
+    - 2 redundant property path tests duplicated behavior tests
+    - PruneMetrics return type not aligned with port plan
+    - SessionTreeEntry timestamp format incorrect
+    - Module location for summary prefix ambiguous
+    - E2E scope too broad for feasible testing
+    - compact() parameter shape not reflected in mocks
+    - multiPassCompact integration with safety timeout unclear
+
+  V1 Review (Corrected — 2026-06-28):
+  ------------------------------------
+    Corrected 15 issues found during code-level verification.
+    102 tests across 9 suites (A-I, restructured from 8).
+
+    KEY CORRECTIONS:
+    1. Fixed vitest shard assignments for 4 files
+    2. Eliminated fixture duplication with existing factories
+    3. Corrected mock patterns (contextEngine is injected, not imported)
+    4. Added missing compaction-safeguard integration tests (Suite H, 4 tests)
+    5. Fixed import paths and function signatures
+    6. Documented harness extension strategy
+    7. Aligned function signatures with Hermes convention (plain params)
+    8. Scoped E2E tests to feasible integration level
+
+    STRUCTURAL CHANGES:
+    - Suite D merged into compaction-safeguard.test.ts additions
+    - Former Suite H (E2E) became Suite I (vertical slice, scoped down)
+    - New Suite H added for compaction-safeguard pre-pruning integration
+    - Net: -5 tests, +1 suite, -1 new file
+
+  V2 (Current — 2026-06-28):
+  ---------------------------
+    From-scratch rewrite incorporating all V1 Review learnings.
+    106 tests across 9 suites (A-I).
+
+    VERIFICATION METHOD:
+    Every pattern verified by direct codebase exploration:
+    - Read compaction-safeguard.ts testing export (30+ entries, lines 1318-1351)
+    - Read Zod schema with .strict() (zod-schema.agent-defaults.ts:158-205)
+    - Read applyCompactionDefaults (defaults.ts:529-552)
+    - Read findCutPoint internals (compaction.ts:388-439)
+    - Read estimateTokens (compaction.ts:262-312)
+    - Read SessionTreeEntry / MessageEntry / HarnessMessage type definitions
+    - Read ToolCall / ToolResultMessage type definitions (llm-core/types.ts)
+    - Read overflow harness mock infrastructure
+    - Read vitest shard configuration (vitest.agents-paths.mjs)
+
+    KEY IMPROVEMENTS OVER V1 REVIEW:
+    1. Zod .strict() handling: +2 tests verifying schema constraints (10.12, 10.13)
+    2. Precise token estimation: character/token mappings specified for Suite C
+    3. All 3 CompactResult variants: added tests for ok:false and ok:true/not-compacted
+    4. Exact 5% boundary test: added test 4.12 for boundary precision
+    5. Verified testing export contents: 30+ entries cataloged
+    6. Verified applyCompactionDefaults: current implementation analyzed
+    7. Referenced existing prefix patterns (PREVIOUS_SUMMARY_REDISTILL_PREFIX)
+    8. Cleaner mock dependency map with rationale for each mock choice
+
+    NET CHANGES: +4 tests, same file structure, deeper verification
+
+  EVOLUTION SUMMARY TABLE:
+  +-----------+-------+--------+----------+---------+----------+
+  | Iteration | Tests | Suites | New Files| Modified| Issues   |
+  +-----------+-------+--------+----------+---------+----------+
+  | V1 Init   | 107   | 8      | 7        | 3       | 15 found |
+  | V1 Review | 102   | 9      | 6        | 3*      | 15 fixed |
+  | V2        | 106   | 9      | 6        | 3*      | 0 known  |
+  +-----------+-------+--------+----------+---------+----------+
+  * Modified count = 2 test files + 1 harness file
+
+================================================================================
+3. CROSS-REFERENCE: TEST SUITES TO PORT PLAN STEPS
+================================================================================
+
+  Port Plan Step 1 (Types & Constants):
+    -> No dedicated test suite. Type correctness verified implicitly by
+       all suites that use the new types (especially B, C, E).
+
+  Port Plan Step 2 (Progress Detection):
+    -> Suite A (18 tests)
+
+  Port Plan Step 3 (Pre-Compaction Pruning):
+    -> Suite B (22 tests) + Suite H (4 integration tests)
+
+  Port Plan Step 4 (Cut Point Anchoring):
+    -> Suite C (12 tests)
+
+  Port Plan Step 5 (Summary Prefix):
+    -> Suite D (6 tests)
+
+  Port Plan Step 6 (Multi-Pass Loop):
+    -> Suite E (20 tests) + Suite I (4 vertical tests)
+
+  Port Plan Step 7 (Runner Integration):
+    -> Suite F (7 tests)
+
+  Port Plan Step 8 (Configuration):
+    -> Suite G (13 tests)
+
+  Port Plan Step 9 (Tests):
+    -> All suites A-I (106 tests total)
+
+================================================================================
+4. CONFIDENCE ASSESSMENT
+================================================================================
+
+  HIGH CONFIDENCE:
+    - Vitest shard assignments (verified against vitest.agents-paths.mjs)
+    - Mock patterns (verified against actual harness/testing export code)
+    - Type definitions (verified against actual TypeScript types)
+    - Configuration schema (verified against actual Zod schema)
+    - Fixture factories (verified against existing test helpers)
+
+  MEDIUM CONFIDENCE:
+    - Suite F (runner integration): Depends on harness extension that hasn't
+      been attempted yet. The harness has 40+ mock exports and a complex
+      loading sequence. The extension strategy is sound but implementation
+      may reveal additional mocks needed.
+    - Suite H (safeguard integration): The pre-pruning injection point
+      (line ~965 of compaction-safeguard.ts) is in a complex code path
+      with multiple branches. The exact test setup may need adjustment
+      based on which branch path is exercised.
+
+  LOWER CONFIDENCE:
+    - Specific test values in Suite C (anchoring): The keepRecentTokens
+      values needed to produce specific cut points depend on the exact
+      token estimation for each message type. While the char/4 formula
+      is known, the overhead per message/content block may shift the
+      cut point by 1-2 positions. Tests should use assertions like
+      `<= expectedIndex` rather than `=== exactIndex`.
+
+================================================================================
+END OF TEST PLAN SUMMARY (V2)
+================================================================================

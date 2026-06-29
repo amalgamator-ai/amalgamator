@@ -1,0 +1,575 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — CORRECTED PORTING PLAN (REVIEW V4)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python)
+Target: OpenClaw (TypeScript)
+Complexity: MEDIUM
+Date: 2026-06-28
+Revision: Review V4 (corrected from V4)
+
+================================================================================
+REVIEW CHANGE LOG (V4 -> Review V4)
+================================================================================
+
+  This plan corrects 5 issues found during code-level verification of the
+  V4 plan against the actual OpenClaw source code. Fixes:
+
+  FIX-1:  ToolCall FIELD NAMES CORRECTED (Step 3, sub-pass 3).
+
+          V4 specified:
+            Content block: { type: "toolCall", toolCallId, toolName, arguments }
+
+          Actual ToolCall type (packages/llm-core/src/types.ts:251-258):
+            export interface ToolCall {
+              type: "toolCall";
+              id: string;                       // NOT toolCallId
+              name: string;                      // NOT toolName
+              arguments: Record<string, unknown>; // NOT string
+              thoughtSignature?: string;
+              executionMode?: "sequential" | "parallel";
+            }
+
+          V4 confused ToolCall content block fields with ToolResultMessage
+          fields. ToolResultMessage uses toolCallId/toolName. ToolCall uses
+          id/name.
+
+          FIX: Use id, name, arguments throughout Step 3 sub-pass 3.
+
+  FIX-2:  ToolCall.arguments TYPE CORRECTED (Step 3, sub-pass 3).
+
+          V4 described sub-pass 3 as:
+            "If ToolCall.arguments is a string > 500 chars:
+             a. Parse as JSON
+             b. Truncate string values > 200 chars
+             c. Re-serialize
+             d. On JSON parse failure: truncate raw string"
+
+          Actual: ToolCall.arguments is Record<string, unknown> — already
+          a parsed object, not a JSON string.
+
+          In Hermes (Python), tool call arguments are stored as a JSON
+          string (tc.function.arguments). In OpenClaw, they are stored as
+          a parsed object (tc.arguments: Record<string, unknown>).
+
+          FIX: Sub-pass 3 adapted to object-based truncation:
+            a. Estimate serialized size: JSON.stringify(tc.arguments).length
+            b. If > 500 chars: walk the object's values
+            c. For string values > 200 chars: truncate with head + "...[truncated]"
+            d. Return a new Record with truncated values (no JSON parse needed)
+
+  FIX-3:  findCutPoint ANCHORING PROPERTY PATH CORRECTED (Step 4).
+
+          V4 specified:
+            (e) => e.type === "message" && "role" in e && e.role === "user"
+
+          Actual: SessionTreeEntry of type "message" is a MessageEntry:
+            { type: "message"; message: AgentMessage }
+
+          The role is on entry.message.role, NOT on entry.role. The
+          existing findCutPoint code accesses it via:
+            (entry.message as HarnessMessage).role
+
+          V4's predicate would never match because "role" is not a direct
+          property of the entry — it's nested inside entry.message.
+
+          FIX: Use (entry as MessageEntry).message.role to access the role,
+          matching the existing code pattern in findValidCutPoints.
+
+  FIX-4:  hasVisibleContent HELPER PROPERTY PATH CORRECTED (Step 4).
+
+          V4 specified:
+            const msg = entry as any;
+            if (!msg.content) return false;
+
+          Actual: For a MessageEntry, the content is at entry.message.content,
+          not entry.content. The entry itself has { type, message, ... } —
+          the content array lives on the message, not the entry.
+
+          FIX: Access (entry as MessageEntry).message to get the AgentMessage,
+          then check its content field.
+
+  FIX-5:  baseMessagesToSummarize IS ALREADY `let` (Step 3).
+
+          V4 specified:
+            "VARIABLE MUTABILITY: baseMessagesToSummarize is currently
+             declared with `const`. It must be changed to `let`..."
+
+          Actual (compaction-safeguard.ts line 884):
+            let baseMessagesToSummarize = stripRuntimeContextCustomMessages(
+              preparation.messagesToSummarize,
+            );
+
+          It is ALREADY `let` (and is reassigned at line 898 for the branch
+          messages fallback). No change needed.
+
+          FIX: Remove the const->let instruction. Note that it's already let.
+
+  ADDITIONAL REFINEMENTS:
+
+  REF-1:  AbortSignal.any() RISK DOWNGRADED from Medium to Non-Issue.
+
+          V4 stated: "AbortSignal.any() requires Node 20+. OpenClaw likely
+          already targets this."
+
+          Verified: OpenClaw's package.json specifies:
+            "engines": { "node": ">=22.19.0" }
+          AbortSignal.any() is supported since Node 22.10.0 and is ALREADY
+          used in multiple places in the codebase:
+            - manager.turn-runner.ts
+            - agent-tools.abort.ts
+            - provider-transport-fetch.ts
+            - dispatch-from-config.ts
+            - model-pricing-cache.ts
+          This is not a risk.
+
+  REF-2:  STALE compactParams ON SESSION ROTATION documented as limitation.
+
+          multiPassCompact receives compactParams once and passes the same
+          params (including sessionId, sessionFile) to each pass. If a pass
+          rotates the session (returns a new sessionId/sessionFile in the
+          CompactResult), adoptTranscript updates the run-scope variables
+          but compactParams retains the stale snapshot.
+
+          For OpenClaw's default in-place compaction this is a non-issue:
+          sessionId/sessionFile don't change, and the context engine re-reads
+          the updated session file on each compact() call.
+
+          For context engine plugins that rotate sessions, subsequent passes
+          would use stale session references. This is documented as a known
+          limitation in the risk analysis.
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 1]
+
+================================================================================
+2. ARCHITECTURAL MAPPING (HERMES -> OPENCLAW)
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 2]
+
+================================================================================
+3. PORTING STRATEGY & PRINCIPLES
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 3, Principles P1-P10]
+
+================================================================================
+4. STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 1: Types, Interfaces & Constants
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V4 — see V4 plan Step 1]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 2: Progress Detection & Anti-Thrashing Module
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V4 — see V4 plan Step 2]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 3: Tool Result Pre-Pruning (Compaction-Safeguard Integration)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Add a cheap pre-pruning step before LLM summarization that replaces
+old tool results with compact 1-line summaries. This reduces the input size
+for summary generation, making each compaction pass more effective.
+
+─── FILE: src/agents/agent-hooks/pre-compaction-pruning.ts (NEW)
+
+  Ported from: agent/context_compressor.py lines 990-1150
+  (_prune_old_tool_results)
+
+  Adapts to OpenClaw's AgentMessage type system.
+
+  1. FUNCTION: preCompactionPrune
+
+     [UNCHANGED FROM V4 — signature and purpose]
+
+  2. SUB-PASS 1: Deduplicate identical tool results
+
+     [UNCHANGED FROM V4 — hash-based deduplication]
+
+     Use OpenClaw field names:
+       - message.role === "toolResult" (not "tool")
+       - message.toolCallId (not tool_call_id / tool_use_id)
+       - message.toolName (not looked up from assistant tool_calls)
+       - message.content: (TextContent | ImageContent)[]
+
+  3. SUB-PASS 2: Replace old tool results with 1-line summaries
+
+     [UNCHANGED FROM V4 — per-tool summaries using toolName]
+
+  4. SUB-PASS 3: Truncate large tool call arguments
+
+     CHANGE FROM V4: ToolCall field names and arguments type corrected.
+
+     For AssistantMessage messages BEFORE the prune boundary:
+       - Walk message.content blocks looking for type "toolCall"
+       - ToolCall content block has fields:
+           { type: "toolCall", id: string, name: string,
+             arguments: Record<string, unknown> }
+         NOT { toolCallId, toolName } — those are ToolResultMessage fields.
+
+       - ToolCall.arguments is Record<string, unknown> (a parsed object),
+         NOT a JSON string as in Hermes.
+
+       - Truncation algorithm (adapted from Hermes's string-based approach):
+         a. Estimate serialized size: JSON.stringify(tc.arguments).length
+         b. If estimated size > 500 chars:
+            - Walk the Record's values
+            - For any string value > 200 chars: replace with
+              value.slice(0, 150) + "...[truncated]"
+            - Return a new Record with truncated values
+         c. No JSON parse needed (already an object)
+         d. Preserve object structure (only truncate leaf string values)
+
+       - Clone the entire AssistantMessage and its content array to avoid
+         mutating the original. Produce a new ToolCall block with the
+         truncated arguments Record.
+
+     RATIONALE FOR CHANGE:
+       In Hermes (Python), tool_call.function.arguments is a JSON string.
+       In OpenClaw (TypeScript), ToolCall.arguments is Record<string, unknown>.
+       The truncation logic must work with parsed objects, not strings.
+       JSON.stringify is used only for size estimation, not for data access.
+
+─── FILE: src/agents/agent-hooks/compaction-safeguard.ts (MODIFY)
+
+  Inject pre-pruning at line ~965, AFTER runtime knob resolution and BEFORE
+  the provider path.
+
+  [INJECTION POINT UNCHANGED FROM V4 — verified at line 965]
+
+  ADD after line 964:
+
+    [UNCHANGED FROM V4 — the preCompactionPrune call and logging]
+
+  IMPORT at top of file:
+
+    import { preCompactionPrune } from "./pre-compaction-pruning.js";
+
+  VARIABLE MUTABILITY:
+
+    CHANGE FROM V4: baseMessagesToSummarize is ALREADY declared with `let`
+    at line 884. No change needed.
+
+    V4 incorrectly stated it was `const`. Verified actual declaration:
+      let baseMessagesToSummarize = stripRuntimeContextCustomMessages(
+        preparation.messagesToSummarize,
+      );
+    It is reassigned at line 898 for the branch messages fallback, which is
+    why it was already `let`. The pre-pruning reassignment at line ~965 is
+    compatible with the existing declaration.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 4: Cut Point Enhancement (Message Anchoring)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Enhance findCutPoint() to anchor the last user message and last
+substantive assistant message in the tail. This prevents the "active task
+lost" and "can't see the output" bugs that Hermes resolved.
+
+─── FILE: packages/agent-core/src/harness/compaction/compaction.ts (MODIFY)
+
+  MODIFY: findCutPoint() function (line 388)
+
+  After the existing cut-point selection algorithm (backward token walk),
+  add two anchoring passes:
+
+  CHANGE FROM V4: Property paths corrected to access role and content
+  through entry.message (matching the existing code pattern using
+  (entry.message as HarnessMessage).role).
+
+  1. USER MESSAGE ANCHORING
+
+     // After cut point is selected, ensure the last user message is in the tail.
+     const lastUserIdx = findLastMessageIndex(entries, startIndex, cutIndex,
+       (msg) => msg.role === "user");
+     if (lastUserIdx >= 0 && lastUserIdx < cutIndex) {
+       cutIndex = lastUserIdx;
+     }
+
+  2. ASSISTANT MESSAGE ANCHORING
+
+     // Ensure the last assistant message with visible content is in the tail.
+     const lastAssistantIdx = findLastMessageIndex(entries, startIndex, cutIndex,
+       (msg) => msg.role === "assistant" && hasVisibleContent(msg));
+     if (lastAssistantIdx >= 0 && lastAssistantIdx < cutIndex) {
+       cutIndex = lastAssistantIdx;
+     }
+
+  3. SAFETY FLOOR
+
+     cutIndex = Math.max(cutIndex, startIndex + 1);
+
+  Both anchors are MONOTONIC: the tail can only grow, never shrink.
+  This matches Hermes's behavior exactly.
+
+  ADD HELPERS (file-local, not exported):
+
+     import type { HarnessMessage } from "../types.js";
+     import type { MessageEntry } from "../types.js";
+
+     /**
+      * Find the last message entry matching a predicate, searching backward
+      * from `end` (exclusive) to `start` (inclusive).
+      *
+      * Uses (entry.message as HarnessMessage) to access the role, matching
+      * the existing pattern in findValidCutPoints (line 323).
+      */
+     function findLastMessageIndex(
+       entries: SessionTreeEntry[],
+       start: number,
+       end: number,
+       predicate: (msg: HarnessMessage) => boolean,
+     ): number {
+       for (let i = end - 1; i >= start; i--) {
+         const entry = entries[i];
+         if (entry.type === "message") {
+           const msg = entry.message as HarnessMessage;
+           if (predicate(msg)) return i;
+         }
+       }
+       return -1;
+     }
+
+     /**
+      * Check if a HarnessMessage has visible text content (not just tool
+      * calls or thinking blocks).
+      */
+     function hasVisibleContent(msg: HarnessMessage): boolean {
+       // Access the content field from the underlying message.
+       const content = (msg as any).content;
+       if (!content) return false;
+       if (typeof content === "string") return content.length > 0;
+       if (Array.isArray(content)) {
+         return content.some(
+           (c: any) => c.type === "text" && typeof c.text === "string" && c.text.length > 0,
+         );
+       }
+       return false;
+     }
+
+  PROPERTY PATH VERIFICATION:
+
+    The existing code in findCutPoint (line 431) accesses roles as:
+      cutEntry.type === "message" && cutEntry.message.role === "user"
+
+    The existing code in findValidCutPoints (line 323) accesses roles as:
+      (entry.message as HarnessMessage).role
+
+    Our helpers follow the SAME pattern:
+      entry.type === "message" → entry.message as HarnessMessage → msg.role
+
+    V4's original approach of checking "role" in e && e.role was WRONG
+    because SessionTreeEntry has no direct `role` property. The role lives
+    on the nested `message` field of MessageEntry.
+
+  EXPORT: CutPointResult must be added to agent-core's index.ts exports
+  (done in Step 1) so that callers in the gateway layer can reference it.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 5: Summary Prefix Disambiguation & End Marker
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V4 — see V4 plan Step 5]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 6: Multi-Pass Compaction Loop (Gateway Layer)
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V4 — see V4 plan Step 6]
+
+  ADDITIONAL DESIGN NOTE (per REF-2):
+
+  D10: STALE compactParams ON SESSION ROTATION
+
+       multiPassCompact receives compactParams once (a snapshot of
+       sessionId, sessionKey, sessionFile at call time) and passes the
+       same params to each contextEngine.compact() call. If pass N
+       rotates the session (returns a new sessionId/sessionFile in
+       CompactResult), adoptTranscript updates the run-scope variables,
+       but compactParams retains the stale snapshot for pass N+1.
+
+       For OpenClaw's default IN-PLACE compaction:
+         - sessionId/sessionFile do not change → no issue
+         - contextEngine re-reads the updated session file on each
+           compact() call, seeing the new CompactionEntry from the
+           previous pass → correct behavior
+
+       For CONTEXT ENGINE PLUGINS that rotate sessions:
+         - Subsequent passes would compact the old session → incorrect
+         - Known limitation; such plugins should set maxPasses=1 or
+           implement their own multi-pass logic
+
+       This is acceptable for the MVP because:
+         - In-place compaction is the default (and most common case)
+         - Session rotation is an optional feature used by few plugins
+         - maxPasses=1 provides an escape hatch for rotation plugins
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 7: Embedded Runner Integration (2 Call Sites)
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V4 — see V4 plan Step 7]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 8: Configuration Schema Extension
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V4 — see V4 plan Step 8]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 9: Tests
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V4 — see V4 plan Step 9]
+
+  ADDITIONAL test for Review V4 corrections:
+
+  ─── pre-compaction-pruning.test.ts additions:
+
+    - Sub-pass 3: ToolCall content blocks use id/name fields (not
+      toolCallId/toolName)
+    - Sub-pass 3: ToolCall.arguments truncation works on Record<string, unknown>
+      (walk object values, truncate string leaves)
+    - Sub-pass 3: Non-string values in arguments are preserved unchanged
+    - Sub-pass 3: Nested objects have string values truncated recursively
+
+  ─── compaction.test.ts additions (findCutPoint anchoring):
+
+    - User message anchoring accesses entry.message.role (not entry.role)
+    - Assistant message anchoring accesses entry.message.content
+    - Anchoring correctly finds messages via HarnessMessage cast
+    - hasVisibleContent returns false for assistant messages with only
+      tool calls (no text content)
+
+================================================================================
+5. FILE INVENTORY (NEW & MODIFIED)
+================================================================================
+
+  [UNCHANGED FROM V4 — same file count and locations]
+
+  The only changes are within file CONTENTS, not file locations:
+    - pre-compaction-pruning.ts: ToolCall field names and arguments type fixed
+    - compaction.ts: findCutPoint helpers use correct property paths
+    - compaction-safeguard.ts: No const→let change needed (already let)
+
+================================================================================
+6. DEPENDENCY ANALYSIS
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 6]
+
+================================================================================
+7. RISK ANALYSIS & MITIGATION
+================================================================================
+
+  [ALL RISKS FROM V4 PRESERVED, with these changes:]
+
+  RISK 5 (AbortSignal.any()) DOWNGRADED:
+
+    PREVIOUSLY: Severity Low-Medium
+    NOW: Severity Non-Issue (REMOVED from active risk list)
+
+    OpenClaw targets Node >= 22.19.0 (package.json engines field).
+    AbortSignal.any() has been available since Node 22.10.0 and is
+    already used extensively in the OpenClaw codebase:
+      - manager.turn-runner.ts
+      - agent-tools.abort.ts
+      - provider-transport-fetch.ts
+      - dispatch-from-config.ts
+      - model-pricing-cache.ts
+
+  NEW RISK 9: Stale compactParams on session rotation
+
+    Severity: Low (default case unaffected)
+    Mitigation: Document limitation. Session-rotation plugins should set
+    maxPasses=1 in their configuration. The default in-place compaction
+    is unaffected because sessionId/sessionFile don't change between passes.
+
+================================================================================
+8. INTEGRATION VERIFICATION CHECKLIST
+================================================================================
+
+  [ALL ITEMS FROM V4 PRESERVED]
+
+  ADDITIONAL items for Review V4 corrections:
+
+  [ ] ToolCall content blocks use { id, name, arguments } (not
+      { toolCallId, toolName, arguments })
+  [ ] ToolCall.arguments truncation handles Record<string, unknown>
+      (not JSON string parsing)
+  [ ] findCutPoint anchoring uses (entry.message as HarnessMessage).role
+      (not entry.role or "role" in entry)
+  [ ] hasVisibleContent reads from entry.message.content (not entry.content)
+  [ ] baseMessagesToSummarize is already `let` — no change to declaration
+  [ ] AbortSignal.any() usage matches existing codebase pattern (no guard needed)
+
+================================================================================
+9. LESSONS INCORPORATED FROM ALL PREVIOUS ITERATIONS
+================================================================================
+
+  [ALL 38 ITEMS FROM V4 — L1-L29, V3-1 through V3-6, RV3-1 through RV3-3,
+   V4-1 through V4-9]
+
+  REVIEW V4 ADDITIONAL CORRECTIONS:
+
+  RV4-1: ToolCall field names. V4 used toolCallId/toolName for ToolCall
+         content blocks in assistant messages. Actual ToolCall type has
+         id/name. ToolResultMessage has toolCallId/toolName. These are
+         DIFFERENT types with DIFFERENT field names.
+         FIX: Use id, name for ToolCall; toolCallId, toolName for
+         ToolResultMessage.
+
+  RV4-2: ToolCall.arguments type. V4 assumed arguments is a JSON string
+         (ported directly from Hermes's Python tc.function.arguments).
+         Actual OpenClaw type: Record<string, unknown> (parsed object).
+         FIX: Walk object values instead of JSON parse/re-serialize.
+
+  RV4-3: findCutPoint anchoring property path. V4 checked "role" in entry
+         and entry.role. Actual SessionTreeEntry has no direct role field.
+         MessageEntry has { type: "message"; message: AgentMessage }.
+         Role is at entry.message.role, accessed via HarnessMessage cast
+         (matching the pattern at findValidCutPoints line 323).
+         FIX: Use (entry.message as HarnessMessage).role.
+
+  RV4-4: hasVisibleContent property path. V4 checked entry.content directly.
+         Actual: content is on entry.message.content, not entry.content.
+         The entry only has type/message/id/parentId/timestamp.
+         FIX: Access (entry as MessageEntry).message before checking content.
+
+  RV4-5: baseMessagesToSummarize mutability. V4 said it was `const` needing
+         change to `let`. Actual: already declared with `let` at line 884
+         (reassigned at line 898 for branch messages fallback).
+         FIX: Remove the const→let instruction.
+
+  RV4-6: AbortSignal.any() risk. V4 listed as Low-Medium risk needing
+         Node 20+ check. Actual: OpenClaw targets Node >= 22.19.0 and
+         already uses AbortSignal.any() in 5+ files across the codebase.
+         FIX: Downgrade to non-issue.
+
+  RV4-7: Stale compactParams on session rotation. multiPassCompact passes
+         the same compactParams snapshot to every pass. If a pass rotates
+         the session, subsequent passes use stale references. Not a problem
+         for default in-place compaction (sessionId/file unchanged).
+         FIX: Document as limitation in design decisions (D10) and risk
+         analysis (Risk 9).
+
+================================================================================
+10. IMPLEMENTATION ORDER & DEPENDENCIES
+================================================================================
+
+  [UNCHANGED FROM V4 — see V4 plan Section 10]
+
+================================================================================
+END OF CORRECTED PORTING PLAN (REVIEW V4)
+================================================================================

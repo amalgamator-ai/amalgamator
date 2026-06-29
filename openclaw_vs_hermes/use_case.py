@@ -2,7 +2,7 @@ import os
 
 from common.claude_utils import PipelineStep, claude_run
 
-from agent.agent_prompts import (
+from openclaw_vs_hermes.agent_prompts import (
     create_context_str,
     AnalyzeHermesFeaturesPrompt,
     AnalyzeOpenClawFeaturesPrompt,

@@ -1,0 +1,11 @@
+{
+    "output_dir": "/home/alexm-redhat/code/exper/amalgamator/openclaw_vs_hermes/output_iteration_budget",
+    "openclaw_source_dir": "/home/alexm-redhat/code/exper/openclaw",
+    "openclaw_github_url": "https://github.com/openclaw/openclaw",
+    "pr_url": "https://github.com/openclaw/openclaw/pull/97485",
+    "branch_name": "feat/iteration-budget-agent-loop-safety",
+    "build_command": "npx pnpm install && npx pnpm build",
+    "test_command": "node scripts/run-vitest.mjs run --config test/vitest/vitest.agents-embedded-agent.config.ts --reporter=verbose && node scripts/run-vitest.mjs run --config test/vitest/vitest.unit-fast-fake-timers.config.ts --reporter=verbose",
+    "thinking_mode": "deep",
+    "max_fix_iterations": 3
+}

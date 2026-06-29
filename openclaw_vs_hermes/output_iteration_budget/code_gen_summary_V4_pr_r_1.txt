@@ -1,0 +1,216 @@
+================================================================================
+PR REVIEW ROUND 1 — FIX SUMMARY
+================================================================================
+
+PR:       openclaw/openclaw#97485
+Branch:   feat/iteration-budget-agent-loop-safety
+Feature:  Iteration Budget & Agent Loop Safety
+Round:    1
+Patch:    code_gen_V4_pr_r_1.patch
+
+================================================================================
+1. PR COMMENT ANALYSIS
+================================================================================
+
+Source: ClawSweeper[bot] automated review (2026-06-28T12:16:36Z)
+Total inline comments: 0
+Total review summaries: 0
+Total discussion comments: 1 (containing 3 findings + 1 proof request)
+
+Findings extracted:
+
+  [P1] Honor subagent iteration caps — run.ts:1591
+    Category: Bug fix
+    Priority: Must-fix
+    Status:   FIXED
+
+  [P1] Count each budgeted tool round once — run.ts:1945
+    Category: Bug fix
+    Priority: Must-fix
+    Status:   FIXED
+
+  [P2] Document the new config surface — zod-schema.agent-runtime.ts:77-84
+    Category: Documentation / config contract
+    Priority: Should-fix
+    Status:   FIXED
+
+  [P1] Needs real behavior proof before merge
+    Category: Process / proof request
+    Priority: Informational (outside scope of code fixes)
+    Status:   NOT ADDRESSED (see section 4)
+
+
+================================================================================
+2. CHANGES MADE
+================================================================================
+
+--- FIX 1: Honor subagent iteration caps ---
+  FILE: src/agents/embedded-agent-runner/run.ts
+
+  WHAT WAS REQUESTED:
+    The reviewer found that subagentMaxIterations is accepted in config and
+    defaulted to 50, but the runtime always constructs IterationBudget with
+    maxIterations (default 90). A configured subagent cap is silently ignored.
+
+  WHAT WAS DONE:
+    Added `isSubagentRun` detection using `params.spawnedBy` (non-null when
+    the run is spawned by a parent agent via sessions_spawn). The budget
+    constructor now selects:
+      - subagentMaxIterations (default 50) when isSubagentRun is true
+      - maxIterations (default 90) otherwise
+
+    This matches the Hermes source design where parent agents default to 90
+    iterations and each subagent defaults to 50 (hermes_code_trace.txt §10).
+
+  WHY THIS FIX IS CORRECT:
+    params.spawnedBy is the canonical indicator for subagent sessions in the
+    embedded runner (RunEmbeddedAgentParams.spawnedBy in run/params.ts:83).
+    The field is populated when sessions_spawn creates the run and is null/
+    undefined for top-level parent runs. This aligns with how other subagent-
+    aware features (tool policy, compaction hooks) detect subagent sessions.
+
+
+--- FIX 2: Count each budgeted tool round once ---
+  FILE: src/agents/embedded-agent-runner/run.ts
+
+  WHAT WAS REQUESTED:
+    The reviewer found that the same IterationBudget is consumed twice per
+    tool-calling iteration:
+      1. In the outer run loop (line 1945): iterationBudget.consume()
+      2. In onBeforeToolCallingRound callback (line 2168): iterationBudget.consume()
+    This makes the configured limit effectively halved for tool-using runs.
+
+  WHAT WAS DONE:
+    Removed the outer-loop budget consumption (the 4-line block at lines
+    1941-1946). The onBeforeToolCallingRound callback is now the single
+    canonical consumption point. This means each tool-calling round within
+    the agent-core inner loop consumes exactly one budget unit.
+
+  WHY THIS FIX IS CORRECT:
+    The outer run loop covers retry/recovery iterations (compaction, auth,
+    timeout, empty-response, reasoning-only retries). These are programmatic
+    recovery mechanisms, not user-visible agent iterations. They are already
+    bounded by their own independent limits (MAX_OVERFLOW_COMPACTION_ATTEMPTS,
+    MAX_TIMEOUT_COMPACTION_ATTEMPTS, maxReasoningOnlyRetryAttempts, etc.).
+    In the Hermes source, analogous non-productive iterations (execute_code,
+    compression restarts) are explicitly refunded via budget.refund().
+
+    By making onBeforeToolCallingRound the sole consumption point:
+    - Each tool-calling round = exactly 1 budget unit (no double-counting)
+    - Non-tool administrative retries don't consume budget (they're bounded
+      separately and would be refunded in Hermes anyway)
+    - The configured maxIterations accurately reflects the user-visible limit
+
+    Budget summary attempt correctness is preserved: the refund() at line 3897
+    gives back one unit, and the summary attempt (which should not make tool
+    calls) does not trigger onBeforeToolCallingRound. If the model
+    unexpectedly requests tools during the summary, consume() returns false
+    and the inner loop stops.
+
+
+--- FIX 3: Document the new config surface ---
+  FILES: src/config/schema.help.ts, src/config/schema.labels.ts
+
+  WHAT WAS REQUESTED:
+    The reviewer noted that the iterationBudget config block is added to the
+    runtime schema without matching config help entries, field labels, or
+    docs. Config-contract policy expects schema, metadata, and docs to
+    move together.
+
+  WHAT WAS DONE:
+    Added FIELD_HELP entries (10 keys) in schema.help.ts covering:
+      - agents.defaults.iterationBudget (parent object)
+      - agents.defaults.iterationBudget.enabled
+      - agents.defaults.iterationBudget.maxIterations
+      - agents.defaults.iterationBudget.subagentMaxIterations
+      - agents.defaults.iterationBudget.forceSummaryOnExhaustion
+      - agents.list[].iterationBudget (per-agent override parent)
+      - agents.list[].iterationBudget.enabled
+      - agents.list[].iterationBudget.maxIterations
+      - agents.list[].iterationBudget.subagentMaxIterations
+      - agents.list[].iterationBudget.forceSummaryOnExhaustion
+
+    Added matching FIELD_LABELS entries (10 keys) in schema.labels.ts.
+
+    Both follow the established pattern used by the adjacent runRetries
+    config block (inserted in alphabetical order, same grouping structure).
+
+  WHY THIS FIX IS CORRECT:
+    The schema.help.quality.test.ts test verifies that every FIELD_HELP key
+    has a corresponding FIELD_LABELS entry. Adding both in lockstep satisfies
+    the config-contract parity requirement. Help text describes defaults,
+    behavior, and when each field takes effect. Labels provide short UI
+    display names matching the existing naming convention.
+
+
+================================================================================
+3. FILES MODIFIED
+================================================================================
+
+  1. src/agents/embedded-agent-runner/run.ts
+     - Fix 1: Added isSubagentRun detection, select subagentMaxIterations
+       for subagent sessions
+     - Fix 2: Removed outer-loop budget consumption block
+     Net: +6 lines, -7 lines
+
+  2. src/config/schema.help.ts
+     - Fix 3: Added 10 FIELD_HELP entries for iterationBudget config keys
+     Net: +19 lines
+
+  3. src/config/schema.labels.ts
+     - Fix 3: Added 10 FIELD_LABELS entries for iterationBudget config keys
+     Net: +10 lines
+
+  Total: 3 files, +35 lines, -7 lines
+
+
+================================================================================
+4. COMMENTS NOT ADDRESSED (WITH REASONING)
+================================================================================
+
+  [P1] Needs real behavior proof before merge
+    The reviewer requests "redacted terminal/log/live output showing a real
+    runaway OpenClaw run stopping at the configured budget." This is a process
+    requirement (demonstrating behavior via live output), not a code fix. It
+    requires running a real OpenClaw instance with the budget enabled and
+    capturing output, which is outside the scope of automated code review
+    response. The PR author should provide this proof separately in the PR
+    body or as a comment attachment.
+
+
+================================================================================
+5. BUILD AND TEST RESULTS
+================================================================================
+
+  Build: PASS
+    npx pnpm install — already up to date
+    npx pnpm build — completed successfully (150.6s)
+
+  Test Suite 1: agents-embedded-agent
+    Config: test/vitest/vitest.agents-embedded-agent.config.ts
+    Result: 85 test files, 1551 tests PASSED
+    Duration: 20.84s
+
+  Test Suite 2: unit-fast-fake-timers
+    Config: test/vitest/vitest.unit-fast-fake-timers.config.ts
+    Result: 10 test files, 163 tests PASSED
+    Duration: 3.72s
+
+  No test failures. No regressions introduced by the fixes.
+
+
+================================================================================
+6. PATCH VERSIONING
+================================================================================
+
+  code_gen_review_V3.patch    — Original code generation (plan review V3)
+  code_gen_runtime_V1.patch   — Runtime validation (no changes needed)
+  code_gen_V4_pr_r_1.patch    — THIS PATCH (PR review round 1 fixes)
+
+  The V4 designation continues the code evolution sequence:
+    V1-V3: Plan iterations and code generation
+    V4:    PR review fixes
+
+================================================================================
+END OF SUMMARY
+================================================================================

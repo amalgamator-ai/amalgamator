@@ -1,0 +1,167 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — PORTING PLAN SUMMARY V1
+================================================================================
+
+Date: 2026-06-28
+Iteration: 1 (initial)
+
+================================================================================
+1. WORK PERFORMED TO GENERATE THIS PLAN
+================================================================================
+
+ANALYSIS PHASE:
+
+  1. Hermes Code Trace Analysis (hermes_code_trace.txt, ~1400 lines):
+     - Analyzed all 18 sections of the Hermes multi-pass compaction system
+     - Mapped the five architectural layers (Decision, Multi-Pass Loop,
+       Orchestrator, Core Compressor, Auxiliary LLM)
+     - Identified three trigger paths (post-response, preflight multi-pass,
+       manual /compress)
+     - Traced the multi-pass loop in turn_context.py (lines 384-413):
+       3 passes, 5% progress threshold, anti-thrashing via
+       _ineffective_compression_count
+     - Traced the four-phase compress() method: prune -> boundary ->
+       summary -> assemble
+     - Documented tool result pruning (3 sub-passes: dedup, 1-line
+       summaries, arg truncation)
+     - Documented head/tail protection (protect_first_n with decay,
+       token-budget tail, user/assistant anchoring)
+     - Documented summary prefix disambiguation (REFERENCE ONLY directive,
+       historical section headings, end marker)
+     - Documented the orchestrator, configuration, data models, error
+       handling, and full file inventory
+
+  2. OpenClaw Code Trace Analysis (openclaw_code_trace.txt, ~1282 lines):
+     - Analyzed all 18 sections of OpenClaw's current compaction system
+     - Mapped the three-layer architecture (Agent Core SDK, Gateway/Runner,
+       Context Engine Plugin Interface)
+     - Identified four trigger paths (preemptive, post-turn overflow,
+       timeout-based, manual /compact)
+     - Analyzed the gap: NO multi-pass loop, NO progress detection, NO
+       anti-thrashing, NO tool result 1-line summaries, minimal
+       disambiguation prefix
+     - Catalogued existing strengths to preserve: quality guard, staged
+       summarization, recent turns preservation, context pruning (cache-TTL),
+       workspace context, tool failure extraction, identifier preservation,
+       context engine plugin system, safety timeout (180s)
+     - Documented the session tree model (append-only JSONL with
+       CompactionEntry) and how prepareCompaction() finds the last entry
+     - Completed the gap analysis table (Section 18)
+
+  3. Source Code Verification:
+     - Read actual source files in both repositories to verify code traces
+     - Confirmed Hermes multi-pass loop implementation at turn_context.py
+       lines 384-413
+     - Confirmed _compression_made_progress() at lines 41-61
+     - Confirmed should_compress() anti-thrashing at lines 964-984
+     - Confirmed _prune_old_tool_results() structure at lines 990-1024
+     - Confirmed _summarize_tool_result() at lines 490-528
+     - Confirmed SUMMARY_PREFIX at lines 43-69
+     - Confirmed OpenClaw's shouldCompact() at compaction.ts lines 236-245
+     - Confirmed OpenClaw's compact() at compaction.ts (single-pass)
+     - Confirmed OpenClaw's findCutPoint() structure
+     - Confirmed OpenClaw's retry loop in run.ts with counters
+     - Confirmed OpenClaw's compactContextEngineWithSafetyTimeout wrapper
+     - Confirmed OpenClaw's adoptCompactionTranscript() at run.ts lines
+       1808-1817
+     - Confirmed OpenClaw's CompactResult type with tokensAfter field
+     - Confirmed OpenClaw's estimateContextTokens() function
+     - Confirmed OpenClaw's COMPACTION_SUMMARY_PREFIX minimal format
+
+DESIGN PHASE:
+
+  1. Architectural Mapping:
+     - Decided multi-pass loop belongs in the GATEWAY LAYER (src/agents/),
+       not in agent-core, to preserve agent-core's stateless single-pass
+       contract and maintain portability across hosts
+     - Mapped each Hermes component to its OpenClaw injection point
+     - Identified that tool result pre-pruning should be a new hook in
+       src/agents/agent-hooks/ (consistent with context-pruning pattern)
+
+  2. Integration Strategy:
+     - Designed the multi-pass loop to WRAP the existing single-pass
+       infrastructure without modifying its contract
+     - Preserved all existing OpenClaw strengths (quality guard, staged
+       summarization, etc.) by running them per-pass
+     - Designed CompactionProgressTracker as a session-scoped state object
+       attached to the run() function scope
+
+  3. Type Design:
+     - Designed MultiPassCompactionState, MultiPassCompactionResult, and
+       CompactionProgressTrackerState interfaces
+     - Extended CompactionSettings with optional maxPasses and
+       progressThreshold fields (backward compatible)
+
+  4. Risk Analysis:
+     - Identified 7 risks with probability/impact ratings and mitigations
+     - Key risk: timeout exhaustion across passes (mitigated by shared
+       timeout budget and minimum 10s per-pass reservation)
+
+PLAN STRUCTURE:
+
+  The plan is organized into 9 incremental steps:
+    Step 1: Types, Interfaces & Constants (foundation)
+    Step 2: Progress Detection & Anti-Thrashing Module
+    Step 3: Tool Result Pre-Pruning (1-line summaries, dedup, arg truncation)
+    Step 4: Cut Point Enhancement (message anchoring)
+    Step 5: Summary Prefix Disambiguation & End Marker
+    Step 6: Multi-Pass Compaction Loop (core implementation)
+    Step 7: Gateway Integration (wire into run loop)
+    Step 8: Configuration Schema Extension
+    Step 9: Tests
+
+  Steps 1-5 are independent leaf modules that can be built and tested in
+  isolation. Steps 6-7 integrate them. Steps 8-9 finalize configuration
+  and testing.
+
+================================================================================
+2. ITERATION EVOLUTION
+================================================================================
+
+ITERATION 1 (V1) — Initial Plan:
+
+  This is the initial iteration. The plan was generated from a clean
+  analysis of both codebases with no prior iteration to build upon.
+
+  KEY DECISIONS MADE IN V1:
+
+  D1. GATEWAY LAYER PLACEMENT: The multi-pass loop lives in
+      src/agents/multi-pass-compaction.ts, not in agent-core. This
+      preserves agent-core's portability contract and follows OpenClaw's
+      "core provides primitives, gateway provides policies" convention.
+
+  D2. EXTEND, DON'T REPLACE: No existing OpenClaw compaction code is
+      deleted or rewritten. The multi-pass loop wraps around the existing
+      single-pass infrastructure.
+
+  D3. SHARED TIMEOUT: All passes share one 180s timeout budget, preventing
+      multi-pass from exceeding the safety timeout. Each pass gets the
+      remaining budget, not a fresh timeout.
+
+  D4. SESSION TREE COMPATIBILITY: Each pass appends a CompactionEntry to
+      the session tree. This is safe because prepareCompaction() always
+      finds the LAST compaction entry and builds from there.
+
+  D5. PRE-PRUNING ONCE: Tool result pre-pruning runs once before the first
+      pass, not per-pass, because subsequent passes operate on already-
+      pruned content.
+
+  D6. TOOL NAME ADAPTATION: The summarizeToolResult() function uses
+      OpenClaw's tool names (Bash, Read, Write, Edit, Grep, Glob) instead
+      of Hermes's (terminal, read_file, write_file, patch, search_files).
+
+  D7. BACKWARD COMPATIBLE CONFIG: All new configuration fields are optional
+      with defaults that enable multi-pass. Setting maxPasses=1 or
+      multiPass.enabled=false reverts to single-pass behavior.
+
+  SCOPE:
+  - 6 new files, 8 modified files
+  - 1 new external dependency: node:crypto (built-in, for MD5 hashing)
+  - 0 new npm dependencies
+  - Estimated implementation effort: 3-5 days
+
+  NO PRIOR ITERATIONS TO COMPARE AGAINST.
+
+================================================================================
+END OF SUMMARY V1
+================================================================================

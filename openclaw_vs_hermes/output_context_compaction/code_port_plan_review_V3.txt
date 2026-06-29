@@ -1,0 +1,729 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — CORRECTED PORTING PLAN (REVIEW V3)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python)
+Target: OpenClaw (TypeScript)
+Complexity: MEDIUM
+Date: 2026-06-28
+Revision: Review V3 (corrected from V3)
+
+================================================================================
+REVIEW CHANGE LOG (V3 -> Review V3)
+================================================================================
+
+  This plan corrects 3 issues found during code-level verification of the
+  V3 plan against the actual OpenClaw source code. Fixes:
+
+  FIX-1:  CompactResult TYPE MISMATCH resolved. Two DIFFERENT types named
+          "CompactResult" exist in the codebase:
+
+            (A) Harness CompactResult (packages/agent-core/src/harness/types.ts:733)
+                Fields: summary, firstKeptEntryId, tokensBefore, details
+                Purpose: The result data that goes into a CompactionEntry
+                         in the session tree.
+
+            (B) Context Engine CompactResult (src/context-engine/types.ts:126)
+                Fields: ok, compacted, reason?, result? { summary?,
+                        firstKeptEntryId?, tokensBefore, tokensAfter?,
+                        details?, sessionId?, sessionFile? }
+                Purpose: The return type of ContextEngine.compact() and
+                         compactContextEngineWithSafetyTimeout().
+
+          V3 defined MultiPassCompactionResult.lastCompactResult in
+          agent-core's compaction-progress.ts with:
+            import type { CompactResult } from "../types.js";
+          This imports the HARNESS CompactResult (A).
+
+          But multiPassCompact() in the gateway layer works exclusively
+          with the CONTEXT ENGINE CompactResult (B) — it checks .ok,
+          .compacted, accesses .result?.tokensAfter, and passes results
+          to adoptCompactionTranscript() which expects
+          Awaited<ReturnType<typeof contextEngine.compact>>.
+
+          These types are structurally INCOMPATIBLE:
+            - (A) has .summary at top level; (B) has .ok at top level
+            - (A) has no .ok or .compacted fields
+            - (B) nests summary inside .result?
+
+          Assigning a context-engine CompactResult to a field typed as
+          harness CompactResult would cause a TypeScript compilation error.
+
+          FIX: Move MultiPassCompactionResult to the gateway layer's
+          multi-pass-compaction.ts, where it can correctly import the
+          context-engine CompactResult type. MultiPassCompactionState
+          (which has NO external type dependencies) stays in agent-core.
+          Remove MultiPassCompactionResult from agent-core's index.ts
+          exports — callers (run.ts) get it from the gateway import.
+
+  FIX-2:  Variable scoping for timeoutCompactResult corrected. The
+          existing code declares timeoutCompactResult with `let` OUTSIDE
+          the try-catch so both the try body and catch body can assign it:
+
+            let timeoutCompactResult: CompactResult;
+            try {
+              timeoutCompactResult = await compactContextEngine...(...);
+            } catch (compactErr) {
+              timeoutCompactResult = { ok: false, compacted: false, ... };
+            }
+            // use timeoutCompactResult below
+
+          V3's replacement uses `const` INSIDE the try block:
+            const timeoutMultiPassResult = await multiPassCompact({...});
+            const timeoutCompactResult = ...;
+
+          This breaks: if multiPassCompact unexpectedly throws, the catch
+          block tries to assign timeoutCompactResult which isn't declared
+          in its scope (it's const-scoped inside the try).
+
+          FIX: Keep timeoutMultiPassResult as const inside the try, but
+          assign to the existing `let timeoutCompactResult` variable
+          (already declared before the try-catch). Same fix for the
+          effectiveness tracking — keep it inside the try.
+
+  FIX-3:  Agent-core index.ts exports corrected. Since
+          MultiPassCompactionResult moves to the gateway layer, remove
+          it from agent-core exports. Only export types/classes that
+          belong in agent-core:
+            - MultiPassCompactionState (no external deps)    KEEP
+            - CompactionProgressTracker                      KEEP
+            - compactionMadeProgress                         KEEP
+            - Constants (MAX_COMPACTION_PASSES, etc.)         KEEP
+            - CompactionProgressTrackerState                 KEEP
+            - MultiPassCompactionResult                      REMOVE
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 1]
+
+================================================================================
+2. ARCHITECTURAL MAPPING (HERMES -> OPENCLAW)
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 2]
+
+================================================================================
+3. PORTING STRATEGY & PRINCIPLES
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 3, Principles P1-P9]
+
+  ADDENDUM: Principle P10 added for CompactResult disambiguation:
+
+  P10 DISTINGUISH THE TWO CompactResult TYPES
+      OpenClaw has TWO incompatible types named "CompactResult":
+
+        (A) Harness CompactResult (packages/agent-core/src/harness/types.ts:733)
+            = { summary, firstKeptEntryId, tokensBefore, details? }
+            Used in CompactionEntry storage.
+
+        (B) Context Engine CompactResult (src/context-engine/types.ts:126)
+            = { ok, compacted, reason?, result?: { tokensBefore,
+                tokensAfter?, sessionId?, sessionFile?, ... } }
+            Returned by ContextEngine.compact() and by
+            compactContextEngineWithSafetyTimeout().
+
+      The multi-pass system works with type (B) exclusively. Any code
+      that crosses the agent-core / gateway boundary must reference
+      the correct variant. Types that include CompactResult as a field
+      MUST live in the same layer as their CompactResult import.
+
+================================================================================
+4. STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 1: Types, Interfaces & Constants
+────────────────────────────────────────────────────────────────────────────────
+
+  CHANGE FROM V3: MultiPassCompactionResult REMOVED from this file.
+  It moves to multi-pass-compaction.ts in the gateway layer (Step 6)
+  because it contains a lastCompactResult field typed as the
+  context-engine CompactResult, which agent-core cannot import.
+
+─── FILE: packages/agent-core/src/harness/compaction/compaction-progress.ts (NEW)
+
+  Create this module with:
+
+  1. CONSTANTS:
+
+     [UNCHANGED FROM V3 — MAX_COMPACTION_PASSES, PROGRESS_THRESHOLD,
+      INEFFECTIVE_SAVINGS_THRESHOLD, MAX_INEFFECTIVE_COMPRESSIONS,
+      DEFAULT_COMPACTION_TIMEOUT_MS]
+
+  2. INTERFACE: MultiPassCompactionState
+
+     [UNCHANGED FROM V3 — this type has NO external type dependencies
+      (only primitives), so it correctly belongs in agent-core]
+
+  3. INTERFACE: MultiPassCompactionResult
+
+     REMOVED FROM THIS FILE. See Step 6 for its new location in the
+     gateway layer (src/agents/multi-pass-compaction.ts).
+
+     RATIONALE: MultiPassCompactionResult.lastCompactResult must be
+     typed as the context-engine CompactResult (the one with .ok,
+     .compacted, .result?.tokensAfter, etc.). agent-core cannot import
+     from src/context-engine/types.ts — that would be a cross-package
+     dependency violation. The gateway layer CAN import from both
+     agent-core and context-engine.
+
+  4. INTERFACE: CompactionProgressTrackerState
+
+     [UNCHANGED FROM V3 — only primitive fields, no CompactResult dep]
+
+─── FILE: packages/agent-core/src/harness/compaction/compaction.ts (MODIFY)
+
+  [UNCHANGED FROM V3 — CompactionSettings extension, defaults]
+
+─── FILE: packages/agent-core/src/index.ts (MODIFY)
+
+  CHANGE FROM V3: MultiPassCompactionResult REMOVED from exports.
+
+  Add new exports:
+
+    export {
+      // ... existing exports ...
+      CompactionProgressTracker,             // NEW (from Step 2)
+      compactionMadeProgress,                // NEW (from Step 2)
+      MAX_COMPACTION_PASSES,                 // NEW
+      PROGRESS_THRESHOLD,                    // NEW
+      INEFFECTIVE_SAVINGS_THRESHOLD,         // NEW
+      MAX_INEFFECTIVE_COMPRESSIONS,          // NEW
+      DEFAULT_COMPACTION_TIMEOUT_MS,         // NEW
+      type MultiPassCompactionState,         // NEW
+      // MultiPassCompactionResult REMOVED — lives in gateway layer
+      type CompactionProgressTrackerState,   // NEW
+    } from "./harness/compaction/compaction-progress.js";
+
+  Add CutPointResult to existing compaction.ts exports (for Step 4):
+    export {
+      // ... existing exports ...
+      type CutPointResult,                   // NEW
+    } from "./harness/compaction/compaction.js";
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 2: Progress Detection & Anti-Thrashing Module
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V3 — compactionMadeProgress(), CompactionProgressTracker]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 3: Tool Result Pre-Pruning (Compaction-Safeguard Integration)
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V3 — pre-compaction-pruning.ts, injection at line ~965,
+   sub-passes 1-3, compaction-safeguard.ts modification]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 4: Cut Point Enhancement (Message Anchoring)
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V3 — findCutPoint() anchoring, CutPointResult extension]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 5: Summary Prefix Disambiguation & End Marker
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V3 — COMPACTION_SUMMARY_PREFIX_ENHANCED,
+   COMPACTION_SUMMARY_END_MARKER, convertToLlm modification]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 6: Multi-Pass Compaction Loop (Gateway Layer)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Implement the core multi-pass compaction loop in the gateway
+layer, wrapping the existing single-pass compaction with iterative
+progress checks.
+
+This is the CENTRAL STEP of the port.
+
+─── FILE: src/agents/multi-pass-compaction.ts (NEW)
+
+  Ported from: agent/turn_context.py lines 384-413 (multi-pass loop),
+  agent/conversation_compression.py compress_context() orchestration.
+
+  1. TYPE: CompactionPassParams
+
+     [UNCHANGED FROM V3 — derived from ContextEngine["compact"]]
+
+  2. INTERFACE: MultiPassCompactionResult (MOVED HERE from agent-core)
+
+     CHANGE FROM V3: This interface now lives in the GATEWAY layer
+     (this file), NOT in agent-core's compaction-progress.ts.
+
+     import type { CompactResult } from "../context-engine/types.js";
+     import type { MultiPassCompactionState } from "@openclaw/agent-core";
+
+     /**
+      * Result of a multi-pass compaction invocation.
+      *
+      * Lives in the gateway layer (not agent-core) because
+      * lastCompactResult is typed as the context-engine CompactResult,
+      * which is only importable from the gateway layer.
+      */
+     export interface MultiPassCompactionResult {
+       /** All per-pass diagnostic states. */
+       passes: MultiPassCompactionState[];
+       /** Total passes executed. */
+       totalPasses: number;
+       /** Final token count after all passes. */
+       finalTokens: number;
+       /** Whether compaction brought context below the threshold. */
+       metThreshold: boolean;
+       /** Reason the loop stopped. */
+       stopReason:
+         | "threshold_met"
+         | "no_progress"
+         | "max_passes"
+         | "timeout"
+         | "aborted"
+         | "anti_thrash";
+       /** Total elapsed time across all passes in ms. */
+       totalElapsedMs: number;
+       /**
+        * The CompactResult from the last successful pass.
+        * This is the CONTEXT ENGINE CompactResult (with .ok, .compacted,
+        * .result?.tokensAfter, .result?.sessionId, etc.).
+        * Callers use this for post-loop lifecycle (token tracking, hooks).
+        */
+       lastCompactResult?: CompactResult;
+     }
+
+     CompactResult IMPORT VERIFICATION:
+       - src/agents/multi-pass-compaction.ts imports from
+         "../context-engine/types.js"
+       - This resolves to src/context-engine/types.ts
+       - This is the context-engine CompactResult with:
+           ok: boolean
+           compacted: boolean
+           reason?: string
+           result?: { tokensBefore, tokensAfter?, sessionId?, sessionFile?, ... }
+       - This matches what contextEngine.compact() returns
+       - This matches what adoptCompactionTranscript() expects
+         (typed as Awaited<ReturnType<typeof contextEngine.compact>>)
+       - This matches the existing compactContextEngineWithSafetyTimeout
+         return type (imported from the same context-engine/types.js)
+
+  3. TYPE: MultiPassCompactParams
+
+     [UNCHANGED FROM V3 — uses context-engine CompactResult correctly]
+
+     VERIFICATION: The adoptTranscript callback type:
+       adoptTranscript: (result: CompactResult) => void;
+     uses the context-engine CompactResult imported at the top of the
+     file. This matches adoptCompactionTranscript's parameter type in
+     run.ts (Awaited<ReturnType<typeof contextEngine.compact>>). CORRECT.
+
+  4. FUNCTION: multiPassCompact()
+
+     [UNCHANGED FROM V3 — top-level imports, anti-thrashing gate,
+      per-pass lifecycle, progress detection, buildResult helper]
+
+     VERIFICATION OF shouldCompact IMPORT:
+       import { shouldCompact } from "@openclaw/agent-core";
+     This is a TOP-LEVEL STATIC import. Verified: OpenClaw has NO
+     precedent for dynamic imports of @openclaw/agent-core. CORRECT.
+
+  5. HELPER: buildResult()
+
+     CHANGE FROM V3: Return type now references the gateway-local
+     MultiPassCompactionResult (defined in this same file), NOT the
+     agent-core version. Since both the type definition and the function
+     are in the same file, the types are trivially compatible.
+
+     function buildResult(
+       passes: MultiPassCompactionState[],
+       lastCompactResult: CompactResult | undefined,
+       stopReason: MultiPassCompactionResult["stopReason"],
+       startTime: number,
+     ): MultiPassCompactionResult {
+       const lastPass = passes[passes.length - 1];
+       const finalTokens = lastPass?.tokensAfter ?? 0;
+       return {
+         passes,
+         totalPasses: passes.length,
+         finalTokens,
+         metThreshold: stopReason === "threshold_met",
+         stopReason,
+         totalElapsedMs: Date.now() - startTime,
+         lastCompactResult,
+       };
+     }
+
+     TYPE CONSISTENCY CHECK:
+       - `lastCompactResult` parameter: CompactResult from context-engine ✓
+       - Return type MultiPassCompactionResult.lastCompactResult:
+         CompactResult from context-engine (same file) ✓
+       - No cross-package type mismatch ✓
+
+─── KEY DESIGN DECISIONS:
+
+  [UNCHANGED FROM V3 — D1 through D9]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 7: Embedded Runner Integration (2 Call Sites)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Wire the multi-pass loop into OpenClaw's compaction trigger
+paths in the embedded runner.
+
+─── FILE: src/agents/embedded-agent-runner/run.ts (MODIFY)
+
+  VERIFIED DETAILS:
+  [UNCHANGED FROM V3 — all line numbers and details verified]
+
+  1. ADD IMPORTS:
+
+     CHANGE FROM V3: MultiPassCompactionResult is now imported from the
+     gateway layer, not from agent-core.
+
+     import {
+       multiPassCompact,
+       type MultiPassCompactionResult,
+     } from "../multi-pass-compaction.js";
+     import {
+       CompactionProgressTracker,
+       DEFAULT_COMPACTION_SETTINGS,
+     } from "@openclaw/agent-core";
+
+  2. INSTANTIATE TRACKER:
+
+     [UNCHANGED FROM V3]
+
+  3. DEFINE LIFECYCLE CALLBACKS:
+
+     [UNCHANGED FROM V3]
+
+  ──── CALL SITE 1: TIMEOUT RECOVERY PATH (line ~2503) ────────────────────
+
+  CHANGE FROM V3: Variable scoping fixed. Use assignment to the
+  existing `let timeoutCompactResult` variable (declared before the
+  try-catch), NOT a new `const` declaration inside the try block.
+
+  EXISTING CODE STRUCTURE (verified):
+
+    let timeoutCompactResult: CompactResult;   // declared before try
+    // ... (before-hook at line 2447, runtime context build 2449-2497)
+    try {
+      timeoutCompactResult = await compactContextEngineWithSafetyTimeout(
+        contextEngine, { ... }, resolveCompactionTimeoutMs(...), ...
+      );
+    } catch (compactErr) {
+      timeoutCompactResult = { ok: false, compacted: false, reason: ... };
+    }
+    // ... post-compaction code uses timeoutCompactResult
+
+  REPLACEMENT (preserving try-catch structure and variable scope):
+
+    let timeoutCompactResult: CompactResult;   // KEEP existing let
+    // ... (before-hook stays at line 2447, runtime context build untouched)
+    try {
+      // REPLACE the compactContextEngineWithSafetyTimeout call:
+      const timeoutMultiPassResult = await multiPassCompact({
+        contextEngine,
+        compactParams: {
+          sessionId: activeSessionId,
+          sessionKey: params.sessionKey,
+          sessionFile: activeSessionFile,
+          tokenBudget: ctxInfo.tokens,
+          force: true,
+          compactionTarget: "budget",
+          runtimeContext: timeoutCompactionRuntimeContext,
+          runtimeSettings: buildEmbeddedContextEngineRuntimeSettings({
+            tokenBudget: ctxInfo.tokens,
+          }),
+        },
+        settings: {
+          ...DEFAULT_COMPACTION_SETTINGS,
+          maxPasses: resolveMaxPasses(params.config),
+          progressThreshold: resolveProgressThreshold(params.config),
+        },
+        contextWindow: ctxInfo.tokens,
+        tracker: compactionProgressTracker,
+        adoptTranscript: multiPassAdoptTranscript,
+        timeoutMs: resolveCompactionTimeoutMs(params.config),
+        abortSignal: params.abortSignal,
+        logger: log,
+      });
+
+      // Map to CompactResult for existing post-compaction code
+      // ASSIGN to existing `let` variable (not const):
+      timeoutCompactResult =
+        timeoutMultiPassResult.lastCompactResult ?? {
+          ok: false,
+          compacted: false,
+          reason: timeoutMultiPassResult.stopReason,
+        };
+
+      // Track overall effectiveness (inside try, before catch)
+      if (timeoutMultiPassResult.totalPasses > 0) {
+        const firstPass = timeoutMultiPassResult.passes[0];
+        compactionProgressTracker.recordCompaction(
+          firstPass?.tokensBefore ?? 0,
+          timeoutMultiPassResult.finalTokens,
+        );
+      }
+    } catch (compactErr) {
+      // KEEP existing catch block unchanged — acts as safety net
+      // if multiPassCompact itself throws unexpectedly.
+      timeoutCompactResult = {
+        ok: false,
+        compacted: false,
+        reason: String(compactErr),
+      };
+    }
+
+  WHY THIS FIX MATTERS:
+    - timeoutCompactResult is used AFTER the try-catch (by
+      runOwnsCompactionAfterHook, lastCompactionTokensAfter, etc.)
+    - It must be accessible in both the try and catch scopes
+    - Declaring it with `const` inside the try would make it
+      inaccessible to the catch block and to post-try-catch code
+    - The existing `let` declaration ensures both paths can assign it
+
+  CHANGES TO EXISTING POST-COMPACTION CODE (lines 2531-2554):
+
+    [UNCHANGED FROM V3:
+     REMOVE: adoptCompactionTranscript at line 2531
+     PRESERVE: runOwnsCompactionAfterHook at line 2533
+     PRESERVE: lastCompactionTokensAfter update at line 2541
+     PRESERVE: runPostCompactionSideEffects at lines 2544-2549
+     PRESERVE: Post-compaction guard arming and continue]
+
+  ──── CALL SITE 2: OVERFLOW / PREEMPTIVE RECOVERY PATH (line ~2707) ──────
+
+  CHANGE FROM V3: Same variable scoping fix applied. The existing code
+  uses `compactResult` which is declared before the try-catch.
+
+  EXISTING CODE STRUCTURE (verified):
+
+    // compactResult is a let variable declared earlier in the run scope
+    try {
+      compactResult = await compactContextEngineWithSafetyTimeout(
+        contextEngine, { ... }, resolveCompactionTimeoutMs(...), ...
+      );
+      if (compactResult.ok && compactResult.compacted) {
+        adoptCompactionTranscript(compactResult);
+        await runContextEngineMaintenance({ ... });
+      }
+    } catch (compactErr) {
+      compactResult = { ok: false, compacted: false, reason: ... };
+    }
+
+  REPLACEMENT (preserving try-catch structure and variable scope):
+
+    try {
+      const overflowMultiPassResult = await multiPassCompact({
+        contextEngine,
+        compactParams: {
+          sessionId: activeSessionId,
+          sessionKey: params.sessionKey,
+          sessionFile: activeSessionFile,
+          tokenBudget: ctxInfo.tokens,
+          ...(overflowTokenCountForCompaction !== undefined
+            ? { currentTokenCount: overflowTokenCountForCompaction }
+            : {}),
+          force: true,
+          compactionTarget: "budget",
+          runtimeContext: overflowCompactionRuntimeContext,
+          runtimeSettings: overflowCompactionRuntimeSettings,
+        },
+        settings: {
+          ...DEFAULT_COMPACTION_SETTINGS,
+          maxPasses: resolveMaxPasses(params.config),
+          progressThreshold: resolveProgressThreshold(params.config),
+        },
+        contextWindow: ctxInfo.tokens,
+        tracker: compactionProgressTracker,
+        adoptTranscript: multiPassAdoptTranscript,
+        runMaintenance: createMultiPassMaintenance(
+          overflowCompactionRuntimeContext,
+          overflowCompactionRuntimeSettings,
+        ),
+        timeoutMs: resolveCompactionTimeoutMs(params.config),
+        abortSignal: params.abortSignal,
+        logger: log,
+      });
+
+      // ASSIGN to existing `let compactResult` (not const):
+      compactResult = overflowMultiPassResult.lastCompactResult ?? {
+        ok: false,
+        compacted: false,
+        reason: overflowMultiPassResult.stopReason,
+      };
+
+      // Track overall effectiveness
+      if (overflowMultiPassResult.totalPasses > 0) {
+        const firstPass = overflowMultiPassResult.passes[0];
+        compactionProgressTracker.recordCompaction(
+          firstPass?.tokensBefore ?? 0,
+          overflowMultiPassResult.finalTokens,
+        );
+      }
+
+      // adoptCompactionTranscript + runContextEngineMaintenance already
+      // called per-pass by multiPassCompact -- remove lines 2726-2737
+    } catch (compactErr) {
+      // KEEP existing catch block unchanged
+      compactResult = {
+        ok: false,
+        compacted: false,
+        reason: String(compactErr),
+      };
+    }
+
+  CHANGES TO EXISTING POST-COMPACTION CODE:
+
+    [UNCHANGED FROM V3:
+     REMOVE: adoptCompactionTranscript at line 2726
+     REMOVE: runContextEngineMaintenance at lines 2727-2737
+     REMOVE: adoptCompactionTranscript at line 2768
+     PRESERVE: Catch block
+     PRESERVE: runOwnsCompactionAfterHook at line 2749
+     PRESERVE: isNoRealConversationCompactionNoop handling
+     PRESERVE: lastCompactionTokensAfter update at line 2774
+     PRESERVE: Post-compaction truncation at lines 2776+]
+
+  4-6: [UNCHANGED FROM V3 — config helpers, conditional, session reset]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 8: Configuration Schema Extension
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V3]
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 9: Tests
+────────────────────────────────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V3]
+
+  ADDITIONAL tests for Review V3 corrections:
+
+  ─── multi-pass-compaction.test.ts additions:
+
+    - MultiPassCompactionResult.lastCompactResult has context-engine
+      CompactResult shape (has .ok, .compacted, .result?.tokensAfter)
+    - NOT harness CompactResult shape (no top-level .summary field)
+    - buildResult returns compatible type when lastCompactResult is
+      a context-engine CompactResult
+
+  ─── Integration test additions:
+
+    - Timeout path: timeoutCompactResult accessible in catch block
+      (variable scoping test)
+    - Overflow path: compactResult accessible in catch block
+    - Both paths: existing catch block sets { ok: false, compacted: false }
+      correctly when multiPassCompact throws
+
+================================================================================
+5. FILE INVENTORY (NEW & MODIFIED)
+================================================================================
+
+  CHANGE FROM V3: Same file count, but the content split is adjusted.
+
+NEW FILES (6):
+  packages/agent-core/src/harness/compaction/compaction-progress.ts
+    -> Constants, MultiPassCompactionState, CompactionProgressTrackerState
+    -> compactionMadeProgress(), CompactionProgressTracker
+    -> NOTE: MultiPassCompactionResult NOT HERE (moved to gateway)
+  packages/agent-core/src/harness/compaction/compaction-progress.test.ts
+  src/agents/multi-pass-compaction.ts
+    -> MultiPassCompactionResult (MOVED HERE from agent-core)
+    -> multiPassCompact(), buildResult()
+  src/agents/multi-pass-compaction.test.ts
+  src/agents/agent-hooks/pre-compaction-pruning.ts
+  src/agents/agent-hooks/pre-compaction-pruning.test.ts
+
+MODIFIED FILES (9):
+  [UNCHANGED FROM V3, except for the index.ts export adjustment]
+
+  packages/agent-core/src/index.ts
+    -> Export new types EXCEPT MultiPassCompactionResult
+    -> Export CutPointResult from compaction.ts
+
+  [All other modified files unchanged from V3]
+
+================================================================================
+6. DEPENDENCY ANALYSIS
+================================================================================
+
+  [UNCHANGED FROM V3]
+
+  ADDITIONAL CLARIFICATION on CompactResult imports:
+
+  IMPORT MAP (which CompactResult, from where):
+
+    compaction-progress.ts (agent-core):
+      - Does NOT import CompactResult at all (no need after FIX-1)
+
+    multi-pass-compaction.ts (gateway):
+      - import type { CompactResult } from "../context-engine/types.js"
+      - This is the CONTEXT ENGINE CompactResult
+      - Used in: MultiPassCompactionResult.lastCompactResult,
+        multiPassCompact() internal state, buildResult() params
+
+    run.ts (gateway):
+      - Already imports CompactResult for existing compaction code
+      - The CompactResult used for timeoutCompactResult and compactResult
+        variables is the CONTEXT ENGINE variant (same as what
+        compactContextEngineWithSafetyTimeout returns)
+      - No import changes needed — types already compatible
+
+================================================================================
+7. RISK ANALYSIS & MITIGATION
+================================================================================
+
+  [UNCHANGED FROM V3 — all 8 risks with mitigations]
+
+================================================================================
+8. INTEGRATION VERIFICATION CHECKLIST
+================================================================================
+
+  [ALL ITEMS FROM V3]
+
+  ADDITIONAL items for Review V3 corrections:
+
+  [ ] MultiPassCompactionResult is in multi-pass-compaction.ts (gateway)
+      NOT in compaction-progress.ts (agent-core)
+  [ ] MultiPassCompactionResult.lastCompactResult uses context-engine
+      CompactResult (has .ok, .compacted, .result?)
+  [ ] MultiPassCompactionResult is NOT exported from agent-core index.ts
+  [ ] timeoutCompactResult uses `let` before try-catch (not const inside)
+  [ ] compactResult (overflow) uses existing `let` (not const inside try)
+  [ ] Both catch blocks remain functional after replacement
+  [ ] No cross-package imports from agent-core to context-engine
+
+================================================================================
+9. LESSONS INCORPORATED FROM ALL PREVIOUS ITERATIONS
+================================================================================
+
+  [ALL 29 ITEMS FROM V3 — L1 through L29, V3-1 through V3-6]
+
+  REVIEW V3 ADDITIONAL CORRECTIONS:
+
+  RV3-1: CompactResult type mismatch. Two incompatible types share the
+         name "CompactResult":
+           (A) Harness (types.ts:733): { summary, firstKeptEntryId, ... }
+           (B) Context Engine (context-engine/types.ts:126): { ok, compacted, ... }
+         V3 put MultiPassCompactionResult in agent-core with import from
+         (A), but multiPassCompact works with (B). Compilation would fail.
+         FIX: Move MultiPassCompactionResult to gateway layer.
+
+  RV3-2: Variable scoping for timeoutCompactResult. V3 used `const`
+         inside try block; existing code uses `let` outside try-catch
+         so both try and catch can assign. Using const breaks the catch
+         path and post-try-catch usage.
+         FIX: Assign to existing `let` variable, use `const` only for
+         the intermediate multiPassResult.
+
+  RV3-3: Agent-core index.ts export list adjusted to remove
+         MultiPassCompactionResult (now in gateway layer).
+
+================================================================================
+END OF CORRECTED PORTING PLAN (REVIEW V3)
+================================================================================

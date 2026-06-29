@@ -1,0 +1,332 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — REVIEW SUMMARY V3
+================================================================================
+
+Date: 2026-06-28
+Review of: code_port_plan_V3.txt (Iteration 3)
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+3 issues were found during code-level verification of the V3 plan against
+the actual OpenClaw source code. Issues are grouped by severity.
+
+──── SIGNIFICANT ISSUE (1) — Would cause TypeScript compilation failure ──────
+
+ISSUE #1: CompactResult TYPE MISMATCH
+
+  Affected: Step 1 (MultiPassCompactionResult definition in agent-core)
+            Step 6 (multiPassCompact usage of CompactResult in gateway)
+
+  What V3 says:
+    In compaction-progress.ts (agent-core):
+      import type { CompactResult } from "../types.js";
+      export interface MultiPassCompactionResult {
+        ...
+        lastCompactResult?: CompactResult;
+      }
+
+    In multi-pass-compaction.ts (gateway):
+      import type { CompactResult } from "../context-engine/types.js";
+      let lastCompactResult: CompactResult | undefined;
+
+  What's wrong: The codebase has TWO types named "CompactResult":
+
+    (A) Harness CompactResult (packages/agent-core/src/harness/types.ts:733)
+        interface CompactResult {
+          summary: string;
+          firstKeptEntryId: string;
+          tokensBefore: number;
+          details?: unknown;
+        }
+
+    (B) Context Engine CompactResult (src/context-engine/types.ts:126)
+        type CompactResult = {
+          ok: boolean;
+          compacted: boolean;
+          reason?: string;
+          result?: {
+            summary?: string;
+            firstKeptEntryId?: string;
+            tokensBefore: number;
+            tokensAfter?: number;
+            sessionId?: string;
+            sessionFile?: string;
+            details?: unknown;
+          };
+        };
+
+    The import in compaction-progress.ts ("../types.js") resolves to (A).
+    The import in multi-pass-compaction.ts ("../context-engine/types.js")
+    resolves to (B).
+
+    These types are STRUCTURALLY INCOMPATIBLE:
+      - (A) has .summary at the top level; (B) has .ok at the top level
+      - (A) has no .ok or .compacted fields
+      - (B) nests .summary inside .result?
+
+    The multiPassCompact function checks .ok, .compacted, accesses
+    .result?.tokensAfter — all fields from type (B). It assigns the
+    result to lastCompactResult. The buildResult helper returns
+    MultiPassCompactionResult which includes lastCompactResult.
+
+    If MultiPassCompactionResult.lastCompactResult is typed as (A),
+    assigning a value of type (B) would fail TypeScript type checking.
+
+  Verification path:
+    - compactContextEngineWithSafetyTimeout (compaction-safety-timeout.ts:162)
+      imports CompactResult from "../../context-engine/types.js" (type B)
+    - adoptCompactionTranscript (run.ts:1808) types its parameter as
+      Awaited<ReturnType<typeof contextEngine.compact>>, which returns
+      type (B)
+    - contextEngine.compact() (context-engine/types.ts:298) returns
+      Promise<CompactResult> where CompactResult is type (B)
+    - The multi-pass loop checks compactResult.ok, compactResult.compacted
+      — fields that ONLY exist on type (B)
+
+  Why it matters: TypeScript compilation would fail. Assigning a context-
+  engine CompactResult (B) to a field typed as harness CompactResult (A)
+  is a structural type mismatch.
+
+  Fix: Move MultiPassCompactionResult from agent-core to the gateway
+  layer's multi-pass-compaction.ts, where it can correctly import the
+  context-engine CompactResult. MultiPassCompactionState (which has no
+  external type dependencies) stays in agent-core.
+
+
+──── MODERATE ISSUE (1) — Would cause runtime error in edge case ─────────────
+
+ISSUE #2: VARIABLE SCOPING FOR timeoutCompactResult
+
+  Affected: Step 7, Call Site 1 (timeout recovery path)
+
+  What V3 says:
+    const timeoutMultiPassResult = await multiPassCompact({...});
+    const timeoutCompactResult =
+      timeoutMultiPassResult.lastCompactResult ?? {...};
+
+  What's wrong: The existing code structure uses `let` before the
+  try-catch:
+
+    let timeoutCompactResult: CompactResult;
+    try {
+      timeoutCompactResult = await compactContextEngine...(...);
+    } catch (compactErr) {
+      timeoutCompactResult = { ok: false, compacted: false, reason: ... };
+    }
+    // Post-try-catch: uses timeoutCompactResult
+
+  V3 replaces the try body with `const timeoutCompactResult`, which:
+    - Creates a block-scoped const inside the try, shadowing the outer let
+    - The catch block's assignment targets the outer let (uninitialized
+      if the try body never reaches the assignment)
+    - Post-try-catch code uses the outer let which may be undefined
+      if multiPassCompact throws before the const assignment
+
+  Even though multiPassCompact handles errors internally and rarely
+  throws, the safety net catch block must work correctly.
+
+  Why it matters: If multiPassCompact throws unexpectedly, the catch
+  block assigns to the outer `let`, but the `const` inside the try
+  creates a scoping ambiguity. In the best case, TypeScript catches
+  this. In the worst case, `timeoutCompactResult` is used uninitialized
+  after the catch.
+
+  Fix: Use assignment to the existing `let` variable:
+    timeoutCompactResult = timeoutMultiPassResult.lastCompactResult ?? {...};
+  Keep the intermediate `const timeoutMultiPassResult` (new const is fine
+  since it's only used inside the try).
+
+
+──── MINOR ISSUE (1) — Index.ts export correctness ───────────────────────────
+
+ISSUE #3: MultiPassCompactionResult EXPORTED FROM WRONG PACKAGE
+
+  Affected: Step 1, packages/agent-core/src/index.ts exports
+
+  What V3 says:
+    export {
+      ...
+      type MultiPassCompactionResult,        // NEW
+      ...
+    } from "./harness/compaction/compaction-progress.js";
+
+  What's wrong: Since MultiPassCompactionResult is moved to the gateway
+  layer (per Fix #1), it should NOT be exported from agent-core's
+  index.ts. Callers in run.ts import it from multi-pass-compaction.ts
+  instead.
+
+  Why it matters: Trying to export a type that doesn't exist in the
+  specified module would cause a compilation error.
+
+  Fix: Remove MultiPassCompactionResult from agent-core exports. Add
+  it as a named export from multi-pass-compaction.ts (gateway).
+
+
+================================================================================
+2. ITERATION EVOLUTION
+================================================================================
+
+─── ITERATION 1: V1 (Initial Plan) ───────────────────────────────────────────
+
+  The V1 plan was generated from code trace analysis and partial source
+  verification. It established the 9-step structure and identified the
+  core porting targets. It had 15 issues across critical, significant,
+  and minor severity levels.
+
+  Key errors in V1:
+    - Pre-pruning injection point in run.ts (dead code location)
+    - Per-pass lifecycle not recognized (adopt + maintenance)
+    - Wrong file locations for types (CompactionSettings, CutPointResult)
+    - Wrong package name (@anthropic/ instead of @openclaw/)
+    - Message count estimation hand-waved
+    - 3 call sites assumed (actually 2)
+
+  Issues found: 15 (5 critical, 7 significant, 3 minor)
+
+─── ITERATION 1.5: Review V1 (Corrected Plan) ────────────────────────────────
+
+  The Review V1 phase found and fixed all 15 issues. Key fixes:
+    - Pre-pruning moved to compaction-safeguard hook
+    - Per-pass lifecycle callbacks added
+    - All file locations and package names corrected
+    - Progress detection simplified to token-only
+    - Call site count corrected to 2
+
+  Issues fixed: 15
+  New issues discovered: 6
+
+─── ITERATION 2: V2 (From Scratch) ───────────────────────────────────────────
+
+  V2 was built from scratch incorporating all Review V1 learnings plus
+  6 new issues (L16-L21) discovered through deeper verification:
+    - EMBEDDED_COMPACTION_TIMEOUT_MS not exported
+    - Third adoptCompactionTranscript call site at line 2768
+    - Two-branch overflow adoption pattern
+    - runOwnsCompactionAfterHook boundary
+    - buildEmbeddedContextEngineRuntimeSettings scope
+    - shouldCompact function identity
+
+  Issues incorporated: 21 (15 from V1 + 6 new)
+  New issues found by subsequent review: 8
+
+─── ITERATION 2.5: Review V2 (Corrected Plan) ────────────────────────────────
+
+  The Review V2 phase verified V2 against actual source code with 5
+  parallel exploration agents. Found 8 issues (5 significant, 1 moderate,
+  2 minor):
+
+    L22: shouldCompact dynamic import -> static import (non-idiomatic)
+    L23: Pre-pruning injection at line 889 references undeclared variables
+    L24: ToolCall type field "tool_use" -> "toolCall" (silent failure)
+    L25: ToolResultMessage field tool_use_id -> toolCallId (no matches)
+    L26: ToolCall field input -> arguments (undefined, zero truncation)
+    L27: Timeout path missing preservation of post-compaction code
+    L28: Redundant anti-thrashing check at end of loop (dead code)
+    L29: ToolResultMessage.toolName simplifies summarization
+
+  Issues fixed: 8
+
+─── ITERATION 3: V3 (From Scratch) ───────────────────────────────────────────
+
+  V3 was built from scratch after a VERIFICATION-FIRST methodology:
+  five parallel source-level exploration passes verified every reference
+  BEFORE writing the plan. V3 incorporated all 29 prior issues and
+  identified 6 additional verifications (V3-1 through V3-6).
+
+  Issues incorporated: 29 (all prior) + 6 new verifications = 35 total
+
+─── ITERATION 3.5: Review V3 (Current — Corrected Plan) ──────────────────────
+
+  The Review V3 phase independently re-verified V3 against actual source
+  code with 6 parallel exploration agents (4 broad + 2 targeted). Found
+  3 issues (1 significant, 1 moderate, 1 minor):
+
+  SOURCE CODE VERIFICATIONS PERFORMED:
+
+    1. compaction-safeguard.ts: Full flow re-verified, all line numbers
+       confirmed matching V3's claims. Injection point at ~965 confirmed.
+
+    2. Type definitions: BOTH CompactResult types discovered and
+       distinguished:
+         (A) Harness CompactResult (types.ts:733) — data storage type
+         (B) Context Engine CompactResult (context-engine/types.ts:126) —
+             compact() return type with ok/compacted wrapper
+
+    3. run.ts compaction call sites: All line numbers, try-catch
+       structures, and variable scoping verified. Confirmed that
+       timeoutCompactResult and compactResult are `let` variables
+       declared before their respective try-catch blocks.
+
+    4. messages.ts: COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX,
+       convertToLlm compactionSummary handling all confirmed. No existing
+       COMPACTION_SUMMARY_END_MARKER found.
+
+    5. CompactResult import chain: Traced from contextEngine.compact()
+       return type through compactContextEngineWithSafetyTimeout through
+       adoptCompactionTranscript to confirm all use context-engine
+       CompactResult (type B).
+
+    6. Run.ts structural verification: Confirmed that
+       runOwnsCompactionBeforeHook is called OUTSIDE the try-catch
+       (lines 2447 and 2643), while compaction calls are INSIDE the try
+       (lines 2503 and 2707). The before-hook is NOT affected by the
+       replacement.
+
+  CATEGORY BREAKDOWN:
+    - 1 SIGNIFICANT: Would cause TypeScript compilation failure
+      (CompactResult type mismatch across package boundaries)
+    - 1 MODERATE: Would cause incorrect behavior in edge case
+      (variable scoping with try-catch)
+    - 1 MINOR: Export list inconsistency (consequence of significant fix)
+
+  ISSUE SEVERITY TREND ACROSS ITERATIONS:
+    V1:       5 critical, 7 significant, 3 minor       (15 total)
+    V2:       0 critical, 5 significant, 1 moderate, 2 minor  (8 total)
+    V3:       0 critical, 0 significant, 6 verification  (6 V3-specific)
+    Review V3: 0 critical, 1 significant, 1 moderate, 1 minor  (3 total)
+
+  KEY OBSERVATION: V3's verification-first methodology eliminated all
+  the wrong-field-name errors (L22-L29) that plagued V2. The remaining
+  issues in Review V3 are ARCHITECTURAL rather than superficial:
+
+    - Issue #1 (CompactResult mismatch) is a cross-package type boundary
+      problem that requires understanding both the agent-core and gateway
+      package structures AND that two different types share the same name
+      in different packages.
+
+    - Issue #2 (variable scoping) requires understanding the exact
+      try-catch control flow structure in run.ts, including that the
+      result variable is declared BEFORE the try block to be accessible
+      in the catch and post-catch code.
+
+  These are not "wrong name" errors but design-level issues that only
+  surface when the plan is mentally compiled against the actual code
+  structure.
+
+─── PROGRESSION SUMMARY ──────────────────────────────────────────────────────
+
+  V1 (Initial):       15 issues found
+  Review V1:          15 fixed, 6 new discovered
+  V2 (From Scratch):  21 incorporated, 8 new found
+  Review V2:          8 fixed
+  V3 (From Scratch):  29 incorporated, 6 new verifications
+  Review V3:          3 found, 3 fixed
+
+  Total issues found and resolved across all iterations: 38
+
+  Remaining risk areas:
+    - ContextEngine import path ("../context-engine/types.js") from
+      multi-pass-compaction.ts needs build-time verification
+    - The two CompactResult types in the codebase could cause confusion
+      for future contributors — consider adding a lint rule or
+      documentation to distinguish them
+    - HarnessMessage cast pattern should be verified for all message
+      role access patterns in findCutPoint anchoring code
+    - Session reset hook location for CompactionProgressTracker.reset()
+      needs to be identified during implementation
+
+================================================================================
+END OF REVIEW SUMMARY V3
+================================================================================

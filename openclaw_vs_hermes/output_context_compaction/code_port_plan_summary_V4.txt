@@ -1,0 +1,289 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — PLAN SUMMARY V4
+================================================================================
+
+Date: 2026-06-28
+Iteration: V4 (4th iteration, fresh build incorporating all prior learnings)
+
+================================================================================
+1. WORK DONE TO GENERATE THIS PLAN
+================================================================================
+
+V4 was built from scratch using a VERIFICATION-FIRST methodology. Before
+writing any plan content, the following source-level verifications were
+performed:
+
+─── Phase 1: Prior Iteration Analysis ───────────────────────────────────────
+
+  Read and analyzed in detail:
+    - code_port_plan_review_V3.txt (corrected V3 plan with 3 fixes)
+    - code_port_plan_review_summary_V3.txt (iteration evolution history)
+    - hermes_code_trace.txt (Hermes multi-pass compaction trace)
+    - openclaw_code_trace.txt (OpenClaw compaction system trace)
+
+  Extracted 38 total issues from the prior iteration history (V1 through
+  Review V3) and catalogued them for incorporation.
+
+─── Phase 2: Parallel Source Verification ───────────────────────────────────
+
+  Launched 4 parallel exploration agents to verify critical code areas:
+
+  Agent 1 — OpenClaw run.ts compaction call sites:
+    Verified exact line numbers, try-catch structures, variable declarations,
+    adoptCompactionTranscript call sites (3 total), hook calls, maintenance
+    calls, import statements, and constant values. Key finding: confirmed
+    the overflow path has TWO adoptCompactionTranscript calls (line 2726
+    inside try, line 2768 after catch), both needing removal.
+
+  Agent 2 — OpenClaw compaction types:
+    Verified both CompactResult type definitions (harness vs context-engine),
+    CompactionSettings interface, DEFAULT_COMPACTION_SETTINGS values,
+    shouldCompact signature, findCutPoint/CutPointResult definition,
+    compactContextEngineWithSafetyTimeout signature, and the full
+    compaction directory structure. Key finding: CutPointResult is NOT
+    exported from agent-core (needs addition).
+
+  Agent 3 — OpenClaw compaction-safeguard hook:
+    Verified the full hook implementation including quality guard loop,
+    provider path, LLM path, pre-compaction injection point (~line 965),
+    messages.ts COMPACTION_SUMMARY_PREFIX definition, convertToLlm
+    handling. Key finding: confirmed no existing multi-pass-compaction
+    file in the codebase.
+
+  Agent 4 — Hermes multi-pass implementation:
+    Verified the exact loop code (turn_context.py:384-413), progress
+    detection function (_compression_made_progress), should_compress
+    anti-thrashing logic, _prune_old_tool_results signature, SUMMARY_PREFIX
+    definition, compress() method signature, and compress_context()
+    orchestrator.
+
+─── Phase 3: Targeted Source Reading ────────────────────────────────────────
+
+  Direct source reads of critical code sections:
+    - run.ts lines 2440-2519: Timeout path try block (exact params)
+    - run.ts lines 2519-2568: Timeout path catch + post-compaction code
+    - run.ts lines 2630-2700: Overflow path pre-compact setup
+    - run.ts lines 2695-2784: Overflow path compact + catch + post code
+    - run.ts lines 2760-2829: Overflow post-compaction (truncation, etc.)
+    - compaction-safeguard.ts lines 940-1039: Pre-compaction injection point
+    - messages.ts lines 38-77: COMPACTION_SUMMARY_PREFIX/SUFFIX definitions
+    - messages.ts lines 120-179: convertToLlm function
+    - index.ts lines 1-50: Agent-core exports
+
+  These reads confirmed 9 new verifications (V4-1 through V4-9) that
+  refine the plan beyond what V3 achieved.
+
+─── Phase 4: Plan Construction ──────────────────────────────────────────────
+
+  Wrote the complete V4 plan as a self-contained 9-step document with:
+    - Full type definitions and interface specifications
+    - Exact file paths and line number references (verified)
+    - Precise integration code showing both the existing code to replace
+      and the replacement code
+    - Variable scoping diagrams for both try-catch call sites
+    - Import path verification chains
+    - Cross-package dependency analysis
+    - Risk assessment with mitigations
+    - Comprehensive test specifications
+    - Implementation ordering with parallelism opportunities
+
+================================================================================
+2. ITERATION EVOLUTION (V1 through V4)
+================================================================================
+
+─── ITERATION 1: V1 (Initial Plan) ───────────────────────────────────────────
+
+  The V1 plan was the first attempt, generated from code trace analysis
+  and partial source verification. It established the 9-step structure
+  but had significant accuracy issues.
+
+  KEY ERRORS IN V1:
+    - Pre-pruning injection point in run.ts pointed to dead code
+    - Per-pass lifecycle (adopt + maintenance) not recognized
+    - Types defined in wrong files (CompactionSettings, CutPointResult)
+    - Wrong package name (@anthropic/ instead of @openclaw/)
+    - Message count estimation hand-waved without justification
+    - Assumed 3 compaction call sites (actually 2)
+    - Missing post-compaction code preservation requirements
+
+  Issues found: 15 (5 critical, 7 significant, 3 minor)
+
+─── ITERATION 1.5: Review V1 (Corrected Plan) ────────────────────────────────
+
+  Fixed all 15 V1 issues. Key improvements:
+    - Pre-pruning moved to compaction-safeguard hook
+    - Per-pass lifecycle callbacks added to multiPassCompact design
+    - All file locations and package names corrected
+    - Progress detection simplified to token-only (no message count)
+    - Call site count corrected to 2
+
+  Issues fixed: 15
+  New issues discovered during deeper verification: 6
+
+─── ITERATION 2: V2 (From Scratch, 1st rebuild) ─────────────────────────────
+
+  V2 was rebuilt from scratch incorporating 21 issues (15 from V1 + 6 new).
+  The 6 new issues (L16-L21) were discovered through deeper verification:
+    - EMBEDDED_COMPACTION_TIMEOUT_MS not exported from agent-core
+    - Third adoptCompactionTranscript call site at line 2768
+    - Two-branch overflow adoption pattern
+    - runOwnsCompactionAfterHook boundary conditions
+    - buildEmbeddedContextEngineRuntimeSettings scope
+    - shouldCompact function identity
+
+  Issues incorporated: 21
+
+─── ITERATION 2.5: Review V2 (Corrected Plan) ────────────────────────────────
+
+  Verified V2 against actual source with 5 parallel exploration agents.
+  Found 8 new issues (L22-L29), primarily FIELD NAME errors from
+  translating Hermes Python conventions to OpenClaw TypeScript:
+    - shouldCompact: dynamic import → static import
+    - Pre-pruning at line 889 references undeclared variables
+    - ToolCall type field "tool_use" → "toolCall"
+    - ToolResultMessage field tool_use_id → toolCallId
+    - ToolCall field input → arguments
+    - Timeout path missing post-compaction code preservation
+    - Redundant anti-thrashing check (dead code)
+    - ToolResultMessage.toolName simplifies summarization
+
+  Issues fixed: 8
+
+─── ITERATION 3: V3 (From Scratch, 2nd rebuild) ─────────────────────────────
+
+  V3 used a VERIFICATION-FIRST methodology: five parallel source-level
+  exploration passes verified every reference BEFORE writing the plan.
+  This eliminated all the wrong-field-name errors that plagued V2.
+
+  V3 incorporated all 29 prior issues and identified 6 additional
+  verifications (V3-1 through V3-6) confirming code structure.
+
+  Issues incorporated: 29 + 6 verifications = 35 total
+
+─── ITERATION 3.5: Review V3 (Corrected Plan) ────────────────────────────────
+
+  Independently re-verified V3 with 6 parallel exploration agents.
+  Found 3 issues — ARCHITECTURAL, not superficial field-name errors:
+
+    1. SIGNIFICANT: CompactResult type mismatch across package boundaries.
+       Two structurally incompatible types share the name "CompactResult":
+       (A) Harness type with .summary at top level
+       (B) Context-engine type with .ok/.compacted at top level
+       V3 placed MultiPassCompactionResult in agent-core importing type (A),
+       but the multi-pass loop uses type (B). Would cause TS compilation
+       failure.
+       FIX: Move MultiPassCompactionResult to gateway layer.
+
+    2. MODERATE: Variable scoping in try-catch. V3 used `const` inside
+       try, but existing code uses `let` before try-catch for accessibility
+       in catch and post-catch code.
+       FIX: Assign to existing `let` variable.
+
+    3. MINOR: Export list inconsistency (consequence of fix 1).
+       FIX: Remove MultiPassCompactionResult from agent-core exports.
+
+  Issues fixed: 3
+
+─── ITERATION 4: V4 (From Scratch, 3rd rebuild — CURRENT) ───────────────────
+
+  V4 is a complete standalone rebuild incorporating all 38 prior issues.
+  It adds 9 new verifications (V4-1 through V4-9) from direct source
+  code reading of critical sections. Key improvements over V3:
+
+  IMPROVEMENT 1: Complete standalone document
+    V3 referenced "UNCHANGED FROM V3" in many sections. V4 is fully
+    self-contained with no cross-references to prior iterations.
+
+  IMPROVEMENT 2: Verified exact line numbers by direct source reads
+    V4 read the actual run.ts source at the compaction call sites rather
+    than relying on agent-reported line numbers. This confirmed:
+    - timeoutCompactResult declaration at line 2446
+    - Three adoptCompactionTranscript calls (lines 2531, 2726, 2768)
+    - runContextEngineMaintenance only in overflow path (lines 2727-2737)
+    - Exact try-catch boundaries
+
+  IMPROVEMENT 3: Precise overflow path dual-adoption handling
+    V4 explicitly documents that the overflow path has TWO
+    adoptCompactionTranscript calls:
+    - Line 2726: Inside try, conditional on ok && compacted
+    - Line 2768: After catch, conditional on compacted
+    Both are redundant with per-pass adoption and should be removed.
+    Previous iterations only partially documented this.
+
+  IMPROVEMENT 4: Variable type declarations use inferred form
+    V4 documents that run.ts uses Awaited<ReturnType<typeof contextEngine.compact>>
+    rather than importing CompactResult. The multiPassAdoptTranscript
+    callback uses the same inferred type pattern for consistency.
+
+  IMPROVEMENT 5: Pre-compaction injection point verified by source read
+    V4 read compaction-safeguard.ts lines 940-1039 directly, confirming
+    that line 965 is a blank line between runtime knob resolution (964)
+    and the provider path comment (966). Also identified that
+    baseMessagesToSummarize needs to change from const to let.
+
+  IMPROVEMENT 6: Implementation ordering with parallelism
+    V4 adds a new Section 10 showing step dependencies and recommended
+    implementation phases (A-D) for parallel development.
+
+  IMPROVEMENT 7: More complete integration verification checklist
+    V4's checklist is organized by category (type safety, variable scoping,
+    lifecycle, imports, configuration, behavior, backward compatibility)
+    with specific items for each V3 Review fix.
+
+  Total issues incorporated: 38 (from V1-V3) + 9 new verifications
+
+─── PROGRESSION SUMMARY ──────────────────────────────────────────────────
+
+  V1 (Initial):           15 issues found
+  Review V1:              15 fixed, 6 new discovered
+  V2 (From Scratch):      21 incorporated, 8 new found
+  Review V2:              8 fixed
+  V3 (From Scratch):      29 incorporated, 6 new verifications
+  Review V3:              3 found, 3 fixed
+  V4 (From Scratch):      38 incorporated, 9 new verifications
+
+  Total issues found and resolved: 38
+  Total verifications performed: 15 (6 from V3 + 9 from V4)
+
+  ISSUE SEVERITY TREND ACROSS ITERATIONS:
+    V1:       5 critical, 7 significant, 3 minor       (15 total)
+    V2:       0 critical, 5 significant, 1 moderate, 2 minor  (8 total)
+    V3:       0 critical, 0 significant, 6 verification  (6 V3-specific)
+    Review V3: 0 critical, 1 significant, 1 moderate, 1 minor  (3 total)
+    V4:       0 critical, 0 significant, 9 verifications  (9 V4-specific)
+
+  KEY OBSERVATION: The nature of issues evolved across iterations:
+    - V1: Fundamental errors (wrong files, wrong names, wrong counts)
+    - V2: Field-level naming mismatches (Python → TypeScript translation)
+    - V3: Architectural boundary issues (cross-package type deps, scoping)
+    - V4: Refinements and precision improvements (no new issues, only
+      deeper verifications confirming the plan's correctness)
+
+  The convergence from 15 critical/significant issues in V1 to 0 in V4
+  demonstrates that the iterative verification methodology is effective.
+  V4's improvements are primarily about completeness and self-containment
+  rather than correcting errors.
+
+─── REMAINING RISK AREAS ────────────────────────────────────────────────────
+
+  1. Session reset hook location for CompactionProgressTracker.reset()
+     needs to be identified during implementation. Look for session
+     lifecycle event handlers in run.ts.
+
+  2. AbortSignal.any() requires Node 20+. Verify OpenClaw's minimum
+     Node version target.
+
+  3. The baseMessagesToSummarize const → let change in compaction-safeguard.ts
+     needs verification that no other code relies on its immutability.
+
+  4. Enhanced summary prefix should be tested with multiple LLM models
+     to ensure disambiguation directives don't cause over-suppression
+     of legitimate summary references.
+
+  5. Pre-compaction pruning's interaction with the existing context-pruning
+     system (cache-TTL based) should be tested to ensure they don't
+     double-prune the same tool results.
+
+================================================================================
+END OF PLAN SUMMARY V4
+================================================================================

@@ -1,0 +1,83 @@
+diff --git a/src/agents/embedded-agent-runner/run.ts b/src/agents/embedded-agent-runner/run.ts
+index 422bf21e92..652fa82bf2 100644
+--- a/src/agents/embedded-agent-runner/run.ts
++++ b/src/agents/embedded-agent-runner/run.ts
+@@ -1587,8 +1587,13 @@ async function runEmbeddedAgentInternal(
+           ? resolveAgentConfig(params.config, sessionAgentId)?.iterationBudget
+           : undefined) ?? params.config?.agents?.defaults?.iterationBudget,
+       );
++      const isSubagentRun = !!params.spawnedBy;
+       const iterationBudget = resolvedBudgetConfig?.enabled
+-        ? new IterationBudget(resolvedBudgetConfig.maxIterations)
++        ? new IterationBudget(
++            isSubagentRun
++              ? resolvedBudgetConfig.subagentMaxIterations
++              : resolvedBudgetConfig.maxIterations,
++          )
+         : undefined;
+       let budgetExhaustedSummaryPending = false;
+       let budgetExhaustedSummaryInstruction: string | null = null;
+@@ -1938,12 +1943,6 @@ async function runEmbeddedAgentInternal(
+             });
+           }
+           runLoopIterations += 1;
+-          // Budget consumption: each outer-loop iteration counts against the budget.
+-          // onBeforeToolCallingRound handles inner-loop tool rounds separately;
+-          // this covers non-tool iterations (compaction retries, auth retries, etc.).
+-          if (iterationBudget && !budgetSummaryAttempt) {
+-            iterationBudget.consume();
+-          }
+           const runtimeAuthRetry = authRetryPending;
+           authRetryPending = false;
+           attemptedThinking.add(thinkLevel);
+diff --git a/src/config/schema.help.ts b/src/config/schema.help.ts
+index 613d6832c4..4b4ddd49be 100644
+--- a/src/config/schema.help.ts
++++ b/src/config/schema.help.ts
+@@ -1536,6 +1536,25 @@ export const FIELD_HELP: Record<string, string> = {
+     "Additional run retry iterations granted per fallback profile candidate for this agent.",
+   "agents.list[].runRetries.min": "Minimum absolute limit for run retry iterations for this agent.",
+   "agents.list[].runRetries.max": "Maximum absolute limit for run retry iterations for this agent.",
++  "agents.defaults.iterationBudget":
++    "Per-agent iteration budget that caps the total number of LLM tool-calling rounds in a single embedded run, preventing runaway loops.",
++  "agents.defaults.iterationBudget.enabled":
++    "Enable per-agent iteration budgeting (default: false). When enabled, agent runs are stopped after exceeding the configured maxIterations.",
++  "agents.defaults.iterationBudget.maxIterations":
++    "Maximum LLM tool-calling rounds allowed for a parent agent run before the budget is exhausted (default: 90).",
++  "agents.defaults.iterationBudget.subagentMaxIterations":
++    "Maximum LLM tool-calling rounds allowed for a subagent (spawned) run before the budget is exhausted (default: 50).",
++  "agents.defaults.iterationBudget.forceSummaryOnExhaustion":
++    "When true (default), inject a summary-request prompt and make one final LLM call when the budget is exhausted, instead of stopping immediately.",
++  "agents.list[].iterationBudget":
++    "Optional per-agent iteration budget override. Controls how many LLM tool-calling rounds this agent is allowed before being stopped.",
++  "agents.list[].iterationBudget.enabled": "Enable iteration budgeting for this specific agent.",
++  "agents.list[].iterationBudget.maxIterations":
++    "Maximum LLM tool-calling rounds for this agent as a parent run (default: 90).",
++  "agents.list[].iterationBudget.subagentMaxIterations":
++    "Maximum LLM tool-calling rounds for this agent when spawned as a subagent (default: 50).",
++  "agents.list[].iterationBudget.forceSummaryOnExhaustion":
++    "When true (default), inject a summary-request prompt on budget exhaustion for this agent.",
+   "agents.defaults.embeddedAgent":
+     "Embedded OpenClaw runner hardening controls for how workspace-local agent settings are trusted and applied in OpenClaw sessions.",
+   "agents.defaults.embeddedAgent.projectSettingsPolicy":
+diff --git a/src/config/schema.labels.ts b/src/config/schema.labels.ts
+index 566c82fa46..66506a2c6e 100644
+--- a/src/config/schema.labels.ts
++++ b/src/config/schema.labels.ts
+@@ -716,6 +716,16 @@ export const FIELD_LABELS: Record<string, string> = {
+   "agents.list[].runRetries.perProfile": "Agent Run Retries Per Profile",
+   "agents.list[].runRetries.min": "Agent Run Retries Minimum",
+   "agents.list[].runRetries.max": "Agent Run Retries Maximum",
++  "agents.defaults.iterationBudget": "Iteration Budget",
++  "agents.defaults.iterationBudget.enabled": "Iteration Budget Enabled",
++  "agents.defaults.iterationBudget.maxIterations": "Iteration Budget Max Iterations",
++  "agents.defaults.iterationBudget.subagentMaxIterations": "Iteration Budget Subagent Max Iterations",
++  "agents.defaults.iterationBudget.forceSummaryOnExhaustion": "Iteration Budget Force Summary",
++  "agents.list[].iterationBudget": "Agent Iteration Budget",
++  "agents.list[].iterationBudget.enabled": "Agent Iteration Budget Enabled",
++  "agents.list[].iterationBudget.maxIterations": "Agent Iteration Budget Max Iterations",
++  "agents.list[].iterationBudget.subagentMaxIterations": "Agent Iteration Budget Subagent Max",
++  "agents.list[].iterationBudget.forceSummaryOnExhaustion": "Agent Iteration Budget Force Summary",
+   "agents.defaults.embeddedAgent": "Embedded OpenClaw",
+   "agents.defaults.embeddedAgent.projectSettingsPolicy":
+     "Embedded OpenClaw Project Settings Policy",

@@ -1,0 +1,313 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — CODE REVIEW SUMMARY (REVIEW V2)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python)
+Target: OpenClaw (TypeScript)
+Review Iteration: 2 (reviewing code_gen_V2.patch)
+Date: 2026-06-28
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+ISSUE 1 — MEDIUM: Lint violations — missing curly braces (curly rule)
+
+  AFFECTED CODE:
+    packages/agent-core/src/harness/compaction/compaction-progress.ts line 81
+    packages/agent-core/src/harness/compaction/compaction.ts lines 486, 498, 499
+    src/agents/agent-hooks/pre-compaction-pruning.ts lines 94, 97, 107, 110,
+      139, 142, 206, 211, 215, 219, 222, 261
+
+  WHAT IS WRONG:
+    OpenClaw's .oxlintrc.json enforces "eslint/curly": "error", requiring
+    curly braces around all if/else/for/while bodies. The V2 patch uses
+    single-line `if (...) return/continue;` statements in 15+ locations
+    across 3 files.
+
+  WHY IT MATTERS:
+    These would fail in CI lint checks. The curly brace rule is enforced
+    project-wide as an error (not warning), so any PR with these would be
+    rejected. Consistent brace style also prevents accidental multi-statement
+    bugs when code is later modified.
+
+  FIX APPLIED:
+    All single-line if/return/continue statements wrapped in curly braces:
+      `if (x) return y;`  →  `if (x) { return y; }`
+      `if (x) continue;`  →  `if (x) { continue; }`
+
+  LOCATIONS FIXED (15 total):
+    - compaction-progress.ts: 1 (line 81)
+    - compaction.ts findLastMessageIndex: 1 (line 486)
+    - compaction.ts hasVisibleContent: 2 (lines 498, 499)
+    - pre-compaction-pruning.ts: 11 (lines 94, 97, 107, 110, 139, 142,
+      206, 211, 215, 219, 222, 261)
+
+────────────────────────────────────────────────────────────────────────────────
+
+ISSUE 2 — MEDIUM: Missing `node:` protocol prefix on crypto import
+
+  AFFECTED CODE:
+    src/agents/agent-hooks/pre-compaction-pruning.ts line 18
+    `import { createHash } from "crypto";`
+
+  WHAT IS WRONG:
+    OpenClaw enforces the "unicorn/prefer-node-protocol" lint rule, requiring
+    Node.js built-in module imports to use the `node:` prefix. The import
+    uses `"crypto"` instead of `"node:crypto"`.
+
+  WHY IT MATTERS:
+    The `node:` prefix explicitly signals a built-in module, preventing
+    confusion with npm packages of the same name. This is a CI-enforced
+    lint rule that would block the PR.
+
+  FIX APPLIED:
+    Changed to `import { createHash } from "node:crypto";`
+
+────────────────────────────────────────────────────────────────────────────────
+
+ISSUE 3 — LOW: Inefficient object spread in map callback (no-map-spread)
+
+  AFFECTED CODE:
+    src/agents/agent-hooks/pre-compaction-pruning.ts line 214
+    `return { ...block, arguments: truncatedArgs };`
+
+  WHAT IS WRONG:
+    The oxc/no-map-spread rule flags spreading to modify object properties
+    inside `.map()` callbacks as inefficient. Each iteration creates a new
+    object via spread, which is slower than Object.assign().
+
+  WHY IT MATTERS:
+    While functionally correct, this pattern is flagged as a lint error in
+    the OpenClaw CI pipeline. Tool call arguments can be large objects, so
+    the performance difference is non-trivial in hot paths.
+
+  FIX APPLIED:
+    Changed to `return Object.assign({}, block, { arguments: truncatedArgs });`
+
+────────────────────────────────────────────────────────────────────────────────
+
+ISSUE 4 — LOW: Import ordering in compaction-safeguard.ts
+
+  AFFECTED CODE:
+    src/agents/agent-hooks/compaction-safeguard.ts lines 1-4
+
+  WHAT IS WRONG:
+    The `preCompactionPrune` import was inserted at line 2, BEFORE the
+    node: built-in imports (`fs`, `path` at lines 3-4). OpenClaw convention
+    and best practice is: node: built-ins first, then third-party, then
+    project-local imports.
+
+    Before (V2):
+      import { preCompactionPrune } from "./pre-compaction-pruning.js";
+      import fs from "node:fs";
+      import path from "node:path";
+
+  WHY IT MATTERS:
+    Inconsistent import ordering makes the file harder to scan and could
+    fail automated import-ordering checks if added in the future.
+
+  FIX APPLIED:
+    Moved the import after the node: built-ins:
+      import fs from "node:fs";
+      import path from "node:path";
+      import { preCompactionPrune } from "./pre-compaction-pruning.js";
+
+================================================================================
+2. ISSUES REVIEWED BUT NOT REQUIRING FIXES
+================================================================================
+
+REVIEW ITEM A: Correctness of multi-pass loop vs Hermes original
+
+  The multiPassCompact() implementation faithfully ports Hermes's 3-pass
+  loop from agent/turn_context.py (lines 384-413):
+  - Max 3 iterations (configurable via settings.maxPasses, clamped [1, 10])
+  - 5% progress threshold matching Hermes's 0.95 multiplier
+  - Anti-thrashing via CompactionProgressTracker (2 consecutive <10%)
+  - Per-pass lifecycle (adoptTranscript + runMaintenance)
+  - Token-only progress detection (simplification of Hermes's dual-dimension
+    check — acceptable since token reduction implies message reduction)
+
+  VERDICT: CORRECT — The multi-pass loop is a faithful port.
+
+REVIEW ITEM B: CompactionSettings optional field backward compatibility
+
+  The new `maxPasses?` and `progressThreshold?` fields on CompactionSettings
+  are optional with `?` modifier. DEFAULT_COMPACTION_SETTINGS does not include
+  them (new fields use defaults from the consuming code). This is safe because:
+  - Existing callers don't pass these fields → undefined → defaults apply
+  - TypeScript structural typing means existing CompactionSettings values
+    remain valid
+
+  VERDICT: CORRECT — Backward compatible.
+
+REVIEW ITEM C: findCutPoint anchoring guard threshold (>= 3 entries)
+
+  The anchoring code requires `lastUserIdx - startIndex >= 3` before applying.
+  This prevents degenerate cases where anchoring would leave nothing to
+  summarize. The guard was validated by V1 review (Review Item C) and the
+  existing compaction.test.ts test still passes.
+
+  VERDICT: CORRECT — Guard prevents regression.
+
+REVIEW ITEM D: Pre-compaction pruning prunedCount semantics
+
+  The prunedCount accumulates across all 3 sub-passes. A message deduped in
+  sub-pass 1 gets a 60-char placeholder, which is below MIN_CONTENT_LENGTH
+  (200), so sub-pass 2 won't re-process it. This means no double-counting
+  occurs between sub-passes 1 and 2. Sub-pass 3 operates on assistant
+  messages (not tool results), so there's no overlap with sub-passes 1/2.
+
+  VERDICT: CORRECT — No double-counting.
+
+REVIEW ITEM E: Summary prefix change impact
+
+  The COMPACTION_SUMMARY_PREFIX change from a neutral statement to a
+  directive ("[COMPACTION — REFERENCE ONLY]") is a semantic enhancement
+  ported from Hermes's SUMMARY_PREFIX. The key directives are:
+  - "Treat it as background reference, NOT as active instructions"
+  - "Do NOT answer questions or fulfill requests mentioned in this summary"
+  - "Respond ONLY to the latest user message that appears AFTER this summary"
+
+  The COMPACTION_SUMMARY_END_MARKER provides a clear boundary after
+  the </summary> tag. Both are shorter than Hermes's full prefix (which
+  has ~30 lines), keeping only the core disambiguation directives.
+
+  VERDICT: CORRECT — Appropriate adaptation.
+
+REVIEW ITEM F: AbortSignal.any() usage
+
+  The multiPassCompact() function uses AbortSignal.any() to compose the
+  timeout signal with the external abort signal. This was verified as safe
+  in the Review V4 plan (REF-1): OpenClaw targets Node >= 22.19.0, and
+  AbortSignal.any() is already used in 5+ files across the codebase.
+
+  VERDICT: CORRECT — No compatibility concern.
+
+REVIEW ITEM G: Test quality and coverage
+
+  7 test files with 120 tests (running to 140 across shards) covering:
+  - Suite A: 24 tests for progress detection + anti-thrashing
+  - Suite B: 20 tests for pre-compaction pruning (×2 shards)
+  - Suite D: 8 tests for summary prefix/end marker
+  - Suite E: 26 tests for multi-pass loop (×2 shards)
+  - Suite G: 16 tests for configuration schema
+
+  Tests properly account for shouldCompact threshold math (contextWindow -
+  reserveTokens = threshold). Multi-pass tests use contextWindow=400000-500000
+  to ensure token values stay above the threshold (383616-483616) for
+  multi-pass iteration scenarios.
+
+  Tests use vi.fn() mocks (not vi.mock() on the SUT), factory helpers, and
+  explicit assertions — all following OpenClaw patterns.
+
+  VERDICT: ADEQUATE — Good coverage for implemented steps.
+
+REVIEW ITEM H: Type safety — MessageWithRole usage
+
+  pre-compaction-pruning.ts defines `type MessageWithRole = AgentMessage &
+  { role: string }` and uses it in loops. This is a V1→V2 improvement over
+  the `as any` pattern. The type intersection preserves AgentMessage fields
+  while adding indexable role access.
+
+  VERDICT: ACCEPTABLE — Better than `as any` while pragmatic about the
+  polymorphic AgentMessage union.
+
+REVIEW ITEM I: Memory / resource management
+
+  The multiPassCompact() function creates an AbortController and setTimeout.
+  The setTimeout is properly cleaned up in a `finally` block, preventing
+  leaks. The composed signal from AbortSignal.any() is GC-eligible once the
+  function returns (no persistent references).
+
+  VERDICT: CORRECT — No resource leaks.
+
+REVIEW ITEM J: Security considerations
+
+  The pre-compaction pruning uses SHA-256 for content hashing (dedup), which
+  is cryptographically strong. The hash is truncated to 12 hex chars (48 bits)
+  for the dedup map key. Collision probability is negligible for the expected
+  cardinality (< 1000 tool results per session). No user input is used in
+  dynamic imports, shell commands, or HTML rendering.
+
+  VERDICT: NO SECURITY ISSUES.
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+ITERATION 1 (V1 — code_gen_V1.patch, reviewed as code_gen_review_V1.patch):
+  - Implemented Steps 1-6 and Step 8
+  - 129 tests across test files
+  - Step 7 (run.ts integration) deferred
+  - Review found 4 issues:
+    1. CRITICAL: Silent no-op test (double-wrapped async function)
+    2. MEDIUM: `as any` in hasVisibleContent → structural type cast
+    3. MEDIUM: 4× `as any` in pruning → NarrowedMessage type
+    4. LOW: Unused DEFAULT_COMPACTION_SETTINGS import
+
+ITERATION 2 (V2 — code_gen_V2.patch):
+  - From-scratch rewrite incorporating all V1 learnings
+  - Used relative imports (../../packages/...) for vitest compatibility
+  - Used structural type cast in hasVisibleContent (V1 fix #2)
+  - Used typed MessageWithRole instead of `as any` (V1 fix #3)
+  - No double-wrapped async tests (V1 fix #1)
+  - No unused imports (V1 fix #4)
+  - Fixed test token values for shouldCompact threshold awareness
+  - Fixed Zod schema access (.unwrap().shape)
+  - 15 files changed, 2091 lines added
+  - 120 tests across 6 test files (140 across shards), all passing
+
+REVIEW 2 (this review — code_gen_review_V2.patch):
+  - Found and fixed 4 issues:
+    1. MEDIUM: 15× curly brace rule violations across 3 files
+    2. MEDIUM: Missing `node:` protocol prefix on crypto import
+    3. LOW: Inefficient object spread in map (no-map-spread)
+    4. LOW: Import ordering (preCompactionPrune before node: imports)
+  - All issues are lint/style conformance — no behavioral changes
+  - 121 tests still pass (120 new + 1 existing regression check)
+  - Build succeeds (177s)
+  - Zero lint errors in modified files after fixes
+
+================================================================================
+4. BUILD AND TEST RESULTS (POST-REVIEW)
+================================================================================
+
+BUILD:
+  pnpm build → SUCCESS (177s)
+  No TypeScript compilation errors
+
+LINT:
+  oxlint on all modified source files → 0 errors
+
+TESTS:
+  7 test files, 121 tests, ALL PASSING
+  - Suite A (compaction-progress.test.ts): 24 tests ✓
+  - Suite B (pre-compaction-pruning.test.ts): 20 tests ✓ (×2 shards)
+  - Suite D (compaction-summary-prefix.test.ts): 8 tests ✓
+  - Suite E (multi-pass-compaction.test.ts): 26 tests ✓ (×2 shards)
+  - Suite G (config.multi-pass-compaction.test.ts): 16 tests ✓
+  - Existing compaction.test.ts: 1 test ✓ (no regressions)
+
+================================================================================
+5. FILES MODIFIED BY THIS REVIEW
+================================================================================
+
+  packages/agent-core/src/harness/compaction/compaction-progress.ts
+    → 1 curly brace fix (line 81)
+
+  packages/agent-core/src/harness/compaction/compaction.ts
+    → 3 curly brace fixes (findLastMessageIndex, hasVisibleContent helpers)
+
+  src/agents/agent-hooks/pre-compaction-pruning.ts
+    → 11 curly brace fixes
+    → 1 node: protocol prefix fix (crypto → node:crypto)
+    → 1 no-map-spread fix (spread → Object.assign)
+
+  src/agents/agent-hooks/compaction-safeguard.ts
+    → Import ordering fix (preCompactionPrune moved after node: imports)
+
+================================================================================
+END OF REVIEW SUMMARY
+================================================================================

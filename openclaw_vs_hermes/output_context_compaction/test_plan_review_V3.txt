@@ -1,0 +1,676 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — CORRECTED TEST PLAN (REVIEW V3)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python) — pytest, tests/agent/test_compression_*.py
+Target: OpenClaw (TypeScript) — Vitest, co-located *.test.ts files
+Porting Plan: code_port_plan_review_V4.txt (Steps 1-9)
+Date: 2026-06-28
+Revision: Review V3 (corrected from V3 initial)
+
+================================================================================
+REVIEW CHANGE LOG (V3 -> Review V3)
+================================================================================
+
+  This plan corrects 5 issues found during code-level verification of the
+  V3 test plan against the actual OpenClaw codebase. See the companion
+  test_plan_review_summary_V3.txt for full documentation of each issue.
+
+  CORRECTIONS APPLIED:
+
+  FIX-R1:  SUITE G MISSING TEST FOR "mode set, maxPasses absent" SCENARIO.
+
+           V3 tests materializeCompactionConfig with:
+             10.1: {} → expects maxPasses=3 (mode absent, defaults applied)
+             10.3: {maxPasses:5} → expects maxPasses=5 (user value preserved)
+             10.5: {mode:"safeguard",...,maxPasses:2} → all preserved
+
+           MISSING: {mode:"safeguard"} WITHOUT maxPasses → should still get
+           maxPasses=3 default. This is critical because the CURRENT
+           applyCompactionDefaults has a guard:
+             `if (compaction?.mode) return cfg;`
+           which returns UNCHANGED when mode is set. The port plan must
+           modify this to per-field defaulting (matching applyAgentDefaults
+           pattern at defaults.ts:404-450). Without this test, a regression
+           where mode-set blocks new defaults would go undetected.
+
+           FIX: Added test 10.5a: materializeCompactionConfig({mode:"safeguard"})
+           → expects maxPasses=3 AND minProgressThreshold=0.05 applied
+           alongside the already-set mode. Existing test 10.5 renumbered
+           to 10.5b. Tests 10.6→10.16 renumbered accordingly.
+
+  FIX-R2:  SUITE E baseCompactParams INCOMPLETE — MISSING runtimeContext
+           AND runtimeSettings.
+
+           V3's baseCompactParams (Section 8, line 923-930) contains:
+             { sessionId, sessionKey, sessionFile, tokenBudget, force,
+               compactionTarget }
+
+           ACTUAL compact() calls in run.ts (lines 2503-2519, 2707-2724)
+           ALWAYS include runtimeContext and runtimeSettings. These are
+           OPTIONAL in the ContextEngine.compact() type signature
+           (types.ts:402-423), so tests compile without them. However:
+
+           1. If multiPassCompact is supposed to thread these fields to
+              each compact() call, tests should verify passthrough.
+           2. Test 8.15 ("does not use stale compactParams") becomes more
+              meaningful when the params actually contain the fields that
+              the real code passes.
+
+           FIX: Added minimal runtimeContext and runtimeSettings to
+           baseCompactParams. Used simple shapes that satisfy the types
+           without complex nested mocks. This aligns the mock with real
+           call sites while keeping tests readable.
+
+  FIX-R3:  SUITE E TEST 8.20 SETUP DESCRIPTION INCOMPLETE.
+
+           V3 stated:
+             "SETUP: Pass 1: 200000 → 191000 (4.5% reduction — below 5%).
+              Do NOT pass minProgressThreshold."
+
+           But the EXPECT clause says "After two consecutive sub-threshold
+           passes, anti-thrash triggers." Two passes require two mock
+           setups, but only one was described.
+
+           FIX: Added explicit Pass 2 setup description:
+             Pass 1: 200000 → 191000 (4.5% — below threshold, counter=1)
+             Pass 2: 191000 → 183000 (4.2% — below threshold, counter=2)
+           This makes the test implementable without ambiguity.
+
+  FIX-R4:  MultiPassCompactResult TYPE UNDOCUMENTED.
+
+           V3 uses `passesCompleted` field in Suite E expectations (8.1,
+           8.2, 8.3, 8.6, 8.7) and Suite F harness mock, but never
+           defines the return type of multiPassCompact. CompactResult
+           (types.ts:126-141) does NOT have passesCompleted. So
+           multiPassCompact returns an EXTENDED type.
+
+           FIX: Added explicit type documentation in Section 3 (N1):
+
+             type MultiPassCompactResult = CompactResult & {
+               passesCompleted: number;
+             };
+
+           This documents that multiPassCompact returns the standard
+           CompactResult fields PLUS passesCompleted. The mock factories
+           (makeCompactSuccess etc.) produce CompactResult (for what
+           engine.compact returns), while multiPassCompact wraps these
+           with passesCompleted.
+
+  FIX-R5:  SUITE D SOURCE FILE AMBIGUITY RESOLVED.
+
+           V3 stated:
+             "SOURCE: packages/agent-core/src/harness/compaction/compaction.ts
+              (or packages/agent-core/src/harness/messages.ts depending on
+              where prefix logic is placed)"
+
+           The "or" clause creates ambiguity for test imports. The existing
+           COMPACTION_SUMMARY_PREFIX and COMPACTION_SUMMARY_SUFFIX are in
+           messages.ts. The port plan Step 5 adds new constants.
+
+           FIX: Resolved to:
+             - ENHANCED prefix constant → messages.ts (alongside existing
+               COMPACTION_SUMMARY_PREFIX)
+             - End marker constant → messages.ts (alongside existing suffix)
+             - wrapCompactionSummary function → messages.ts (same file as
+               the constants it uses)
+
+           All Suite D imports now reference "../messages.js" consistently.
+           This matches the existing OpenClaw convention: message-related
+           constants and helpers live in messages.ts.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  [UNCHANGED FROM V3 — same 15 sections]
+
+================================================================================
+1. TESTING STRATEGY OVERVIEW
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 1]
+
+  TOTAL PLANNED TESTS: 111 across 9 suites (was 110 in V3; +1 from FIX-R1)
+
+================================================================================
+2. TEST FILE INVENTORY & SHARD ASSIGNMENTS
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 2]
+
+  Same 7 new files, same 3 modified files, same shard assignments.
+
+================================================================================
+3. SHARED TEST UTILITIES & FIXTURES
+================================================================================
+
+  ── EXISTING UTILITIES (NO CHANGES NEEDED) ────────────────────────────────
+
+  [UNCHANGED FROM V3 — M1 through M4]
+
+  ── NEW UTILITIES ──────────────────────────────────────────────────────────
+
+  CHANGE FROM V3 (FIX-R4): Added explicit MultiPassCompactResult type
+  documentation.
+
+  N1: Suite E mock factory (inline in multi-pass-compaction.test.ts)
+
+      multiPassCompact's RETURN TYPE is an extension of CompactResult:
+
+        type MultiPassCompactResult = CompactResult & {
+          passesCompleted: number;
+        };
+
+      This adds passesCompleted to the standard CompactResult. The
+      engine.compact() method returns CompactResult; multiPassCompact
+      wraps it with loop metadata.
+
+      CompactResult (types.ts:126-141) is:
+        { ok: boolean; compacted: boolean; reason?: string;
+          result?: { summary?; firstKeptEntryId?; tokensBefore;
+                     tokensAfter?; details?; sessionId?; sessionFile? } }
+
+      Mock factories for engine.compact() return values:
+
+      function createMockContextEngine() {
+        return {
+          info: { ownsCompaction: false },
+          compact: vi.fn(async (): Promise<CompactResult> => ({
+            ok: false,
+            compacted: false,
+            reason: "nothing to compact",
+          })),
+        };
+      }
+
+      function makeCompactSuccess(overrides: {
+        tokensAfter?: number;
+        tokensBefore?: number;
+        summary?: string;
+      } = {}): CompactResult {
+        return {
+          ok: true,
+          compacted: true,
+          result: {
+            summary: overrides.summary ?? "Compacted session",
+            tokensBefore: overrides.tokensBefore ?? 200000,
+            tokensAfter: overrides.tokensAfter ?? 100000,
+            firstKeptEntryId: "entry-5",
+          },
+        };
+      }
+
+      function makeCompactNotCompacted(reason: string): CompactResult {
+        return { ok: true, compacted: false, reason };
+      }
+
+      function makeCompactFailure(reason: string): CompactResult {
+        return { ok: false, compacted: false, reason };
+      }
+
+  CHANGE FROM V3 (FIX-R2): baseCompactParams now includes
+  runtimeContext and runtimeSettings to match real call sites.
+
+      const baseCompactParams = {
+        sessionId: "test-session",
+        sessionKey: "test-key",
+        sessionFile: "/tmp/session.jsonl",
+        tokenBudget: 100000,
+        force: true,
+        compactionTarget: "budget" as const,
+        runtimeContext: {},
+        runtimeSettings: {},
+      };
+
+      NOTE: runtimeContext and runtimeSettings are typed as optional
+      in ContextEngine.compact() (types.ts:415-416). They use opaque
+      types (ContextEngineRuntimeContext, ContextEngineRuntimeSettings)
+      that engines interpret. For unit tests of multiPassCompact, we
+      only need to verify they are passed through unchanged. Empty
+      objects satisfy the type and test the passthrough behavior.
+      The real values (with tokenBudget, model info, etc.) are
+      constructed by the embedded runner and are tested in Suite F
+      via the full harness.
+
+  N2: Suite C message helpers
+      [UNCHANGED FROM V3]
+
+  N3: Harness extension additions
+      [UNCHANGED FROM V3]
+
+================================================================================
+4. TEST SUITE A — PROGRESS DETECTION & ANTI-THRASHING
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 4]
+
+  All 19 tests (4.1 through 4.19) remain exactly as specified.
+
+  TEST COUNT: 19 tests (12 + 7)
+
+================================================================================
+5. TEST SUITE B — PRE-COMPACTION PRUNING
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 5]
+
+  All 20 tests (5.1 through 5.20) remain exactly as specified.
+
+  TEST COUNT: 20 tests
+
+================================================================================
+6. TEST SUITE C — CUT POINT ENHANCEMENT (MESSAGE ANCHORING)
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 6]
+
+  All 12 tests (6.1 through 6.12) remain exactly as specified.
+
+  TEST COUNT: 12 tests
+
+================================================================================
+7. TEST SUITE D — SUMMARY PREFIX DISAMBIGUATION
+================================================================================
+
+  FILE: packages/agent-core/src/harness/compaction/compaction-summary-prefix.test.ts
+  SOURCE: packages/agent-core/src/harness/messages.ts (MODIFIED)
+  PORTED FROM: Hermes SUMMARY_PREFIX, _SUMMARY_END_MARKER
+  SHARD: unit-support
+
+  CHANGE FROM V3 (FIX-R5): Source file resolved to messages.ts
+  (not "compaction.ts or messages.ts"). All new constants and the
+  wrapper function live in messages.ts alongside the existing
+  COMPACTION_SUMMARY_PREFIX and COMPACTION_SUMMARY_SUFFIX.
+
+  FRAMEWORK SETUP:
+
+    import { describe, expect, it } from "vitest";
+    import {
+      COMPACTION_SUMMARY_PREFIX,
+      COMPACTION_SUMMARY_SUFFIX,
+      ENHANCED_COMPACTION_SUMMARY_PREFIX,
+      COMPACTION_SUMMARY_END_MARKER,
+      wrapCompactionSummary,
+    } from "../messages.js";
+
+  -- describe("enhanced compaction summary prefix") ---------------------------------
+
+    7.1 it("contains 'REFERENCE ONLY' disambiguation directive")
+        [UNCHANGED FROM V3]
+
+    7.2 it("contains directive to respond to latest user message")
+        [UNCHANGED FROM V3]
+
+    7.3 it("contains reverse signal handling directive")
+        [UNCHANGED FROM V3]
+
+    7.4 it("is backward-compatible with existing prefix")
+        [UNCHANGED FROM V3]
+
+  -- describe("compaction summary end marker") --------------------------------------
+
+    7.5 it("end marker contains boundary directive")
+        [UNCHANGED FROM V3]
+
+    7.6 it("end marker directs attention to messages below")
+        [UNCHANGED FROM V3]
+
+  -- describe("wrapCompactionSummary") ---------------------------------------------
+
+    7.7 it("wraps summary with prefix and end marker")
+        CALL: wrapCompactionSummary("## Goal\nBuild feature X")
+        EXPECT: Result starts with ENHANCED_COMPACTION_SUMMARY_PREFIX,
+                contains the summary body,
+                ends with COMPACTION_SUMMARY_END_MARKER.
+
+    7.8 it("handles empty summary string")
+        CALL: wrapCompactionSummary("")
+        EXPECT: Returns prefix + end marker with empty body between.
+                Does not crash.
+
+  TEST COUNT: 8 tests
+
+================================================================================
+8. TEST SUITE E — MULTI-PASS COMPACTION LOOP
+================================================================================
+
+  FILE: src/agents/multi-pass-compaction.test.ts
+  SOURCE: src/agents/multi-pass-compaction.ts (NEW gateway-layer module)
+  PORTED FROM: Hermes agent/turn_context.py multi-pass loop (lines 384-413)
+  SHARD: agents-core
+
+  FRAMEWORK SETUP:
+
+    multiPassCompact receives a contextEngine (or compact function) as
+    a parameter, NOT as a module import. Tests inject a mock object
+    directly. No vi.mock() needed.
+
+    CHANGE FROM V3 (FIX-R4): Explicit return type documented.
+    multiPassCompact returns MultiPassCompactResult (CompactResult &
+    { passesCompleted: number }), NOT plain CompactResult.
+
+    import { describe, expect, it, vi, beforeEach } from "vitest";
+    import { multiPassCompact } from "./multi-pass-compaction.js";
+    import type { CompactResult } from "../context-engine/types.js";
+
+    // MultiPassCompactResult = CompactResult & { passesCompleted: number }
+    // (returned by multiPassCompact, not by engine.compact)
+
+    // Mock factories — see Section 3 (N1) for full code
+    let mockEngine: ReturnType<typeof createMockContextEngine>;
+
+    beforeEach(() => {
+      mockEngine = createMockContextEngine();
+    });
+
+    CHANGE FROM V3 (FIX-R2): baseCompactParams includes
+    runtimeContext and runtimeSettings.
+
+    const baseCompactParams = {
+      sessionId: "test-session",
+      sessionKey: "test-key",
+      sessionFile: "/tmp/session.jsonl",
+      tokenBudget: 100000,
+      force: true,
+      compactionTarget: "budget" as const,
+      runtimeContext: {},
+      runtimeSettings: {},
+    };
+
+  -- describe("multiPassCompact single-pass behavior") -----------------------------
+
+    8.1 through 8.5: [UNCHANGED FROM V3]
+
+  -- describe("multiPassCompact multi-pass iteration") -----------------------------
+
+    8.6 through 8.8: [UNCHANGED FROM V3]
+
+  -- describe("multiPassCompact abort handling") ------------------------------------
+
+    8.9 through 8.11: [UNCHANGED FROM V3]
+
+  -- describe("multiPassCompact error handling") ------------------------------------
+
+    8.12 through 8.15: [UNCHANGED FROM V3]
+
+  -- describe("multiPassCompact progress tracking") --------------------------------
+
+    8.16 through 8.18: [UNCHANGED FROM V3]
+
+  -- describe("multiPassCompact configuration defaults") ----------------------------
+
+    8.19 it("defaults maxPasses to 3 when not specified")
+         [UNCHANGED FROM V3]
+
+    CHANGE FROM V3 (FIX-R3): Test 8.20 setup now describes both passes.
+
+    8.20 it("defaults minProgressThreshold to 0.05 (5%)")
+         SETUP: Pass 1: 200000 → 191000 (4.5% reduction — below 5% threshold).
+                Pass 2: 191000 → 183000 (4.2% reduction — below 5% threshold).
+                Do NOT pass minProgressThreshold in params.
+         CALL: multiPassCompact(...)
+         EXPECT: compact called TWICE. After two consecutive sub-threshold
+                 passes (counter reaches 2), anti-thrash triggers.
+                 This confirms the 5% default is active.
+
+    8.21 it("clamps maxPasses to [1, 10] at runtime")
+         [UNCHANGED FROM V3]
+
+  TEST COUNT: 21 tests
+
+================================================================================
+9. TEST SUITE F — EMBEDDED RUNNER INTEGRATION
+================================================================================
+
+  CHANGE FROM V3 (FIX-R4): The harness mock for multiPassCompact
+  returns MultiPassCompactResult (with passesCompleted), which is
+  distinct from CompactResult.
+
+  FILE: src/agents/embedded-agent-runner/run/
+        multi-pass-compaction-integration.test.ts
+  SOURCE: src/agents/embedded-agent-runner/run.ts (MODIFIED)
+  SHARD: agents-embedded-agent
+
+  FRAMEWORK SETUP:
+
+    [UNCHANGED FROM V3 except for the type clarification below]
+
+    HARNESS EXTENSION (run.overflow-compaction.harness.ts MODIFICATION):
+
+      vi.doMock path: "../multi-pass-compaction.js"
+      [Path verification unchanged from V3]
+
+      NEW MOCK EXPORT:
+
+        // Returns MultiPassCompactResult (CompactResult + passesCompleted)
+        export const mockedMultiPassCompact = vi.fn(async () => ({
+          ok: true,
+          compacted: true,
+          passesCompleted: 1,
+          result: {
+            summary: "Compacted",
+            tokensAfter: 80000,
+            tokensBefore: 200000,
+            firstKeptEntryId: "entry-5",
+          },
+        }));
+
+      IN loadRunOverflowCompactionHarness():
+
+        vi.doMock("../multi-pass-compaction.js", () => ({
+          multiPassCompact: mockedMultiPassCompact,
+        }));
+
+      IN resetRunOverflowCompactionHarnessMocks():
+
+        mockedMultiPassCompact.mockReset();
+        mockedMultiPassCompact.mockResolvedValue({
+          ok: true, compacted: true, passesCompleted: 1,
+          result: { summary: "Compacted", tokensAfter: 80000,
+                    tokensBefore: 200000, firstKeptEntryId: "entry-5" },
+        });
+
+    TEST FILE SETUP:
+      [UNCHANGED FROM V3]
+
+  TESTS 9.1 through 9.7:
+    [UNCHANGED FROM V3 — same test cases and assertions]
+
+  TEST COUNT: 7 tests
+
+================================================================================
+10. TEST SUITE G — CONFIGURATION SCHEMA EXTENSION
+================================================================================
+
+  FILE: src/config/config.multi-pass-compaction.test.ts
+  SOURCE: src/config/defaults.ts (MODIFIED — applyCompactionDefaults)
+          src/config/zod-schema.agent-defaults.ts (MODIFIED — compaction schema)
+  SHARD: runtime-config
+
+  FRAMEWORK SETUP:
+
+    [UNCHANGED FROM V3]
+
+  IMPORTANT CONTEXT:
+
+    applyCompactionDefaults currently ONLY sets mode:"safeguard" and has
+    a guard: `if (compaction?.mode) return cfg;`. The port plan modifies
+    this function to apply maxPasses and minProgressThreshold defaults
+    INDEPENDENTLY, following the per-field pattern used by
+    applyAgentDefaults (defaults.ts:404-450).
+
+    The modified function must:
+      1. Check each field independently (not early-exit on mode)
+      2. Set maxPasses=3 when not specified
+      3. Set minProgressThreshold=0.05 when not specified
+      4. Preserve user-specified values for all fields
+      5. NOT clamp or validate ranges (that's Zod + runtime's job)
+
+  -- describe("multi-pass compaction configuration defaults") ----------------------
+
+    10.1 it("applies default maxPasses=3 when not specified")
+         INPUT: materializeCompactionConfig({})
+         EXPECT: result.maxPasses === 3
+
+    10.2 it("applies default minProgressThreshold=0.05 when not specified")
+         INPUT: materializeCompactionConfig({})
+         EXPECT: result.minProgressThreshold === 0.05
+
+    10.3 it("preserves user-specified maxPasses")
+         INPUT: materializeCompactionConfig({ maxPasses: 5 })
+         EXPECT: result.maxPasses === 5
+
+    10.4 it("preserves user-specified minProgressThreshold")
+         INPUT: materializeCompactionConfig({ minProgressThreshold: 0.10 })
+         EXPECT: result.minProgressThreshold === 0.10
+
+    CHANGE FROM V3 (FIX-R1): New test 10.5a added.
+
+    10.5a it("applies new field defaults even when mode is already set")
+          WHAT: The CURRENT applyCompactionDefaults early-exits when
+                mode is set (`if (compaction?.mode) return cfg;`). The
+                modified version must apply maxPasses and
+                minProgressThreshold defaults REGARDLESS of mode.
+                This test catches regressions where the mode guard
+                blocks new defaults.
+          INPUT: materializeCompactionConfig({ mode: "safeguard" })
+          EXPECT: result.mode === "safeguard"      (preserved)
+                  result.maxPasses === 3            (default applied)
+                  result.minProgressThreshold === 0.05 (default applied)
+          WHY: Without this test, a user with mode:"safeguard" already set
+               in their config would silently get NO multi-pass defaults,
+               because the old guard returns before checking new fields.
+               The applyAgentDefaults function (defaults.ts:404-450)
+               demonstrates the correct per-field pattern.
+
+    10.5b it("preserves existing compaction settings alongside new fields")
+          INPUT: materializeCompactionConfig({
+                   mode: "safeguard",
+                   reserveTokens: 16384,
+                   keepRecentTokens: 20000,
+                   maxPasses: 2,
+                   recentTurnsPreserve: 3,
+                 })
+          EXPECT: All fields preserved:
+                  result.mode === "safeguard"
+                  result.reserveTokens === 16384
+                  result.keepRecentTokens === 20000
+                  result.maxPasses === 2
+                  result.recentTurnsPreserve === 3
+
+    10.6 it("handles undefined compaction block gracefully")
+         INPUT: applyCompactionDefaults({} as OpenClawConfig)
+         EXPECT: Returns config without crash. Does not add compaction
+                 block when agents.defaults is absent.
+
+  -- describe("multi-pass compaction Zod schema validation") ----------------------
+
+    10.7 it("accepts valid multi-pass config fields")
+         [UNCHANGED FROM V3]
+
+    10.8 it("rejects invalid type for maxPasses")
+         [UNCHANGED FROM V3]
+
+    10.9 it("rejects invalid type for minProgressThreshold")
+         [UNCHANGED FROM V3]
+
+    10.10 it("rejects maxPasses below minimum via Zod schema")
+          [UNCHANGED FROM V3]
+
+    10.11 it("rejects maxPasses above maximum via Zod schema")
+          [UNCHANGED FROM V3]
+
+    10.12 it("rejects minProgressThreshold at zero via Zod schema")
+          [UNCHANGED FROM V3]
+
+    10.13 it("rejects minProgressThreshold at 1.0 via Zod schema")
+          [UNCHANGED FROM V3]
+
+    10.14 it("backwards-compatible with pre-multi-pass configs")
+          [UNCHANGED FROM V3]
+
+    10.15 it("rejects unknown keys in compaction config (strict mode)")
+          [UNCHANGED FROM V3]
+
+  TEST COUNT: 16 tests (7 defaults + 9 schema) — was 15 in V3
+
+================================================================================
+11. TEST SUITE H — COMPACTION-SAFEGUARD INTEGRATION
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 11]
+
+  All 4 tests (11.1 through 11.4) remain exactly as specified.
+
+  TEST COUNT: 4 tests
+
+================================================================================
+12. TEST SUITE I — INTEGRATION / VERTICAL SLICE
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 12]
+
+  All 4 tests (12.1 through 12.4) remain exactly as specified.
+
+  TEST COUNT: 4 tests
+
+================================================================================
+13. REGRESSION COVERAGE MATRIX
+================================================================================
+
+  CHANGE FROM V3: Added entry for FIX-R1 coverage.
+
+  [ALL ENTRIES FROM V3 PRESERVED, with this addition:]
+
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │ applyCompactionDefaults guard    │ Step 8     │ G: 10.5a             │
+  │ must not block new field defaults│            │                       │
+  │ when mode is already set         │            │                       │
+  └────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+14. MOCK & FIXTURE DEPENDENCY MAP
+================================================================================
+
+  [UNCHANGED FROM V3 — see V3 plan Section 14]
+
+  FIX-R4 change: Add note to Suite E entry that multiPassCompact returns
+  MultiPassCompactResult (CompactResult & { passesCompleted }), not
+  plain CompactResult. The mock factories produce CompactResult (for
+  engine.compact), while multiPassCompact wraps with passesCompleted.
+
+================================================================================
+15. TEST EXECUTION & CI NOTES
+================================================================================
+
+  15.1 VITEST SHARD ASSIGNMENT SUMMARY
+       [UNCHANGED FROM V3]
+
+  15.2 TEST ISOLATION
+       [UNCHANGED FROM V3]
+
+  15.3 PERFORMANCE BUDGET
+       [UNCHANGED FROM V3]
+
+  15.4 EXPECTED TEST COUNT
+
+    Suite A: 19 tests  (progress detection & anti-thrashing)
+    Suite B: 20 tests  (pre-compaction pruning)
+    Suite C: 12 tests  (cut point anchoring)
+    Suite D:  8 tests  (summary prefix disambiguation)
+    Suite E: 21 tests  (multi-pass loop)
+    Suite F:  7 tests  (embedded runner integration)
+    Suite G: 16 tests  (configuration schema extension)  ← was 15, now 16
+    Suite H:  4 tests  (compaction-safeguard integration)
+    Suite I:  4 tests  (vertical integration)
+    -------------------
+    TOTAL: 111 tests   ← was 110, now 111
+
+  15.5 PRIORITY ORDER FOR IMPLEMENTATION
+       [UNCHANGED FROM V3]
+
+================================================================================
+END OF CORRECTED TEST PLAN (REVIEW V3)
+================================================================================

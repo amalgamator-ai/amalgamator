@@ -1,0 +1,1374 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — PORTING PLAN V1
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Source: Hermes Agent (Python)
+Target: OpenClaw (TypeScript)
+Complexity: MEDIUM
+Date: 2026-06-28
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1. Executive Summary
+  2. Architectural Mapping (Hermes -> OpenClaw)
+  3. Porting Strategy & Principles
+  4. Step-by-Step Implementation Plan
+     Step 1: Types, Interfaces & Constants
+     Step 2: Progress Detection & Anti-Thrashing Module
+     Step 3: Tool Result Pre-Pruning (1-Line Summaries, Dedup, Arg Truncation)
+     Step 4: Cut Point Enhancement (Message Anchoring)
+     Step 5: Summary Prefix Disambiguation & End Marker
+     Step 6: Multi-Pass Compaction Loop (Gateway Layer)
+     Step 7: Preemptive Multi-Pass Integration (Pre-Prompt Path)
+     Step 8: Configuration Schema Extension
+     Step 9: Tests
+  5. File Inventory (New & Modified)
+  6. Dependency Analysis
+  7. Risk Analysis & Mitigation
+  8. Integration Verification Checklist
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+This plan ports Hermes's multi-pass context compaction system into OpenClaw.
+The core idea: instead of a single compaction pass with a rigid 180s timeout,
+wrap compaction in an iterative loop that:
+
+  (a) runs up to MAX_COMPACTION_PASSES (3) sequential compaction passes,
+  (b) measures progress after each pass (>5% token reduction or message
+      count reduction),
+  (c) stops early when context fits within the token budget OR progress
+      stalls,
+  (d) guards against thrashing via consecutive ineffective-compression
+      tracking.
+
+The plan also ports three complementary subsystems that make multi-pass
+effective:
+
+  - Pre-compaction tool result pruning with informative 1-line summaries
+    (cheap LLM-free pass that shrinks context before expensive summarization)
+  - Message anchoring in the tail (ensure last user/assistant messages
+    survive compaction, preventing active-task loss)
+  - Summary prefix disambiguation (prevent the model from treating
+    compacted summaries as active instructions)
+
+DESIGN PRINCIPLE: Extend, don't replace. OpenClaw's existing compaction
+safeguard hook, quality guard, staged summarization, context pruning, and
+session tree model are PRESERVED. The new multi-pass logic wraps AROUND
+the existing single-pass infrastructure.
+
+================================================================================
+2. ARCHITECTURAL MAPPING (HERMES -> OPENCLAW)
+================================================================================
+
+  Hermes Component                  OpenClaw Equivalent (Inject Point)
+  ──────────────────────────────    ──────────────────────────────────────
+  turn_context.py multi-pass loop   embedded-agent-runner/run.ts retry loop
+                                    + NEW multi-pass-compaction.ts module
+
+  _compression_made_progress()      NEW compaction-progress.ts in agent-core
+
+  should_compress() anti-thrashing  Extend shouldCompact() in compaction.ts
+
+  _prune_old_tool_results()         NEW pre-compaction-pruning.ts in
+                                    src/agents/agent-hooks/
+
+  _summarize_tool_result()          NEW tool-result-summaries.ts in
+                                    src/agents/agent-hooks/
+
+  SUMMARY_PREFIX (disambiguation)   Enhance COMPACTION_SUMMARY_PREFIX
+                                    in messages.ts
+
+  _ensure_last_user_message_in_tail Enhance findCutPoint() in compaction.ts
+  _ensure_last_assistant_message_in_tail
+
+  compress_context() orchestrator   compactContextEngineWithSafetyTimeout
+                                    in compaction-safety-timeout.ts
+                                    + NEW multi-pass wrapper
+
+  _ineffective_compression_count    NEW CompactionProgressTracker class
+
+  ContextCompressor state           State on CompactionProgressTracker
+                                    (attached to runner lifetime)
+
+  ContextEngine ABC                 ContextEngine interface in
+                                    context-engine/types.ts (unchanged)
+
+LAYER ASSIGNMENT:
+
+  The multi-pass loop lives in the GATEWAY LAYER (src/agents/), NOT in
+  agent-core. Rationale:
+
+  1. agent-core's compact() is a stateless, single-pass primitive designed
+     for portability across hosts (CLI, Copilot, Codex). Making it multi-pass
+     would break that contract.
+
+  2. The gateway layer (embedded-agent-runner) already manages retry loops,
+     timeout accounting, and session state — multi-pass is a natural extension.
+
+  3. The compaction-safeguard hook already overrides compact() behavior from
+     the gateway layer — multi-pass wraps that same hook path.
+
+  4. OpenClaw's architecture convention: agent-core provides primitives,
+     gateway provides orchestration policies.
+
+================================================================================
+3. PORTING STRATEGY & PRINCIPLES
+================================================================================
+
+  P1  EXTEND, DON'T REPLACE
+      - Existing compaction-safeguard hook, quality guard, staged
+        summarization, context pruning, and session tree model are
+        PRESERVED unchanged.
+      - Multi-pass wraps around existing infrastructure.
+
+  P2  IDIOMATIC TYPESCRIPT
+      - Python classes -> TypeScript classes/interfaces
+      - Python dicts -> TypeScript Record<string, unknown> or typed interfaces
+      - Python Optional -> TypeScript `| undefined`
+      - Python tuples -> TypeScript named return types or objects
+      - Python f-strings -> TypeScript template literals
+      - Python `for _pass in range(3)` -> TypeScript `for (let pass = 0; ...)`
+      - Python `re.search` -> TypeScript `RegExp.exec()` or `.match()`
+      - Python `json.loads/dumps` -> TypeScript `JSON.parse/stringify`
+      - Python `hashlib.md5` -> Node.js `crypto.createHash('md5')`
+
+  P3  FOLLOW OPENCLAW CONVENTIONS
+      - Result<T, E> pattern for fallible operations
+      - Structured logging via subsystem loggers
+      - AbortSignal threading for cancellation
+      - Worker threads for CPU-heavy planning
+      - Hook-based extension points
+      - Constants at module top, exported when cross-module
+
+  P4  INCREMENTAL BUILDABILITY
+      - Each step produces a compilable, testable increment
+      - Steps 1-5 are independent leaf modules
+      - Steps 6-7 integrate them into the run loop
+      - Step 8 adds configuration
+      - Step 9 adds tests
+
+  P5  PRESERVE TIMEOUT SAFETY
+      - The existing 180s safety timeout must encompass ALL passes, not
+        reset per pass. Multi-pass shares one AbortSignal + one timeout
+        window.
+
+  P6  SESSION TREE COMPATIBILITY
+      - Each compaction pass appends a CompactionEntry to the session tree
+        (existing behavior via harness.compact() or the hook). Multi-pass
+        means multiple CompactionEntry appends per invocation — this is
+        safe because prepareCompaction() always finds the LAST compaction
+        entry and builds from there.
+
+================================================================================
+4. STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 1: Types, Interfaces & Constants
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Define the foundational types and constants that all subsequent
+steps depend on.
+
+─── FILE: packages/agent-core/src/harness/compaction/compaction-progress.ts (NEW)
+
+  Create this module with:
+
+  1. CONSTANTS:
+
+     export const MAX_COMPACTION_PASSES = 3;
+     export const PROGRESS_THRESHOLD = 0.05;      // 5% token reduction minimum
+     export const INEFFECTIVE_SAVINGS_THRESHOLD = 0.10; // 10% savings minimum
+     export const MAX_INEFFECTIVE_COMPRESSIONS = 2;
+
+  2. INTERFACE: MultiPassCompactionState
+
+     export interface MultiPassCompactionState {
+       /** Current pass number (0-indexed) */
+       pass: number;
+       /** Token count before this pass */
+       tokensBefore: number;
+       /** Token count after this pass */
+       tokensAfter: number;
+       /** Message count before this pass */
+       messageCountBefore: number;
+       /** Message count after this pass */
+       messageCountAfter: number;
+       /** Whether this pass made material progress */
+       madeProgress: boolean;
+       /** Elapsed time in ms for this pass */
+       elapsedMs: number;
+     }
+
+  3. INTERFACE: MultiPassCompactionResult
+
+     export interface MultiPassCompactionResult {
+       /** All per-pass states */
+       passes: MultiPassCompactionState[];
+       /** Total passes executed */
+       totalPasses: number;
+       /** Final token count */
+       finalTokens: number;
+       /** Whether compaction met the target threshold */
+       metThreshold: boolean;
+       /** Reason the loop stopped */
+       stopReason: "threshold_met" | "no_progress" | "max_passes" | "timeout" | "aborted";
+       /** Total elapsed time across all passes in ms */
+       totalElapsedMs: number;
+     }
+
+  4. INTERFACE: CompactionProgressTrackerState
+
+     export interface CompactionProgressTrackerState {
+       /** Consecutive compressions that saved <10% each */
+       ineffectiveCompressionCount: number;
+       /** Savings percentage of last compression */
+       lastCompressionSavingsPct: number;
+       /** Total compressions performed in this session */
+       compressionCount: number;
+     }
+
+─── FILE: packages/agent-core/src/harness/types.ts (MODIFY)
+
+  Add to CompactionSettings interface:
+
+     /** Maximum compaction passes per invocation (default: 3) */
+     maxPasses?: number;
+     /** Minimum token reduction % to count as progress (default: 0.05) */
+     progressThreshold?: number;
+
+  NOTE: These are OPTIONAL fields with defaults, so existing callers and
+  the DEFAULT_COMPACTION_SETTINGS object remain unchanged.
+
+─── FILE: packages/agent-core/src/harness/compaction/compaction.ts (MODIFY)
+
+  Add optional fields to DEFAULT_COMPACTION_SETTINGS:
+
+     export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
+       enabled: true,
+       reserveTokens: 16384,
+       keepRecentTokens: 20000,
+       maxPasses: 3,               // NEW
+       progressThreshold: 0.05,    // NEW
+     };
+
+─── INTEGRATION: Export from packages/agent-core/src/index.ts
+
+  Add exports for:
+    - MultiPassCompactionState
+    - MultiPassCompactionResult
+    - CompactionProgressTrackerState
+    - MAX_COMPACTION_PASSES, PROGRESS_THRESHOLD, etc.
+
+─── REUSE: Leverages existing CompactionSettings, CompactionResult,
+    CompactResult types. No new dependencies.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 2: Progress Detection & Anti-Thrashing Module
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Port Hermes's _compression_made_progress() and anti-thrashing
+guard into a reusable TypeScript class.
+
+─── FILE: packages/agent-core/src/harness/compaction/compaction-progress.ts (EXTEND)
+
+  Add to the module created in Step 1:
+
+  1. FUNCTION: compactionMadeProgress()
+
+     Ported from: agent/turn_context.py lines 41-61
+
+     /**
+      * Determine whether a compaction pass materially reduced the context.
+      *
+      * Progress is detected when EITHER:
+      *   - Message count decreased (any reduction counts), OR
+      *   - Token count decreased by more than the progress threshold
+      *     (default 5%), even if message count is unchanged.
+      *
+      * The token-only path handles "size-only" compression where tool
+      * outputs are summarized without removing message rows.
+      *
+      * @see Hermes issue #39548 — size-only wins were false-negatives
+      */
+     export function compactionMadeProgress(
+       origMessageCount: number,
+       newMessageCount: number,
+       origTokens: number,
+       newTokens: number,
+       progressThreshold: number = PROGRESS_THRESHOLD,
+     ): boolean {
+       if (newMessageCount < origMessageCount) return true;
+       if (origTokens <= 0) return false;
+       return newTokens < origTokens * (1 - progressThreshold);
+     }
+
+     TypeScript note: Direct translation — Hermes uses `new_tokens <
+     orig_tokens * 0.95`, we use `(1 - progressThreshold)` for
+     configurability.
+
+  2. CLASS: CompactionProgressTracker
+
+     Ported from: ContextCompressor._ineffective_compression_count and
+     related tracking in agent/context_compressor.py lines 964-984,
+     2665-2671.
+
+     /**
+      * Tracks compaction effectiveness across passes within a session.
+      * Implements anti-thrashing: after MAX_INEFFECTIVE_COMPRESSIONS
+      * consecutive passes that each save < INEFFECTIVE_SAVINGS_THRESHOLD,
+      * shouldCompact() returns false to prevent infinite loops.
+      *
+      * Lifecycle: one instance per embedded-agent-runner session.
+      * Reset on session clear/new session.
+      */
+     export class CompactionProgressTracker {
+       private _ineffectiveCount = 0;
+       private _lastSavingsPct = 0;
+       private _compressionCount = 0;
+
+       /** Record the outcome of a compaction pass. */
+       recordCompaction(tokensBefore: number, tokensAfter: number): void {
+         this._compressionCount++;
+         const savingsPct =
+           tokensBefore > 0
+             ? ((tokensBefore - tokensAfter) / tokensBefore)
+             : 0;
+         this._lastSavingsPct = savingsPct;
+         if (savingsPct < INEFFECTIVE_SAVINGS_THRESHOLD) {
+           this._ineffectiveCount++;
+         } else {
+           this._ineffectiveCount = 0;  // Reset on effective compression
+         }
+       }
+
+       /** Anti-thrashing check: should we attempt compaction? */
+       shouldAttemptCompaction(): boolean {
+         return this._ineffectiveCount < MAX_INEFFECTIVE_COMPRESSIONS;
+       }
+
+       /** Reset tracker (session clear / new session). */
+       reset(): void {
+         this._ineffectiveCount = 0;
+         this._lastSavingsPct = 0;
+         this._compressionCount = 0;
+       }
+
+       /** Current state snapshot (for diagnostics/logging). */
+       getState(): CompactionProgressTrackerState {
+         return {
+           ineffectiveCompressionCount: this._ineffectiveCount,
+           lastCompressionSavingsPct: this._lastSavingsPct,
+           compressionCount: this._compressionCount,
+         };
+       }
+     }
+
+─── INTEGRATION:
+  - Export CompactionProgressTracker from agent-core index.
+  - Instantiated in the embedded-agent-runner run() scope (Step 6).
+  - Survives across the run loop's lifetime, reset on session switch.
+
+─── REUSE: Uses only the constants from the same module. No external deps.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 3: Tool Result Pre-Pruning (1-Line Summaries, Dedup, Arg Truncation)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Port Hermes's _prune_old_tool_results() as a pre-compaction pass
+that cheaply reduces context before the expensive LLM summarization call.
+
+This is placed in the GATEWAY LAYER as a pre-compaction hook, NOT in
+agent-core, because:
+  - It requires tool-specific knowledge (terminal, read_file, write_file...)
+  - It modifies message content in-place before the session_before_compact hook
+  - OpenClaw's context-pruning already lives in agent-hooks/
+
+─── FILE: src/agents/agent-hooks/pre-compaction-pruning.ts (NEW)
+
+  Ported from: agent/context_compressor.py lines 490-528 (_summarize_tool_result),
+  lines 990-1150 (_prune_old_tool_results).
+
+  1. FUNCTION: summarizeToolResult()
+
+     Ported from: _summarize_tool_result()
+
+     /**
+      * Create an informative 1-line summary of a tool call + result.
+      *
+      * Replaces large tool outputs with a short description, e.g.:
+      *   [Bash] ran `npm test` -> exit 0, 47 lines output
+      *   [Read] read config.ts from line 1 (1,200 chars)
+      *   [Write] wrote to config.ts (15 lines)
+      *   [Grep] content search for 'compress' -> 12 matches
+      *
+      * Adapted from Hermes to use OpenClaw tool names (Bash, Read, Write,
+      * Edit, Grep, Glob, WebFetch, Agent, etc.) instead of Hermes's
+      * (terminal, read_file, write_file, search_files, etc.)
+      */
+     export function summarizeToolResult(
+       toolName: string,
+       toolInput: Record<string, unknown> | string,
+       resultContent: string,
+     ): string
+
+     Tool-specific handlers for OpenClaw's tool set:
+       - "Bash" / "bash" -> `[Bash] ran \`{cmd}\` -> exit {code}, {n} lines`
+       - "Read" -> `[Read] read {path} from line {offset} ({n} chars)`
+       - "Write" -> `[Write] wrote to {path} ({n} lines)`
+       - "Edit" -> `[Edit] edited {path} ({n} chars result)`
+       - "Grep" -> `[Grep] searched for '{pattern}' -> {n} matches`
+       - "Glob" -> `[Glob] matched '{pattern}' -> {n} files`
+       - "WebFetch" -> `[WebFetch] fetched {url} ({n} chars)`
+       - "Agent" -> `[Agent] delegated: {description} ({n} chars result)`
+       - "NotebookEdit" -> `[NotebookEdit] edited {path} cell {n}`
+       - Default: `[{toolName}] ({n} chars result)`
+
+  2. FUNCTION: pruneOldToolResults()
+
+     Ported from: _prune_old_tool_results()
+
+     /**
+      * Cheap LLM-free pre-pass that reduces context before summarization.
+      *
+      * Three sub-passes:
+      *   1. Deduplicate identical tool results (MD5 hash, keep newest)
+      *   2. Replace old tool results with 1-line summaries
+      *   3. Truncate large tool call arguments in assistant messages
+      *
+      * "Old" = before the tail protection boundary.
+      *
+      * @param messages     Session messages to prune
+      * @param tailTokenBudget  Token budget for the protected tail
+      * @param minProtectedCount  Minimum messages to protect in tail
+      * @returns { messages: pruned list, prunedCount: number }
+      */
+     export function pruneOldToolResults(
+       messages: AgentMessage[],
+       tailTokenBudget: number,
+       minProtectedCount: number,
+     ): { messages: AgentMessage[]; prunedCount: number }
+
+     SUB-PASS 1: Deduplication
+       - Walk backward through messages
+       - For each toolResult message with content > 200 chars:
+         - Compute MD5 hash of content (first 12 hex chars)
+         - If hash already seen (newer copy exists), replace content with:
+           "[Duplicate tool output — same content as a more recent call]"
+       - Uses: import { createHash } from "node:crypto";
+
+     SUB-PASS 2: Old Tool Result Replacement
+       - Determine prune boundary: walk backward accumulating tokens,
+         stop when accumulated > tailTokenBudget AND at least
+         minProtectedCount messages are protected
+       - For messages BEFORE boundary with role "toolResult":
+         - Look up the parent tool call (by tool_use_id) to get tool name + input
+         - Replace content with summarizeToolResult(toolName, input, content)
+         - Only replace when original content > 200 chars
+
+     SUB-PASS 3: Tool Call Argument Truncation
+       - For assistant messages BEFORE boundary with tool_use blocks:
+         - If tool input JSON string > 500 chars:
+           - Parse as JSON
+           - Truncate string values > 200 chars (keep head + "...[truncated]")
+           - Re-serialize
+       - Use JSON.parse/stringify with a truncation replacer
+
+  3. FUNCTION: truncateToolCallInput()
+
+     /**
+      * JSON-aware truncation of tool call arguments.
+      * Preserves JSON validity (critical for API wire format).
+      */
+     function truncateToolCallInput(
+       inputJson: string,
+       maxTotalChars: number = 500,
+       maxStringValueChars: number = 200,
+     ): string
+
+─── FILE: src/agents/agent-hooks/pre-compaction-pruning.test.ts (NEW)
+
+  Unit tests for:
+  - summarizeToolResult() with each tool type
+  - pruneOldToolResults() dedup behavior
+  - pruneOldToolResults() boundary calculation
+  - truncateToolCallInput() JSON validity
+
+─── INTEGRATION:
+  - Called from the multi-pass loop (Step 6) BEFORE each compaction pass.
+  - Also callable from compaction-safeguard.ts as an early optimization.
+  - Uses AgentMessage types from agent-core (no new deps beyond node:crypto).
+
+─── OPENCLAW TOOL NAME MAPPING:
+  Hermes tool names        OpenClaw tool names
+  terminal                 Bash
+  read_file                Read
+  write_file               Write
+  patch                    Edit
+  search_files             Grep
+  (no equivalent)          Glob
+  web_search/web_extract   WebFetch / WebSearch
+  delegate_task            Agent
+  (no equivalent)          NotebookEdit
+
+  The summarizeToolResult() function uses OpenClaw's tool names, NOT
+  Hermes's. Tool input fields also differ (e.g., Hermes "command" vs
+  OpenClaw "command" for Bash, but Hermes "path" vs OpenClaw "file_path"
+  for Read).
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 4: Cut Point Enhancement (Message Anchoring)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Port Hermes's _ensure_last_user_message_in_tail() and
+_ensure_last_assistant_message_in_tail() into OpenClaw's findCutPoint()
+to prevent active-task loss during compaction.
+
+─── FILE: packages/agent-core/src/harness/compaction/compaction.ts (MODIFY)
+
+  Ported from: agent/context_compressor.py lines 442-459
+  (_ensure_last_user_message_in_tail, _ensure_last_assistant_message_in_tail)
+
+  1. MODIFY findCutPoint():
+
+     After the existing cut point calculation (walk backward accumulating
+     tokens to keepRecentTokens), add two anchoring passes:
+
+     a. LAST USER MESSAGE ANCHOR:
+        - Find the last entry with role "user" at or after startIndex
+        - If it falls BEFORE the computed firstKeptEntryIndex:
+          - Pull firstKeptEntryIndex back to include this message
+        - This prevents the active user task from being compacted away
+        - Ported from Hermes issue #10896 fix
+
+     b. LAST ASSISTANT MESSAGE ANCHOR:
+        - Find the last entry with role "assistant" that has visible text
+          content (not just tool_calls)
+        - If it falls BEFORE firstKeptEntryIndex:
+          - Pull firstKeptEntryIndex back to include this message
+        - This prevents "can't see the output" bugs
+        - Ported from Hermes issue #29824 fix
+
+     c. RE-ALIGNMENT:
+        - After both anchors, re-check that the cut point doesn't land
+          inside a tool_call/toolResult pair
+        - Walk backward past consecutive toolResult entries
+        - If landed on a parent assistant with tool_calls, pull before it
+
+     d. MONOTONICITY INVARIANT:
+        - Both anchors can only GROW the tail (pull firstKeptEntryIndex
+          earlier), never shrink it
+        - Final safety: max(firstKeptEntryIndex, startIndex + 1)
+
+  2. MODIFY CutPointResult type (in types.ts):
+
+     Add optional diagnostic fields:
+       /** Whether the user message anchor activated */
+       userMessageAnchored?: boolean;
+       /** Whether the assistant message anchor activated */
+       assistantMessageAnchored?: boolean;
+
+  CRITICAL: The anchoring logic uses OpenClaw's SessionTreeEntry types
+  (message entries with roles), NOT Hermes's flat dict format. The
+  translation maps:
+    - Hermes: msg["role"] == "user" -> OpenClaw: entry.type === "message"
+      && entry.message.role === "user"
+    - Hermes: msg["role"] == "assistant" -> OpenClaw: entry.type === "message"
+      && entry.message.role === "assistant"
+    - Hermes: assistant with visible content -> check for text content
+      in entry.message.content, not just tool_calls
+
+─── REUSE: Fully within existing findCutPoint() function. No new files
+    needed. Uses existing SessionTreeEntry types.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 5: Summary Prefix Disambiguation & End Marker
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Enhance OpenClaw's minimal COMPACTION_SUMMARY_PREFIX with
+Hermes's disambiguation directives that prevent models from treating
+compacted summaries as active instructions.
+
+─── FILE: packages/agent-core/src/harness/messages.ts (MODIFY)
+
+  Ported from: agent/context_compressor.py lines 43-140
+  (SUMMARY_PREFIX, _SUMMARY_END_MARKER, historical section headings)
+
+  1. REPLACE COMPACTION_SUMMARY_PREFIX:
+
+     Current (OpenClaw):
+       "The conversation history before this point was compacted into
+        the following summary:\n\n<summary>\n"
+
+     New (ported from Hermes, adapted for OpenClaw):
+       `[CONTEXT COMPACTION -- REFERENCE ONLY] The conversation history ` +
+       `before this point was compacted into the following summary. ` +
+       `This is a handoff from a previous context window -- treat it as ` +
+       `background reference, NOT as active instructions.\n\n` +
+       `Do NOT answer questions or fulfill requests mentioned in this ` +
+       `summary; they were already addressed.\n` +
+       `Respond ONLY to the latest user message that appears AFTER this ` +
+       `summary -- that message is the single source of truth for what ` +
+       `to do right now.\n` +
+       `Topic overlap with the summary does NOT mean you should resume ` +
+       `its task: even on similar topics, the latest user message WINS.\n` +
+       `Reverse signals in the latest message (e.g. "stop", "undo", ` +
+       `"roll back", "never mind", a new topic) must immediately end ` +
+       `any in-flight work described in the summary.\n\n` +
+       `<summary>\n`
+
+     NOTE: Keep the <summary> XML tag that OpenClaw uses (not Hermes's
+     plain-text format). The disambiguation directives are PREPENDED
+     before the <summary> tag.
+
+  2. ADD COMPACTION_SUMMARY_END_MARKER:
+
+     export const COMPACTION_SUMMARY_END_MARKER =
+       "\n--- END OF CONTEXT SUMMARY -- respond to the message " +
+       "below, not the summary above ---";
+
+     Ported from: _SUMMARY_END_MARKER in context_compressor.py
+
+  3. MODIFY createCompactionSummaryMessage() (if it exists) or the
+     conversion path in convertToLlm():
+
+     When building the compactionSummary user message content, append
+     COMPACTION_SUMMARY_END_MARKER after COMPACTION_SUMMARY_SUFFIX:
+
+       content = COMPACTION_SUMMARY_PREFIX + summary +
+                 COMPACTION_SUMMARY_SUFFIX +
+                 COMPACTION_SUMMARY_END_MARKER
+
+  4. OPTIONAL: Add HISTORICAL_SECTION_HEADINGS constant:
+
+     export const HISTORICAL_SECTION_HEADINGS = {
+       task: "## Historical Task Snapshot",
+       inProgress: "## Historical In-Progress State",
+       pendingAsks: "## Historical Pending User Asks",
+       remainingWork: "## Historical Remaining Work",
+     } as const;
+
+     These can be used by the summarization prompt (in
+     compaction-safeguard.ts) to produce headings that don't mislead
+     the model into treating historical state as active instructions.
+
+─── BACKWARD COMPATIBILITY:
+
+  The prefix change affects ALL compaction summaries going forward.
+  Existing sessions with the old prefix will still work — the model
+  simply won't see the new directives for historical summaries. No
+  migration needed; the improvement is forward-only.
+
+─── REUSE: Modifies existing constants in messages.ts. No new deps.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 6: Multi-Pass Compaction Loop (Gateway Layer)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Implement the core multi-pass compaction loop in the gateway
+layer, wrapping the existing single-pass compaction with iterative
+progress checks.
+
+This is the CENTRAL STEP of the port.
+
+─── FILE: src/agents/multi-pass-compaction.ts (NEW)
+
+  Ported from: agent/turn_context.py lines 384-413 (multi-pass loop),
+  agent/conversation_compression.py compress_context() orchestration.
+
+  1. FUNCTION: multiPassCompact()
+
+     /**
+      * Run up to maxPasses sequential compaction passes, checking for
+      * material progress after each. Stops when:
+      *   - Token count is below the compaction threshold, OR
+      *   - Progress stalls (<5% token reduction AND no message count
+      *     reduction), OR
+      *   - maxPasses exhausted, OR
+      *   - Safety timeout fires, OR
+      *   - AbortSignal is triggered.
+      *
+      * This wraps the existing single-pass compaction infrastructure
+      * (contextEngine.compact via compactContextEngineWithSafetyTimeout).
+      * The compaction-safeguard hook, quality guard, staged summarization,
+      * and all existing OpenClaw features are preserved per-pass.
+      *
+      * @param contextEngine    The context engine to compact against
+      * @param params           Base compaction params (sessionId, runtimeContext, etc.)
+      * @param settings         Compaction settings (reserveTokens, keepRecentTokens, maxPasses)
+      * @param contextWindow    Total context window tokens for threshold check
+      * @param estimateTokensFn Function to estimate current context tokens
+      * @param tracker          Progress tracker for anti-thrashing
+      * @param timeoutMs        Total timeout budget for ALL passes (default 180s)
+      * @param abortSignal      External abort signal
+      * @param logger           Subsystem logger
+      * @returns MultiPassCompactionResult with per-pass details
+      */
+     export async function multiPassCompact(params: {
+       contextEngine: Pick<ContextEngine, "compact">;
+       compactParams: ContextEngineCompactParams;
+       settings: CompactionSettings;
+       contextWindow: number;
+       estimateTokensFn: () => Promise<number>;
+       tracker: CompactionProgressTracker;
+       timeoutMs?: number;
+       abortSignal?: AbortSignal;
+       logger?: Logger;
+     }): Promise<MultiPassCompactionResult>
+
+  2. IMPLEMENTATION SKETCH:
+
+     async function multiPassCompact(params): Promise<MultiPassCompactionResult> {
+       const {
+         contextEngine, compactParams, settings, contextWindow,
+         estimateTokensFn, tracker, abortSignal, logger,
+       } = params;
+
+       const maxPasses = settings.maxPasses ?? MAX_COMPACTION_PASSES;
+       const progressThreshold = settings.progressThreshold ?? PROGRESS_THRESHOLD;
+       const timeoutMs = params.timeoutMs ?? EMBEDDED_COMPACTION_TIMEOUT_MS;
+
+       const passes: MultiPassCompactionState[] = [];
+       const startTime = Date.now();
+       let finalTokens = await estimateTokensFn();
+
+       // Anti-thrashing gate
+       if (!tracker.shouldAttemptCompaction()) {
+         logger?.warn("Compaction skipped — last %d compressions saved <10%% each",
+           tracker.getState().ineffectiveCompressionCount);
+         return {
+           passes: [],
+           totalPasses: 0,
+           finalTokens,
+           metThreshold: !shouldCompact(finalTokens, contextWindow, settings),
+           stopReason: "no_progress",
+           totalElapsedMs: 0,
+         };
+       }
+
+       for (let pass = 0; pass < maxPasses; pass++) {
+         // Check timeout budget
+         const elapsed = Date.now() - startTime;
+         const remainingMs = timeoutMs - elapsed;
+         if (remainingMs < 10_000) {  // Need at least 10s for a pass
+           return buildResult(passes, finalTokens, "timeout", ...);
+         }
+
+         // Check abort signal
+         if (abortSignal?.aborted) {
+           return buildResult(passes, finalTokens, "aborted", ...);
+         }
+
+         const origTokens = finalTokens;
+         const origMessageCount = /* get from session context */;
+         const passStart = Date.now();
+
+         // Run one compaction pass with remaining timeout budget
+         const compactResult = await compactWithSafetyTimeout(
+           (signal) => contextEngine.compact({ ...compactParams, abortSignal: signal }),
+           remainingMs,
+           abortSignal ? { abortSignal } : undefined,
+         );
+
+         const passElapsed = Date.now() - passStart;
+
+         if (!compactResult.ok || !compactResult.compacted) {
+           // Pass failed or nothing to compact
+           passes.push({
+             pass,
+             tokensBefore: origTokens,
+             tokensAfter: origTokens,
+             messageCountBefore: origMessageCount,
+             messageCountAfter: origMessageCount,
+             madeProgress: false,
+             elapsedMs: passElapsed,
+           });
+           return buildResult(passes, finalTokens, "no_progress", ...);
+         }
+
+         // Re-estimate tokens after compaction
+         finalTokens = compactResult.result?.tokensAfter
+           ?? await estimateTokensFn();
+         const newMessageCount = /* get from session context */;
+
+         // Track effectiveness
+         tracker.recordCompaction(origTokens, finalTokens);
+
+         const madeProgress = compactionMadeProgress(
+           origMessageCount, newMessageCount,
+           origTokens, finalTokens,
+           progressThreshold,
+         );
+
+         passes.push({
+           pass,
+           tokensBefore: origTokens,
+           tokensAfter: finalTokens,
+           messageCountBefore: origMessageCount,
+           messageCountAfter: newMessageCount,
+           madeProgress,
+           elapsedMs: passElapsed,
+         });
+
+         logger?.info(
+           "Compaction pass %d: %d -> %d tokens (%.1f%% reduction), %d -> %d messages",
+           pass + 1, origTokens, finalTokens,
+           ((origTokens - finalTokens) / origTokens) * 100,
+           origMessageCount, newMessageCount,
+         );
+
+         // Check if we're below threshold now
+         if (!shouldCompact(finalTokens, contextWindow, settings)) {
+           return buildResult(passes, finalTokens, "threshold_met", ...);
+         }
+
+         // Check if progress stalled
+         if (!madeProgress) {
+           return buildResult(passes, finalTokens, "no_progress", ...);
+         }
+
+         // Anti-thrashing check for next pass
+         if (!tracker.shouldAttemptCompaction()) {
+           return buildResult(passes, finalTokens, "no_progress", ...);
+         }
+       }
+
+       return buildResult(passes, finalTokens, "max_passes", ...);
+     }
+
+  3. HELPER: buildResult()
+
+     function buildResult(
+       passes, finalTokens, stopReason, contextWindow, settings, startTime,
+     ): MultiPassCompactionResult {
+       return {
+         passes,
+         totalPasses: passes.length,
+         finalTokens,
+         metThreshold: !shouldCompact(finalTokens, contextWindow, settings),
+         stopReason,
+         totalElapsedMs: Date.now() - startTime,
+       };
+     }
+
+─── FILE: src/agents/multi-pass-compaction.test.ts (NEW)
+
+  Tests for:
+  - Single pass when already below threshold
+  - Multiple passes with diminishing returns
+  - Anti-thrashing gate prevents compaction
+  - Timeout budget respected across passes
+  - Abort signal cancels loop
+  - Progress stall exits early
+  - Max passes cap
+
+─── KEY DESIGN DECISIONS:
+
+  D1. TIMEOUT SHARING: The total timeout budget (180s by default) is
+      SHARED across all passes. Each pass gets `remainingMs`, not a
+      fresh timeout. This prevents multi-pass from exceeding the safety
+      timeout.
+
+  D2. ABORT PROPAGATION: The external AbortSignal is threaded into each
+      pass. If the user cancels mid-loop, the current pass aborts and
+      the loop exits cleanly.
+
+  D3. TOKEN ESTIMATION: After each pass, tokens are re-estimated using
+      either the compactResult.result.tokensAfter (preferred, from the
+      compaction-safeguard hook) or the estimateTokensFn callback (fallback,
+      calls estimateContextTokens on the rebuilt session context).
+
+  D4. SESSION CONSISTENCY: Each pass appends a CompactionEntry to the
+      session tree. On the next pass, prepareCompaction() finds this
+      entry and builds from it. This is the correct behavior — each pass
+      starts from where the previous one left off.
+
+  D5. PRE-PRUNING INTEGRATION: The pruneOldToolResults() function from
+      Step 3 is called ONCE before the first pass (not per-pass), because
+      subsequent passes operate on already-pruned content. This is wired
+      in Step 7 when integrating with the run loop.
+
+─── INTEGRATION POINT:
+  - Called from embedded-agent-runner/run.ts (Step 7) in place of the
+    current single-pass compactContextEngineWithSafetyTimeout() calls.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 7: Preemptive Multi-Pass Integration (Pre-Prompt & Retry Paths)
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Wire the multi-pass loop into OpenClaw's three compaction trigger
+paths (preemptive, overflow, timeout) in the embedded runner.
+
+─── FILE: src/agents/embedded-agent-runner/run.ts (MODIFY)
+
+  1. IMPORT new modules:
+
+     import { multiPassCompact } from "../multi-pass-compaction.js";
+     import {
+       CompactionProgressTracker,
+     } from "@anthropic/agent-core"; // or correct package name
+     import { pruneOldToolResults } from "../agent-hooks/pre-compaction-pruning.js";
+
+  2. INSTANTIATE tracker in the run() function scope:
+
+     Near line ~1567 (where overflowCompactionAttempts and
+     timeoutCompactionAttempts are declared), add:
+
+       const compactionProgressTracker = new CompactionProgressTracker();
+
+     This tracker persists across the entire run loop for the session.
+
+  3. MODIFY TIMEOUT RECOVERY PATH (lines ~2435-2496):
+
+     Replace:
+       const timeoutCompactResult = await compactContextEngineWithSafetyTimeout(
+         contextEngine, params, timeout
+       );
+
+     With:
+       const multiPassResult = await multiPassCompact({
+         contextEngine,
+         compactParams: params,
+         settings: compactionSettings,
+         contextWindow: contextTokenBudget,
+         estimateTokensFn: async () => {
+           const ctx = await contextEngine.assemble(...);
+           return estimateContextTokens(ctx.messages).tokens;
+         },
+         tracker: compactionProgressTracker,
+         timeoutMs: resolveCompactionTimeoutMs(config),
+         abortSignal,
+         logger,
+       });
+
+       // Use the result of the LAST successful pass for adoptCompactionTranscript
+       if (multiPassResult.totalPasses > 0) {
+         adoptCompactionTranscript(lastCompactResult);
+       }
+
+     The existing retry loop counter (timeoutCompactionAttempts) is
+     preserved — multi-pass runs within a single retry attempt. If
+     multi-pass exhausts passes without meeting the threshold, the
+     outer retry loop can still trigger another multi-pass invocation.
+
+  4. MODIFY OVERFLOW RECOVERY PATH (lines ~2606-2690):
+
+     Same pattern as timeout recovery: replace single
+     compactContextEngineWithSafetyTimeout call with multiPassCompact.
+
+  5. MODIFY PREEMPTIVE COMPACTION PATH (attempt.ts, lines ~4605):
+
+     In the preemptive compaction handling within runAttempt(), replace
+     the single compaction call with multiPassCompact using the same
+     pattern. The preemptive path is the PRIMARY path for multi-pass
+     (matching Hermes's preflight compression loop).
+
+  6. ADD PRE-PRUNING CALL:
+
+     Before multiPassCompact is called, invoke pruneOldToolResults():
+
+       // Pre-prune tool results (cheap, no LLM)
+       const pruneResult = pruneOldToolResults(
+         currentMessages,
+         settings.keepRecentTokens,
+         3, // minProtectedCount = DEFAULT_RECENT_TURNS_PRESERVE
+       );
+       if (pruneResult.prunedCount > 0) {
+         logger.info("Pre-pruned %d tool results before compaction",
+           pruneResult.prunedCount);
+         // Apply pruned messages to context
+         applyPrunedMessages(pruneResult.messages);
+       }
+
+     NOTE: The pre-pruning modifies messages in the CONTEXT (not the
+     session tree). This is consistent with how OpenClaw's context-pruning
+     hook works — it modifies the assembled context, not the persisted
+     session entries.
+
+  7. SESSION RESET HOOK:
+
+     When the session is reset (new session, /clear, etc.), reset the
+     tracker:
+
+       compactionProgressTracker.reset();
+
+─── FILE: src/agents/embedded-agent-runner/run/preemptive-compaction.ts (MODIFY)
+
+  No structural changes needed. The existing
+  shouldPreemptivelyCompactBeforePrompt() function continues to decide
+  WHETHER to compact. The new multi-pass logic only changes HOW
+  compaction is executed (multi-pass instead of single-pass).
+
+─── FILE: src/agents/embedded-agent-runner/compaction-safety-timeout.ts (MODIFY)
+
+  MINOR: Export compactWithSafetyTimeout (already exported) for use by
+  multiPassCompact. No logic changes needed — the timeout function
+  is used per-pass within the multi-pass loop.
+
+─── KEY INTEGRATION DETAILS:
+
+  I1. RETRY LOOP INTERACTION:
+      The existing retry counters (MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3,
+      MAX_TIMEOUT_COMPACTION_ATTEMPTS = 2) continue to work. Each retry
+      invokes multiPassCompact which runs up to 3 passes internally.
+      So the maximum compaction attempts = 3 retries * 3 passes = 9.
+      In practice, the anti-thrashing guard will stop this much sooner.
+
+  I2. adoptCompactionTranscript():
+      Called once after ALL passes complete (not per-pass). The session
+      ID / file changes from the last CompactionEntry are what matter.
+      If compactResult includes sessionId rotation, it's applied once.
+
+  I3. lastCompactionTokensAfter:
+      Updated from multiPassResult.finalTokens instead of
+      compactResult.result?.tokensAfter.
+
+  I4. DIAGNOSTIC LOGGING:
+      Log the MultiPassCompactionResult for observability:
+        - Total passes, per-pass token reduction, stop reason
+        - Anti-thrashing state
+        - Total elapsed time
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 8: Configuration Schema Extension
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Make multi-pass behavior configurable via OpenClaw's existing
+configuration system.
+
+─── FILE: Configuration schema (openclaw.json or equivalent) (MODIFY)
+
+  Add under agents.defaults.compaction (or equivalent config path):
+
+    multiPass: {
+      enabled: true,              // Enable/disable multi-pass (default: true)
+      maxPasses: 3,               // Maximum passes per compaction (1-5, default: 3)
+      progressThreshold: 0.05,    // Minimum token reduction % (0.01-0.50, default: 0.05)
+      antiThrashingEnabled: true, // Enable anti-thrashing guard (default: true)
+      antiThrashingThreshold: 2,  // Consecutive ineffective compressions to block (default: 2)
+      prePruning: {
+        enabled: true,            // Enable tool result pre-pruning (default: true)
+        minContentLength: 200,    // Minimum content length to prune (default: 200)
+        deduplication: true,      // Enable MD5 deduplication (default: true)
+        argTruncation: true,      // Enable tool arg truncation (default: true)
+        maxArgLength: 500,        // Max tool arg chars before truncation (default: 500)
+      },
+    },
+    disambiguationPrefix: true,   // Use enhanced disambiguation prefix (default: true)
+
+─── FILE: src/agents/embedded-agent-runner/run.ts (MODIFY)
+
+  Read configuration:
+
+    const multiPassConfig = config.agents?.defaults?.compaction?.multiPass ?? {};
+    const maxPasses = multiPassConfig.enabled === false ? 1 :
+      (multiPassConfig.maxPasses ?? MAX_COMPACTION_PASSES);
+
+─── FILE: src/agents/agent-hooks/compaction-safeguard-runtime.ts (MODIFY)
+
+  Add multi-pass settings to the runtime configuration resolution:
+
+    export interface CompactionSafeguardRuntime {
+      // ... existing fields ...
+      multiPassEnabled?: boolean;
+      multiPassMaxPasses?: number;
+      progressThreshold?: number;
+      antiThrashingEnabled?: boolean;
+      prePruningEnabled?: boolean;
+    }
+
+─── BACKWARD COMPATIBILITY:
+
+  All new config fields are OPTIONAL with defaults matching the new
+  behavior (multi-pass enabled). To revert to single-pass behavior,
+  set multiPass.enabled = false or maxPasses = 1.
+
+  No existing config files need to change.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 9: Tests
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE: Comprehensive test coverage for all new functionality.
+
+─── FILE: packages/agent-core/src/harness/compaction/compaction-progress.test.ts (NEW)
+
+  Tests for compactionMadeProgress():
+    - Returns true when message count decreases
+    - Returns true when token count decreases > threshold
+    - Returns false when token decrease < threshold
+    - Returns false when both counts unchanged
+    - Handles zero origTokens gracefully
+    - Custom threshold values
+
+  Tests for CompactionProgressTracker:
+    - Initial state allows compaction
+    - recordCompaction with >10% savings resets count
+    - recordCompaction with <10% savings increments count
+    - After 2 ineffective, shouldAttemptCompaction returns false
+    - After effective compression following ineffective, resets
+    - reset() clears all state
+    - getState() returns correct snapshot
+
+─── FILE: packages/agent-core/src/harness/compaction/compaction.test.ts (MODIFY)
+
+  Add tests for findCutPoint() message anchoring:
+    - Last user message pulled into tail when it would be compacted
+    - Last assistant message with content pulled into tail
+    - Anchoring doesn't split tool_call/result pairs
+    - Both anchors are monotonic (tail only grows)
+    - No anchoring needed when messages are already in tail
+
+─── FILE: src/agents/agent-hooks/pre-compaction-pruning.test.ts (NEW)
+
+  Tests for summarizeToolResult():
+    - Bash tool summary format
+    - Read tool summary format
+    - Write tool summary format
+    - Edit tool summary format
+    - Grep tool summary format
+    - Unknown tool fallback format
+    - Long command truncation
+
+  Tests for pruneOldToolResults():
+    - Messages below boundary are pruned
+    - Tail messages are protected
+    - Duplicate detection via MD5
+    - Short content (< 200 chars) preserved
+    - Tool call arg truncation preserves JSON validity
+    - Empty input handled
+
+─── FILE: src/agents/multi-pass-compaction.test.ts (NEW)
+
+  Tests for multiPassCompact():
+    - Single pass sufficient (below threshold after 1 pass)
+    - Multiple passes needed (2-3 passes)
+    - Anti-thrashing prevents compaction
+    - Progress threshold enforced (stalls after no improvement)
+    - Timeout budget shared across passes
+    - Abort signal cancels mid-loop
+    - Max passes cap enforced
+    - Correct MultiPassCompactionResult fields
+    - Token estimation fallback when tokensAfter not provided
+
+─── FILE: packages/agent-core/src/harness/messages.test.ts (MODIFY)
+
+  Add tests for enhanced prefix:
+    - COMPACTION_SUMMARY_PREFIX contains disambiguation directives
+    - COMPACTION_SUMMARY_END_MARKER present
+    - Full message construction includes prefix + summary + suffix + end marker
+
+================================================================================
+5. FILE INVENTORY (NEW & MODIFIED)
+================================================================================
+
+NEW FILES:
+  packages/agent-core/src/harness/compaction/compaction-progress.ts
+  packages/agent-core/src/harness/compaction/compaction-progress.test.ts
+  src/agents/multi-pass-compaction.ts
+  src/agents/multi-pass-compaction.test.ts
+  src/agents/agent-hooks/pre-compaction-pruning.ts
+  src/agents/agent-hooks/pre-compaction-pruning.test.ts
+
+MODIFIED FILES:
+  packages/agent-core/src/harness/types.ts
+    -> Add maxPasses, progressThreshold to CompactionSettings
+    -> Add userMessageAnchored, assistantMessageAnchored to CutPointResult
+
+  packages/agent-core/src/harness/compaction/compaction.ts
+    -> Add maxPasses and progressThreshold to DEFAULT_COMPACTION_SETTINGS
+    -> Enhance findCutPoint() with message anchoring
+
+  packages/agent-core/src/harness/messages.ts
+    -> Enhance COMPACTION_SUMMARY_PREFIX with disambiguation
+    -> Add COMPACTION_SUMMARY_END_MARKER
+    -> Modify summary message construction to include end marker
+
+  packages/agent-core/src/index.ts
+    -> Export new types and functions
+
+  src/agents/embedded-agent-runner/run.ts
+    -> Import and instantiate CompactionProgressTracker
+    -> Replace single-pass compaction calls with multiPassCompact
+    -> Add pre-pruning call before compaction
+    -> Add tracker reset on session switch
+
+  src/agents/agent-hooks/compaction-safeguard-runtime.ts
+    -> Add multi-pass settings to runtime configuration
+
+  packages/agent-core/src/harness/compaction/compaction.test.ts
+    -> Add message anchoring tests
+
+  packages/agent-core/src/harness/messages.test.ts
+    -> Add disambiguation prefix tests
+
+================================================================================
+6. DEPENDENCY ANALYSIS
+================================================================================
+
+NEW DEPENDENCIES:
+  node:crypto (built-in)  — MD5 hashing for tool result deduplication
+                            in pre-compaction-pruning.ts
+
+EXISTING DEPENDENCIES REUSED:
+  @anthropic/agent-core   — CompactionSettings, CompactResult, AgentMessage,
+                            shouldCompact, estimateTokens, estimateContextTokens,
+                            DEFAULT_COMPACTION_SETTINGS
+  infra/retry.js          — retryAsync (unchanged, still used per-pass)
+  logging/subsystem.js    — structured logging
+  node:worker_threads     — compaction planning workers (unchanged)
+
+NO NEW EXTERNAL (npm) DEPENDENCIES REQUIRED.
+
+================================================================================
+7. RISK ANALYSIS & MITIGATION
+================================================================================
+
+─── RISK 1: Timeout Exhaustion ────────────────────────────────────────────────
+
+  RISK: Multi-pass consumes the entire 180s timeout budget, causing
+  compaction to time out when it wouldn't have with single-pass.
+
+  PROBABILITY: MEDIUM
+  IMPACT: MEDIUM (compaction fails, context continues to grow)
+
+  MITIGATION:
+  a. Reserve minimum 10s per remaining pass before starting
+  b. Log per-pass timing in MultiPassCompactionResult
+  c. Default maxPasses=3 with typical 20-40s per pass = 60-120s total,
+     well within the 180s budget
+  d. Configurable timeoutMs per deployment
+
+─── RISK 2: Session Tree Bloat ────────────────────────────────────────────────
+
+  RISK: Each pass appends a CompactionEntry to the session tree.
+  3 passes = 3 entries per compaction invocation. Over many invocations,
+  the session file grows.
+
+  PROBABILITY: LOW
+  IMPACT: LOW (entries are small, and buildSessionContext only uses the
+  LAST compaction entry)
+
+  MITIGATION:
+  a. prepareCompaction() already skips entries before the last compaction.
+     Multiple entries are harmless — only the last one matters at runtime.
+  b. Monitor session file growth in production telemetry.
+
+─── RISK 3: Pre-Pruning Side Effects ─────────────────────────────────────────
+
+  RISK: Tool result pruning replaces content that the summarizer or
+  quality guard relies on.
+
+  PROBABILITY: LOW
+  IMPACT: MEDIUM (degraded summary quality)
+
+  MITIGATION:
+  a. Pre-pruning only modifies the ASSEMBLED context, not the persisted
+     session tree. Original content is always recoverable.
+  b. The tail protection boundary ensures recent tool results are never
+     pruned — only old, out-of-cache results are affected.
+  c. 1-line summaries preserve the KEY information (tool name, arguments,
+     exit code, output size) that the summarizer needs.
+  d. Pre-pruning can be disabled via config: prePruning.enabled = false.
+
+─── RISK 4: Message Anchoring Over-Protection ────────────────────────────────
+
+  RISK: Message anchoring pulls too many messages into the tail, leaving
+  insufficient content for the summarizer (nothing to summarize).
+
+  PROBABILITY: LOW
+  IMPACT: MEDIUM (compaction becomes a no-op)
+
+  MITIGATION:
+  a. Anchoring only activates when the target message is NOT already in
+     the tail — most conversations won't trigger it.
+  b. The minimum-for-compression check (existing) catches the case where
+     anchoring leaves nothing to summarize.
+  c. Both anchors are MONOTONIC — they can only grow the tail, and the
+     tail growth is bounded by message positions.
+
+─── RISK 5: Anti-Thrashing False Positives ────────────────────────────────────
+
+  RISK: The anti-thrashing guard blocks compaction prematurely, causing
+  the context to exceed the window and trigger overflow errors.
+
+  PROBABILITY: LOW
+  IMPACT: HIGH (context overflow, potential data loss)
+
+  MITIGATION:
+  a. Anti-thrashing only blocks via should_compress() / shouldAttemptCompaction().
+     Overflow recovery (Path B) uses force=true which bypasses the guard.
+  b. The tracker resets on session switch/clear.
+  c. Anti-thrashing is configurable: antiThrashingEnabled = false.
+  d. The threshold (2 consecutive ineffective) matches Hermes's proven value.
+
+─── RISK 6: Breaking Existing Hook Consumers ──────────────────────────────────
+
+  RISK: The compaction-safeguard hook expects to be called once per
+  compaction event. Multi-pass calls it multiple times.
+
+  PROBABILITY: LOW
+  IMPACT: LOW (hook is idempotent — each call produces a fresh summary)
+
+  MITIGATION:
+  a. The hook receives independent CompactionPreparation per call.
+  b. The hook's quality guard runs per-pass (desirable — each summary
+     is quality-checked).
+  c. The session_compact notification hook fires per-pass — extension
+     consumers get per-pass notifications (more data, not less).
+
+─── RISK 7: Summary Prefix Regression ────────────────────────────────────────
+
+  RISK: The enhanced disambiguation prefix is significantly longer than
+  the current prefix. This consumes more of the context window and
+  may affect summarization behavior for models that weight prefix
+  instructions heavily.
+
+  PROBABILITY: LOW
+  IMPACT: LOW (prefix adds ~300 tokens, negligible vs 200K context)
+
+  MITIGATION:
+  a. The prefix is still much smaller than the summary body.
+  b. Configurable: disambiguationPrefix = false reverts to the minimal prefix.
+  c. The end marker (separate) can be independently disabled.
+
+================================================================================
+8. INTEGRATION VERIFICATION CHECKLIST
+================================================================================
+
+Before shipping, verify:
+
+  [ ] Multi-pass loop runs 1 pass when single pass reaches threshold
+  [ ] Multi-pass loop runs 2-3 passes when needed
+  [ ] Anti-thrashing blocks after 2 consecutive ineffective passes
+  [ ] Anti-thrashing resets on effective pass
+  [ ] Timeout budget is shared across passes (no per-pass reset)
+  [ ] Abort signal cancels the loop cleanly
+  [ ] Pre-pruning reduces token count before first pass
+  [ ] Pre-pruning preserves recent tool results (tail protection)
+  [ ] 1-line tool summaries are informative for all OpenClaw tools
+  [ ] MD5 dedup removes duplicate tool results
+  [ ] Message anchoring keeps last user message in tail
+  [ ] Message anchoring keeps last assistant message in tail
+  [ ] Anchoring doesn't split tool_call/result pairs
+  [ ] Enhanced prefix contains disambiguation directives
+  [ ] End marker is present after summary suffix
+  [ ] CompactionEntry is appended per-pass (session tree)
+  [ ] buildSessionContext uses LAST compaction entry (correct)
+  [ ] adoptCompactionTranscript called after all passes
+  [ ] lastCompactionTokensAfter updated from final pass
+  [ ] Existing tests still pass (no regressions)
+  [ ] New tests cover all new code paths
+  [ ] Configuration defaults enable multi-pass
+  [ ] Setting maxPasses=1 or multiPass.enabled=false reverts to single-pass
+  [ ] Structured logging shows per-pass metrics
+  [ ] No new external npm dependencies
+
+================================================================================
+END OF PORTING PLAN V1
+================================================================================

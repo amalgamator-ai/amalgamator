@@ -1,0 +1,347 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — REVIEW SUMMARY V2
+================================================================================
+
+Date: 2026-06-28
+Review of: code_port_plan_V2.txt (Iteration 2)
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+8 issues were found during code-level verification of the V2 plan against
+the actual OpenClaw source code. Issues are grouped by severity.
+
+──── SIGNIFICANT ISSUES (5) — Would cause incorrect behavior or build failure ──
+
+ISSUE #1: shouldCompact DYNAMIC IMPORT IS NON-IDIOMATIC
+
+  Affected: Step 6, line 1194 of V2 plan
+
+  What V2 says:
+    const { shouldCompact } = await import("@openclaw/agent-core");
+
+  What's wrong: OpenClaw has NO precedent for dynamic imports of
+  @openclaw/agent-core. All existing gateway-layer usage of agent-core
+  functions uses top-level static imports. Verified:
+    - src/agents/sessions/agent-session.ts: top-level import of shouldCompact
+    - All dynamic imports found in the codebase are for LOCAL modules
+      (same repository), not for the agent-core package
+    - Dynamic imports have per-invocation overhead and break tree-shaking
+
+  Why it matters: Non-idiomatic code that deviates from OpenClaw
+  conventions. While functionally correct, it adds unnecessary runtime
+  cost inside a loop that may run up to 3 times.
+
+  Fix: Move to a top-level static import:
+    import { shouldCompact } from "@openclaw/agent-core";
+
+
+ISSUE #2: PRE-PRUNING INJECTION REFERENCES UNDECLARED VARIABLES
+
+  Affected: Step 3, lines 715-733 of V2 plan
+
+  What V2 says: "Add pre-pruning call approximately after line 889"
+  with code referencing `runtime?.prePruningEnabled` and
+  `recentTurnsPreserve * 4`.
+
+  What's wrong: At line 889 in compaction-safeguard.ts, NEITHER of
+  these variables is declared:
+    - `runtime` is declared at line 940
+    - `recentTurnsPreserve` is resolved at line 952
+  Inserting code at line 889 that references these variables would cause
+  a TypeScript compilation error (ReferenceError at runtime if somehow
+  the TS compiler didn't catch it).
+
+  Verification path: The compaction-safeguard hook flow was verified
+  line-by-line. Between line 884 (stripRuntimeContextCustomMessages)
+  and line 952 (recentTurnsPreserve), the setup section at lines
+  930-960 resolves runtime (line 940), recentTurnsPreserve (line 952),
+  and other variables. The plan's insertion point is ~60 lines too early.
+
+  Why it matters: The code would not compile. This is a BLOCKING issue.
+
+  Fix: Move injection point to approximately line 960 — after both
+  `runtime` (line 940) and `recentTurnsPreserve` (line 952) are
+  resolved, but before the provider path at line 970. Both provider
+  and LLM paths then benefit from smaller pruned inputs.
+
+
+ISSUE #3: TOOL CALL CONTENT BLOCK TYPE NAME WRONG
+
+  Affected: Step 3, Sub-Pass 3 (lines 679-686 of V2 plan)
+
+  What V2 says: "For each tool_use content block (type === 'tool_use')"
+
+  What's wrong: OpenClaw's ToolCall interface uses `type: "toolCall"`,
+  NOT `type: "tool_use"`. Verified from:
+    packages/llm-core/src/types.ts, lines 250-258:
+      interface ToolCall {
+        type: "toolCall";  ← NOT "tool_use"
+        id: string;
+        name: string;
+        arguments: Record<string, unknown>;
+      }
+
+  Also verified: OpenClaw internally supports MULTIPLE variant names
+  ("toolCall", "toolUse", "functionCall") via a Set in tool-call-id.ts,
+  but the canonical type in the interface definition is "toolCall".
+
+  Why it matters: Sub-pass 3 (tool call argument truncation) would
+  silently skip ALL tool call blocks, making the entire sub-pass
+  non-functional. No errors, just zero truncation.
+
+  Fix: Use `type === "toolCall"` in the content block check.
+
+
+ISSUE #4: ToolResultMessage FIELD NAME WRONG
+
+  Affected: Step 3, Sub-Pass 2 (lines 662-677 of V2 plan)
+
+  What V2 says: "ToolResultMessage has: { role: 'toolResult', tool_use_id,
+  content }" and "Find the corresponding assistant message (walking
+  backward) that contains a tool_use block with matching id"
+
+  What's wrong: OpenClaw's ToolResultMessage uses `toolCallId`, NOT
+  `tool_use_id`. Verified from:
+    packages/llm-core/src/types.ts, lines 306-314:
+      interface ToolResultMessage {
+        role: "toolResult";
+        toolCallId: string;  ← NOT tool_use_id
+        toolName: string;    ← also available directly
+        content: (TextContent | ImageContent)[];
+        isError: boolean;
+        timestamp: number;
+      }
+
+  Why it matters: Matching tool results to their assistant tool calls
+  would always fail (property undefined → no match found → no pruning).
+  Sub-pass 2 would be non-functional.
+
+  Fix: Use `msg.toolCallId` for the ID field. Also use `msg.toolName`
+  directly instead of walking backward (see Issue #8).
+
+
+ISSUE #5: ToolCall ARGUMENTS FIELD NAME WRONG
+
+  Affected: Step 3, Sub-Pass 3 (lines 681-686 of V2 plan)
+
+  What V2 says: "Serialize input to JSON", "Deep-clone the input object",
+  "Replace the content block's input with the truncated clone"
+
+  What's wrong: OpenClaw's ToolCall interface uses `arguments`, NOT
+  `input`. Verified from:
+    packages/llm-core/src/types.ts, lines 250-258:
+      interface ToolCall {
+        type: "toolCall";
+        id: string;
+        name: string;
+        arguments: Record<string, unknown>;  ← NOT input
+      }
+
+  Why it matters: Accessing `block.input` on a ToolCall would return
+  undefined. The serialized length check would always be 0, and no
+  truncation would occur.
+
+  Fix: Use `block.arguments` throughout Sub-Pass 3. Serialize
+  `block.arguments` to JSON, deep-clone `block.arguments`, truncate
+  string values in the clone, replace `block.arguments` with the result.
+
+
+──── MODERATE ISSUES (1) — Would cause incorrect runtime behavior ──────────
+
+ISSUE #6: TIMEOUT PATH POST-COMPACTION CODE NOT EXPLICITLY PRESERVED
+
+  Affected: Step 7, Call Site 1 (lines 1354-1426 of V2 plan)
+
+  What V2 says: "REPLACE WITH: ... PRESERVE: runOwnsCompactionAfterHook
+  at line 2533 still fires once with the timeoutCompactResult"
+
+  What's wrong: The timeout path's existing post-compaction block
+  (lines 2534-2550 in run.ts) includes three critical operations that
+  V2 does not mention preserving:
+    1. lastCompactionTokensAfter update (line 2541)
+    2. runPostCompactionSideEffects (lines 2544-2549, for ownsCompaction)
+    3. Post-compaction guard arming and continue statement
+
+  Verified from actual source: After runOwnsCompactionAfterHook at
+  line 2533, the code checks if (timeoutCompactResult.compacted) and
+  performs these operations. If they are inadvertently removed during
+  the replacement, the timeout path would:
+    - Lose token tracking (lastCompactionTokensAfter not updated)
+    - Skip side effects for context engines with ownsCompaction=true
+    - Potentially not continue the retry loop correctly
+
+  Why it matters: Token tracking regression and potential context engine
+  state inconsistency for the timeout recovery path.
+
+  Fix: Explicitly list ALL preserved post-compaction code:
+    - REMOVE: only adoptCompactionTranscript at line 2531
+    - PRESERVE: runOwnsCompactionAfterHook (line 2533)
+    - PRESERVE: lastCompactionTokensAfter update (line 2541)
+    - PRESERVE: runPostCompactionSideEffects (lines 2544-2549)
+    - PRESERVE: post-compaction guard arming and continue
+
+
+──── MINOR ISSUES (2) — Dead code or missed optimization ───────────────────
+
+ISSUE #7: REDUNDANT ANTI-THRASHING CHECK AT END OF LOOP
+
+  Affected: Step 6, lines 1204-1209 of V2 plan
+
+  What V2 says:
+    // ── Anti-thrashing check for next pass ──
+    if (!tracker.shouldAttemptCompaction()) {
+      return buildResult(passes, lastCompactResult, "anti_thrash", startTime);
+    }
+
+  What's wrong: The tracker's recordCompaction() is NOT called inside
+  the loop — by design, the CALLER records overall effectiveness after
+  the loop returns (see D7 in V2). Since the tracker state doesn't
+  change within the loop, tracker.shouldAttemptCompaction() at line
+  1207 always returns the same value as the gate at line 1067.
+
+  This is dead code. Not harmful, but confusing — it implies the
+  tracker might be updated mid-loop.
+
+  Why it matters: Code maintainability. A future reader might waste
+  time understanding why this check is here.
+
+  Fix: Remove the redundant check. Add a comment at the gate
+  explaining it covers the entire invocation.
+
+
+ISSUE #8: ToolResultMessage.toolName SIMPLIFIES SUMMARIZATION
+
+  Affected: Step 3, Sub-Pass 2 (lines 672-676 of V2 plan)
+
+  What V2 says: "Find the corresponding assistant message (walking
+  backward) that contains a tool_use block with matching id" to
+  extract the tool name.
+
+  What's wrong: ToolResultMessage already has a `toolName: string`
+  field. Walking backward through assistant messages to find the
+  tool name is unnecessary when it's directly available on the
+  tool result message.
+
+  The backward walk IS still needed for extracting tool INPUT
+  (the arguments passed to the tool call), which IS only available
+  on the assistant message's ToolCall block. But the tool name itself
+  can be read directly.
+
+  Why it matters: Unnecessary complexity and potential for bugs in
+  the backward-walk logic. Direct field access is simpler and faster.
+
+  Fix: Use msg.toolName directly. Only fall back to backward walk
+  for extracting the tool's input arguments (for richer summaries).
+  If the arguments can't be found (no matching assistant message),
+  pass an empty object as the input — the summarizeToolResult()
+  function handles missing inputs gracefully.
+
+
+================================================================================
+2. ITERATION EVOLUTION
+================================================================================
+
+─── ITERATION 1: V1 (Initial Plan) ───────────────────────────────────────────
+
+  The V1 plan was generated from code trace analysis and partial source
+  verification. It established the 9-step structure and identified the
+  core porting targets. It had 15 issues across critical, significant,
+  and minor severity levels.
+
+  Key errors in V1:
+    - Pre-pruning injection point in run.ts (dead code location)
+    - Per-pass lifecycle not recognized (adopt + maintenance)
+    - Wrong file locations for types (CompactionSettings, CutPointResult)
+    - Wrong package name (@anthropic/ instead of @openclaw/)
+    - Message count estimation hand-waved
+    - 3 call sites assumed (actually 2)
+
+─── ITERATION 1.5: Review V1 (Corrected Plan) ────────────────────────────────
+
+  The Review V1 phase found and fixed all 15 issues. Key fixes:
+    - Pre-pruning moved to compaction-safeguard hook
+    - Per-pass lifecycle callbacks added
+    - All file locations and package names corrected
+    - Progress detection simplified to token-only
+    - Call site count corrected to 2
+
+─── ITERATION 2: V2 (From Scratch) ───────────────────────────────────────────
+
+  V2 was built from scratch incorporating all Review V1 learnings plus
+  6 new issues (L16-L21) discovered through deeper verification:
+    - EMBEDDED_COMPACTION_TIMEOUT_MS not exported
+    - Third adoptCompactionTranscript call site
+    - Two-branch overflow adoption pattern
+    - runOwnsCompactionAfterHook boundary
+    - buildEmbeddedContextEngineRuntimeSettings scope
+    - shouldCompact function identity
+
+─── ITERATION 2.5: Review V2 (Current — Corrected Plan) ──────────────────────
+
+  The Review V2 phase verified V2 against actual source code with 5
+  parallel exploration agents. Found 8 issues (5 significant, 1 moderate,
+  2 minor). Key findings:
+
+  SOURCE CODE VERIFICATIONS PERFORMED:
+    - compaction-safeguard.ts: Line-by-line flow from entry to summarization.
+      Verified variable declaration order: baseMessagesToSummarize (884),
+      runtime (940), recentTurnsPreserve (952), provider path (970),
+      model auth (1031), history prune (1077).
+    - ToolResultMessage type: Verified at llm-core/src/types.ts:306-314.
+      Field names: toolCallId (not tool_use_id), toolName (available directly),
+      content (TextContent | ImageContent)[].
+    - ToolCall type: Verified at llm-core/src/types.ts:250-258.
+      Type field: "toolCall" (not "tool_use"). Arguments field: arguments
+      (not input). Types handled: Set(["toolCall", "toolUse", "functionCall"]).
+    - shouldCompact usage: Verified at agent-session.ts:52 — top-level import.
+      No dynamic imports of @openclaw/agent-core found anywhere in codebase.
+    - run.ts timeout path: Verified lines 2447-2554. Confirmed NO
+      runContextEngineMaintenance. Found runPostCompactionSideEffects
+      at lines 2544-2549 that V2 didn't mention preserving.
+    - run.ts overflow path: Verified lines 2643-2800. Confirmed two-branch
+      adoption at 2725 (ok && compacted) and 2767 (compacted only).
+    - findCutPoint: Verified at compaction.ts:388-439. HarnessMessage cast
+      pattern confirmed. findValidCutPoints checks entry.type === "message"
+      then narrows by role.
+
+  CATEGORY BREAKDOWN:
+    - 5 SIGNIFICANT: Would cause build failure or silently broken features
+      (2x field name errors, 1x type name error, 1x variable scope error,
+       1x non-idiomatic import pattern)
+    - 1 MODERATE: Would cause token tracking regression in timeout path
+    - 2 MINOR: Dead code and missed optimization
+
+  ISSUE SEVERITY TREND ACROSS ITERATIONS:
+    V1:       5 critical, 7 significant, 3 minor  (15 total)
+    V2:       0 critical, 5 significant, 1 moderate, 2 minor  (8 total)
+    Review V2: Expected 0 remaining (all 8 fixed in corrected plan)
+
+  KEY OBSERVATION: V2 eliminated all CRITICAL issues from V1 but
+  introduced new SIGNIFICANT issues from incorrect OpenClaw API naming
+  (tool_use/tool_use_id vs toolCall/toolCallId, input vs arguments).
+  These are naming convention differences between Anthropic's raw API
+  format and OpenClaw's internal type system — OpenClaw normalizes the
+  API's snake_case names to camelCase TypeScript conventions.
+
+─── PROGRESSION SUMMARY ──────────────────────────────────────────────────────
+
+  V1 (Initial):      15 issues (5 critical)
+  Review V1:         15 fixed, 6 new discovered
+  V2 (From Scratch): 21 issues incorporated, 8 new found
+  Review V2:         8 fixed
+
+  Total issues found and resolved across all iterations: 29
+
+  Remaining risk areas:
+    - ContextEngine import path needs compilation verification
+    - CompactResult import path in compaction-progress.ts needs verification
+    - The pre-pruning insertion point (line ~960) should be tested with
+      the actual provider path to confirm it doesn't interfere
+    - HarnessMessage cast pattern should be verified for all message role
+      access patterns in findCutPoint anchoring code
+
+================================================================================
+END OF REVIEW SUMMARY V2
+================================================================================

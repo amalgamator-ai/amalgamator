@@ -1,0 +1,290 @@
+================================================================================
+MULTI-PASS CONTEXT COMPACTION — TEST PLAN REVIEW SUMMARY (REVIEW V3)
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Date: 2026-06-28
+Iteration: Review V3 (review of V3 initial)
+
+================================================================================
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+  5 issues were found during code-level verification of the V3 test plan
+  against the actual OpenClaw codebase. Each issue was verified by reading
+  the relevant source files, type definitions, test files, vitest
+  configuration, and harness code.
+
+  ── FIX-R1: SUITE G MISSING TEST FOR "mode set, maxPasses absent" ──────────
+
+    SEVERITY: Medium (gap in defaults regression coverage)
+
+    V3 TESTED:
+      10.1: materializeCompactionConfig({}) → maxPasses=3
+      10.3: materializeCompactionConfig({maxPasses:5}) → preserved
+      10.5: materializeCompactionConfig({mode:"safeguard",...,maxPasses:2}) → all preserved
+
+    MISSING SCENARIO:
+      materializeCompactionConfig({mode:"safeguard"}) → should get maxPasses=3
+
+    WHY THIS MATTERS:
+      The CURRENT applyCompactionDefaults (defaults.ts:529-552) has:
+        `if (compaction?.mode) return cfg;`
+      This early-exits when mode is set, returning the config UNCHANGED.
+      The port plan must modify this to per-field defaulting, following the
+      pattern used by applyAgentDefaults (defaults.ts:404-450), which checks
+      EACH field independently:
+        `const hasMax = typeof defaults?.maxConcurrent === "number"...`
+        `if (hasMax && hasSubMax && hasSubArchive) return cfg;`
+
+      Without test 10.5a, a regression where the mode-set guard blocks the
+      new maxPasses/minProgressThreshold defaults would go undetected.
+      This is especially likely because the implementor might only modify
+      the block under the `if (!compaction?.mode)` branch, leaving the
+      early-exit intact.
+
+    VERIFICATION:
+      Direct read of applyCompactionDefaults (defaults.ts:529-552).
+      Direct read of applyAgentDefaults (defaults.ts:404-450) for pattern.
+      Direct read of config.compaction-settings.test.ts for existing test
+      conventions — existing tests cover mode defaulting and field preservation,
+      but NOT the interaction between mode-set and new-field defaults.
+
+    CORRECTED: Added test 10.5a. Renumbered 10.5→10.5b.
+    Suite G test count: 15 → 16.
+
+  ── FIX-R2: SUITE E baseCompactParams MISSING runtimeContext/runtimeSettings ──
+
+    SEVERITY: Low (optional fields, but real code always passes them)
+
+    V3 STATED:
+      const baseCompactParams = {
+        sessionId: "test-session",
+        sessionKey: "test-key",
+        sessionFile: "/tmp/session.jsonl",
+        tokenBudget: 100000,
+        force: true,
+        compactionTarget: "budget" as const,
+      };
+
+    ACTUAL compact() CALLS (run.ts lines 2503-2519, 2707-2724):
+      All real call sites include runtimeContext and runtimeSettings:
+        - Timeout path: runtimeContext: timeoutCompactionRuntimeContext,
+                        runtimeSettings: buildEmbeddedContextEngineRuntimeSettings(...)
+        - Overflow path: runtimeContext: overflowCompactionRuntimeContext,
+                         runtimeSettings: overflowCompactionRuntimeSettings
+
+    IMPACT:
+      Both fields are OPTIONAL in ContextEngine.compact() (types.ts:415-416),
+      so tests compile without them. However:
+      1. If multiPassCompact threads these to each compact() call, tests
+         should verify the passthrough (test 8.15 becomes more meaningful)
+      2. Mock params should approximate what the real code passes
+
+    CORRECTED: Added runtimeContext: {} and runtimeSettings: {} to
+    baseCompactParams. Empty objects satisfy the types for unit testing
+    while keeping tests readable. The full complex shapes are tested
+    indirectly via Suite F (which uses the real harness with fully-
+    populated mocks).
+
+    VERIFICATION:
+      Direct read of ContextEngine.compact() type (types.ts:402-423).
+      Direct read of compact calls in run.ts (lines 2503-2519, 2707-2724).
+      Direct read of compact.queued.ts (lines 404-433) for another call site.
+
+  ── FIX-R3: SUITE E TEST 8.20 SETUP DESCRIPTION INCOMPLETE ────────────────
+
+    SEVERITY: Low (test description, not logic)
+
+    V3 STATED:
+      "SETUP: Pass 1: 200000 → 191000 (4.5% reduction — below 5%).
+       Do NOT pass minProgressThreshold."
+      "EXPECT: After two consecutive sub-threshold passes, anti-thrash
+       triggers."
+
+    ISSUE: The EXPECT clause references "two consecutive" passes, but the
+    SETUP only describes one pass. An implementor would need to infer the
+    second pass's token values.
+
+    CORRECTED: Added explicit Pass 2 setup:
+      Pass 1: 200000 → 191000 (4.5% — below threshold, counter=1)
+      Pass 2: 191000 → 183000 (4.2% — below threshold, counter=2)
+
+    VERIFICATION: Math check:
+      Pass 1: 191000 < 200000 * 0.95 = 190000? → 191000 > 190000 → NO progress ✓
+      Pass 2: 183000 < 191000 * 0.95 = 181450? → 183000 > 181450 → NO progress ✓
+      Counter reaches 2 → anti-thrash exit ✓
+
+  ── FIX-R4: MultiPassCompactResult TYPE UNDOCUMENTED ───────────────────────
+
+    SEVERITY: Low (documentation gap, not logic error)
+
+    V3 USED:
+      passesCompleted field in: 8.1, 8.2, 8.3, 8.6, 8.7, 8.9, 8.10
+      passesCompleted in Suite F harness mock (mockedMultiPassCompact)
+      passesCompleted in Suite I tests (12.1, 12.3, 12.4)
+
+    V3 DID NOT:
+      Define the type that contains passesCompleted.
+      CompactResult (types.ts:126-141) does NOT have passesCompleted.
+
+    ISSUE: multiPassCompact returns an EXTENDED type (CompactResult +
+    passesCompleted). This distinction matters because:
+      1. engine.compact() returns CompactResult
+      2. multiPassCompact() returns MultiPassCompactResult
+    The mock factories correctly produce CompactResult (for engine.compact
+    mocking), while the assertions and harness mock correctly produce the
+    extended type. The gap is only in documentation.
+
+    CORRECTED: Added explicit type documentation:
+      type MultiPassCompactResult = CompactResult & { passesCompleted: number };
+    Added notes distinguishing engine.compact return type from
+    multiPassCompact return type in Section 3 (N1) and Suite E/F headers.
+
+    VERIFICATION:
+      Direct read of CompactResult type (types.ts:126-141).
+      Grep for "passesCompleted" in test plan — used 14 times but never defined.
+
+  ── FIX-R5: SUITE D SOURCE FILE AMBIGUITY ──────────────────────────────────
+
+    SEVERITY: Low (ambiguous import paths)
+
+    V3 STATED:
+      "SOURCE: packages/agent-core/src/harness/compaction/compaction.ts (or
+       packages/agent-core/src/harness/messages.ts depending on where prefix
+       logic is placed)"
+
+    ISSUE: The "or" clause means test imports could be wrong. The test plan
+    had two different import sources:
+      from "../messages.js"  — existing COMPACTION_SUMMARY_PREFIX/SUFFIX
+      from "./compaction.js" — new ENHANCED_*, END_MARKER, wrapCompactionSummary
+
+    This split means constants that conceptually belong together live in
+    different files.
+
+    RESOLUTION: All summary prefix/suffix constants belong in messages.ts
+    (where the existing ones already live). The wrapCompactionSummary helper
+    also belongs there since it only uses those constants.
+
+    CORRECTED: All Suite D imports now reference "../messages.js".
+    The "or" clause removed.
+
+    VERIFICATION:
+      Direct read of messages.ts — existing COMPACTION_SUMMARY_PREFIX,
+      COMPACTION_SUMMARY_SUFFIX, createCompactionSummaryMessage all here.
+      Convention: message-related constants live in messages.ts.
+
+================================================================================
+2. SUMMARY OF CHANGES
+================================================================================
+
+  V3 (Initial) → Review V3 (Corrected):
+
+  STRUCTURAL CHANGES:
+    - Test 10.5a added (mode-set-but-maxPasses-absent defaults scenario)
+    - Existing test 10.5 renumbered to 10.5b
+    - baseCompactParams expanded with runtimeContext/runtimeSettings
+    - MultiPassCompactResult type explicitly documented
+    - Suite D source file resolved to messages.ts
+    - Test 8.20 setup fully described (both passes)
+
+  TEST COUNT:
+    V3 total:      110 tests across 9 suites (A-I)
+    Review V3:     111 tests across 9 suites (A-I)
+    Delta: +1 test (Suite G: 15→16 from FIX-R1)
+
+  FILES:
+    V3:        7 new test files, 3 modified test/support files
+    Review V3: Same file count (corrections are within existing files)
+
+  DOCUMENTATION:
+    - MultiPassCompactResult type defined
+    - baseCompactParams fields documented with rationale
+    - applyCompactionDefaults guard behavior documented
+    - Suite D import ambiguity resolved
+
+================================================================================
+3. ITERATION EVOLUTION
+================================================================================
+
+  V1 (Initial — 2026-06-28):
+    Initial test plan. 107 tests across 8 suites.
+    Triangulated from Hermes tests, OpenClaw conventions, and port plan.
+
+  V1 Review (Corrected — 2026-06-28):
+    Corrected 15 issues. 102 tests across 9 suites.
+    Key: shard fixes, factory reuse, mock pattern corrections, Suite H added.
+
+  V2 (From-Scratch — 2026-06-28):
+    From-scratch rewrite. 106 tests across 9 suites.
+    Key: Zod .strict(), CompactResult variants, exact 5% boundary test.
+
+  V2 Review (Corrected — 2026-06-28):
+    Corrected 7 issues. 107 tests across 9 suites.
+    Key: boundary math, model convention, CompactResult flat type,
+    vi.doMock path, defaults don't clamp, consecutiveNoProgress counter,
+    NonNullable<> typing.
+
+  V3 (From-Scratch — 2026-06-28):
+    From-scratch rewrite incorporating all 22 corrections. 110 tests
+    across 9 suites. Key: all prior corrections baked in, abort priority
+    test, wrapCompactionSummary tests, exception handling.
+
+  Review V3 (Current — 2026-06-28):
+    Corrected 5 issues. 111 tests across 9 suites.
+    Key fixes:
+    1. FIX-R1: Suite G missing "mode-set, maxPasses-absent" test (MEDIUM)
+    2. FIX-R2: baseCompactParams missing runtimeContext/runtimeSettings (LOW)
+    3. FIX-R3: Test 8.20 setup description incomplete (LOW)
+    4. FIX-R4: MultiPassCompactResult type undocumented (LOW)
+    5. FIX-R5: Suite D source file ambiguity (LOW)
+
+  CONVERGENCE ASSESSMENT:
+    The V3 plan was substantially correct. All 5 issues are LOW to MEDIUM
+    severity:
+    - 1 MEDIUM (FIX-R1: missing test scenario)
+    - 4 LOW (documentation, completeness, and disambiguation)
+
+    No structural redesign was needed. Suite organization, file locations,
+    shard assignments, mock strategies, and fixture patterns all verified
+    correct. The core logic of all 110 existing tests is unchanged.
+
+    The correction severity is the LOWEST of any review iteration:
+      V1→V1R: 15 issues (many structural, HIGH severity)
+      V2→V2R: 7 issues (2 HIGH, 2 MEDIUM, 3 LOW)
+      V3→V3R: 5 issues (1 MEDIUM, 4 LOW)
+
+    The plan is converging.
+
+  EVOLUTION SUMMARY TABLE:
+  +-----------+-------+--------+----------+---------+-------------+
+  | Iteration | Tests | Suites | New Files| Modified| Issues       |
+  +-----------+-------+--------+----------+---------+-------------+
+  | V1 Init   | 107   | 8      | 7        | 3       | 15 found     |
+  | V1 Review | 102   | 9      | 6        | 3*      | 15 fixed     |
+  | V2        | 106   | 9      | 6        | 3*      | 7 found      |
+  | V2 Review | 107   | 9      | 6        | 3*      | 7 fixed      |
+  | V3        | 110   | 9      | 7        | 3*      | 5 found      |
+  | V3 Review | 111   | 9      | 7        | 3*      | 5 fixed      |
+  +-----------+-------+--------+----------+---------+-------------+
+  * Modified count = 1 test file + 2 harness/fixture files
+
+  CUMULATIVE CORRECTIONS BY CATEGORY:
+  +----------------------------+-------+---------------------+
+  | Category                   | Count | Severity Impact     |
+  +----------------------------+-------+---------------------+
+  | Type/interface mismatches  |   6   | 2 HIGH, 3 LOW, 1 LOW|
+  | Path/import errors         |   4   | 2 HIGH, 1 LOW, 1 LOW|
+  | Boundary math errors       |   2   | 1 MEDIUM, 1 LOW     |
+  | Convention misalignments   |   4   | 4 LOW                |
+  | Logic contradictions       |   2   | 2 HIGH               |
+  | Structural gaps            |   4   | 2 MEDIUM, 1 LOW,     |
+  |                            |       | 1 MEDIUM (new)       |
+  | Documentation inaccuracies |   5   | 3 LOW, 2 LOW (new)   |
+  +----------------------------+-------+---------------------+
+  | TOTAL                      |  27   | 6 HIGH, 4 MED, 17 LOW|
+  +----------------------------+-------+---------------------+
+
+================================================================================
+END OF REVIEW SUMMARY (REVIEW V3)
+================================================================================

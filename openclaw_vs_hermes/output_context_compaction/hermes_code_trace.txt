@@ -1,0 +1,1410 @@
+================================================================================
+HERMES AGENT — MULTI-PASS CONTEXT COMPACTION: FULL CODE TRACE
+================================================================================
+
+Feature: Multi-Pass Context Compaction
+Category: Core / Context Management
+Traced from: /home/alexm-redhat/code/exper/hermes-agent
+
+TABLE OF CONTENTS
+─────────────────
+1. Architecture Overview
+2. Entry Points & Trigger Chain
+3. Multi-Pass Loop (Preflight Compression)
+4. Core Compressor: ContextCompressor.compress()
+5. Tool Output Pruning (Cheap Pre-Pass)
+6. Head/Tail Protection
+7. Summary Generation (LLM Call)
+8. Summary Prefix & Disambiguation
+9. Post-Compression Assembly
+10. Iterative Summary Updates (Multi-Compaction)
+11. Anti-Thrashing & Progress Detection
+12. Session Rotation vs In-Place Compaction
+13. Orchestrator: compress_context()
+14. Configuration & Defaults
+15. Data Models & Type Signatures
+16. External Dependencies
+17. Error Handling Patterns
+18. File Inventory
+
+================================================================================
+1. ARCHITECTURE OVERVIEW
+================================================================================
+
+The context compaction system has five architectural layers:
+
+  ┌──────────────────────────────────────────────────────────┐
+  │ LAYER 1: Decision Layer                                  │
+  │   should_compress() — checks token count vs threshold    │
+  │   should_compress_preflight() — rough pre-API estimate   │
+  │   File: agent/context_compressor.py, agent/turn_context  │
+  ├──────────────────────────────────────────────────────────┤
+  │ LAYER 2: Multi-Pass Loop (Preflight)                     │
+  │   Up to 3 iterations, 5% progress threshold             │
+  │   File: agent/turn_context.py (lines 384–413)           │
+  ├──────────────────────────────────────────────────────────┤
+  │ LAYER 3: Orchestrator                                    │
+  │   compress_context() — lock, compress, session mgmt      │
+  │   File: agent/conversation_compression.py (314–825)      │
+  ├──────────────────────────────────────────────────────────┤
+  │ LAYER 4: Core Compressor Engine                          │
+  │   ContextCompressor.compress() — prune, split, summarize │
+  │   File: agent/context_compressor.py (2372–2683)          │
+  ├──────────────────────────────────────────────────────────┤
+  │ LAYER 5: Auxiliary LLM                                   │
+  │   call_llm() for summary generation                      │
+  │   File: agent/auxiliary_client.py                        │
+  └──────────────────────────────────────────────────────────┘
+
+Inheritance chain:
+  ContextEngine (ABC)  →  ContextCompressor (default implementation)
+  File: agent/context_engine.py → agent/context_compressor.py
+
+The system supports pluggable engines (e.g., LCM) via the plugin system,
+selected by config: context.engine = "compressor" | "<plugin_name>".
+
+================================================================================
+2. ENTRY POINTS & TRIGGER CHAIN
+================================================================================
+
+There are three distinct trigger paths for compaction:
+
+─── PATH A: Post-Response Auto-Compress ───────────────────────────────────────
+
+  File: agent/conversation_loop.py, lines 4280–4318
+
+  After each LLM API response, the conversation loop checks token usage:
+
+    1. Read last_prompt_tokens from the compressor
+       - If > 0: use provider-reported prompt_tokens (most accurate)
+       - If == -1: compression just ran, skip (sentinel)
+       - If == 0: fall back to estimate_request_tokens_rough(messages, tools=)
+
+    2. Call should_compress(_real_tokens)
+       - Returns True when tokens >= threshold_tokens
+       - Subject to anti-thrashing guard (_ineffective_compression_count >= 2)
+
+    3. If True, call agent._compress_context(messages, system_message, ...)
+       - Single pass; does not loop
+
+  Code (conversation_loop.py:4309–4318):
+    if agent.compression_enabled and _compressor.should_compress(_real_tokens):
+        agent._safe_print("  ⟳ compacting context…")
+        messages, active_system_prompt = agent._compress_context(
+            messages, system_message,
+            approx_tokens=agent.context_compressor.last_prompt_tokens,
+            task_id=effective_task_id,
+        )
+        conversation_history = conversation_history_after_compression(agent, messages)
+
+─── PATH B: Preflight Compression (Multi-Pass) ────────────────────────────────
+
+  File: agent/turn_context.py, lines 334–413
+
+  Before each API call, the turn prologue runs a preflight check:
+
+    Gate: _should_run_preflight_estimate(messages, protect_first_n,
+                                          protect_last_n, threshold_tokens)
+      - Passes when message count > protect_first_n + protect_last_n + 1
+      - OR when estimate_messages_tokens_rough(messages) >= threshold_tokens
+
+    Step 1: Compute _preflight_tokens via estimate_request_tokens_rough()
+            (includes system prompt + tool schemas)
+    Step 2: Check should_defer_preflight_to_real_usage(_preflight_tokens)
+            - Defers when provider-reported post-compression tokens are known
+              to fit and the rough estimate hasn't grown beyond tolerance
+    Step 3: If not deferred and should_compress(_preflight_tokens):
+            Execute multi-pass compression loop (up to 3 passes)
+
+  This is the KEY multi-pass mechanism. See section 3 below for full detail.
+
+─── PATH C: Manual /compress Command ──────────────────────────────────────────
+
+  Files:
+    - gateway/slash_commands.py  — /compress <topic> handler
+    - hermes_cli/partial_compress.py — partial compression variant
+    - cli.py — CLI compress handler
+
+  Calls agent._compress_context(..., focus_topic=<user_topic>, force=True)
+  - force=True bypasses summary-failure cooldown
+  - focus_topic drives guided compression (60–70% budget to topic)
+
+─── WRAPPER METHOD ────────────────────────────────────────────────────────────
+
+  File: run_agent.py, lines 5167–5180
+
+  def _compress_context(self, messages, system_message, *,
+                        approx_tokens=None, task_id="default",
+                        focus_topic=None, force=False):
+      from agent.conversation_compression import compress_context
+      return compress_context(self, messages, system_message,
+                              approx_tokens=approx_tokens, task_id=task_id,
+                              focus_topic=focus_topic, force=force)
+
+================================================================================
+3. MULTI-PASS LOOP (PREFLIGHT COMPRESSION)
+================================================================================
+
+File: agent/turn_context.py, lines 384–413
+
+This is the core of the "multi-pass" system that distinguishes Hermes from
+single-pass compactors. The loop runs up to 3 iterations, checking for
+material progress after each pass.
+
+  for _pass in range(3):
+      _orig_len = len(messages)
+      _orig_tokens = _preflight_tokens
+
+      # Execute one compression pass
+      messages, active_system_prompt = agent._compress_context(
+          messages, system_message, approx_tokens=_preflight_tokens,
+          task_id=effective_task_id,
+      )
+
+      # Re-estimate tokens after compression
+      _preflight_tokens = estimate_request_tokens_rough(
+          messages,
+          system_prompt=active_system_prompt or "",
+          tools=agent.tools or None,
+      )
+
+      # Check progress: break if no material improvement
+      if not _compression_made_progress(
+          _orig_len, len(messages), _orig_tokens, _preflight_tokens
+      ):
+          break  # Cannot compress further
+
+      # Reset housekeeping state between passes
+      conversation_history = conversation_history_after_compression(agent, messages)
+      agent._empty_content_retries = 0
+      agent._thinking_prefill_retries = 0
+      agent._last_content_with_tools = None
+      agent._last_content_tools_all_housekeeping = False
+      agent._mute_post_response = False
+
+      # Exit if below threshold
+      if not _compressor.should_compress(_preflight_tokens):
+          break
+
+─── PROGRESS DETECTION ────────────────────────────────────────────────────────
+
+  File: agent/turn_context.py, lines 41–61
+
+  def _compression_made_progress(orig_len, new_len, orig_tokens, new_tokens):
+      """Return True if compression materially reduced the request."""
+      if new_len < orig_len:
+          return True
+      # Token reduction must be >5% to count as progress
+      return orig_tokens > 0 and new_tokens < orig_tokens * 0.95
+
+  Two dimensions of progress:
+    1. Message count reduction (any decrease counts)
+    2. Token count reduction (>5% decrease counts, even if message count same)
+       - This handles "size-only" compression where tool outputs are
+         summarized without removing message rows
+
+─── PREFLIGHT GATE ────────────────────────────────────────────────────────────
+
+  File: agent/turn_context.py, lines 64–89
+
+  def _should_run_preflight_estimate(messages, protect_first_n,
+                                     protect_last_n, threshold_tokens):
+      """Cheap gate for the expensive full preflight token estimate."""
+      # Count-based gate (cheap)
+      if len(messages) > protect_first_n + protect_last_n + 1:
+          return True
+      # Char-based estimate (handles few-but-huge messages, issue #27405)
+      return estimate_messages_tokens_rough(messages) >= threshold_tokens
+
+  The char-based fallback catches the case where a handful of very large
+  messages (e.g., massive tool outputs) don't trip the count gate but
+  still exceed the context window.
+
+================================================================================
+4. CORE COMPRESSOR: ContextCompressor.compress()
+================================================================================
+
+File: agent/context_compressor.py, lines 2372–2683
+Class: ContextCompressor (extends ContextEngine)
+
+The compress() method implements the main compaction algorithm in four phases:
+
+  PHASE 1: Prune old tool results (cheap, no LLM call)
+  PHASE 2: Determine head/tail boundaries
+  PHASE 3: Generate structured LLM summary
+  PHASE 4: Assemble compressed message list
+
+─── METHOD SIGNATURE ──────────────────────────────────────────────────────────
+
+  def compress(self,
+      messages: List[Dict[str, Any]],
+      current_tokens: int = None,
+      focus_topic: str = None,
+      force: bool = False,
+  ) -> List[Dict[str, Any]]:
+
+  Arguments:
+    messages       — Full conversation message list (OpenAI-format dicts)
+    current_tokens — Pre-compression token estimate (for logging)
+    focus_topic    — Optional topic for guided compression
+    force          — Bypass summary-failure cooldown (manual /compress)
+
+  Returns:
+    Compressed message list (head + summary + tail)
+
+─── PER-CALL STATE RESET ──────────────────────────────────────────────────────
+
+  Each compress() call resets diagnostic flags:
+    _last_summary_dropped_count = 0
+    _last_summary_fallback_used = False
+    _last_summary_error = None
+    _last_aux_model_failure_error = None
+    _last_aux_model_failure_model = None
+    _last_compress_aborted = False
+    _last_summary_auth_failure = False
+    _last_summary_network_failure = False
+
+─── MINIMUM MESSAGE GUARD ─────────────────────────────────────────────────────
+
+  _min_for_compress = _protect_head_size(messages) + 3 + 1
+  If n_messages <= _min_for_compress, returns messages unchanged.
+
+─── PHASE 1: TOOL RESULT PRUNING ──────────────────────────────────────────────
+
+  messages, pruned_count = self._prune_old_tool_results(
+      messages, protect_tail_count=self.protect_last_n,
+      protect_tail_tokens=self.tail_token_budget,
+  )
+
+  See section 5 for full detail.
+
+─── PHASE 2: BOUNDARY DETERMINATION ──────────────────────────────────────────
+
+  compress_start = self._protect_head_size(messages)
+  compress_start = self._align_boundary_forward(messages, compress_start)
+  compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
+
+  If compress_start >= compress_end:
+    - Records as ineffective compression
+    - Returns messages unchanged
+
+  See section 6 for full detail.
+
+─── INHERITED SUMMARY REHYDRATION ─────────────────────────────────────────────
+
+  Before generating a new summary, the compressor searches for an existing
+  handoff summary in the message list (may be there from a resumed session):
+
+  summary_idx, summary_body = self._find_latest_context_summary(
+      messages, summary_search_start, compress_end)
+
+  If found:
+    - Rehydrates _previous_summary for iterative update path
+    - Adjusts turns_to_summarize to start after the handoff
+
+  If NOT found but _previous_summary is set:
+    - Clears it (stale cross-session state from cron/background job)
+
+─── PHASE 3: SUMMARY GENERATION ──────────────────────────────────────────────
+
+  summary = self._generate_summary(turns_to_summarize, focus_topic=...)
+
+  If summary generation fails, behavior depends on flags:
+    - abort_on_summary_failure=True → Return messages unchanged, set aborted
+    - Auth failure (401/403) → Always abort regardless of config
+    - Network failure → Always abort regardless of config
+    - Otherwise → Build deterministic fallback summary
+
+  See section 7 for full detail.
+
+─── PHASE 4: ASSEMBLY ────────────────────────────────────────────────────────
+
+  The compressed message list is assembled:
+    1. Head messages (with compression note injected into system prompt)
+    2. Summary message (role chosen to avoid consecutive same-role)
+    3. Tail messages (from compress_end to end)
+
+  Post-assembly cleanup:
+    - _sanitize_tool_pairs() — fix orphaned tool_call/result references
+    - _strip_historical_media() — remove base64 images from older messages
+
+  Compression effectiveness tracking:
+    savings_pct = (saved_estimate / display_tokens * 100)
+    If savings_pct < 10: _ineffective_compression_count += 1
+    Else: _ineffective_compression_count = 0
+
+  See sections 8, 9, 10 for full detail.
+
+================================================================================
+5. TOOL OUTPUT PRUNING (CHEAP PRE-PASS)
+================================================================================
+
+File: agent/context_compressor.py, lines 990–1150
+Method: _prune_old_tool_results()
+
+Signature:
+  def _prune_old_tool_results(self, messages, protect_tail_count,
+                               protect_tail_tokens=None) -> tuple[list, int]
+
+This is a cheap, LLM-free pre-pass that reduces context before the expensive
+summary generation. Three sub-passes:
+
+─── PRUNE BOUNDARY CALCULATION ────────────────────────────────────────────────
+
+  When protect_tail_tokens is provided (default: self.tail_token_budget):
+    - Walk backward accumulating msg_tokens per message
+    - Stop when accumulated exceeds protect_tail_tokens AND at least
+      min(protect_tail_count, len(result)) messages are protected
+    - Convert to prune boundary index
+
+  When only protect_tail_count:
+    prune_boundary = len(result) - protect_tail_count
+
+─── PASS 1: DEDUPLICATE IDENTICAL TOOL RESULTS ───────────────────────────────
+
+  For each tool result (walking backward from end):
+    - Compute MD5 hash of content (first 12 hex chars)
+    - If hash seen before (newer copy exists), replace with:
+      "[Duplicate tool output — same content as a more recent call]"
+    - Only deduplicates content > 200 chars
+
+─── PASS 2: REPLACE OLD TOOL RESULTS WITH 1-LINE SUMMARIES ───────────────────
+
+  For messages BEFORE the prune boundary (old tool results):
+    - Multimodal content: strip image parts, replace with placeholder
+    - String content > 200 chars: replace with informative summary
+
+  Summary function: _summarize_tool_result(tool_name, tool_args, tool_content)
+  Produces strings like:
+    [terminal] ran `npm test` -> exit 0, 47 lines output
+    [read_file] read config.py from line 1 (1,200 chars)
+    [search_files] content search for 'compress' in agent/ -> 12 matches
+    [write_file] wrote to config.py (15 lines)
+    [web_search] query='React hooks' (3,200 chars result)
+    [patch] replace in config.py (450 chars result)
+
+  Tool-specific handling for: terminal, read_file, write_file, search_files,
+  patch, browser_*, web_search, web_extract, delegate_task, execute_code,
+  skill_view/skills_list/skill_manage, vision_analyze, memory, todo,
+  clarify, text_to_speech, cronjob, process.
+
+─── PASS 3: TRUNCATE LARGE TOOL CALL ARGUMENTS ───────────────────────────────
+
+  For assistant messages BEFORE the prune boundary:
+    - Tool call arguments > 500 chars are truncated
+    - Uses _truncate_tool_call_args_json() which:
+      a. Parses as JSON
+      b. Shrinks string values > 200 chars (keeps head + "...[truncated]")
+      c. Re-serializes with ensure_ascii=False
+      d. Preserves JSON validity (critical for strict providers)
+
+================================================================================
+6. HEAD/TAIL PROTECTION
+================================================================================
+
+─── HEAD PROTECTION ───────────────────────────────────────────────────────────
+
+  File: agent/context_compressor.py
+
+  _protect_head_size(messages) -> int:
+    - System prompt (index 0) always protected if role == "system"
+    - Plus protect_first_n additional messages (default: 3)
+    - DECAYS after first compression: _effective_protect_first_n() returns 0
+      when compression_count >= 1 or _previous_summary exists
+    - Rationale: after first compaction, early turns are captured in summary
+
+  _align_boundary_forward(messages, idx) -> int:
+    - Slides compress_start past any orphan tool results
+    - Ensures compression doesn't start mid-tool-group
+
+─── TAIL PROTECTION (TOKEN-BUDGET BASED) ──────────────────────────────────────
+
+  _find_tail_cut_by_tokens(messages, head_end, token_budget=None) -> int:
+
+  Algorithm:
+    1. Walk backward from end, accumulating tokens per message
+    2. Stop when accumulated > soft_ceiling (1.5x token_budget)
+       AND at least min_tail messages protected
+    3. min_tail = min(min(protect_last_n, 8), available_tail - 2, available)
+       - Capped at _MAX_TAIL_MESSAGE_FLOOR = 8 to prevent large tool outputs
+         from making compression ineffective
+       - Leaves at least 2 messages for summarization
+    4. If entire transcript fits in soft_ceiling:
+       - Re-walk with raw budget (no 1.5x) to find meaningful split
+    5. Align to avoid splitting tool groups: _align_boundary_backward()
+
+  Token estimation per message: _estimate_msg_budget_tokens(msg)
+    - Content length / 4 + 10 (overhead)
+    - Plus full tool_call envelope size (id, type, function.name, args)
+    - This counts the FULL envelope, not just arguments, preventing
+      2-15x undercounting on parallel tool-call turns
+
+─── LAST-MESSAGE ANCHORING ────────────────────────────────────────────────────
+
+  Two anchoring passes ensure critical messages stay in the tail:
+
+  _ensure_last_user_message_in_tail(messages, cut_idx, head_end):
+    - Finds the last user-role message at/after head_end
+    - If it's in the compressed middle, pulls cut_idx back to include it
+    - Prevents active task loss (issue #10896)
+
+  _ensure_last_assistant_message_in_tail(messages, cut_idx, head_end):
+    - Finds the last assistant message with visible content (not just tool_calls)
+    - If it's in compressed middle, pulls cut_idx back
+    - Prevents "can't see the output" bug (issue #29824)
+    - Re-runs alignment to avoid splitting tool groups
+
+  Both anchors are monotonic — tail can only grow, never shrink.
+  Combined order: align → user anchor → assistant anchor
+  Final safety: max(cut_idx, head_end + 1)
+
+─── BOUNDARY ALIGNMENT ────────────────────────────────────────────────────────
+
+  _align_boundary_backward(messages, idx):
+    - Walk backward past consecutive tool results
+    - If landed on parent assistant with tool_calls, pull boundary before it
+    - Keeps entire assistant + tool_results groups together
+
+  _align_boundary_forward(messages, idx):
+    - Walk forward past orphan tool results at start of compression window
+
+================================================================================
+7. SUMMARY GENERATION (LLM CALL)
+================================================================================
+
+File: agent/context_compressor.py, lines 1453–1846
+Method: _generate_summary(turns_to_summarize, focus_topic=None) -> Optional[str]
+
+─── COOLDOWN CHECK ────────────────────────────────────────────────────────────
+
+  if now < self._summary_failure_cooldown_until:
+      return None  # Skip during cooldown
+
+  Cooldowns:
+    - No provider configured: 600 seconds (SUMMARY_FAILURE_COOLDOWN_SECONDS)
+    - JSON decode / streaming close: 30 seconds
+    - Other transient errors: 60 seconds
+
+─── SUMMARY BUDGET CALCULATION ────────────────────────────────────────────────
+
+  _compute_summary_budget(turns_to_summarize) -> int:
+    budget = int(content_tokens * _SUMMARY_RATIO)  # 20% of compressed content
+    return max(_MIN_SUMMARY_TOKENS, min(budget, self.max_summary_tokens))
+
+  Constants:
+    _MIN_SUMMARY_TOKENS = 2000
+    _SUMMARY_RATIO = 0.20
+    _SUMMARY_TOKENS_CEILING = 12,000
+    max_summary_tokens = min(context_length * 0.05, 12000)
+
+─── INPUT SERIALIZATION ───────────────────────────────────────────────────────
+
+  _serialize_for_summary(turns) -> str:
+    - Serializes turns into labeled text blocks:
+      [USER]: <content>
+      [ASSISTANT]: <content>\n[Tool calls:\n  name(args)\n]
+      [TOOL RESULT call_id]: <content>
+    - Content truncated at _CONTENT_MAX = 6000 chars per message
+      (keeps head 4000 + tail 1500 chars)
+    - Tool args truncated at _TOOL_ARGS_MAX = 1500 chars
+    - All content redacted via redact_sensitive_text()
+    - MEDIA directives stripped
+
+─── PROMPT CONSTRUCTION ───────────────────────────────────────────────────────
+
+  Two prompt variants:
+
+  FIRST COMPACTION (no _previous_summary):
+    Preamble:
+      "You are a summarization agent creating a context checkpoint..."
+    Body:
+      "Create a structured checkpoint summary for the conversation..."
+    Template sections: (see below)
+
+  ITERATIVE UPDATE (_previous_summary exists):
+    Preamble: Same
+    Body includes PREVIOUS SUMMARY block + NEW TURNS TO INCORPORATE
+    Instructions to PRESERVE existing info, ADD new actions,
+    MOVE items between sections (In Progress → Completed, etc.)
+
+  STRUCTURED TEMPLATE SECTIONS:
+    ## Historical Task Snapshot
+    ## Goal
+    ## Constraints & Preferences
+    ## Completed Actions (numbered, tool-specific format)
+    ## Active State
+    ## Historical In-Progress State
+    ## Blocked
+    ## Key Decisions
+    ## Resolved Questions
+    ## Historical Pending User Asks
+    ## Relevant Files
+    ## Historical Remaining Work
+    ## Critical Context
+
+  TEMPORAL ANCHORING:
+    When current date is available, adds:
+    "TEMPORAL ANCHORING: The current date is YYYY-MM-DD. When an action
+     has already been carried out, phrase it as a completed, dated,
+     past-tense fact..."
+
+  FOCUS TOPIC (when provided):
+    "FOCUS TOPIC: \"<topic>\"
+     This compaction should PRIORITISE preserving all information
+     related to the focus topic above..."
+    Allocates 60–70% of summary budget to focus topic content.
+
+─── LLM CALL ──────────────────────────────────────────────────────────────────
+
+  call_kwargs = {
+      "task": "compression",
+      "main_runtime": {model, provider, base_url, api_key, api_mode},
+      "messages": [{"role": "user", "content": prompt}],
+      "max_tokens": int(summary_budget * 1.3),
+  }
+
+  Called via: call_llm(**call_kwargs) from agent/auxiliary_client.py
+  Protected from mid-turn interrupt via aux_interrupt_protection()
+
+  Post-processing:
+    - Validates non-empty content (RuntimeError on empty)
+    - Redacts the output via redact_sensitive_text()
+    - Stores as self._previous_summary for iterative updates
+    - Clears cooldown and error flags
+    - Prepends SUMMARY_PREFIX via _with_summary_prefix()
+
+─── FALLBACK CHAIN ────────────────────────────────────────────────────────────
+
+  On failure, the following fallback chain executes:
+
+  1. If "no llm provider configured" → 600s cooldown, return None
+  2. If aux model != main model AND not yet fallen back:
+     - Model not found / timeout / JSON decode / streaming close:
+       _fallback_to_main_for_compression(e, reason)
+       → Clears summary_model, retries immediately with main model
+     - Any other error:
+       Same fallback to main model
+  3. If already fallen back or same model:
+     - Short cooldown (30–60s), return None
+     - Network errors flagged with _last_summary_network_failure
+     - Auth errors flagged with _last_summary_auth_failure
+
+─── STATIC FALLBACK SUMMARY ───────────────────────────────────────────────────
+
+  When all LLM attempts fail and abort_on_summary_failure=False:
+  _build_static_fallback_summary(turns_to_summarize, reason) -> str
+
+  Extracts locally (no LLM):
+    - User asks (from user messages)
+    - Assistant actions (tool call names)
+    - Tool results (via _summarize_tool_result)
+    - File path mentions (regex extraction)
+    - Error/blocker text
+    - Last dropped turns (up to 8)
+
+  Uses same structured template sections for consistency.
+  Capped at _FALLBACK_SUMMARY_MAX_CHARS = 8,000 chars.
+  Per-turn cap: _FALLBACK_TURN_MAX_CHARS = 700 chars.
+
+─── AUTO-FOCUS TOPIC ──────────────────────────────────────────────────────────
+
+  When no explicit focus_topic is given, an auto-focus is derived:
+  _derive_auto_focus_topic(messages) -> Optional[str]
+
+  - Scans last 3 user messages (_AUTO_FOCUS_MAX_TURNS)
+  - Skips context summary messages
+  - Truncates each at 260 chars (_AUTO_FOCUS_TURN_MAX_CHARS)
+  - Combines into "Recent user focus:\n- item1\n- item2..."
+  - Total capped at 700 chars (_AUTO_FOCUS_MAX_CHARS)
+
+================================================================================
+8. SUMMARY PREFIX & DISAMBIGUATION
+================================================================================
+
+File: agent/context_compressor.py, lines 43–140
+
+─── CURRENT SUMMARY PREFIX ────────────────────────────────────────────────────
+
+  SUMMARY_PREFIX = (
+    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
+    "into the summary below. This is a handoff from a previous context "
+    "window — treat it as background reference, NOT as active instructions. "
+    "Do NOT answer questions or fulfill requests mentioned in this summary; "
+    "they were already addressed. "
+    "Respond ONLY to the latest user message that appears AFTER this "
+    "summary — that message is the single source of truth..."
+    ...additional directives on reverse signals, memory priority, etc.
+  )
+
+  Key directives in the prefix:
+    - Summary is REFERENCE ONLY, not active instructions
+    - Respond to latest user message, not summary content
+    - Topic overlap does NOT mean resume the task
+    - Reverse signals (stop, undo, roll back) end summary tasks
+    - Persistent memory (MEMORY.md, USER.md) always authoritative
+    - Historical section headings (not "Active Task" / "Next Steps")
+
+─── END MARKER ────────────────────────────────────────────────────────────────
+
+  _SUMMARY_END_MARKER = (
+    "--- END OF CONTEXT SUMMARY — "
+    "respond to the message below, not the summary above ---"
+  )
+
+  Appended to every summary to prevent weak models from:
+    - Reading "## Active Task" as fresh input (#11475, #14521)
+    - Regurgitating summary as output (#33256)
+
+─── HISTORICAL PREFIX HANDLING ────────────────────────────────────────────────
+
+  _HISTORICAL_SUMMARY_PREFIXES — tuple of frozen older prefix versions.
+  Used by _strip_summary_prefix() to normalize summaries from resumed
+  lineages that were persisted under older prefix formats.
+
+─── METADATA KEY ──────────────────────────────────────────────────────────────
+
+  COMPRESSED_SUMMARY_METADATA_KEY = "_compressed_summary"
+  - Added to summary message dicts for frontend identification
+  - Underscore-prefixed: stripped by wire sanitizers before API calls
+  - Prevents strict provider rejection of unknown keys
+
+─── HISTORICAL SECTION HEADINGS ───────────────────────────────────────────────
+
+  HISTORICAL_TASK_HEADING = "## Historical Task Snapshot"
+  HISTORICAL_IN_PROGRESS_HEADING = "## Historical In-Progress State"
+  HISTORICAL_PENDING_ASKS_HEADING = "## Historical Pending User Asks"
+  HISTORICAL_REMAINING_WORK_HEADING = "## Historical Remaining Work"
+
+  These replace the more active-sounding headings (## Active Task, etc.)
+  to prevent models from treating compacted state as current instructions.
+
+================================================================================
+9. POST-COMPRESSION ASSEMBLY
+================================================================================
+
+File: agent/context_compressor.py, lines 2568–2683
+
+─── COMPRESSED MESSAGE LIST CONSTRUCTION ──────────────────────────────────────
+
+  Step 1: Copy head messages (indices 0 to compress_start)
+    - Inject compression note into system prompt (index 0):
+      "[Note: Some earlier conversation turns have been compacted into a
+       handoff summary to preserve context space...]"
+
+  Step 2: Insert summary message
+    - Role selection algorithm:
+      a. If last_head_role is assistant/tool → summary_role = "user"
+      b. Otherwise → summary_role = "assistant"
+      c. If chosen role collides with first_tail_role, try flipping
+      d. If both roles would create consecutive same-role → merge into tail
+
+    - Standalone: append summary + _SUMMARY_END_MARKER as separate message
+    - Merged: prepend summary + end marker into first tail message
+
+    - Mark with COMPRESSED_SUMMARY_METADATA_KEY: True
+
+  Step 3: Copy tail messages (indices compress_end to end)
+
+─── POST-ASSEMBLY CLEANUP ─────────────────────────────────────────────────────
+
+  1. _sanitize_tool_pairs(compressed):
+     - Remove orphaned tool results (no matching assistant tool_call)
+     - Insert stub results for orphaned tool_calls (result was summarized)
+     - Stub content: "[Result from earlier conversation — see context summary above]"
+
+  2. _strip_historical_media(compressed):
+     - Find the newest user message with image content
+     - Replace image parts in ALL messages before that anchor with
+       "[Attached image — stripped after compression]"
+     - Prevents multi-MB base64 payloads from surviving forever
+
+─── EFFECTIVENESS TRACKING ────────────────────────────────────────────────────
+
+  new_estimate = estimate_messages_tokens_rough(compressed)
+  saved_estimate = display_tokens - new_estimate
+  savings_pct = (saved_estimate / display_tokens * 100)
+
+  self._last_compression_savings_pct = savings_pct
+  if savings_pct < 10:
+      self._ineffective_compression_count += 1
+  else:
+      self._ineffective_compression_count = 0
+
+  self.compression_count += 1
+
+================================================================================
+10. ITERATIVE SUMMARY UPDATES (MULTI-COMPACTION)
+================================================================================
+
+The system supports iterative summary refinement across multiple compactions
+within the same session, maintaining a running summary that gets updated
+rather than regenerated from scratch.
+
+─── STATE ─────────────────────────────────────────────────────────────────────
+
+  self._previous_summary: Optional[str] = None
+
+  Set after successful summary generation.
+  Cleared on:
+    - on_session_reset() — /new or /reset commands
+    - on_session_end() — CLI exit, gateway expiry, session rotation
+    - compress() when no handoff found AND cross-session state detected
+
+─── ITERATIVE UPDATE PROMPT ───────────────────────────────────────────────────
+
+  When _previous_summary is set, the summarizer receives:
+
+    "You are updating a context compaction summary. A previous compaction
+     produced the summary below. New conversation turns have occurred since
+     then and need to be incorporated.
+
+     PREVIOUS SUMMARY:
+     <previous_summary>
+
+     NEW TURNS TO INCORPORATE:
+     <content_to_summarize>
+
+     Update the summary using this exact structure.
+     PRESERVE all existing information that is still relevant.
+     ADD new completed actions to the numbered list (continue numbering).
+     Move items from 'In Progress' to 'Completed Actions' when done.
+     Move answered questions to 'Resolved Questions'.
+     Update 'Active State' to reflect current state.
+     Remove information only if it is clearly obsolete.
+     CRITICAL: Update '## Active Task' to reflect the user's most recent
+     unfulfilled input..."
+
+─── SUMMARY REHYDRATION ON RESUME ─────────────────────────────────────────────
+
+  When a session is resumed, the compressor searches for existing handoff
+  summaries in the message list via _find_latest_context_summary().
+  If found, it rehydrates _previous_summary from the stored body.
+
+  This enables continuity even after process restart: a resumed session
+  can iteratively update its previous summary rather than generating
+  a new one from scratch.
+
+─── HEAD PROTECTION DECAY ─────────────────────────────────────────────────────
+
+  _effective_protect_first_n():
+    - First compaction: protect_first_n (default 3)
+    - Subsequent compactions: 0 (decayed)
+    - Rationale: early turns are captured in summary, no need to fossilize
+
+================================================================================
+11. ANTI-THRASHING & PROGRESS DETECTION
+================================================================================
+
+─── ANTI-THRASHING GUARD (SHOULD_COMPRESS) ────────────────────────────────────
+
+  File: agent/context_compressor.py, lines 964–984
+
+  def should_compress(self, prompt_tokens=None) -> bool:
+      tokens = prompt_tokens or self.last_prompt_tokens
+      if tokens < self.threshold_tokens:
+          return False
+      if self._ineffective_compression_count >= 2:
+          logger.warning("Compression skipped — last %d saved <10%% each...")
+          return False
+      return True
+
+  _ineffective_compression_count tracks consecutive compressions saving <10%.
+  After 2 consecutive ineffective passes, compression is skipped entirely.
+  Reset to 0 when a compression saves ≥10%.
+
+─── MULTI-PASS PROGRESS DETECTION ────────────────────────────────────────────
+
+  File: agent/turn_context.py, lines 41–61
+
+  _compression_made_progress(orig_len, new_len, orig_tokens, new_tokens):
+    Progress = message count decreased OR tokens decreased by >5%
+
+─── PREFLIGHT DEFERRAL ────────────────────────────────────────────────────────
+
+  should_defer_preflight_to_real_usage(rough_tokens) -> bool:
+
+  Prevents re-compacting from noisy rough estimates after a compressed
+  request already fit. Defers when:
+    1. Rough estimate >= threshold (would trigger compression)
+    2. awaiting_real_usage_after_compression is True (just compressed)
+    3. OR last real prompt_tokens < threshold AND rough hasn't grown
+       beyond tolerance (5% of threshold or 4096, whichever is larger)
+
+─── NO-OP COMPRESSION GUARD ───────────────────────────────────────────────────
+
+  In compress(), when compress_start >= compress_end:
+    - Nothing to compress (transcript fits within tail budget)
+    - Records as ineffective: _ineffective_compression_count += 1
+    - Returns messages unchanged
+
+  In compress(), when len(messages) <= _min_for_compress:
+    - Too few messages to compress
+    - Returns messages unchanged
+
+================================================================================
+12. SESSION ROTATION VS IN-PLACE COMPACTION
+================================================================================
+
+File: agent/conversation_compression.py, lines 486–825
+
+Two modes, controlled by config: compression.in_place (default: False)
+
+─── LEGACY ROTATION MODE (in_place=False) ─────────────────────────────────────
+
+  1. Flush un-persisted messages to OLD session DB
+  2. End the old session: _session_db.end_session(session_id, "compression")
+  3. Generate new session_id: YYYYMMDD_HHMMSS_<hex>
+  4. Update contextvar + env + logging context
+  5. Create child session: create_session(parent_session_id=old_id)
+  6. Migrate /goal to new session
+  7. Auto-number title (e.g., "My Chat #2")
+  8. Update system prompt in new session
+
+  Rollback on failure:
+    - Roll session_id back to parent
+    - Reopen parent session
+    - Propagate re-binding to contextvar/env/logging
+
+─── IN-PLACE COMPACTION (in_place=True, #38763) ──────────────────────────────
+
+  1. Call _session_db.archive_and_compact(session_id, compressed)
+     - Soft-archives pre-compaction turns (active=0, kept for search)
+     - Inserts compressed messages as new active set (active=1)
+     - Single session_id for life
+  2. Reset flush identity set (_flushed_db_message_ids)
+  3. Set compacted_in_place = True flag
+
+  Advantages:
+    - No session rotation bugs
+    - No parent_session_id chain
+    - No title renumbering
+    - No contextvar/env/logging re-sync needed
+    - Old turns kept for search/recovery
+
+─── POST-COMPACTION CALLBACKS (BOTH MODES) ────────────────────────────────────
+
+  1. Memory extraction: agent.commit_memory_session(messages)
+  2. Context engine notification: on_session_start(boundary_reason="compression")
+  3. Memory manager notification: on_session_switch(reason="compression")
+  4. Compression count warning: if count >= 2, emit degradation warning
+  5. Event callback: "session:compress" event
+  6. Post-compression token estimation
+  7. File-read dedup cache reset
+  8. Compression lock release
+
+─── COMPRESSION LOCK ──────────────────────────────────────────────────────────
+
+  SQLite-backed lock per session_id prevents concurrent compression:
+  - try_acquire_compression_lock(session_id, holder)
+  - release_compression_lock(session_id, holder)
+  - Holder format: "pid=<pid>:tid=<tid>:agent=<hex>:nonce=<hex>"
+  - If lock not acquired: return messages unchanged (abort)
+  - Fail-open on broken lock subsystem (proceed without lock)
+
+================================================================================
+13. ORCHESTRATOR: compress_context()
+================================================================================
+
+File: agent/conversation_compression.py, lines 314–825
+Function: compress_context(agent, messages, system_message, *, ...)
+
+This is the top-level orchestrator called by agent._compress_context().
+
+─── SIGNATURE ─────────────────────────────────────────────────────────────────
+
+  def compress_context(
+      agent: Any,
+      messages: list,
+      system_message: str,
+      *,
+      approx_tokens: Optional[int] = None,
+      task_id: str = "default",
+      focus_topic: Optional[str] = None,
+      force: bool = False,
+  ) -> Tuple[list, str]:
+
+  Returns: (compressed_messages, new_system_prompt)
+
+─── EXECUTION FLOW ────────────────────────────────────────────────────────────
+
+  1. Lazy feasibility check (first call only):
+     check_compression_model_feasibility(agent)
+     - Probes auxiliary compression model availability
+     - Auto-lowers threshold if aux model context < main threshold
+     - Rejects aux models with < 64K context
+
+  2. Emit compaction status: COMPACTION_STATUS
+
+  3. Acquire compression lock on old session_id
+
+  4. Notify memory manager: on_pre_compress(messages)
+
+  5. Call compressor: agent.context_compressor.compress(
+         messages, current_tokens=approx_tokens,
+         focus_topic=focus_topic, force=force)
+
+  6. Check for abort: _last_compress_aborted flag
+     - If True, return (messages, existing_system_prompt) unchanged
+
+  7. Check for summary warnings:
+     - _last_summary_error → emit fallback warning
+     - _last_aux_model_failure_model → emit aux failure warning
+
+  8. Append todo snapshot to compressed messages
+
+  9. Invalidate and rebuild system prompt
+
+  10. Session management (rotation or in-place) — see section 12
+
+  11. Post-compaction callbacks — see section 12
+
+  12. Token estimation & diagnostics
+
+  13. File-read dedup cache reset
+
+  14. Release compression lock
+
+─── ABORT DETECTION ───────────────────────────────────────────────────────────
+
+  Callers detect no-op via: len(returned) == len(input)
+  This stops retry loops when compression aborted.
+
+  The _last_compress_aborted flag is also checked explicitly after the call.
+
+================================================================================
+14. CONFIGURATION & DEFAULTS
+================================================================================
+
+─── CONFIG STRUCTURE (config.yaml) ────────────────────────────────────────────
+
+  compression:
+    enabled: true               # Enable/disable auto-compression
+    threshold: 0.50             # % of context window to trigger at
+    target_ratio: 0.20          # Summary size as ratio of threshold
+    protect_first_n: 3          # Head messages to protect (beyond system)
+    protect_last_n: 20          # Tail messages to protect (count floor)
+    abort_on_summary_failure: false  # Abort vs fallback behavior
+    in_place: false             # In-place vs rotation mode
+
+  auxiliary:
+    compression:
+      model: <model-name>       # Aux LLM for summaries
+      context_length: <int>     # Override detected context length
+      timeout: <seconds>        # Request timeout
+
+  context:
+    engine: "compressor"        # Engine selection (default)
+
+─── COMPUTED DEFAULTS ─────────────────────────────────────────────────────────
+
+  threshold_tokens = max(context_length * threshold_percent,
+                         MINIMUM_CONTEXT_LENGTH)
+    - MINIMUM_CONTEXT_LENGTH = 64,000 tokens
+    - Degenerate case: if floor >= context_length,
+      trigger at 85% of effective window
+
+  tail_token_budget = int(threshold_tokens * summary_target_ratio)
+    - Default: threshold_tokens * 0.20
+
+  max_summary_tokens = min(context_length * 0.05, 12,000)
+
+  summary_target_ratio = clamp(0.10, config_value, 0.80)
+
+  max_tokens (output reservation):
+    - Subtracts from context_length for effective input budget
+    - effective_window = context_length - (max_tokens or 0)
+
+─── CONSTANTS ─────────────────────────────────────────────────────────────────
+
+  _MIN_SUMMARY_TOKENS = 2,000
+  _SUMMARY_RATIO = 0.20
+  _SUMMARY_TOKENS_CEILING = 12,000
+  _CHARS_PER_TOKEN = 4
+  _IMAGE_TOKEN_ESTIMATE = 1,600
+  _IMAGE_CHAR_EQUIVALENT = 6,400
+  _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
+  _FALLBACK_SUMMARY_MAX_CHARS = 8,000
+  _FALLBACK_TURN_MAX_CHARS = 700
+  _AUTO_FOCUS_MAX_TURNS = 3
+  _AUTO_FOCUS_TURN_MAX_CHARS = 260
+  _AUTO_FOCUS_MAX_CHARS = 700
+  _MAX_TAIL_MESSAGE_FLOOR = 8
+  _MIN_CTX_TRIGGER_RATIO = 0.85
+
+  Serialization limits:
+  _CONTENT_MAX = 6,000 chars per message body
+  _CONTENT_HEAD = 4,000 chars from start
+  _CONTENT_TAIL = 1,500 chars from end
+  _TOOL_ARGS_MAX = 1,500 chars per tool args
+  _TOOL_ARGS_HEAD = 1,200 chars from start
+
+================================================================================
+15. DATA MODELS & TYPE SIGNATURES
+================================================================================
+
+─── MESSAGE FORMAT (OpenAI-compatible) ────────────────────────────────────────
+
+  message = {
+      "role": "system" | "user" | "assistant" | "tool",
+      "content": str | List[ContentPart],
+      "tool_calls": Optional[List[ToolCall]],   # assistant only
+      "tool_call_id": Optional[str],            # tool only
+      "_compressed_summary": Optional[bool],    # metadata flag
+  }
+
+  ContentPart = {
+      "type": "text" | "image_url" | "input_image" | "image",
+      "text": Optional[str],
+      "image_url": Optional[str | {"url": str}],
+      "source": Optional[{"type": "base64", "data": str, "media_type": str}],
+  }
+
+  ToolCall = {
+      "id": str,
+      "type": "function",
+      "function": {"name": str, "arguments": str},
+  }
+
+─── CONTEXT ENGINE ABC ────────────────────────────────────────────────────────
+
+  class ContextEngine(ABC):
+      # Identity
+      name: str (abstract property)
+
+      # Token state (read by run_agent.py)
+      last_prompt_tokens: int = 0
+      last_completion_tokens: int = 0
+      last_total_tokens: int = 0
+      threshold_tokens: int = 0
+      context_length: int = 0
+      compression_count: int = 0
+
+      # Compaction parameters
+      threshold_percent: float = 0.75
+      protect_first_n: int = 3
+      protect_last_n: int = 6
+
+      # Core interface
+      update_from_response(usage: Dict) -> None       # abstract
+      should_compress(prompt_tokens: int) -> bool      # abstract
+      compress(messages, current_tokens, focus_topic)  # abstract
+
+      # Optional
+      should_compress_preflight(messages) -> bool
+      should_defer_preflight_to_real_usage(rough) -> bool
+      has_content_to_compress(messages) -> bool
+      on_session_start(session_id, **kwargs) -> None
+      on_session_end(session_id, messages) -> None
+      on_session_reset() -> None
+      get_tool_schemas() -> List
+      handle_tool_call(name, args) -> str
+      get_status() -> Dict
+      update_model(model, context_length, ...) -> None
+
+─── CONTEXT COMPRESSOR STATE ──────────────────────────────────────────────────
+
+  class ContextCompressor(ContextEngine):
+      # Configuration
+      model: str
+      base_url: str
+      api_key: str
+      provider: str
+      api_mode: str
+      threshold_percent: float
+      protect_first_n: int
+      protect_last_n: int
+      summary_target_ratio: float
+      quiet_mode: bool
+      max_tokens: int | None
+      abort_on_summary_failure: bool
+      context_length: int
+      threshold_tokens: int
+      tail_token_budget: int
+      max_summary_tokens: int
+      summary_model: str
+
+      # Token tracking
+      last_prompt_tokens: int
+      last_completion_tokens: int
+      last_total_tokens: int
+      last_real_prompt_tokens: int
+      last_compression_rough_tokens: int
+      last_rough_tokens_when_real_prompt_fit: int
+      awaiting_real_usage_after_compression: bool
+
+      # Summary state
+      _previous_summary: Optional[str]
+      _last_compression_savings_pct: float
+      _ineffective_compression_count: int
+      _summary_failure_cooldown_until: float
+      _last_summary_error: Optional[str]
+      _last_summary_dropped_count: int
+      _last_summary_fallback_used: bool
+      _last_compress_aborted: bool
+      _last_summary_auth_failure: bool
+      _last_summary_network_failure: bool
+      _last_aux_model_failure_error: Optional[str]
+      _last_aux_model_failure_model: Optional[str]
+
+      compression_count: int
+
+================================================================================
+16. EXTERNAL DEPENDENCIES
+================================================================================
+
+─── PYTHON STANDARD LIBRARY ───────────────────────────────────────────────────
+
+  hashlib      — MD5 hashing for tool result deduplication
+  json         — JSON parsing/serializing for tool call arguments
+  logging      — Structured logging throughout
+  re           — Regex for path extraction, media directives, error detection
+  time         — Monotonic clock for cooldowns
+  uuid         — Session ID generation, lock holder nonces
+  os           — Environment variable access
+  threading    — Thread identity for lock holders
+  tempfile     — Temporary files for image resizing
+  pathlib.Path — File path operations
+
+─── PROJECT MODULES ───────────────────────────────────────────────────────────
+
+  agent.auxiliary_client:
+    - call_llm()               — LLM API call for summary generation
+    - _is_connection_error()   — Network error detection
+    - aux_interrupt_protection() — Protect summary call from interrupts
+    - get_text_auxiliary_client() — Resolve aux provider/model
+    - _resolve_task_provider_model() — Config-driven provider resolution
+    - _try_configured_fallback_for_unavailable_client()
+    - set_runtime_main()       — Update main runtime info
+
+  agent.model_metadata:
+    - get_model_context_length() — Context window lookup
+    - estimate_messages_tokens_rough() — Char-based token estimation
+    - estimate_request_tokens_rough()  — Full request token estimation
+    - MINIMUM_CONTEXT_LENGTH   — 64K token floor
+
+  agent.redact:
+    - redact_sensitive_text()  — Mask secrets in summaries/logs
+
+  agent.context_engine:
+    - ContextEngine (ABC)      — Base class for compressor
+
+  agent.conversation_compression:
+    - compress_context()       — Top-level orchestrator
+    - check_compression_model_feasibility() — Startup probe
+    - conversation_history_after_compression() — Post-compression baseline
+    - COMPACTION_STATUS         — Status message constant
+    - COMPACTION_STATUS_MARKER  — Gateway-matchable marker
+
+  agent.turn_context:
+    - build_turn_context()      — Turn prologue (preflight compression)
+    - _compression_made_progress() — Progress detection
+    - _should_run_preflight_estimate() — Cheap preflight gate
+
+  hermes_time:
+    - now()                    — Timezone-aware current time
+
+  tools.file_tools:
+    - reset_file_dedup()       — Clear file-read dedup cache
+
+  tools.vision_tools:
+    - _resize_image_for_vision() — Image resizing for shrink recovery
+
+  PIL.Image (Pillow):
+    - Optional: image dimension detection for shrink recovery
+
+─── EXTERNAL SERVICES ─────────────────────────────────────────────────────────
+
+  OpenAI-compatible LLM API:
+    - Used for summary generation via call_llm()
+    - Supports multiple providers: OpenAI, Anthropic, OpenRouter,
+      Azure, Bedrock, local (ollama, vLLM, etc.)
+
+  SQLite (state.db):
+    - Session management: create, end, reopen sessions
+    - Compression locks: try_acquire, release
+    - Message archival: archive_and_compact (in-place mode)
+    - System prompt persistence
+
+================================================================================
+17. ERROR HANDLING PATTERNS
+================================================================================
+
+─── SUMMARY GENERATION FAILURES ───────────────────────────────────────────────
+
+  Cascading fallback:
+    1. Aux model fails → retry on main model (one shot)
+    2. Main model fails → enter cooldown + return None
+    3. None summary:
+       a. abort_on_summary_failure=True → abort (preserve messages)
+       b. Auth failure → always abort
+       c. Network failure → always abort
+       d. Otherwise → build static fallback summary
+
+  Cooldown periods:
+    - No provider: 600s
+    - JSON decode / streaming close: 30s
+    - Other transient: 60s
+    - Manual /compress bypasses cooldown (force=True)
+
+─── COMPRESSION LOCK FAILURES ─────────────────────────────────────────────────
+
+  - Lock not acquired: return messages unchanged (concurrent compression)
+  - Lock subsystem broken (version skew): proceed without lock (fail-open)
+  - Lock release failure: log debug, continue
+
+─── SESSION ROTATION FAILURES ─────────────────────────────────────────────────
+
+  - Child session creation fails: roll back to parent session
+    - Reopen parent, restore contextvar/env/logging
+    - Prevents orphan sessions
+  - Goal migration failure: log debug, continue
+  - Title propagation failure: log debug, continue
+
+─── COMPRESS() METHOD INVARIANTS ──────────────────────────────────────────────
+
+  - Never returns fewer messages than the protected head + tail
+  - Always returns a valid OpenAI-format message list
+  - Tool pairs are always sanitized (orphaned results removed, stubs added)
+  - compress_start >= compress_end → return unchanged (no-op)
+  - Too few messages → return unchanged
+  - Summary failure (depending on config) → abort or fallback
+
+─── PREFLIGHT LOOP INVARIANTS ─────────────────────────────────────────────────
+
+  - Maximum 3 iterations (hard cap)
+  - Breaks on no progress (neither message count nor >5% token reduction)
+  - Breaks when should_compress() returns False (below threshold)
+
+================================================================================
+18. FILE INVENTORY
+================================================================================
+
+─── CORE IMPLEMENTATION ───────────────────────────────────────────────────────
+
+  agent/context_compressor.py     — ContextCompressor class (2683 lines)
+    - SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX
+    - _HISTORICAL_SUMMARY_PREFIXES
+    - COMPRESSED_SUMMARY_METADATA_KEY
+    - _SUMMARY_END_MARKER
+    - Constants: _MIN_SUMMARY_TOKENS, _SUMMARY_RATIO, etc.
+    - Helper functions: _dedupe_append, _extract_tool_call_*,
+      _collect_path_mentions, _content_length_for_budget,
+      _estimate_msg_budget_tokens, _content_text_for_contains,
+      _append_text_to_content, _strip_image_parts_from_parts,
+      _truncate_tool_call_args_json, _is_image_part,
+      _content_has_images, _strip_images_from_content,
+      _strip_historical_media, _summarize_tool_result
+    - ContextCompressor.__init__, compress(), _prune_old_tool_results(),
+      _generate_summary(), _build_static_fallback_summary(),
+      _serialize_for_summary(), _compute_summary_budget(),
+      _find_tail_cut_by_tokens(), _protect_head_size(),
+      _effective_protect_first_n(), _align_boundary_forward/backward(),
+      _ensure_last_user_message_in_tail(),
+      _ensure_last_assistant_message_in_tail(),
+      _sanitize_tool_pairs(), _find_latest_context_summary(),
+      _derive_auto_focus_topic(), _strip_summary_prefix(),
+      _with_summary_prefix(), _is_context_summary_content(),
+      _has_compressed_summary_metadata(),
+      _fallback_to_main_for_compression(),
+      update_from_response(), should_compress(),
+      should_defer_preflight_to_real_usage(),
+      has_content_to_compress(), on_session_reset(),
+      on_session_end(), update_model()
+
+  agent/context_engine.py         — ContextEngine ABC (227 lines)
+    - Abstract base for pluggable context engines
+    - Defines the contract: update_from_response, should_compress,
+      compress, lifecycle hooks, tool support, status
+
+  agent/conversation_compression.py — Orchestrator (1091 lines)
+    - compress_context() — top-level compression entry point
+    - check_compression_model_feasibility() — startup probe
+    - replay_compression_warning() — re-emit warning
+    - conversation_history_after_compression() — flush baseline
+    - try_shrink_image_parts_in_messages() — image resize recovery
+    - COMPACTION_STATUS, COMPACTION_STATUS_MARKER
+
+─── INTEGRATION POINTS ────────────────────────────────────────────────────────
+
+  agent/turn_context.py           — Multi-pass preflight loop (490 lines)
+    - build_turn_context() — turn prologue with preflight compression
+    - _compression_made_progress() — progress detection
+    - _should_run_preflight_estimate() — cheap gate
+    - TurnContext dataclass
+
+  agent/conversation_loop.py      — Post-response auto-compress trigger
+    - Lines 4280–4318: should_compress check + single-pass compress
+
+  run_agent.py                    — Agent wrapper method
+    - Lines 5167–5180: _compress_context() forwarder
+
+  agent/agent_init.py             — Configuration & instantiation
+    - Lines 1340–1623: config loading, ContextCompressor creation
+
+─── SUPPORTING MODULES ────────────────────────────────────────────────────────
+
+  agent/model_metadata.py         — Token estimation functions
+    - estimate_messages_tokens_rough() — char-based message estimate
+    - estimate_request_tokens_rough() — full request estimate
+    - _estimate_message_chars() — per-message char count
+    - _count_image_tokens() — image part token cost
+    - get_model_context_length() — context window lookup
+    - MINIMUM_CONTEXT_LENGTH — 64K token floor
+
+  agent/auxiliary_client.py       — Auxiliary LLM client
+    - call_llm() — API call for summary generation
+    - _is_connection_error() — error classification
+    - aux_interrupt_protection() — interrupt guard
+    - get_text_auxiliary_client() — provider/model resolution
+
+  agent/redact.py                 — Secret redaction
+    - redact_sensitive_text() — mask secrets in summaries
+
+─── MANUAL COMPRESSION HANDLERS ───────────────────────────────────────────────
+
+  gateway/slash_commands.py       — /compress command handler
+  hermes_cli/partial_compress.py  — partial compression variant
+  cli.py                          — CLI compress handler
+
+─── TEST FILES ────────────────────────────────────────────────────────────────
+
+  Core compressor:
+    tests/agent/test_context_compressor.py
+    tests/agent/test_compression_rotation_state.py
+    tests/agent/test_compression_concurrent_fork.py
+    tests/agent/test_compression_progress.py
+    tests/agent/test_compression_count_warning_36908.py
+    tests/agent/test_compression_logging_session_context.py
+
+  Preflight:
+    tests/agent/test_preflight_compression_gate.py
+
+  Compressor internals:
+    tests/agent/test_context_compressor_summary_continuity.py
+    tests/agent/test_compressor_tool_call_budget.py
+    tests/agent/test_compressor_assistant_tail_anchor.py
+    tests/agent/test_compressor_historical_media.py
+    tests/agent/test_compressor_media_stripping.py
+    tests/agent/test_compressor_image_tokens.py
+
+  Focus/guided:
+    tests/agent/test_compress_focus.py
+    tests/cli/test_compress_focus.py
+    tests/gateway/test_compress_focus.py
+
+  Manual command:
+    tests/cli/test_manual_compress.py
+    tests/cli/test_compress_here.py
+    tests/cli/test_partial_compress.py
+    tests/gateway/test_compress_command.py
+
+  Integration:
+    tests/run_agent/test_compression_boundary.py
+    tests/run_agent/test_compression_boundary_hook.py
+    tests/run_agent/test_compression_session_id_persistence.py
+    tests/gateway/test_compression_concurrent_sessions.py
+    tests/test_hermes_state_compression_locks.py
+
+================================================================================
+END OF TRACE
+================================================================================

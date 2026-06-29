@@ -1,0 +1,210 @@
+================================================================================
+PR REVIEW COMMENTS — Round 1
+================================================================================
+PR:         openclaw/openclaw#97485
+URL:        https://github.com/openclaw/openclaw/pull/97485
+Fetched:    2026-06-29 15:30:24 UTC
+Round:      1
+================================================================================
+
+================================================================================
+INLINE CODE REVIEW COMMENTS
+================================================================================
+
+
+================================================================================
+REVIEW SUMMARIES
+================================================================================
+
+
+================================================================================
+DISCUSSION COMMENTS
+================================================================================
+
+--- DISCUSSION COMMENT ---
+Author: clawsweeper[bot]
+Created: 2026-06-28T12:16:36Z
+Updated: 2026-06-28T12:29:59Z
+
+Body:
+Codex review: needs real behavior proof before merge. _Reviewed June 28, 2026, 8:29 AM ET / 12:29 UTC._
+
+**Summary**
+Adds an opt-in agent iteration budget config, an agent-core pre-tool-round hook, embedded-runner budget exhaustion handling, and related tests.
+
+PR surface: Source +339, Tests +674. Total +1013 across 20 files.
+
+Reproducibility: yes. for the source-level patch defects: PR head always uses maxIterations for the budget and consumes the same budget in both the outer loop and pre-tool hook. No live runaway-loop reproduction was run in this read-only review.
+
+**Review metrics:** 2 noteworthy metrics.
+- **Config surface:** 1 block added, 4 fields. The PR adds strict iterationBudget config under agent defaults and per-agent entries, so docs, labels, and upgrade semantics matter before merge.
+- **Runtime API surface:** 1 hook added. The new agent-core hook changes the package-level loop contract and should match the intended permanent budget API.
+
+**Merge readiness**
+Overall: 🧂 unranked krab
+Proof: 🧂 unranked krab
+Patch quality: 🧂 unranked krab
+Result: blocked until real behavior proof is added.
+
+Overall follows the weaker of proof and patch quality, so missing proof can cap an otherwise strong patch.
+
+Rank-up moves:
+- Provide redacted terminal/log/live output showing a real runaway OpenClaw run stopping at the configured budget.
+- [P1] Fix subagent cap selection and single-counter budget semantics with focused regression tests.
+- [P1] Add config help, labels, and docs for the new keys or remove the public config surface pending maintainer direction.
+
+Proof guidance:
+- [P1] Needs real behavior proof before merge: The PR body lists tests but provides no redacted live output, logs, terminal proof, or artifact showing a real OpenClaw runaway loop stopped after the change. After adding proof, update the PR body; ClawSweeper should re-review automatically. If it does not, the PR author or someone with repository write access can comment `@clawsweeper re-review`.
+
+**Risk before merge**
+- [P1] Merging as-is would add a strict openclaw.json budget surface and package-level agent-core hook before the permanent semantics are settled and documented.
+- [P1] The advertised subagentMaxIterations setting is silently ineffective because subagent runs receive the parent maxIterations cap.
+- [P1] The same budget is consumed in the wrapper loop and again before tool execution, so low budgets can stop runs earlier than configured.
+- [P1] The PR has no redacted live output, logs, terminal proof, or artifact showing a real runaway OpenClaw run stopped after the change.
+
+**Maintainer options:**
+1. **Repair and prove budget semantics (recommended)**  
+   Fix parent/subagent cap selection, use one canonical counter, add config help/labels/docs, and provide redacted real-run proof before merge.
+2. **Pause for API direction**  
+   If maintainers are not ready to bless this config block or agent-core hook, pause this branch and keep the canonical hard-budget issue as the design target.
+
+**Next step before merge**
+- [P1] Manual review is needed because this adds new agent runtime/config/API surface, has blocking source-level defects, and still needs contributor-provided real behavior proof.
+
+**Security**
+Cleared: The diff changes agent runtime control flow, config schemas, and tests only; no dependency, workflow, secret, package, or supply-chain concern was found.
+
+**Review findings**
+- [P1] Honor subagent iteration caps — `src/agents/embedded-agent-runner/run.ts:1591`
+- [P1] Count each budgeted tool round once — `src/agents/embedded-agent-runner/run.ts:1945`
+- [P2] Document the new config surface — `src/config/zod-schema.agent-runtime.ts:77-84`
+
+<details>
+<summary>Review details</summary>
+
+Best possible solution:
+
+Align the branch with https://github.com/openclaw/openclaw/issues/9912 by enforcing one clear budgeted unit, selecting parent versus subagent caps correctly, documenting the config/help/labels contract, and proving the behavior in a real OpenClaw run.
+
+Do we have a high-confidence way to reproduce the issue?
+
+Yes for the source-level patch defects: PR head always uses maxIterations for the budget and consumes the same budget in both the outer loop and pre-tool hook. No live runaway-loop reproduction was run in this read-only review.
+
+Is this the best way to solve the issue?
+
+No as-is. A hard runtime budget is a plausible direction, but this implementation is not the best current shape until it has one counter, correct subagent semantics, documented config, and real behavior proof.
+
+Full review comments:
+
+- [P1] Honor subagent iteration caps — `src/agents/embedded-agent-runner/run.ts:1591`
+  `subagentMaxIterations` is accepted and defaulted, but the runtime always constructs the budget with `maxIterations`. A configured subagent cap is therefore silently ignored for subagent sessions; select the subagent cap for subagent session keys or remove the field until supported.
+  Confidence: 0.89
+- [P1] Count each budgeted tool round once — `src/agents/embedded-agent-runner/run.ts:1945`
+  The same `IterationBudget` is consumed before each outer attempt and again by `onBeforeToolCallingRound`. This makes the configured limit smaller than advertised, and low values can block the first tool round before it executes; keep one canonical counter or split the counters into separate named budgets.
+  Confidence: 0.87
+- [P2] Document the new config surface — `src/config/zod-schema.agent-runtime.ts:77-84`
+  This strict `iterationBudget` block is added to the runtime schema without matching config help, labels, or gateway docs. Users and UI/help surfaces will not discover or understand the new keys, and config-contract policy expects schema, metadata, and docs to move together.
+  Confidence: 0.82
+
+Overall correctness: patch is incorrect
+Overall confidence: 0.87
+
+AGENTS.md: found and applied where relevant.
+
+Codex review notes: model internal, reasoning high; reviewed against [08d15ec32db3](https://github.com/openclaw/openclaw/commit/08d15ec32db3ca8a9f1d3160cdb14b8fff95f7b1).
+
+</details>
+
+<details>
+<summary>Label changes</summary>
+
+Label justifications:
+
+- `P2`: This is a normal-priority agent reliability feature with limited blast radius, but the current patch has blocking implementation and config-contract issues.
+- `merge-risk: 🚨 compatibility`: The PR adds new user config/defaults and an agent-core runtime hook that can change run behavior once enabled.
+- `rating: 🧂 unranked krab`: Overall readiness is 🧂 unranked krab; proof is 🧂 unranked krab and patch quality is 🧂 unranked krab.
+- `status: 📣 needs proof`: The PR needs real behavior proof before ClawSweeper can clear the contributor ask. Needs real behavior proof before merge: The PR body lists tests but provides no redacted live output, logs, terminal proof, or artifact showing a real OpenClaw runaway loop stopped after the change. After adding proof, update the PR body; ClawSweeper should re-review automatically. If it does not, the PR author or someone with repository write access can comment `@clawsweeper re-review`.
+
+</details>
+
+<details>
+<summary>Evidence reviewed</summary>
+
+PR surface:
+
+Source +339, Tests +674. Total +1013 across 20 files.
+
+<details>
+<summary>View PR surface stats</summary>
+
+| Area | Files | Added | Removed | Net |
+|---|---:|---:|---:|---:|
+| Source | 15 | 341 | 2 | +339 |
+| Tests | 5 | 674 | 0 | +674 |
+| Docs | 0 | 0 | 0 | 0 |
+| Config | 0 | 0 | 0 | 0 |
+| Generated | 0 | 0 | 0 | 0 |
+| Other | 0 | 0 | 0 | 0 |
+| **Total** | **20** | **1015** | **2** | **+1013** |
+
+</details>
+
+What I checked:
+
+- **Root policy applied:** Root AGENTS.md was read fully; its config/API compatibility guidance applies because the PR adds agent runtime, schema, and public config surface. ([`AGENTS.md:1`](https://github.com/openclaw/openclaw/blob/08d15ec32db3/AGENTS.md#L1), [08d15ec32db3](https://github.com/openclaw/openclaw/commit/08d15ec32db3))
+- **Scoped agent policy applied:** Scoped agent guidance was read; the touched agent tests and embedded-runner paths are covered by focused runtime-proof expectations. ([`src/agents/AGENTS.md:1`](https://github.com/openclaw/openclaw/blob/08d15ec32db3/src/agents/AGENTS.md#L1), [08d15ec32db3](https://github.com/openclaw/openclaw/commit/08d15ec32db3))
+- **Scoped embedded-runner policy applied:** The embedded-runner guide favors production helper proof and limited full-runner coverage, which is relevant to the new budget wiring and tests. ([`src/agents/embedded-agent-runner/run/AGENTS.md:1`](https://github.com/openclaw/openclaw/blob/08d15ec32db3/src/agents/embedded-agent-runner/run/AGENTS.md#L1), [08d15ec32db3](https://github.com/openclaw/openclaw/commit/08d15ec32db3))
+- **Subagent budget cap is ignored:** PR head resolves iterationBudget but always constructs IterationBudget with maxIterations, despite adding subagentMaxIterations as a user-facing field. ([`src/agents/embedded-agent-runner/run.ts:1591`](https://github.com/openclaw/openclaw/blob/3a384218e18a/src/agents/embedded-agent-runner/run.ts#L1591), [3a384218e18a](https://github.com/openclaw/openclaw/commit/3a384218e18a))
+- **Budget is consumed twice:** PR head consumes the same IterationBudget once in the outer run loop and again via onBeforeToolCallingRound before tool execution. ([`src/agents/embedded-agent-runner/run.ts:1945`](https://github.com/openclaw/openclaw/blob/3a384218e18a/src/agents/embedded-agent-runner/run.ts#L1945), [3a384218e18a](https://github.com/openclaw/openclaw/commit/3a384218e18a))
+- **Tool-round hook added:** PR head adds a new package-level onBeforeToolCallingRound hook that can stop execution before executeToolCalls, creating a new runtime contract. ([`packages/agent-core/src/agent-loop.ts:360`](https://github.com/openclaw/openclaw/blob/3a384218e18a/packages/agent-core/src/agent-loop.ts#L360), [3a384218e18a](https://github.com/openclaw/openclaw/commit/3a384218e18a))
+
+Likely related people:
+
+- **steipete:** Authored configurable tool-loop detection and recent agent-core loop fixes, and prior issue review kept the canonical hard-budget request open for product/API design. (role: feature-history contributor and prior reviewer; confidence: high; commits: [076df941a326](https://github.com/openclaw/openclaw/commit/076df941a3265067602e0951a4233cfb7e8597ea), [56259606d15f](https://github.com/openclaw/openclaw/commit/56259606d15f66c90415baddca9e08b156ef6b33), [0314819f918a](https://github.com/openclaw/openclaw/commit/0314819f918ad25fa7554f3d9b81b4ecd1e61aeb); files: `src/agents/tool-loop-detection.ts`, `docs/tools/loop-detection.md`, `packages/agent-core/src/agent-loop.ts`)
+- **vincentkoc:** Recent GitHub history repeatedly touches the embedded runner and agent config/runtime-adjacent files affected by this PR. (role: recent area contributor; confidence: high; commits: [31a65e0647ae](https://github.com/openclaw/openclaw/commit/31a65e0647ae85eb4c9048051145f07003722caf), [7f6a93eb8efd](https://github.com/openclaw/openclaw/commit/7f6a93eb8efd5859c264841bd8fa2886f9d9c4b3), [2b75806197ab](https://github.com/openclaw/openclaw/commit/2b75806197ab0626a9f0d7517f9a6ba1a5d64c15); files: `src/agents/embedded-agent-runner/run.ts`, `src/config/zod-schema.agent-runtime.ts`)
+- **medns:** Authored the merged runRetries config surface, the closest existing per-agent/default loop-bound config that this PR must compose with. (role: adjacent config contributor; confidence: medium; commits: [a92d5fe77d71](https://github.com/openclaw/openclaw/commit/a92d5fe77d71d6546e3dd79ee40bd506971f6c85); files: `src/config/zod-schema.agent-defaults.ts`, `src/config/zod-schema.agent-runtime.ts`, `src/agents/embedded-agent-runner/run/helpers.ts`)
+- **jalehman:** Recent commits touch embedded-run session targeting and config-doc-adjacent behavior, which overlaps the session-agent boundary changed here. (role: adjacent owner; confidence: medium; commits: [0dfa22c6e0fc](https://github.com/openclaw/openclaw/commit/0dfa22c6e0fc7edfc1effe9190ccade84a8996cd), [070996e5c334](https://github.com/openclaw/openclaw/commit/070996e5c334aa5e496b86d9b072e440394de2c8); files: `src/agents/embedded-agent-runner/run.ts`, `src/config/schema.help.ts`)
+
+</details>
+
+<details>
+<summary>What the crustacean ranks mean</summary>
+
+- 🦀 challenger crab: rare, exceptional readiness with strong proof, clean implementation, and convincing validation.
+- 🦞 diamond lobster: very strong readiness with only minor maintainer review expected.
+- 🐚 platinum hermit: good normal PR, likely mergeable with ordinary maintainer review.
+- 🦐 gold shrimp: useful signal, but proof or patch confidence is still limited.
+- 🦪 silver shellfish: thin signal; proof, validation, or implementation needs work.
+- 🧂 unranked krab: not merge-ready because proof is missing/unusable or there are serious correctness or safety concerns.
+- 🌊 off-meta tidepool: rating does not apply to this item.
+
+Shiny media proof means a screenshot, video, or linked artifact directly shows the changed behavior. Runtime, network, CSP, and security claims still need visible diagnostics.
+
+</details>
+
+<details>
+<summary>How this review workflow works</summary>
+
+- ClawSweeper keeps one durable marker-backed review comment per issue or PR.
+- Re-runs edit this comment so the latest verdict, findings, and automation markers stay together instead of adding duplicate bot comments.
+- A fresh review can be triggered by eligible `@clawsweeper re-review` comments, exact-item GitHub events, scheduled/background review runs, or manual workflow dispatch.
+- PR/issue authors and users with repository write access can comment `@clawsweeper re-review` or `@clawsweeper re-run` on an open PR or issue to request a fresh review only.
+- Maintainers can also comment `@clawsweeper review` to request a fresh review only.
+- Fresh-review commands do not start repair, autofix, rebase, CI repair, or automerge.
+- Maintainer-only repair and merge flows require explicit commands such as `@clawsweeper autofix`, `@clawsweeper automerge`, `@clawsweeper fix ci`, or `@clawsweeper address review`.
+- Maintainers can comment `@clawsweeper explain` to ask for more context, or `@clawsweeper stop` to stop active automation.
+
+</details>
+
+<!-- clawsweeper-verdict:needs-human item=97485 sha=3a384218e18a8ac26956d289eee482b3042a269d confidence=high updated_at=2026-06-28T12:22:45Z reviewed_at=2026-06-28T12:29:05.722Z source_revision=6d21d622c73e12dd4fda77d584ae610ddc6bddcbe1b70532cd03a85afdd9268f -->
+
+<!-- clawsweeper-review item=97485 -->
+
+================================================================================
+SUMMARY
+================================================================================
+Inline code comments: 0
+Review summaries:     0
+Discussion comments:  1
+Total:                1
+================================================================================
