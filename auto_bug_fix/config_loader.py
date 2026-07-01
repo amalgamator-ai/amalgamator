@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import re
 import yaml
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -158,3 +160,117 @@ def load_pipeline_config(config_path: str) -> tuple[BugFixConfig, ClaudeConfig, 
     claude_config = parse_claude_config(config, output_dir)
 
     return bug_fix_config, claude_config, workdir, source_path
+
+
+# ---------------------------------------------------------------------------
+# Multi-target support
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TargetSpec:
+    """Per-target overrides for multi-branch porting."""
+    branch: str
+    issue_id: str | None = None
+    bug_description: str | None = None
+    build_command: str | None = None
+    test_command: str | None = None
+    lint_command: str | None = None
+
+
+def _sanitize_ref(ref: str) -> str:
+    """Sanitize a git ref for use in filesystem paths.
+
+    Strips ``origin/`` prefix and replaces ``/`` with ``_``.
+    Commit SHAs pass through unchanged.
+    """
+    s = re.sub(r"^origin/", "", ref)
+    return s.replace("/", "_")
+
+
+def parse_targets(config: dict[str, Any]) -> list[TargetSpec]:
+    """Normalize ``branches.target`` or ``branches.targets`` into a list of TargetSpec.
+
+    Raises ConfigError if both or neither are present, or if two targets
+    collide after sanitization.
+    """
+    branches = config.get("branches", {})
+    if not isinstance(branches, dict):
+        raise ConfigError("'branches' must be a mapping")
+
+    has_singular = "target" in branches
+    has_plural = "targets" in branches
+
+    if has_singular and has_plural:
+        raise ConfigError("branches must have 'target' or 'targets', not both")
+    if not has_singular and not has_plural:
+        raise ConfigError("branches must have 'target' or 'targets'")
+
+    if has_singular:
+        return [TargetSpec(branch=str(branches["target"]))]
+
+    raw_targets = branches["targets"]
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise ConfigError("branches.targets must be a non-empty list")
+
+    specs: list[TargetSpec] = []
+    for entry in raw_targets:
+        if isinstance(entry, str):
+            specs.append(TargetSpec(branch=entry))
+        elif isinstance(entry, dict):
+            if "branch" not in entry:
+                raise ConfigError("each target mapping must have a 'branch' key")
+            specs.append(TargetSpec(
+                branch=str(entry["branch"]),
+                issue_id=entry.get("issue_id"),
+                bug_description=entry.get("bug_description"),
+                build_command=entry.get("build_command"),
+                test_command=entry.get("test_command"),
+                lint_command=entry.get("lint_command"),
+            ))
+        else:
+            raise ConfigError(
+                f"each target must be a string or mapping, got {type(entry).__name__}"
+            )
+
+    seen: dict[str, str] = {}
+    for spec in specs:
+        key = _sanitize_ref(spec.branch)
+        if key in seen:
+            raise ConfigError(
+                f"duplicate target after sanitization: '{spec.branch}' and "
+                f"'{seen[key]}' both resolve to '{key}'"
+            )
+        seen[key] = spec.branch
+
+    return specs
+
+
+def load_multi_target_config(
+    config_path: str,
+) -> tuple[list[TargetSpec], BugFixConfig, ClaudeConfig, str, str]:
+    """Load config with multi-target support.
+
+    Returns (targets, base_config, claude_config, workdir, source_path).
+    The base_config has ``target_branch`` set to the first target's branch
+    to satisfy the required field.
+    """
+    config = load_config_file(config_path)
+
+    targets = parse_targets(config)
+
+    # Pop 'targets' and inject synthetic 'target' so parse_bug_fix_config
+    # (which reads config["branches"]["target"]) doesn't KeyError.
+    # parse_targets already rejected having both, so no false positive.
+    config.setdefault("branches", {})
+    config["branches"].pop("targets", None)
+    config["branches"]["target"] = targets[0].branch
+
+    output_section = config.get("output", {})
+    if not isinstance(output_section, dict):
+        output_section = {}
+    output_dir = expand_path(output_section.get("directory"), "./runs")
+
+    bug_fix_config, workdir, source_path = parse_bug_fix_config(config)
+    claude_config = parse_claude_config(config, output_dir)
+
+    return targets, bug_fix_config, claude_config, workdir, source_path

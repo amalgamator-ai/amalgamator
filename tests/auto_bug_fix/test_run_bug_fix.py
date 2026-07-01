@@ -1,4 +1,6 @@
 """Tests for auto_bug_fix.run_bug_fix — pipeline state, strategies, and helpers."""
+import json
+import os
 from unittest.mock import patch, MagicMock
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.run_bug_fix import (
@@ -8,7 +10,13 @@ from auto_bug_fix.run_bug_fix import (
     identify_test_files,
     _resolve_lint_command,
     _run_build_and_test,
+    TargetResult,
+    run_targets,
+    _read_tracker_cost,
 )
+from auto_bug_fix.config_loader import TargetSpec, _sanitize_ref
+from auto_bug_fix.git_tools import GitResult
+from auto_bug_fix.dossier import Dossier
 from auto_bug_fix.baseline import TIMEOUT_EXIT_CODE
 
 
@@ -278,3 +286,222 @@ def test_lint_timeout_not_masked_as_preexisting(mock_run, mock_allow, mock_veto)
     ]
     passed, _, _, _, _ = _run_build_and_test(config, state)
     assert passed is False
+
+
+# --- _sanitize_ref tests (function lives in config_loader, imported here) ---
+
+def test_sanitize_ref():
+    assert _sanitize_ref("origin/release-1.34") == "release-1.34"
+    assert _sanitize_ref("release/1.33") == "release_1.33"
+    assert _sanitize_ref("cc8e8609e") == "cc8e8609e"
+    assert _sanitize_ref("origin/feature/deep") == "feature_deep"
+
+
+# --- run_targets tests ---
+
+def _make_tracker_json(output_dir, issue_id, cost_usd=1.23):
+    """Write a fake tracker JSON — reproduces run_pipeline's finally side effect."""
+    os.makedirs(output_dir, exist_ok=True)
+    filename = f"{issue_id}_20260701_000000.json"
+    path = os.path.join(output_dir, filename)
+    data = {
+        "run_id": "fake-run-id",
+        "issue_id": issue_id,
+        "outcome": "success",
+        "total_cost_usd": cost_usd,
+        "total_input_tokens": 1000,
+        "total_output_tokens": 500,
+    }
+    with open(path, "w") as f:
+        json.dump(data, f)
+    return path
+
+
+def _make_dossier(issue_id="test-1"):
+    return Dossier(
+        issue_id=issue_id,
+        source_branch="main",
+        target_branch="target",
+        fix_commit="abc123",
+        bug_description="test fix",
+    )
+
+
+_BASE_CFG = dict(
+    repo_path="/tmp/repo",
+    build_dir="/tmp/repo",
+    source_branch="main",
+    target_branch="placeholder",
+    source_fix_commit="abc123",
+    bug_description="test fix",
+    issue_id="test-1",
+    build_command="make",
+    test_command="make test",
+)
+
+
+@patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
+@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.run_pipeline")
+def test_run_targets_continues_on_failure(mock_pipeline, mock_wt_add, mock_cleanup, tmp_path):
+    """Headline test: failure on target 1 must not prevent target 2 from running."""
+    base_config = BugFixConfig(**_BASE_CFG)
+
+    call_count = [0]
+
+    def pipeline_side_effect(config, claude_config, output_dir):
+        call_count[0] += 1
+        # Both targets write a tracker JSON (run_pipeline's finally does this)
+        _make_tracker_json(output_dir, config.issue_id, cost_usd=1.50 * call_count[0])
+        if call_count[0] == 1:
+            raise PipelineEscalation("build failed on target 1")
+        return _make_dossier(config.issue_id), MagicMock()
+
+    mock_pipeline.side_effect = pipeline_side_effect
+    mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
+
+    targets = [
+        TargetSpec(branch="branch-a", issue_id="fix-a"),
+        TargetSpec(branch="branch-b", issue_id="fix-b"),
+    ]
+    claude_cfg = MagicMock()
+    parent_run_dir = str(tmp_path / "runs" / "test_run")
+    os.makedirs(parent_run_dir, exist_ok=True)
+
+    results = run_targets(
+        targets, base_config, claude_cfg,
+        source_path="/tmp/source", workdir=str(tmp_path / "workdir"),
+        parent_run_dir=parent_run_dir, build_subdir="",
+    )
+
+    assert len(results) == 2
+    assert results[0].outcome == "pipeline_escalation"
+    assert results[0].issue_id == "fix-a"
+    assert "build failed" in results[0].error
+    assert results[0].cost_usd == 1.50
+
+    assert results[1].outcome == "success"
+    assert results[1].issue_id == "fix-b"
+    assert results[1].cost_usd == 3.00
+
+    summary_path = os.path.join(parent_run_dir, "summary.json")
+    assert os.path.exists(summary_path)
+    with open(summary_path) as f:
+        summary = json.load(f)
+    assert summary["total_targets"] == 2
+    assert summary["succeeded"] == 1
+    assert summary["failed"] == 1
+
+
+@patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
+@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.run_pipeline")
+def test_run_targets_single_target(mock_pipeline, mock_wt_add, mock_cleanup, tmp_path):
+    """Single-element list produces correct directory structure."""
+    base_config = BugFixConfig(**_BASE_CFG)
+
+    def pipeline_side_effect(config, claude_config, output_dir):
+        _make_tracker_json(output_dir, config.issue_id, cost_usd=2.00)
+        return _make_dossier(config.issue_id), MagicMock()
+
+    mock_pipeline.side_effect = pipeline_side_effect
+    mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
+
+    targets = [TargetSpec(branch="release-1.34")]
+    parent_run_dir = str(tmp_path / "runs" / "single")
+    os.makedirs(parent_run_dir, exist_ok=True)
+
+    results = run_targets(
+        targets, base_config, MagicMock(),
+        source_path="/tmp/source", workdir=str(tmp_path / "workdir"),
+        parent_run_dir=parent_run_dir, build_subdir="",
+    )
+
+    assert len(results) == 1
+    assert results[0].outcome == "success"
+    target_subdir = os.path.join(parent_run_dir, "release-1.34")
+    assert os.path.isdir(target_subdir)
+    assert os.path.exists(os.path.join(target_subdir, "run_log.txt"))
+    assert os.path.exists(os.path.join(target_subdir, "dossier.md"))
+
+
+@patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
+@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.run_pipeline")
+def test_run_targets_cost_recovery_on_failure(mock_pipeline, mock_wt_add, mock_cleanup, tmp_path):
+    """TargetResult.cost_usd is populated from tracker JSON even when run_pipeline raises."""
+    base_config = BugFixConfig(**_BASE_CFG)
+
+    def pipeline_side_effect(config, claude_config, output_dir):
+        _make_tracker_json(output_dir, config.issue_id, cost_usd=4.56)
+        raise PipelineStop("already fixed")
+
+    mock_pipeline.side_effect = pipeline_side_effect
+    mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
+
+    targets = [TargetSpec(branch="target-1")]
+    parent_run_dir = str(tmp_path / "runs" / "cost")
+    os.makedirs(parent_run_dir, exist_ok=True)
+
+    results = run_targets(
+        targets, base_config, MagicMock(),
+        source_path="/tmp/source", workdir=str(tmp_path / "workdir"),
+        parent_run_dir=parent_run_dir, build_subdir="",
+    )
+
+    assert len(results) == 1
+    assert results[0].outcome == "pipeline_stop"
+    assert results[0].cost_usd == 4.56
+    assert results[0].tracker_path != ""
+
+
+@patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
+@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.run_pipeline")
+def test_run_targets_worktree_failure_continues(mock_pipeline, mock_wt_add, mock_cleanup, tmp_path):
+    """Worktree failure on target 1 records worktree_error and target 2 still runs."""
+    base_config = BugFixConfig(**_BASE_CFG)
+
+    call_count = [0]
+
+    def wt_add_side_effect(source_path, worktree_path, branch):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return GitResult(exit_code=1, stdout="", stderr="fatal: invalid ref: bad-branch")
+        return GitResult(exit_code=0, stdout="", stderr="")
+
+    mock_wt_add.side_effect = wt_add_side_effect
+
+    def pipeline_side_effect(config, claude_config, output_dir):
+        _make_tracker_json(output_dir, config.issue_id, cost_usd=3.21)
+        return _make_dossier(config.issue_id), MagicMock()
+
+    mock_pipeline.side_effect = pipeline_side_effect
+
+    targets = [
+        TargetSpec(branch="bad-branch", issue_id="fix-bad"),
+        TargetSpec(branch="good-branch", issue_id="fix-good"),
+    ]
+    parent_run_dir = str(tmp_path / "runs" / "wt_fail")
+    os.makedirs(parent_run_dir, exist_ok=True)
+
+    results = run_targets(
+        targets, base_config, MagicMock(),
+        source_path="/tmp/source", workdir=str(tmp_path / "workdir"),
+        parent_run_dir=parent_run_dir, build_subdir="",
+    )
+
+    assert len(results) == 2
+
+    assert results[0].outcome == "worktree_error"
+    assert results[0].issue_id == "fix-bad"
+    assert results[0].cost_usd == 0.0
+    assert results[0].tracker_path == ""
+    assert results[0].dossier_path == ""
+    assert "fatal: invalid ref" in results[0].error
+
+    assert results[1].outcome == "success"
+    assert results[1].issue_id == "fix-good"
+    assert results[1].cost_usd == 3.21
+
+    assert mock_pipeline.call_count == 1
