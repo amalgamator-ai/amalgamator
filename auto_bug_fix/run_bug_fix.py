@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 import asyncio
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -75,7 +75,7 @@ from auto_bug_fix.signature import capture_output
 from auto_bug_fix.allowlist import derive_seed, resolve_renames, enforce_allowlist, enforce_test_file_veto
 from auto_bug_fix.baseline import capture_baseline, check_regression, run_test_suite, parse_test_failures, TIMEOUT_EXIT_CODE
 from auto_bug_fix.worktree import cleanup_worktree
-from auto_bug_fix.config_loader import load_pipeline_config
+from auto_bug_fix.config_loader import load_pipeline_config, load_multi_target_config, TargetSpec, _sanitize_ref
 from auto_bug_fix.range_diff import run_range_diff, parse_equivalence
 from auto_bug_fix.dossier import Dossier, build_trailers, format_dossier
 from auto_bug_fix.tracker import Tracker
@@ -1444,50 +1444,214 @@ def _run_pipeline_phases(
     return state.dossier, tracker
 
 
+@dataclass
+class TargetResult:
+    target_branch: str
+    issue_id: str
+    outcome: str
+    duration_s: float
+    cost_usd: float
+    dossier_path: str
+    tracker_path: str
+    error: str = ""
+
+
+def _read_tracker_cost(target_run_dir: str, issue_id: str) -> tuple[float, str]:
+    """Read cost and path from the tracker JSON written by run_pipeline's finally block."""
+    import glob
+    pattern = os.path.join(target_run_dir, f"{issue_id}_*.json")
+    matches = glob.glob(pattern)
+    if not matches:
+        return 0.0, ""
+    tracker_path = matches[0]
+    try:
+        with open(tracker_path) as f:
+            data = json.load(f)
+        return data.get("total_cost_usd", 0.0), tracker_path
+    except (json.JSONDecodeError, OSError):
+        return 0.0, tracker_path
+
+
+def _write_summary(results: list[TargetResult], parent_run_dir: str) -> None:
+    """Write summary.json aggregating all target outcomes."""
+    succeeded = sum(1 for r in results if r.outcome == "success")
+    summary = {
+        "total_targets": len(results),
+        "succeeded": succeeded,
+        "failed": len(results) - succeeded,
+        "total_duration_s": round(sum(r.duration_s for r in results), 1),
+        "total_cost_usd": round(sum(r.cost_usd for r in results), 4),
+        "targets": [asdict(r) for r in results],
+    }
+    path = os.path.join(parent_run_dir, "summary.json")
+    with open(path, "w") as f:
+        json.dump(summary, f, indent=2)
+    log.info("Summary written to %s", path)
+
+
+def run_targets(
+    targets: list[TargetSpec],
+    base_config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    source_path: str,
+    workdir: str,
+    parent_run_dir: str,
+    build_subdir: str,
+) -> list[TargetResult]:
+    """Execute the pipeline serially for each target branch.
+
+    A failure on one target does not prevent subsequent targets from running.
+    """
+    os.makedirs(workdir, exist_ok=True)
+    results: list[TargetResult] = []
+
+    for i, spec in enumerate(targets, 1):
+        # --- Per-target config ---
+        target_config = replace(
+            base_config,
+            target_branch=spec.branch,
+            # or: empty issue_id/bug_description is meaningless, fall through to base
+            issue_id=spec.issue_id or base_config.issue_id,
+            bug_description=spec.bug_description or base_config.bug_description,
+            # is not None: build_command="" means "skip build", not "inherit"
+            build_command=spec.build_command if spec.build_command is not None else base_config.build_command,
+            test_command=spec.test_command if spec.test_command is not None else base_config.test_command,
+            lint_command=spec.lint_command if spec.lint_command is not None else base_config.lint_command,
+        )
+        sanitized = _sanitize_ref(spec.branch)
+        target_run_dir = os.path.join(parent_run_dir, sanitized)
+        os.makedirs(target_run_dir, exist_ok=True)
+
+        log.info("=== Target %d/%d: %s (issue_id=%s) ===",
+                 i, len(targets), spec.branch, target_config.issue_id)
+
+        target_start = time.time()
+        worktree_created = False
+        worktree_path = os.path.join(workdir, f"{target_config.issue_id}_{sanitized}")
+
+        target_log_file = open(os.path.join(target_run_dir, "run_log.txt"), "w")
+        saved_stdout = sys.stdout
+        sys.stdout = Tee(saved_stdout, target_log_file)
+
+        outcome = "error"
+        error_msg = ""
+        dossier_path = ""
+
+        try:
+            # --- Worktree setup ---
+            cleanup_worktree(source_path, worktree_path)
+            if os.path.exists(worktree_path):
+                shutil.rmtree(worktree_path)
+
+            print(f"Creating worktree at {worktree_path} on {spec.branch}...")
+            wt_result = git_worktree_add(source_path, worktree_path, spec.branch)
+            if not wt_result.success:
+                log.warning("Target %s: worktree creation failed: %s", spec.branch, wt_result.stderr)
+                results.append(TargetResult(
+                    target_branch=spec.branch,
+                    issue_id=target_config.issue_id,
+                    outcome="worktree_error",
+                    duration_s=round(time.time() - target_start, 1),
+                    cost_usd=0.0,
+                    dossier_path="",
+                    tracker_path="",
+                    error=f"git worktree add failed: {wt_result.stderr.strip()}",
+                ))
+                continue
+            worktree_created = True
+            target_config.repo_path = worktree_path
+            target_config.build_dir = os.path.join(worktree_path, build_subdir)
+            print(f"Worktree created successfully")
+
+            # --- Pipeline ---
+            try:
+                dossier, tracker = run_pipeline(target_config, claude_config, output_dir=target_run_dir)
+                dossier_text = format_dossier(dossier)
+                dp = os.path.join(target_run_dir, DOSSIER_FILE)
+                with open(dp, "w") as f:
+                    f.write(dossier_text)
+                dossier_path = os.path.join(sanitized, DOSSIER_FILE)
+                outcome = "success"
+                print(f"Dossier written to {dp}")
+            except PipelineStop as e:
+                outcome = "pipeline_stop"
+                error_msg = str(e)
+                print(f"PIPELINE STOP: {e}")
+            except PipelineEscalation as e:
+                outcome = "pipeline_escalation"
+                error_msg = str(e)
+                print(f"PIPELINE ESCALATION: {e}")
+            except Exception as e:
+                outcome = "error"
+                error_msg = f"{type(e).__name__}: {e}"
+                print(f"PIPELINE ERROR: {error_msg}")
+
+            # --- Cost retrieval (unified, both paths) ---
+            cost_usd, tracker_json = _read_tracker_cost(target_run_dir, target_config.issue_id)
+            tracker_rel = os.path.join(sanitized, os.path.basename(tracker_json)) if tracker_json else ""
+
+            if not dossier_path:
+                dp = os.path.join(target_run_dir, DOSSIER_FILE)
+                if os.path.exists(dp):
+                    dossier_path = os.path.join(sanitized, DOSSIER_FILE)
+
+            duration = round(time.time() - target_start, 1)
+            results.append(TargetResult(
+                target_branch=spec.branch,
+                issue_id=target_config.issue_id,
+                outcome=outcome,
+                duration_s=duration,
+                cost_usd=cost_usd,
+                dossier_path=dossier_path,
+                tracker_path=tracker_rel,
+                error=error_msg,
+            ))
+            print(f"FINISHED target {spec.branch}: outcome={outcome}, duration={duration}s, cost=${cost_usd:.4f}")
+
+        finally:
+            sys.stdout = saved_stdout
+            target_log_file.close()
+            if worktree_created:
+                cleanup_worktree(source_path, worktree_path)
+
+    _write_summary(results, parent_run_dir)
+
+    log.info("=== Multi-target summary ===")
+    for r in results:
+        status = "OK" if r.outcome == "success" else f"FAILED ({r.outcome})"
+        log.info("  %s [%s]: %s  (%.1fs, $%.4f)", r.issue_id, r.target_branch, status, r.duration_s, r.cost_usd)
+
+    return results
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    # Load config from YAML if provided, otherwise use defaults
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
 
-        bug_fix_config, claude_config, workdir, source_path = load_pipeline_config(config_path)
+        targets, base_config, claude_config, workdir, source_path = load_multi_target_config(config_path)
 
-        # Create run directory: <yaml_basename>_<datetime>/
         yaml_basename = os.path.splitext(os.path.basename(config_path))[0]
         run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        run_dir = os.path.join("runs", f"{yaml_basename}_{run_timestamp}")
-        os.makedirs(run_dir, exist_ok=True)
+        parent_run_dir = os.path.join("runs", f"{yaml_basename}_{run_timestamp}")
+        os.makedirs(parent_run_dir, exist_ok=True)
 
-        # Redirect stdout to run log
-        log_path = os.path.join(run_dir, "run_log.txt")
+        log_path = os.path.join(parent_run_dir, "run_log.txt")
         log_file = open(log_path, "w")
         original_stdout = sys.stdout
         sys.stdout = Tee(original_stdout, log_file)
-        print(f"Run directory: {run_dir}")
+        print(f"Run directory: {parent_run_dir}")
 
-        # Set up worktree for this CVE (avoids copying multi-GB repos)
-        os.makedirs(workdir, exist_ok=True)
-        worktree_path = os.path.join(workdir, bug_fix_config.issue_id)
-
-        cleanup_worktree(source_path, worktree_path)
-        if os.path.exists(worktree_path):
-            shutil.rmtree(worktree_path)
-
-        print(f"Fetching latest refs from origin...")
+        print("Fetching latest refs from origin...")
         subprocess.run(["git", "fetch", "--all", "--quiet"], cwd=source_path, capture_output=True)
+        build_subdir = os.path.relpath(base_config.build_dir, base_config.repo_path)
 
-        target_branch = bug_fix_config.target_branch
-        print(f"Creating worktree at {worktree_path} on {target_branch}...")
-        result = git_worktree_add(source_path, worktree_path, target_branch)
-        if not result.success:
-            print(f"ERROR: git worktree add failed: {result.stderr}")
-            sys.exit(1)
-        print(f"Worktree created successfully")
+        results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir)
 
-        build_subdir = os.path.relpath(bug_fix_config.build_dir, bug_fix_config.repo_path)
-        bug_fix_config.repo_path = worktree_path
-        bug_fix_config.build_dir = os.path.join(worktree_path, build_subdir)
+        sys.stdout = original_stdout
+        log_file.close()
+        sys.exit(0 if all(r.outcome == "success" for r in results) else 1)
     else:
         from auto_bug_fix.bug_fix_config import claude_config, bug_fix_config
         run_dir = "runs"
@@ -1497,36 +1661,33 @@ if __name__ == "__main__":
         original_stdout = sys.stdout
         sys.stdout = Tee(original_stdout, log_file)
 
-    # Override tracker output_dir to use run_dir
-    start_time = time.time()
-    try:
-        dossier, tracker = run_pipeline(bug_fix_config, claude_config, output_dir=run_dir)
+        start_time = time.time()
+        try:
+            dossier, tracker = run_pipeline(bug_fix_config, claude_config, output_dir=run_dir)
 
-        # Save dossier to run directory
-        dossier_text = format_dossier(dossier)
-        dossier_path = os.path.join(run_dir, DOSSIER_FILE)
-        with open(dossier_path, "w") as f:
-            f.write(dossier_text)
-        print(f"Dossier written to {dossier_path}")
+            dossier_text = format_dossier(dossier)
+            dossier_path = os.path.join(run_dir, DOSSIER_FILE)
+            with open(dossier_path, "w") as f:
+                f.write(dossier_text)
+            print(f"Dossier written to {dossier_path}")
 
+        except PipelineStop as e:
+            print(f"PIPELINE STOP: {e}")
+            exit_code = 1
+        except PipelineEscalation as e:
+            print(f"PIPELINE ESCALATION: {e}")
+            exit_code = 1
+        except Exception as e:
+            print(f"PIPELINE ERROR: {type(e).__name__}: {e}")
+            exit_code = 1
+        else:
+            exit_code = 0
+        finally:
+            duration = time.time() - start_time
+            print(f"FINISHED: total_duration = {duration:.1f}s")
+            print(f"All outputs in: {run_dir}")
+            if sys.stdout is not original_stdout:
+                sys.stdout = original_stdout
+            log_file.close()
 
-    except PipelineStop as e:
-        print(f"PIPELINE STOP: {e}")
-        exit_code = 1
-    except PipelineEscalation as e:
-        print(f"PIPELINE ESCALATION: {e}")
-        exit_code = 1
-    except Exception as e:
-        print(f"PIPELINE ERROR: {type(e).__name__}: {e}")
-        exit_code = 1
-    else:
-        exit_code = 0
-    finally:
-        duration = time.time() - start_time
-        print(f"FINISHED: total_duration = {duration:.1f}s")
-        print(f"All outputs in: {run_dir}")
-        if sys.stdout is not original_stdout:
-            sys.stdout = original_stdout
-        log_file.close()
-
-    sys.exit(exit_code)
+        sys.exit(exit_code)
