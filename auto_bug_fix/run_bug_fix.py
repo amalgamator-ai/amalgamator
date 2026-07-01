@@ -1501,6 +1501,9 @@ def run_targets(
     """Execute the pipeline serially for each target branch.
 
     A failure on one target does not prevent subsequent targets from running.
+
+    Callers must ensure target branch uniqueness after sanitization — enforced
+    by ``parse_targets`` upstream, not defensively here.
     """
     os.makedirs(workdir, exist_ok=True)
     results: list[TargetResult] = []
@@ -1546,6 +1549,7 @@ def run_targets(
             print(f"Creating worktree at {worktree_path} on {spec.branch}...")
             wt_result = git_worktree_add(source_path, worktree_path, spec.branch)
             if not wt_result.success:
+                print(f"ERROR: git worktree add failed: {wt_result.stderr.strip()}")
                 log.warning("Target %s: worktree creation failed: %s", spec.branch, wt_result.stderr)
                 results.append(TargetResult(
                     target_branch=spec.branch,
@@ -1565,26 +1569,35 @@ def run_targets(
 
             # --- Pipeline ---
             try:
-                dossier, tracker = run_pipeline(target_config, claude_config, output_dir=target_run_dir)
-                dossier_text = format_dossier(dossier)
-                dp = os.path.join(target_run_dir, DOSSIER_FILE)
-                with open(dp, "w") as f:
-                    f.write(dossier_text)
-                dossier_path = os.path.join(sanitized, DOSSIER_FILE)
+                dossier, _ = run_pipeline(target_config, claude_config, output_dir=target_run_dir)
                 outcome = "success"
-                print(f"Dossier written to {dp}")
             except PipelineStop as e:
+                dossier = None
                 outcome = "pipeline_stop"
                 error_msg = str(e)
                 print(f"PIPELINE STOP: {e}")
             except PipelineEscalation as e:
+                dossier = None
                 outcome = "pipeline_escalation"
                 error_msg = str(e)
                 print(f"PIPELINE ESCALATION: {e}")
             except Exception as e:
+                dossier = None
                 outcome = "error"
                 error_msg = f"{type(e).__name__}: {e}"
                 print(f"PIPELINE ERROR: {error_msg}")
+
+            # --- Dossier write (separate from outcome) ---
+            if dossier is not None:
+                try:
+                    dossier_text = format_dossier(dossier)
+                    dp = os.path.join(target_run_dir, DOSSIER_FILE)
+                    with open(dp, "w") as f:
+                        f.write(dossier_text)
+                    dossier_path = os.path.join(sanitized, DOSSIER_FILE)
+                    print(f"Dossier written to {dp}")
+                except Exception as e:
+                    log.warning("Failed to write dossier: %s", e)
 
             # --- Cost retrieval (unified, both paths) ---
             cost_usd, tracker_json = _read_tracker_cost(target_run_dir, target_config.issue_id)
