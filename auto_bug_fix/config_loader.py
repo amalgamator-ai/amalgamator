@@ -214,8 +214,8 @@ def parse_targets(config: dict[str, Any]) -> list[TargetSpec]:
 
     specs: list[TargetSpec] = []
     for entry in raw_targets:
-        if isinstance(entry, str):
-            specs.append(TargetSpec(branch=entry))
+        if isinstance(entry, (str, int, float)):
+            specs.append(TargetSpec(branch=str(entry)))
         elif isinstance(entry, dict):
             if "branch" not in entry:
                 raise ConfigError("each target mapping must have a 'branch' key")
