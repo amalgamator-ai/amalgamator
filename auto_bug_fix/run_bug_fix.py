@@ -75,7 +75,7 @@ from auto_bug_fix.signature import capture_output
 from auto_bug_fix.allowlist import derive_seed, resolve_renames, enforce_allowlist, enforce_test_file_veto
 from auto_bug_fix.baseline import capture_baseline, check_regression, run_test_suite, parse_test_failures, TIMEOUT_EXIT_CODE
 from auto_bug_fix.worktree import cleanup_worktree
-from auto_bug_fix.config_loader import load_pipeline_config, load_multi_target_config, TargetSpec, _sanitize_ref
+from auto_bug_fix.config_loader import load_multi_target_config, TargetSpec, _sanitize_ref
 from auto_bug_fix.range_diff import run_range_diff, parse_equivalence
 from auto_bug_fix.dossier import Dossier, build_trailers, format_dossier
 from auto_bug_fix.tracker import Tracker
@@ -1460,7 +1460,7 @@ def _read_tracker_cost(target_run_dir: str, issue_id: str) -> tuple[float, str]:
     """Read cost and path from the tracker JSON written by run_pipeline's finally block."""
     import glob
     pattern = os.path.join(target_run_dir, f"{issue_id}_*.json")
-    matches = glob.glob(pattern)
+    matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
     if not matches:
         return 0.0, ""
     tracker_path = matches[0]
@@ -1532,7 +1532,22 @@ def run_targets(
         worktree_created = False
         worktree_path = os.path.join(workdir, f"{target_config.issue_id}_{sanitized}")
 
-        target_log_file = open(os.path.join(target_run_dir, "run_log.txt"), "w")
+        try:
+            target_log_file = open(os.path.join(target_run_dir, "run_log.txt"), "w")
+        except OSError as e:
+            log.warning("Target %s: cannot open run log: %s", spec.branch, e)
+            results.append(TargetResult(
+                target_branch=spec.branch,
+                issue_id=target_config.issue_id,
+                outcome="error",
+                duration_s=round(time.time() - target_start, 1),
+                cost_usd=0.0,
+                dossier_path="",
+                tracker_path="",
+                error=f"cannot open run log: {e}",
+            ))
+            continue
+
         saved_stdout = sys.stdout
         sys.stdout = Tee(saved_stdout, target_log_file)
 
@@ -1654,16 +1669,19 @@ if __name__ == "__main__":
         log_file = open(log_path, "w")
         original_stdout = sys.stdout
         sys.stdout = Tee(original_stdout, log_file)
-        print(f"Run directory: {parent_run_dir}")
 
-        print("Fetching latest refs from origin...")
-        subprocess.run(["git", "fetch", "--all", "--quiet"], cwd=source_path, capture_output=True)
-        build_subdir = os.path.relpath(base_config.build_dir, base_config.repo_path)
+        try:
+            print(f"Run directory: {parent_run_dir}")
 
-        results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir)
+            print("Fetching latest refs from origin...")
+            subprocess.run(["git", "fetch", "--all", "--quiet"], cwd=source_path, capture_output=True)
+            build_subdir = os.path.relpath(base_config.build_dir, base_config.repo_path)
 
-        sys.stdout = original_stdout
-        log_file.close()
+            results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir)
+        finally:
+            sys.stdout = original_stdout
+            log_file.close()
+
         sys.exit(0 if all(r.outcome == "success" for r in results) else 1)
     else:
         from auto_bug_fix.bug_fix_config import claude_config, bug_fix_config
