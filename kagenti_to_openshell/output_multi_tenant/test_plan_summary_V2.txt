@@ -1,0 +1,288 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT -- TEST PLAN SUMMARY V2
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Date: 2026-07-03
+Iteration: V2 (from scratch, incorporating all V1 + V1-R1 learnings)
+================================================================================
+
+1. EXPLANATION OF THE V2 TEST PLAN
+================================================================================
+
+The V2 test plan is a comprehensive, from-scratch testing strategy for the
+Multi-Tenant Deployment Support feature being ported from Kagenti to OpenShell.
+It covers all 20 steps of the code porting plan (code_port_plan_review_V4.txt)
+with ~150 tests organized across 22 sections.
+
+1.1 APPROACH
+------------
+
+The plan was developed by:
+
+  a) Studying the V1-R1 review (12 issues found, all corrections applied)
+     to avoid repeating ANY mistake from the first iteration.
+
+  b) Reading the actual OpenShell source code to verify:
+     - Exact struct field names (OidcConfig at config.rs:462-493)
+     - Handler visibility modifiers (sandbox.rs:119 private, 256 pub(super))
+     - OIDC extraction mechanism (serde(skip) + extract_roles pattern)
+     - Test infrastructure (test_server_state at grpc/mod.rs:693)
+     - ServerState::new signature (lib.rs:172, 8 parameters)
+     - sandbox_labels function (driver.rs:857-865, current behavior)
+     - put_if labels parameter (compute/mod.rs:499, currently None)
+     - Existing dev-dependencies (wiremock, rcgen already available)
+
+  c) Studying Kagenti's E2E test coverage (test_T4_2, test_T4_4) to
+     ensure equivalent coverage in the Rust test plan.
+
+  d) Aligning with OpenShell's actual test conventions:
+     - In-source #[cfg(test)] modules for unit and handler tests
+     - tokio::test for async tests
+     - sqlite::memory:?cache=shared for persistence
+     - NoopTestDriver for compute operations
+     - --features test-support for openshell-server tests
+     - wiremock for HTTP service mocking
+
+1.2 KEY DESIGN DECISIONS
+--------------------------
+
+  1. ALL handler tests are in-source #[cfg(test)] modules because
+     handlers are private or pub(super). No tests/ integration files
+     for handler testing.
+
+  2. check_ownership() has allow_unowned parameter from inception:
+     sandboxes use false (unlabeled=deny), providers use true
+     (unlabeled=shared access). This resolves the semantic contradiction
+     found in V1.
+
+  3. OIDC groups tests exercise extract_groups() method (matching
+     the existing extract_roles pattern), not direct JSON deserialization.
+
+  4. Streaming handler "allowed" tests assert NOT PermissionDenied
+     rather than full Ok(), since NoopTestDriver may fail after the
+     ownership check passes.
+
+  5. Provider role tests verify the RUNTIME GUARD (handler-level),
+     not the #[rpc_auth] attribute (service-level). The attribute
+     change is verified by compilation and existing auth tests.
+
+  6. Dual-label stamping is explicitly tested: labels on BOTH
+     ObjectMeta.labels AND SandboxTemplate.labels.
+
+1.3 V2-SPECIFIC IMPROVEMENTS
+------------------------------
+
+  V2-1: Wiremock-based OIDC integration tests (Section 16)
+    4 tests validating the full JWT -> JWKS validation -> groups extraction
+    -> Identity construction pipeline. Uses the wiremock and rcgen crates
+    already in OpenShell's dev-dependencies. This covers the gap identified
+    in V1-R1 where Section 4.2 (identity_from_validated_jwt_includes_groups)
+    was described but had no test infrastructure for the mocked JWKS endpoint.
+
+  V2-2: Dual-label stamping tests (Section 9.1)
+    New test create_sandbox_stamps_owner_on_template_labels verifies that
+    the R4-1 fix (stamping labels on BOTH ObjectMeta and SandboxTemplate)
+    works correctly. This was identified as a critical data flow issue
+    in the port plan review.
+
+  V2-3: Labels JSON serialization fix tests (Section 11)
+    New test create_sandbox_persists_labels_in_db_column verifies the R4-8
+    fix (changing put_if from labels:None to labels:labels_json). Without
+    this fix, list_with_selector cannot find owner labels on newly created
+    sandboxes.
+
+  V2-4: Provider metadata initialization test (Section 10.1)
+    New test create_provider_without_metadata_gets_metadata_created verifies
+    the R4-7 fix (ensure metadata exists before stamping). This catches the
+    case where a client sends a provider without metadata.
+
+  V2-5: OpenShift-specific Helm tests (Section 17.5)
+    3 new tests validating Route and SCC templates render correctly with
+    tenant values. These were suggested by V1-R1 as a gap.
+
+  V2-6: Security-focused error message tests (Section 18.4)
+    New test permission_denied_does_not_leak_owner_identity ensures that
+    error messages for ownership denial don't reveal the actual owner's
+    identity (information leakage prevention).
+
+  V2-7: Kagenti E2E test mapping (Appendix A)
+    Explicit mapping from Kagenti's Python E2E tests to corresponding
+    OpenShell Rust tests, ensuring all Kagenti test dimensions are covered.
+
+  V2-8: Additional edge case coverage
+    More sanitize_label_value tests (unicode, single char), more
+    extract_groups edge cases (deeply nested path, partial path).
+
+1.4 TEST COUNT BREAKDOWN
+--------------------------
+
+  +-----------------------------------------------+-----------+
+  | Category                                      | # Tests   |
+  +-----------------------------------------------+-----------+
+  | Unit Tests - Identity (Section 3)             | 4         |
+  | Unit Tests - OIDC groups (Section 4)          | 10        |
+  | Unit Tests - Ownership module (Section 5)     | 30        |
+  | Unit Tests - Label constants (Section 6)      | 4         |
+  | Unit Tests - Configuration (Section 7)        | 12        |
+  | Unit Tests - ServerState helper (Section 8)   | 5         |
+  | Handler Tests - Sandbox (Section 9)           | 32        |
+  | Handler Tests - Provider (Section 10)         | 19        |
+  | Integration - Label persistence (Section 11)  | 6         |
+  | Integration - K8s driver labels (Section 12)  | 4         |
+  | Integration - Docker driver (Section 13)      | 2         |
+  | Unit Tests - SandboxIndex (Section 14)        | 3         |
+  | Lifecycle Tests (Section 15)                  | 8         |
+  | Wiremock OIDC (Section 16, V2 NEW)            | 4         |
+  | Helm chart tests (Section 17)                 | 15        |
+  | Cross-cutting (Section 18)                    | 6         |
+  +-----------------------------------------------+-----------+
+  | TOTAL (implementable tests)                   | ~150      |
+  | CI gate checks (not counted)                  | 2         |
+  +-----------------------------------------------+-----------+
+
+  Rust tests:        ~135 (cargo test)
+  Shell/Helm tests:  ~15  (scripts/test-helm-templates.sh)
+
+  Crate distribution:
+    openshell-core:              ~16 tests
+    openshell-server:            ~113 tests
+    openshell-driver-kubernetes: 4 tests
+    openshell-driver-docker:     2 tests
+
+================================================================================
+2. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+2.1 ITERATION 1 (V1) -- Initial Test Plan
+------------------------------------------
+
+  Output: test_plan_V1.txt
+  Tests: ~143 across 14 files
+
+  Key contributions:
+    - First comprehensive mapping of all 20 port plan steps to tests
+    - Translated Kagenti E2E test dimensions to Rust
+    - Defined test helper patterns (make_user, make_config, etc.)
+    - Created traceability matrix
+
+  Weaknesses found by review:
+    - OidcConfig test helper had wrong field names (would not compile)
+    - Provider shared access logic was internally contradictory
+    - Integration tests used wrong file location (tests/ for private handlers)
+    - Provider role tests tested wrong mechanism (#[rpc_auth] vs runtime guard)
+    - OIDC groups tests assumed wrong extraction mechanism
+    - Some tests duplicated across sections
+    - No wiremock-based OIDC tests
+    - No dual-label stamping tests
+    - No label serialization fix tests
+    - No OpenShift-specific Helm tests
+
+2.2 ITERATION 1 REVIEW (V1-R1) -- Critical Review
+---------------------------------------------------
+
+  Output: test_plan_review_V1.txt, test_plan_review_summary_V1.txt
+  Tests: ~141 across 13 files + 2 CI checks
+  Issues found: 12 (1 critical, 3 high, 4 medium, 4 low)
+
+  Key corrections:
+    - Fixed OidcConfig field names (jwks_ttl_secs, removed ca_cert_path)
+    - Added allow_unowned parameter to check_ownership
+    - Moved all handler tests to in-source #[cfg(test)] modules
+    - Reframed provider role tests to test runtime guard
+    - Rewrote OIDC groups tests to use extract_groups() pattern
+    - Added explicit disabled ownership test
+    - Eliminated test overlap between sections
+    - Reclassified meta-tests as CI gate checks
+
+  Suggested V2 improvements:
+    - Wiremock-based OIDC JWT validation tests
+    - Property-based tests for sanitize_label_value (proptest)
+    - Full gRPC-level integration test for #[rpc_auth] role change
+    - Helm tests for OpenShift-specific templates
+    - Performance/stress tests for label selector queries
+    - pub(crate) test harness for cross-module handler testing
+
+2.3 ITERATION 2 (V2) -- Current (From Scratch)
+-----------------------------------------------
+
+  Output: test_plan_V2.txt, test_plan_summary_V2.txt
+  Tests: ~150 across 13 files + 1 shell script + 2 CI checks
+
+  Approach: Built from scratch with all V1-R1 learnings incorporated
+  by design (not patched retroactively). Every test is written against
+  verified OpenShell source code, using actual struct definitions,
+  field names, and function signatures.
+
+  Key improvements over V1-R1:
+    1. Wiremock-based OIDC integration tests (4 tests) -- validates the
+       full JWT validation pipeline with mocked JWKS endpoint
+    2. Dual-label stamping tests -- verifies R4-1 fix (labels on both
+       ObjectMeta and SandboxTemplate)
+    3. Labels JSON serialization tests -- verifies R4-8 fix (create path
+       persists labels to DB column)
+    4. Provider metadata initialization test -- verifies R4-7 fix
+    5. OpenShift-specific Helm tests (3 tests) -- Route, SCC templates
+    6. Security-focused error message tests -- no owner identity leakage
+    7. Kagenti E2E test mapping (Appendix A) -- ensures coverage parity
+    8. Additional edge case coverage for sanitize and extract_groups
+
+  What V2 deliberately did NOT add:
+    - Property-based tests (proptest): OpenShell doesn't use proptest.
+      Adding it would introduce a new dependency. The edge case tests
+      for sanitize_label_value provide equivalent coverage.
+    - Full gRPC-level #[rpc_auth] integration test: Requires standing up
+      the full tonic::transport::Server with the OpenShell service trait.
+      This is better suited for E2E tests (Kagenti-style) than unit tests.
+    - Performance/stress tests: These require a running database and
+      significant test data. Better suited for benchmark suites than
+      unit test plans.
+
+  Quantitative comparison:
+    +-------------------------+--------+--------+--------+
+    | Metric                  | V1     | V1-R1  | V2     |
+    +-------------------------+--------+--------+--------+
+    | Total test cases        | ~143   | ~141   | ~150   |
+    | Test files              | 14     | 13     | 13+1   |
+    | Unit tests              | ~77    | ~74    | ~65    |
+    | Handler/Integration     | ~54    | ~55    | ~70    |
+    | Helm chart tests        | 12     | 12     | 15     |
+    | Wiremock OIDC tests     | 0      | 0      | 4      |
+    | Cross-cutting tests     | ~8     | ~6     | ~6     |
+    | CI gate checks          | 0      | 2      | 2      |
+    | Compilation issues      | 1      | 0      | 0      |
+    | Logic contradictions    | 1      | 0      | 0      |
+    | Visibility errors       | 1      | 0      | 0      |
+    | Port plan R4 fixes      | 0      | 0      | 4 *    |
+    +-------------------------+--------+--------+--------+
+
+    * V2 includes dedicated tests for port plan R4 review fixes:
+      R4-1 (dual label stamping), R4-2 (provider label persistence),
+      R4-7 (metadata initialization), R4-8 (sandbox label serialization).
+
+================================================================================
+3. RISK ASSESSMENT
+================================================================================
+
+  LOW RISK:
+    - Test helpers use verified field names (compilation will fail fast
+      if any struct field is wrong)
+    - All handler tests are in-source (no visibility errors possible)
+    - allow_unowned parameter resolves the sandbox/provider semantic split
+
+  MEDIUM RISK:
+    - Wiremock OIDC tests require constructing valid JWTs with RSA keys.
+      The rcgen and jsonwebtoken crates are available but JWT construction
+      is non-trivial. Implementation may need adjustment.
+    - Helm chart tests depend on helm and yq being available in CI.
+    - SandboxIndex tests (Section 14) are for an OPTIONAL step. They
+      may not be implemented if Step 14 is deferred.
+
+  MITIGATIONS:
+    - Wiremock OIDC tests can be gated behind a feature flag if needed.
+    - Helm chart tests can use the existing CI pipeline (which already
+      has helm installed).
+    - SandboxIndex tests are marked as optional and can be skipped.
+
+================================================================================
+END OF TEST PLAN SUMMARY V2
+================================================================================

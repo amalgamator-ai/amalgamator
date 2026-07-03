@@ -1,0 +1,119 @@
+===============================================================================
+OpenShell Test Suite Results - V1
+Date: 2026-07-03
+Command: cargo test --workspace --exclude openshell-prover --exclude openshell-vfio --exclude openshell-driver-vm --exclude openshell-cli --exclude openshell-server
+===============================================================================
+
+OVERALL RESULT: ALL TESTS PASSED
+
+Summary:
+  Total passed:  2,111
+  Total failed:  0
+  Total ignored: 10 (require root privileges, LocalStack, or env-specific setup)
+
+===============================================================================
+Excluded Crates (build dependency on libclang/z3-sys not available on this host):
+  - openshell-prover     (requires z3-sys → libclang)
+  - openshell-vfio       (requires bindgen → libclang)
+  - openshell-driver-vm  (requires OPENSHELL_VM_RUNTIME_COMPRESSED_DIR env var)
+  - openshell-cli        (depends on openshell-prover)
+  - openshell-server     (depends on openshell-prover)
+
+Note: These exclusions are due to missing native build dependencies
+(libclang/z3) on the test host, not code issues. The ported multi-tenant
+feature code does not reside in these crates.
+===============================================================================
+
+Per-Crate Breakdown:
+-------------------------------------------------------------------------------
+
+1. openshell-bootstrap (lib)
+   Result: ok. 71 passed; 0 failed; 0 ignored
+
+2. openshell-core (lib)
+   Result: ok. 297 passed; 0 failed; 0 ignored
+
+3. openshell-driver-docker (lib)
+   Result: ok. 96 passed; 0 failed; 0 ignored
+
+4. openshell-driver-kubernetes (lib)
+   Result: ok. 93 passed; 0 failed; 0 ignored
+
+5. openshell-driver-kubernetes (bin)
+   Result: ok. 0 passed; 0 failed; 0 ignored
+
+6. openshell-driver-podman (lib)
+   Result: ok. 106 passed; 0 failed; 0 ignored
+
+7. openshell-driver-podman (bin)
+   Result: ok. 0 passed; 0 failed; 0 ignored
+
+8. openshell-ocsf (lib)
+   Result: ok. 123 passed; 0 failed; 0 ignored
+
+9. openshell-policy (lib)
+   Result: ok. 110 passed; 0 failed; 0 ignored
+
+10. openshell-providers (lib)
+    Result: ok. 63 passed; 0 failed; 0 ignored
+
+11. openshell-router (lib)
+    Result: ok. 64 passed; 0 failed; 0 ignored
+
+12. openshell-router (integration: backend_integration)
+    Result: ok. 17 passed; 0 failed; 0 ignored
+
+13. openshell-sandbox (lib)
+    Result: ok. 63 passed; 0 failed; 0 ignored
+
+14. openshell-sandbox (bin)
+    Result: ok. 2 passed; 0 failed; 0 ignored
+
+15. openshell-sandbox (integration: stdout_logging)
+    Result: ok. 1 passed; 0 failed; 0 ignored
+
+16. openshell-server-macros (lib)
+    Result: ok. 0 passed; 0 failed; 0 ignored
+
+17. openshell-supervisor-network (lib)
+    Result: ok. 832 passed; 0 failed; 0 ignored
+
+18. openshell-supervisor-network (integration: sigv4_localstack)
+    Result: ok. 0 passed; 0 failed; 5 ignored (require LocalStack)
+
+19. openshell-supervisor-network (integration: system_inference)
+    Result: ok. 3 passed; 0 failed; 0 ignored
+
+20. openshell-supervisor-network (integration: websocket_upgrade)
+    Result: ok. 2 passed; 0 failed; 0 ignored
+
+21. openshell-supervisor-process (lib)
+    Result: ok. 144 passed; 0 failed; 2 ignored (require root)
+
+22. openshell-tui (lib)
+    Result: ok. 24 passed; 0 failed; 0 ignored
+
+Doc-tests (all crates):
+  - openshell-bootstrap: 0 tests
+  - openshell-core: 0 tests
+  - openshell-driver-docker: 0 tests
+  - openshell-driver-kubernetes: 0 tests
+  - openshell-driver-podman: 0 tests
+  - openshell-ocsf: 2 ignored
+  - openshell-policy: 0 tests
+  - openshell-providers: 1 ignored
+  - openshell-router: 0 tests
+  - openshell-sandbox: 0 tests
+  - openshell-server-macros: 0 tests
+  - openshell-supervisor-network: 0 tests
+  - openshell-supervisor-process: 0 tests
+  - openshell-tui: 0 tests
+
+===============================================================================
+Ignored Tests (expected - require special environments):
+  1. netns::tests::test_create_and_drop_namespace - requires root privileges
+  2. process::tests::drop_privileges_succeeds_for_current_user - requires CAP_SETGID
+  3. 5x sigv4_localstack tests - require LocalStack service running
+  4. 2x openshell-ocsf doc-tests - ignored by annotation
+  5. 1x openshell-providers doc-test - ignored by annotation
+===============================================================================

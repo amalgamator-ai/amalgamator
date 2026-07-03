@@ -1,0 +1,484 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — REVIEWED TEST PLAN V4
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Source: Kagenti (Python/Shell/YAML)
+Target: OpenShell (Rust)
+Port Plan: code_port_plan_review_V4.txt (20 steps)
+Review: V4-R1 (review of iteration 4)
+Date: 2026-07-03
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Issues Found and Corrections Applied
+2. Corrected Sections (only changed sections reproduced)
+3. Unchanged Sections (referenced by number)
+
+================================================================================
+1. ISSUES FOUND AND CORRECTIONS APPLIED
+================================================================================
+
+ISSUE R4-1 (MEDIUM): validate_token() takes 1 argument, not 2
+
+  PROBLEM: Section 17 (wiremock OIDC tests) calls:
+    cache.validate_token(&jwt, &config).await.unwrap()
+
+  This passes TWO user-supplied arguments: the JWT token AND an OidcConfig
+  reference. But the actual validate_token signature is:
+
+    pub async fn validate_token(&self, token: &str) -> Result<Identity, Status>
+
+  Verified at oidc.rs line 288. The method takes only ONE user argument
+  (the token string). The OidcConfig is captured internally during
+  JwksCache::new(&config) and stored as self.config. The validate_token
+  method uses self.config.issuer, self.config.audience,
+  self.config.roles_claim, and self.config.scopes_claim internally.
+  After Step 2 adds groups, it will also use self.config.groups_claim.
+
+  IMPACT: All 4 tests in Section 17 would fail to compile:
+    17.1: cache.validate_token(&jwt, &config) → won't compile
+    17.2: same
+    17.3: same, AND additionally tries to mutate config.groups_claim
+          AFTER JwksCache construction, but the config is already
+          captured inside the cache — the mutation has no effect
+    17.4: same
+
+  FIX:
+    - All validate_token calls: remove &config argument
+      BEFORE: cache.validate_token(&jwt, &config).await.unwrap()
+      AFTER:  cache.validate_token(&jwt).await.unwrap()
+
+    - Test 17.3 (custom groups_claim): Must construct a NEW
+      JwksCache with the modified config, because the groups_claim
+      is captured at construction time. The mock server can be
+      reused (OIDC discovery and JWKS are independent of groups_claim),
+      but the config must be modified BEFORE creating the cache:
+
+      BEFORE:
+        config.groups_claim = "custom.team_membership"
+        cache.validate_token(&jwt, &config).await.unwrap()
+      AFTER:
+        let (mock, mut config, key) = setup_mock_jwks_server().await;
+        config.groups_claim = "custom.team_membership".to_string();
+        let cache = JwksCache::new(&config).await.unwrap();
+        // ... sign JWT and validate ...
+        cache.validate_token(&jwt).await.unwrap()
+
+------------------------------------------------------------------------
+
+ISSUE R4-2 (MEDIUM): E2E test file location is wrong — e2e/rust/ is a
+  separate crate that uses black-box CLI testing
+
+  PROBLEM: Section 16 places tests at:
+    e2e/rust/tests/ownership_lifecycle.rs (NEW)
+
+  And describes the tests using white-box handler calls:
+    test_server_state_with_ownership(true, None).await
+    handle_create_sandbox_inner(&state, request_with_principal(...))
+    make_user("user-A", "openshell-user")
+
+  But the e2e/rust/ directory is a SEPARATE workspace crate
+  (openshell-e2e) with its own Cargo.toml. Verified:
+
+    e2e/rust/Cargo.toml:
+      [workspace]              ← prevents being part of root workspace
+      name = "openshell-e2e"
+      [features]
+      e2e = []                 ← feature-gated
+
+    e2e/rust/tests/sandbox_lifecycle.rs:
+      #![cfg(feature = "e2e")]
+      use openshell_e2e::harness::binary::openshell_cmd;
+      → runs CLI binary commands (black-box testing)
+
+  The Section 16 tests CANNOT go here because:
+    1. openshell-e2e is a separate crate — it cannot access
+       #[cfg(test)] items from openshell-server (test_support,
+       make_user, test_server_state_with_ownership, etc.)
+    2. E2E tests in this directory use CLI binary execution
+       (openshell_cmd), not handler function calls
+    3. E2E tests require a running server process, not in-process
+       handler invocation
+
+  IMPACT: 8 tests in Section 16 would not compile in the specified location.
+
+  FIX: Move Section 16 tests into the handler test modules where they
+  have access to all required helpers:
+    - 16.1 (sandbox lifecycle, 4 tests) → crates/openshell-server/src/grpc/sandbox.rs
+      in #[cfg(test)] mod tests, alongside the existing sandbox handler tests
+    - 16.2 (provider lifecycle, 3 tests) → crates/openshell-server/src/grpc/provider.rs
+      in #[cfg(test)] mod tests, alongside the existing provider handler tests
+    - 16.3 (cross-resource, 1 test) → crates/openshell-server/src/grpc/sandbox.rs
+      in #[cfg(test)] mod tests (since it tests sandbox creation with providers)
+
+  These tests are handler-level integration tests that exercise multi-step
+  flows through the handler layer. They belong with the handler tests, not
+  in the E2E directory. The "E2E" label is misleading — they don't test
+  the full stack (CLI → gRPC → server → compute → driver).
+
+------------------------------------------------------------------------
+
+ISSUE R4-3 (LOW): put_if name parameter is &str, not Option<&str>
+
+  PROBLEM: Section 12.1 (sandbox_labels_persisted_on_create) calls:
+
+    store.put_if(
+        "sandbox", "sbx-1", Some("my-sandbox"),
+        &payload, Some(&labels), WriteCondition::MustCreate
+    )
+
+  But the actual put_if signature (persistence/mod.rs line 232-240):
+
+    pub async fn put_if(
+        &self,
+        object_type: &str,
+        id: &str,
+        name: &str,           // ← &str, NOT Option<&str>
+        payload: &[u8],
+        labels: Option<&str>,
+        condition: WriteCondition,
+    ) -> PersistenceResult<WriteResult>
+
+  The `name` parameter is `&str`, not `Option<&str>`. Passing
+  `Some("my-sandbox")` would not compile.
+
+  Verified against existing persistence tests (persistence/tests.rs):
+    store.put_if(
+        "sandbox", "id-1", "new-sandbox",  // ← plain &str
+        b"payload", None, WriteCondition::MustCreate,
+    ).await.unwrap();
+
+  IMPACT: Test 12.1 would not compile as written.
+
+  FIX: Change Some("my-sandbox") to "my-sandbox":
+
+    BEFORE: store.put_if("sandbox", "sbx-1", Some("my-sandbox"), ...)
+    AFTER:  store.put_if("sandbox", "sbx-1", "my-sandbox", ...)
+
+------------------------------------------------------------------------
+
+ISSUE R4-4 (LOW): Test 6.4.7 uses .. struct update syntax on Identity
+  which has no Default impl
+
+  PROBLEM: Section 6.4.7 (user_with_no_roles_still_gets_selector) describes:
+
+    principal = Principal::User(UserPrincipal {
+        identity: Identity {
+            subject: "u1".to_string(),
+            roles: vec![],  // no roles
+            ..
+        }
+    })
+
+  The `..` at the end of the Identity struct literal implies Rust's
+  struct update syntax (e.g., `..Default::default()`). But Identity
+  has `#[derive(Debug, Clone)]` only — no Default impl (verified at
+  identity.rs lines 15-31).
+
+  Without Default, `..` struct update syntax requires another Identity
+  instance to fill in the remaining fields. Since none is provided,
+  this won't compile.
+
+  IMPACT: Test description is misleading. An implementer following this
+  literally would get a compile error.
+
+  FIX: Spell out all Identity fields explicitly. After Step 1 adds the
+  groups field, Identity has 6 fields that must all be specified:
+
+    principal = Principal::User(UserPrincipal {
+        identity: Identity {
+            subject: "u1".to_string(),
+            display_name: None,
+            roles: vec![],
+            scopes: vec![],
+            groups: vec![],
+            provider: IdentityProvider::Oidc,
+        },
+    })
+
+  Alternatively, this test could use make_user and then check the
+  logic differently. But since the test specifically needs a user with
+  NO roles (while make_user always adds one role), explicit construction
+  is the correct approach.
+
+------------------------------------------------------------------------
+
+================================================================================
+2. CORRECTED SECTIONS
+================================================================================
+
+Only sections with changes are reproduced below. Unchanged sections
+from V4 are referenced by section number in Section 3.
+
+------------------------------------------------------------------------
+SECTION 6.4 (TEST 6.4.7 ONLY): owner_label_selector() — CORRECTED
+------------------------------------------------------------------------
+
+  REVIEW FIX: Explicit Identity construction (Issue R4-4)
+
+  TEST 6.4.7: user_with_no_roles_still_gets_selector          (CORRECTED)
+    Setup:  principal = Principal::User(UserPrincipal {
+                identity: Identity {
+                    subject: "u1".to_string(),
+                    display_name: None,
+                    roles: vec![],
+                    scopes: vec![],
+                    groups: vec![],
+                    provider: IdentityProvider::Oidc,
+                },
+            })
+            config = test_ownership_config(true)
+    Action: owner_label_selector(&principal, &config)
+    Verify: Some(s) where s starts with "openshell.ai/owner="
+    Why:    Role check is only for admin bypass. A user with no roles
+            is still a user and should be filtered by owner.
+
+  All other tests in Section 6.4 UNCHANGED.
+  SUBTOTAL: 7 tests (unchanged count)
+
+------------------------------------------------------------------------
+SECTION 12 (TEST 12.1 ONLY): Label Persistence Fix — CORRECTED
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected put_if name parameter (Issue R4-3)
+
+  TEST 12.1: sandbox_labels_persisted_on_create                (CORRECTED)
+    Setup:  let store = test_store().await;
+            let labels = serde_json::json!(
+                {"openshell.ai/owner": "user-1"}
+            ).to_string();
+    Action: store.put_if(
+                "sandbox", "sbx-1", "my-sandbox",
+                &payload, Some(&labels), WriteCondition::MustCreate
+            ).await
+    Verify: let record = store.get("sandbox", "sbx-1").await.unwrap();
+            record.labels == Some(labels)
+    Why:    Verifies DB stores labels on creation.
+
+  All other tests in Section 12 UNCHANGED (tests 12.2-12.6 do not
+  use the incorrect Some() wrapper).
+
+  SECTION TOTAL: 6 tests (unchanged count)
+
+------------------------------------------------------------------------
+SECTION 16: E2E Tests → RECLASSIFIED as Handler Integration Tests
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected file locations (Issue R4-2)
+
+  The Section 16 tests are handler-level integration tests, not E2E
+  tests. They exercise multi-step handler flows using white-box APIs
+  (test_server_state_with_ownership, handler functions, make_user, etc.)
+
+  CORRECTED FILE LOCATIONS:
+
+    16.1 Multi-User Sandbox Lifecycle (4 tests):
+      File: crates/openshell-server/src/grpc/sandbox.rs
+      Module: EXTEND #[cfg(test)] mod tests
+      Reason: Uses handle_create_sandbox_inner, handle_list_sandboxes, etc.
+              These handlers are in sandbox.rs and tests have access to
+              private functions in the same file.
+
+    16.2 Multi-User Provider Lifecycle (3 tests):
+      File: crates/openshell-server/src/grpc/provider.rs
+      Module: EXTEND #[cfg(test)] mod tests
+      Reason: Uses handle_create_provider, handle_list_providers, etc.
+
+    16.3 Cross-Resource Scenarios (1 test):
+      File: crates/openshell-server/src/grpc/sandbox.rs
+      Module: EXTEND #[cfg(test)] mod tests
+      Reason: Tests sandbox creation with provider references — the
+              primary handler is handle_create_sandbox_inner.
+
+  TEST DESCRIPTIONS UNCHANGED. Only the file/module locations change.
+
+  IMPACT ON SECTION 21 (Test File Layout):
+    - REMOVED: e2e/rust/tests/ownership_lifecycle.rs
+    - sandbox.rs: 27 + 2 stress + 3 regression + 5 lifecycle = 37 tests
+      (was 32 without lifecycle tests)
+    - provider.rs: 19 + 3 lifecycle = 22 tests (was 19)
+
+  SECTION TOTAL: 8 tests (unchanged count, relocated)
+
+------------------------------------------------------------------------
+SECTION 17: Wiremock-Based OIDC Integration Tests — CORRECTED
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected validate_token() calls (Issue R4-1)
+
+  The OidcConfig is captured inside JwksCache during new(). The
+  validate_token method does NOT accept a config parameter.
+
+  Corrected validate_token() signature reference:
+    pub async fn validate_token(&self, token: &str) -> Result<Identity, Status>
+
+  TEST 17.1: jwt_with_groups_claim_populates_identity_groups   (CORRECTED)
+    Setup:  let (mock, config, key) = setup_mock_jwks_server().await;
+            let cache = JwksCache::new(&config).await.unwrap();
+            let jwt = sign_jwt(serde_json::json!({
+                "sub": "user-1",
+                "aud": "test-audience",
+                "iss": mock.uri(),
+                "exp": future_timestamp(),
+                "iat": now_timestamp(),
+                "realm_access": {"roles": ["openshell-user"]},
+                "groups": ["/team1", "/engineering"],
+            }), &key, "test-key-1");
+    Action: let identity = cache.validate_token(&jwt).await.unwrap();
+    Verify: identity.groups == vec!["/team1", "/engineering"]
+    Why:    Full flow: JWT → JWKS validation → extract_groups → Identity.
+
+  TEST 17.2: jwt_without_groups_claim_has_empty_groups         (CORRECTED)
+    Setup:  Same mock server and cache; JWT with no "groups" claim
+    Action: let identity = cache.validate_token(&jwt).await.unwrap();
+    Verify: identity.groups.is_empty()
+    Why:    Not all JWTs have group claims. Must not panic.
+
+  TEST 17.3: jwt_with_custom_groups_claim_path                 (CORRECTED)
+    Setup:  // Config modification BEFORE JwksCache construction:
+            let (mock, mut config, key) = setup_mock_jwks_server().await;
+            config.groups_claim = "custom.team_membership".to_string();
+            let cache = JwksCache::new(&config).await.unwrap();
+            // The mock server is reused — discovery and JWKS endpoints
+            // are independent of the groups_claim config value.
+            let jwt = sign_jwt(serde_json::json!({
+                "sub": "user-1",
+                "aud": "test-audience",
+                "iss": mock.uri(),
+                "exp": future_timestamp(),
+                "iat": now_timestamp(),
+                "realm_access": {"roles": ["openshell-user"]},
+                "custom": {"team_membership": ["ops"]},
+            }), &key, "test-key-1");
+    Action: let identity = cache.validate_token(&jwt).await.unwrap();
+    Verify: identity.groups == vec!["ops"]
+    Why:    Custom claim path works through the full flow.
+            groups_claim is captured at JwksCache::new() time, so config
+            must be modified BEFORE constructing the cache.
+
+  TEST 17.4: jwt_with_audience_mismatch_rejected               (CORRECTED)
+    Setup:  let (mock, config, key) = setup_mock_jwks_server().await;
+            let cache = JwksCache::new(&config).await.unwrap();
+            JWT with aud = "wrong-audience"
+    Action: cache.validate_token(&jwt).await
+    Verify: Err(status) with status.code() == tonic::Code::Unauthenticated
+    Why:    Audience validation still works (not broken by groups addition).
+
+  SECTION TOTAL: 4 tests (unchanged count, corrected API calls)
+
+------------------------------------------------------------------------
+SECTION 20: TRACEABILITY MATRIX — CORRECTED
+------------------------------------------------------------------------
+
+  No changes to test counts. The matrix total remains 157.
+
+  Note: Step 7 row now includes Section 16.1 and 16.3 tests alongside
+  10.1 and 12, but the count was already correct because Section 16
+  tests were counted under "E2E ownership lifecycle flows" (8 tests).
+  The reclassification to handler tests does not change the count.
+
+  Arithmetic verification:
+    4+10+4+34+12+4+13+6+7+7+19+4+2+3+15+0+8+5 = 157 ✓
+
+------------------------------------------------------------------------
+SECTION 21: TEST FILE LAYOUT — CORRECTED
+------------------------------------------------------------------------
+
+  REVIEW FIX: Removed E2E file, updated handler test counts (Issue R4-2)
+
+  MODIFIED RUST FILES (14 — unchanged count, same files):
+
+  crates/openshell-server/src/
+    auth/
+      identity.rs           → ADD #[cfg(test)] mod tests (4 tests)
+      oidc.rs               → EXTEND tests (6 unit + 4 wiremock = 10 tests)
+      ownership.rs          → NEW file with #[cfg(test)] mod tests (34 tests)
+    grpc/
+      mod.rs                → EXTEND test_support (4 new helpers)
+      sandbox.rs            → EXTEND tests (27 + 5 lifecycle + 2 stress
+                               + 3 regression = 37 tests)
+      provider.rs           → EXTEND tests (19 + 3 lifecycle = 22 tests)
+    lib.rs                  → EXTEND tests (4 tests)
+    persistence/tests.rs    → EXTEND (6 tests)
+    sandbox_index.rs        → ADD tests (3 tests)
+
+  crates/openshell-core/src/
+    config.rs               → EXTEND tests (7 tests)
+    driver_utils.rs         → ADD tests (4 tests)
+
+  crates/openshell-server/src/
+    config_file.rs          → EXTEND tests (5 tests)
+
+  crates/openshell-driver-kubernetes/src/
+    driver.rs               → ADD or EXTEND tests (4 tests)
+
+  crates/openshell-driver-docker/src/
+    tests.rs                → EXTEND (2 tests)
+
+  NEW FILES (1 — was 2, removed ownership_lifecycle.rs):
+
+  deploy/helm/openshell/
+    test_templates.sh       → NEW Helm test script (15 tests)
+
+  REMOVED:
+    e2e/rust/tests/ownership_lifecycle.rs → REMOVED (tests moved to
+        sandbox.rs and provider.rs handler test modules)
+
+  Changes from V4:
+    - sandbox.rs: 37 (was 32 — absorbed 5 lifecycle tests from Sec 16)
+    - provider.rs: 22 (was 19 — absorbed 3 lifecycle tests from Sec 16)
+    - e2e/rust/tests/ownership_lifecycle.rs: REMOVED
+    - New files: 1 (was 2)
+
+------------------------------------------------------------------------
+SECTION 22.2: Wiremock Infrastructure — CORRECTED
+------------------------------------------------------------------------
+
+  validate_token() reference corrected:
+
+  | Method                    | Signature                                    |
+  |───────────────────────────|──────────────────────────────────────────────|
+  | validate_token            | async fn(&self, token: &str)                 |
+  |                           | -> Result<Identity, Status>                  |
+  |                           | NOTE: OidcConfig captured in JwksCache::new()|
+  |                           | NOT passed to validate_token()               |
+
+  For tests needing a non-default groups_claim (Test 17.3):
+    1. Call setup_mock_jwks_server() to get (mock, config, key)
+    2. Modify config.groups_claim BEFORE constructing JwksCache
+    3. Call JwksCache::new(&config) with the modified config
+    4. The mock server is reusable — discovery/JWKS are config-independent
+
+================================================================================
+3. UNCHANGED SECTIONS (by reference)
+================================================================================
+
+The following sections are UNCHANGED FROM V4 and are not reproduced:
+
+  Section 1  - Overview & Scope (total unchanged at 157)
+  Section 2  - Conventions & Test Infrastructure (all subsections)
+  Section 3  - Unit Tests — Identity Groups Field (Step 1)
+  Section 4  - Unit Tests — OIDC Groups Extraction (Step 2)
+  Section 5  - Unit Tests — Label Constants (Step 3)
+  Section 6.1 - sanitize_label_value() Tests
+  Section 6.2 - stamp_owner_labels() Tests
+  Section 6.3 - check_ownership() Tests
+  Section 6.4 - owner_label_selector() Tests (except Test 6.4.7 corrected)
+  Section 7  - Unit Tests — OwnershipConfig in Config (Step 5)
+  Section 8  - Unit Tests — Config File Parsing (Step 5)
+  Section 9  - Unit Tests — ServerState Helper (Step 6)
+  Section 10 - Handler Tests — Sandbox Ownership (Steps 7-10)
+  Section 11 - Handler Tests — Provider Ownership (Step 11)
+  Section 12 - Integration Tests — Label Persistence (except Test 12.1)
+  Section 13 - Integration Tests — K8s Driver Labels (Step 12)
+  Section 14 - Integration Tests — Docker Driver Verification (Step 13)
+  Section 15 - Unit Tests — SandboxIndex Owner Tracking (Step 14)
+  Section 18 - Helm Chart Template Tests (Steps 15-18)
+  Section 19 - Cross-Cutting Concerns
+  Section 22.1, 22.3, 22.4 - Test Helpers, Mock Patterns, Test Data
+  Appendix A - Kagenti E2E Test Mapping
+
+================================================================================
+END OF REVIEWED TEST PLAN V4
+================================================================================

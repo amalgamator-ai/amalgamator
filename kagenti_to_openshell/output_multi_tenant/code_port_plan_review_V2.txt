@@ -1,0 +1,554 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — REVIEWED CODE PORTING PLAN V2
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Source: Kagenti (Python/Shell/YAML)
+Target: OpenShell (Rust)
+Porting Complexity: HIGH
+Date: 2026-07-03
+Review: V2-R1 (review of iteration 2)
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Executive Summary
+2. Architectural Decision
+3. Prerequisites & Assumptions
+4. Learnings Incorporated from Previous Iterations
+5. Step-by-Step Implementation Plan
+   Step 1:  Add groups Field to Identity Struct
+   Step 2:  Add groups_claim to OidcConfig & Extract Groups from JWT
+   Step 3:  Define Owner/Tenant Label Constants in openshell-core
+   Step 4:  Create Ownership Module (auth/ownership.rs)
+   Step 5:  Add OwnershipSettings to Configuration
+   Step 6:  Add ownership_config() Method to ServerState
+   Step 7:  Modify Sandbox Create Handler (Owner Stamping)
+   Step 8:  Modify Sandbox List Handler (Owner Filtering)
+   Step 9:  Modify Sandbox Get/Delete Handlers (Ownership Enforcement)
+   Step 10: Modify Sandbox Watch/Exec/SSH Handlers (Ownership Enforcement)
+   Step 11: Modify Provider CRUD for Per-User Ownership
+   Step 12: Add Owner Labels to Kubernetes Driver (Pod Labels)
+   Step 13: Add Owner Labels to Docker Driver
+   Step 14: Update SandboxIndex for Owner Tracking (Optional)
+   Step 15: Update Helm Chart for Gateway-Per-Tenant Deployment
+   Step 16: Add Per-Tenant RBAC Templates
+   Step 17: Add ResourceQuota and LimitRange Templates
+   Step 18: Update Certificate Generation for Tenant SANs
+   Step 19: Update CLI for Multi-Tenant Gateway Display
+   Step 20: Add Unit and Integration Tests
+6. Dependency Summary
+7. Risk Analysis
+8. Breaking Change Assessment
+9. Implementation Order & Milestones
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+  [UNCHANGED FROM V2]
+
+  This plan ports Kagenti's multi-tenant deployment support to OpenShell.
+  The feature operates at two complementary layers:
+
+    Layer 1 — Per-User Ownership (Rust gateway code changes):
+      Within a single gateway instance, enforce per-user isolation via the
+      openshell.ai/owner label. This is the core Rust work.
+
+    Layer 2 — Gateway-Per-Tenant (Helm/infrastructure changes):
+      Each tenant gets a dedicated Kubernetes namespace with an isolated
+      gateway stack. This is primarily Helm chart and deployment tooling.
+
+  Both layers compose. Backward compatibility is preserved: when OIDC is
+  disabled or ownership config is absent, all ownership logic is bypassed.
+
+================================================================================
+2. ARCHITECTURAL DECISION
+================================================================================
+
+  [UNCHANGED FROM V2]
+
+================================================================================
+3. PREREQUISITES & ASSUMPTIONS
+================================================================================
+
+  [UNCHANGED FROM V2, with one correction:]
+
+  REVIEW FIX: OidcConfig struct has #[serde(deny_unknown_fields)] at line
+  462 of config.rs. The V2 plan incorrectly stated it did NOT have this
+  attribute. However, the conclusion remains correct: adding a new field
+  with #[serde(default)] to a deny_unknown_fields struct is SAFE because
+  the attribute only rejects unknown keys in the INPUT (deserialized data).
+  Missing keys use their serde default. The new groups_claim field will
+  work correctly: old configs without groups_claim use the default (empty
+  string), new configs with groups_claim are parsed normally.
+
+  Current OidcConfig struct (VERIFIED, config.rs lines 461-493):
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]           // <-- V2 INCORRECTLY said absent
+    pub struct OidcConfig {
+        pub issuer: String,
+        pub audience: String,
+        #[serde(default = "default_jwks_ttl_secs")]
+        pub jwks_ttl_secs: u64,
+        #[serde(default = "default_roles_claim")]
+        pub roles_claim: String,
+        #[serde(default = "default_admin_role")]
+        pub admin_role: String,
+        #[serde(default = "default_user_role")]
+        pub user_role: String,
+        #[serde(default)]
+        pub scopes_claim: String,
+    }
+
+================================================================================
+4. LEARNINGS INCORPORATED FROM PREVIOUS ITERATIONS
+================================================================================
+
+  [UNCHANGED FROM V2]
+
+================================================================================
+5. STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+  [DEPENDENCY GRAPH UNCHANGED FROM V2]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1: Add groups Field to Identity Struct
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2: Add groups_claim to OidcConfig & Extract Groups from JWT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [MOSTLY UNCHANGED FROM V2, with one correction to the NOTE:]
+
+  REVIEW FIX on deny_unknown_fields:
+
+  The V2 plan stated:
+    "NOTE on #[serde(deny_unknown_fields)]: The OidcConfig struct itself
+     does NOT have deny_unknown_fields (only GatewayFileSection does)."
+
+  This is INCORRECT. Verified: OidcConfig HAS #[serde(deny_unknown_fields)]
+  at line 462 of config.rs.
+
+  CORRECTED NOTE:
+    OidcConfig has #[serde(deny_unknown_fields)]. Adding groups_claim with
+    #[serde(default)] is SAFE because deny_unknown_fields only rejects
+    fields present in the INPUT that are NOT defined in the struct. It does
+    NOT reject missing fields — those use their serde defaults. So:
+    - Old configs without groups_claim → groups_claim defaults to "" → OK
+    - New configs with groups_claim → groups_claim is a known field → OK
+    - Configs with a TYPO like "group_claim" → rejected with clear error → OK
+
+  Since GatewayFileSection.oidc is typed as Option<OidcConfig>, the
+  deny_unknown_fields on OidcConfig applies when deserializing the
+  [openshell.gateway.oidc] TOML section. This means the groups_claim
+  field MUST be added to OidcConfig (as proposed) — it cannot be added
+  only to GatewayFileSection.
+
+  [Rest of Step 2 (extraction logic, validate_token, Helm template)
+   UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3: Define Owner/Tenant Label Constants in openshell-core
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 4: Create Ownership Module (auth/ownership.rs)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [MOSTLY UNCHANGED FROM V2, with one fix:]
+
+  REVIEW FIX: Remove labels_from_metadata helper (dead code)
+
+  The V2 plan includes this helper:
+
+    pub fn labels_from_metadata<F, M>(metadata_accessor: F) -> HashMap<String, String>
+    where
+        F: FnOnce() -> Option<M>,
+        M: AsRef<HashMap<String, String>>,
+    {
+        metadata_accessor()
+            .map(|m| m.as_ref().clone())
+            .unwrap_or_default()
+    }
+
+  ISSUES:
+    1. The trait bound M: AsRef<HashMap<String, String>> is incorrect.
+       The protobuf ObjectMeta struct does not implement
+       AsRef<HashMap<String, String>>. The labels field is accessed as
+       metadata.labels (a plain HashMap<String, String> field), not
+       through the AsRef trait.
+
+    2. This helper is NEVER CALLED anywhere in the plan. All ownership
+       enforcement code uses the inline pattern:
+         sandbox.metadata.as_ref()
+             .map(|m| &m.labels)
+             .cloned()
+             .unwrap_or_default()
+
+    3. The inline pattern is clear enough that a helper adds no value.
+
+  FIX: Remove the labels_from_metadata function entirely from the
+  ownership module. The inline pattern used throughout the plan is
+  correct and idiomatic.
+
+  [All other ownership module code, tests, and documentation
+   UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 5: Add OwnershipSettings to Configuration
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 6: Add ownership_config() Method to ServerState
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 7: Modify Sandbox Create Handler (Owner Stamping)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 8: Modify Sandbox List Handler (Owner Filtering)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 9: Modify Sandbox Get/Delete Handlers (Ownership Enforcement)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [MOSTLY UNCHANGED FROM V2, with one style note:]
+
+  REVIEW NOTE: The V2 plan's delete handler (Step 9B) extracts sandbox_id
+  using metadata.as_ref().map(|m| m.id.clone()). The actual codebase uses
+  sandbox.object_id().to_string() (verified at line 511 of sandbox.rs).
+  The plan's approach works but should use object_id() for consistency
+  with OpenShell conventions:
+
+  CORRECTED (in Step 9B):
+    let sandbox_id = sandbox.as_ref()
+        .map(|s| s.object_id().to_string());
+
+  [Rest of Step 9 UNCHANGED FROM V2]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 10: Modify Sandbox Watch/Exec/SSH Handlers (Ownership Enforcement)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 11: Modify Provider CRUD for Per-User Ownership
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [MOSTLY UNCHANGED FROM V2, with two fixes:]
+
+  REVIEW FIX 1: Runtime admin guard uses empty admin_role (Step 11A)
+
+  The V2 plan's runtime guard has a functional bug:
+
+    V2 CODE (BUGGY):
+      if !ownership_config.enabled {
+          if let Principal::User(user) = &principal {
+              if !user.identity.roles.iter()
+                  .any(|r| r == &ownership_config.admin_role) {
+                  return Err(Status::permission_denied(
+                      "provider creation requires admin role"
+                  ));
+              }
+          }
+      }
+
+  BUG: When ownership is disabled, ownership_config() returns
+  OwnershipEnforcement::disabled() which sets admin_role to "". The check
+  `r == &ownership_config.admin_role` compares against "", which NEVER
+  matches any role. Result: ALL users (including admins) are denied from
+  creating providers when ownership is disabled but OIDC is configured.
+
+  This happens because OwnershipEnforcement::disabled() does not carry
+  the OIDC admin_role — it's only populated when ownership is enabled.
+
+  CORRECTED CODE:
+      if !ownership_config.enabled {
+          // When ownership is disabled, preserve the existing admin-only
+          // restriction for provider creation. Read admin_role directly
+          // from the OIDC config (not from OwnershipEnforcement which
+          // has an empty admin_role when disabled).
+          if let Some(ref oidc) = state.config.oidc {
+              if !oidc.admin_role.is_empty() {
+                  if let Principal::User(user) = &principal {
+                      if !user.identity.roles.iter()
+                          .any(|r| r == &oidc.admin_role) {
+                          return Err(Status::permission_denied(
+                              "provider creation requires admin role"
+                          ));
+                      }
+                  }
+              }
+          }
+      }
+
+  WHY THIS FIX IS CORRECT:
+    - When OIDC is configured with roles, admin_role is "openshell-admin"
+    - The guard checks the user's roles against the OIDC admin_role
+    - Admin users pass the check; non-admin users are denied
+    - When OIDC is not configured (state.config.oidc is None), the guard
+      is skipped entirely (no OIDC = no role-based restriction)
+    - When OIDC is configured but admin_role is empty (auth-only mode),
+      the guard is skipped (matching current behavior where empty roles
+      mean auth-only)
+
+  REVIEW FIX 2: Scope requirement note (Step 11D)
+
+  The V2 plan proposes changing CreateProvider's #[rpc_auth] annotation
+  from role="admin" to role="user". But the current annotation is:
+
+    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+
+  The `scope = "provider:write"` requirement is preserved. When
+  scopes_enabled is true in AuthzPolicy (i.e., the OIDC scopes_claim
+  is configured), users will also need the "provider:write" scope
+  (or "openshell:all") to create providers. This is enforced by
+  AuthzPolicy.check() at authz.rs line 98.
+
+  IMPACT: In deployments using scopes, the OIDC provider must grant
+  "provider:write" scope to users who should create their own providers.
+  Without this scope, the scope check at the multiplex layer will reject
+  the request before the handler is reached.
+
+  RECOMMENDATION: Add a note in the deployment documentation that when
+  multi-tenancy is enabled with scope-based authorization, the
+  "provider:write" scope must be granted to user-role principals who
+  need to create providers. This does NOT require code changes — it's
+  a configuration concern.
+
+  When scopes_enabled is false (the common case — scopes_claim defaults
+  to empty), the scope check is skipped entirely (authz.rs line 98:
+  `if self.scopes_enabled { self.check_scope(...) }`).
+
+  [Rest of Step 11 (B, C, E, F) UNCHANGED FROM V2]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 12: Add Owner Labels to Kubernetes Driver (Pod Labels)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 13: Add Owner Labels to Docker Driver
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 14: Update SandboxIndex for Owner Tracking (Optional)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 15: Update Helm Chart for Gateway-Per-Tenant Deployment
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [MOSTLY UNCHANGED FROM V2, with two notes:]
+
+  REVIEW FIX: Pod template labels are in _gateway-workload.tpl (Step 15D)
+
+  The V2 plan proposes adding tenant labels to statefulset.yaml pod
+  template. However, the pod template is actually defined in the shared
+  partial template _gateway-workload.tpl (verified: this file exists and
+  defines the "openshell.gatewayPodTemplate" template). Both
+  statefulset.yaml and deployment.yaml reference this shared template.
+
+  The tenant labels should be added to _gateway-workload.tpl, not
+  statefulset.yaml directly:
+
+  File: deploy/helm/openshell/templates/_gateway-workload.tpl
+
+  Current (line ~20):
+    labels:
+      {{- include "openshell.labels" . | nindent 4 }}
+      {{- with .Values.podLabels }}
+      {{- toYaml . | nindent 4 }}
+      {{- end }}
+
+  Modified:
+    labels:
+      {{- include "openshell.labels" . | nindent 4 }}
+      {{- include "openshell.tenantLabels" . | nindent 4 }}
+      {{- with .Values.podLabels }}
+      {{- toYaml . | nindent 4 }}
+      {{- end }}
+
+  This ensures both StatefulSet and Deployment workload shapes get
+  tenant labels without duplicating the template change.
+
+  REVIEW NOTE: gateway-config.yaml TOML section placement (Step 15C)
+
+  The V2 plan proposes adding tenant_id in a separate [openshell.gateway]
+  block within the TOML template. The existing template already has an
+  [openshell.gateway] section at the top. While duplicate TOML section
+  headers are valid (they merge), it's cleaner to add tenant_id alongside
+  existing gateway keys in the primary [openshell.gateway] section:
+
+  In gateway-config.yaml, in the existing [openshell.gateway] section
+  (around line 5-25), add:
+
+    {{- if .Values.tenant.id }}
+    tenant_id = {{ .Values.tenant.id | quote }}
+    {{- end }}
+
+  And add the [openshell.gateway.ownership] section separately (since
+  it's a subsection):
+
+    {{- if .Values.tenant.id }}
+    [openshell.gateway.ownership]
+    enabled = {{ .Values.tenant.ownershipEnabled | default true }}
+    {{- end }}
+
+  FILES CORRECTED:
+    deploy/helm/openshell/templates/_gateway-workload.tpl  (tenant labels)
+    deploy/helm/openshell/templates/statefulset.yaml       (NOT needed)
+    deploy/helm/openshell/templates/deployment.yaml        (NOT needed)
+
+  [Rest of Step 15 (A, B, E) UNCHANGED FROM V2]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 16: Add Per-Tenant RBAC Templates
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [MOSTLY UNCHANGED FROM V2, with one correction:]
+
+  REVIEW NOTE: Existing ClusterRole name includes a suffix.
+
+  VERIFIED: The current clusterrole.yaml uses:
+    name: {{ include "openshell.fullname" . }}-node-reader
+
+  The V2 plan proposes adding tenant.id to the name:
+    name: {{ include "openshell.fullname" . }}-{{ .Values.tenant.id }}
+
+  But this drops the existing "-node-reader" suffix. The corrected name
+  should preserve the suffix while adding tenant uniqueness:
+
+    {{- if .Values.tenant.id }}
+    name: {{ include "openshell.fullname" . }}-node-reader-{{ .Values.tenant.id }}
+    {{- else }}
+    name: {{ include "openshell.fullname" . }}-node-reader
+    {{- end }}
+
+  Same pattern for ClusterRoleBinding.
+
+  [Rest of Step 16 UNCHANGED FROM V2]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 17: Add ResourceQuota and LimitRange Templates
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 18: Update Certificate Generation for Tenant SANs
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 19: Update CLI for Multi-Tenant Gateway Display
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [UNCHANGED FROM V2 — verified correct]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 20: Add Unit and Integration Tests
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [MOSTLY UNCHANGED FROM V2, with one addition:]
+
+  REVIEW FIX: Add test for provider creation when ownership is disabled.
+
+  The runtime guard bug (Issue R2-1) should have a dedicated test:
+
+  #[tokio::test]
+  async fn admin_can_create_provider_when_ownership_disabled() {
+      // Gateway with OIDC configured but ownership.enabled = false
+      // Admin (openshell-admin role) creates provider → succeeds
+  }
+
+  #[tokio::test]
+  async fn user_cannot_create_provider_when_ownership_disabled() {
+      // Gateway with OIDC configured but ownership.enabled = false
+      // Regular user (openshell-user role) creates provider → permission_denied
+  }
+
+  These tests validate that the runtime guard correctly reads admin_role
+  from OIDC config (not from OwnershipEnforcement) when ownership is
+  disabled.
+
+  [Rest of Step 20 UNCHANGED FROM V2]
+
+================================================================================
+6. DEPENDENCY SUMMARY
+================================================================================
+
+  [UNCHANGED FROM V2]
+
+================================================================================
+7. RISK ANALYSIS
+================================================================================
+
+  [UNCHANGED FROM V2, with one addition:]
+
+  12. Scope Requirement for User-Created Providers (MEDIUM)
+      Risk: When scopes_enabled is true, users need "provider:write" scope
+            to create providers. This scope might not be granted by default
+            in OIDC provider configurations.
+      Mitigation: Document the scope requirement. In deployments using
+            scopes, ensure the OIDC provider grants "provider:write" to
+            user-role principals. When scopes_enabled is false (default),
+            this is not an issue.
+      Validation: Test both with and without scopes_enabled.
+
+================================================================================
+8. BREAKING CHANGE ASSESSMENT
+================================================================================
+
+  [UNCHANGED FROM V2]
+
+================================================================================
+9. IMPLEMENTATION ORDER & MILESTONES
+================================================================================
+
+  [UNCHANGED FROM V2, with corrected file list:]
+
+  FILES MODIFIED (Rust — 16 files):
+    [UNCHANGED FROM V2]
+
+  FILES MODIFIED (Helm — 9 files):
+    deploy/helm/openshell/values.yaml                         (tenant section)
+    deploy/helm/openshell/templates/_helpers.tpl              (tenant helpers)
+    deploy/helm/openshell/templates/_gateway-workload.tpl     (tenant labels)
+    deploy/helm/openshell/templates/gateway-config.yaml       (ownership TOML)
+    deploy/helm/openshell/templates/clusterrole.yaml          (tenant-unique)
+    deploy/helm/openshell/templates/clusterrolebinding.yaml   (tenant-unique)
+    deploy/helm/openshell/templates/certgen.yaml              (tenant SANs)
+    deploy/helm/openshell/templates/resourcequota.yaml        (NEW)
+    deploy/helm/openshell/templates/limitrange.yaml           (NEW)
+
+  NOTE: statefulset.yaml is NOT directly modified — pod template labels
+  are in _gateway-workload.tpl which is shared by both StatefulSet and
+  Deployment workloads.
+
+================================================================================
+END OF REVIEWED CODE PORTING PLAN V2
+================================================================================

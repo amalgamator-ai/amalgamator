@@ -1,0 +1,16 @@
+{
+    "kagenti_source_dir": "/home/alexm-redhat/code/exper/kagenti",
+    "openshell_source_dir": "/home/alexm-redhat/code/exper/openshell",
+    "kagenti_github_url": "https://github.com/kagenti/kagenti",
+    "openshell_github_url": "https://github.com/NVIDIA/openshell",
+    "output_dir": "/home/alexm-redhat/code/exper/amalgamator/kagenti_to_openshell/output_default",
+    "num_code_port_plan_iterations": 3,
+    "num_test_plan_iterations": 3,
+    "num_code_gen_iterations": 3,
+    "num_runtime_iterations": 5,
+    "thinking_mode": "deep",
+    "max_features_to_detect": 10,
+    "feature_id": 0,
+    "build_command": "cargo build",
+    "test_command": "cargo test"
+}

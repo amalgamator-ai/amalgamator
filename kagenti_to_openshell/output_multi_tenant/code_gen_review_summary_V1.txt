@@ -1,0 +1,221 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — CODE GENERATION REVIEW SUMMARY V1
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Source: Kagenti (Python/Shell/YAML)
+Target: OpenShell (Rust)
+Review of: code_gen_V1.patch (iteration 1)
+Date: 2026-07-03
+================================================================================
+
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+ISSUE 1 — SECURITY (HIGH): Sandbox delete handler swallows store errors,
+  enabling ownership bypass
+
+  AFFECTED CODE:
+    crates/openshell-server/src/grpc/sandbox.rs, handle_delete_sandbox_inner
+    Lines 574-580 (V1 patch)
+
+  WHAT IS WRONG:
+    The delete handler fetches the sandbox for ownership checking using
+    `.ok().flatten()`:
+      let sandbox = state.store
+          .get_message_by_name::<Sandbox>(&name)
+          .await
+          .ok()        // ← silently converts store error to None
+          .flatten();
+
+    When the store returns an error (transient DB failure, connection
+    issue), `.ok()` converts it to `None`, making it look like the
+    sandbox doesn't exist. The ownership check inside
+    `if let Some(ref sandbox)` is then skipped, and the code proceeds
+    directly to `state.compute.delete_sandbox(&name)` which can
+    succeed independently.
+
+  WHY IT MATTERS:
+    An attacker who can trigger transient store failures (or during a
+    genuine DB brownout) can delete any sandbox regardless of
+    ownership. This is a complete ownership bypass for the delete
+    operation.
+
+  HOW IT WAS FIXED:
+    Replaced `.ok().flatten()` with `.map_err(|e| Status::internal(...))?`
+    to propagate store errors. If the store is unreachable, the handler
+    returns an error instead of silently skipping the ownership check.
+    This matches the pattern used in handle_get_sandbox.
+
+------------------------------------------------------------------------
+
+ISSUE 2 — SECURITY (HIGH): Provider update handler skips ownership check
+  when provider name is empty
+
+  AFFECTED CODE:
+    crates/openshell-server/src/grpc/provider.rs, handle_update_provider
+    Lines 2006-2027 (V1 patch)
+
+  WHAT IS WRONG:
+    The ownership check was wrapped in `if !provider_name.is_empty()`:
+      if !provider_name.is_empty() {
+          if let Some(existing) = state.store.get_message_by_name...
+          { check_ownership }
+      }
+
+    If a client sends an UpdateProviderRequest with
+    provider.metadata.name = "" or metadata = None, the entire
+    ownership check block is skipped. The update then proceeds to
+    `update_provider_record` which may resolve the provider by
+    other means (e.g., ID), allowing an attacker to update a
+    provider they don't own.
+
+  WHY IT MATTERS:
+    Any authenticated user with the "user" role (which now includes
+    all users since the role was relaxed from "admin" to "user" in
+    this patch) could update any provider by omitting the name field,
+    bypassing the ownership check entirely.
+
+  HOW IT WAS FIXED:
+    Changed the guard from a silent skip to an early error return:
+      if provider_name.is_empty() {
+          return Err(Status::invalid_argument(
+              "provider name is required for update"));
+      }
+    This is consistent with update_provider_record, which already
+    rejects empty names downstream, so the early rejection is
+    safe and prevents the bypass.
+
+------------------------------------------------------------------------
+
+ISSUE 3 — BUG (MEDIUM): CLI env var OPENSHELL_OWNERSHIP_ENABLED=false
+  interpreted as true
+
+  AFFECTED CODE:
+    crates/openshell-server/src/cli.rs, RunArgs struct
+    Lines 214-216 (V1 patch)
+
+  WHAT IS WRONG:
+    The CLI argument was defined as:
+      #[arg(long, env = "OPENSHELL_OWNERSHIP_ENABLED")]
+      ownership_enabled: bool,
+
+    Without `action = ArgAction::Set`, clap treats a bool flag with
+    an env var as a presence indicator: any non-empty value (including
+    "false", "0", "no") makes it `true`. An operator who sets
+    OPENSHELL_OWNERSHIP_ENABLED=false would unexpectedly enable
+    ownership enforcement.
+
+  WHY IT MATTERS:
+    This can cause production incidents where ownership is enabled
+    unintentionally. Since ownership enforcement changes the
+    behavior of every CRUD operation (user A can no longer see user
+    B's sandboxes), accidentally enabling it could look like data
+    loss.
+
+  HOW IT WAS FIXED:
+    Added `default_value_t = false, action = ArgAction::Set` to match
+    the pattern used by the existing `enable_loopback_service_http`
+    flag in the same struct. This tells clap to parse the env var as
+    a boolean string ("true"/"false"/"1"/"0").
+
+------------------------------------------------------------------------
+
+ISSUE 4 — PERF (LOW): Unnecessary HashMap clones in ownership label
+  checks
+
+  AFFECTED CODE:
+    crates/openshell-server/src/grpc/sandbox.rs — handle_get_sandbox
+      (lines 289-294), handle_delete_sandbox_inner (lines 583-588)
+    crates/openshell-server/src/grpc/provider.rs — handle_get_provider
+      (lines 1258-1263), handle_update_provider (lines 2019-2024),
+      handle_delete_provider (lines 2407-2412)
+
+  WHAT IS WRONG:
+    All five locations used:
+      .map(|m| &m.labels).cloned().unwrap_or_default()
+    This clones the entire HashMap<String, String> on every request,
+    even though check_ownership only needs a &HashMap reference.
+
+  WHY IT MATTERS:
+    Minor performance overhead per request. In hot paths (list/get),
+    this creates and immediately discards a HashMap clone. For labels
+    maps with owner/tenant entries, this is ~4 small string allocations
+    per call that serve no purpose.
+
+  HOW IT WAS FIXED:
+    Replaced with a reference-based pattern:
+      let empty = std::collections::HashMap::new();
+      let labels = sandbox.metadata.as_ref()
+          .map(|m| &m.labels).unwrap_or(&empty);
+    This avoids the clone entirely by passing a reference to either
+    the existing labels or an empty map.
+
+------------------------------------------------------------------------
+
+ISSUES IDENTIFIED BUT NOT FIXED (documented for future iterations):
+
+  A. DESIGN: ownership_config() allocates on every call (lib.rs lines
+     204-217). The OwnershipConfig is reconstructed (cloning admin_role
+     and tenant_id strings) on every gRPC handler invocation. Should be
+     cached in ServerState at startup since config never changes at
+     runtime. Low priority — the allocation is small.
+
+  B. DESIGN: sanitize_label_value truncates before trimming (ownership.rs
+     lines 43-53). The `.take(63)` is applied before
+     trim_start/trim_end, meaning leading non-alphanumeric chars reduce
+     the effective length. Not a correctness bug (result is always
+     valid), but produces sub-optimal output for edge-case inputs.
+
+  C. SECURITY: Subject collision through lossy sanitization. Two
+     different subjects can sanitize to the same label value (e.g.,
+     "user@domain.com" and "user_domain.com" both become
+     "user_domain.com"). Unlikely with UUID-based OIDC subjects, but
+     possible with email-based subjects. Documented as a known
+     limitation in the porting plan.
+
+  D. TEST COVERAGE: The ownership module tests (27 tests) cover the
+     core functions well but lack tests for Sandbox principal variants,
+     empty-subject edge cases, subject collision scenarios, and
+     roundtrip behavior (stamp then check). Handler integration tests
+     are deferred pending z3 build dependency resolution.
+
+  E. DESIGN: The provider delete handler (provider.rs lines 2396-2405)
+     skips the ownership check when the provider is not found (returns
+     None from get_message_by_name). This is harmless since the
+     subsequent delete_provider_record would be a no-op, but differs
+     from the get handler pattern which returns not_found. Kept as-is
+     since the original provider delete handler had this same behavior
+     before ownership was added.
+
+================================================================================
+2. SUMMARY OF ITERATION EVOLUTION
+================================================================================
+
+ITERATION V1 (code_gen_V1.patch) — Initial implementation:
+  - Implemented Steps 1-11 of the V4 code porting plan
+  - Created auth/ownership.rs module with 27 unit tests
+  - Added groups field to Identity, OIDC groups extraction
+  - Added ownership label stamping on sandbox and provider create
+  - Added ownership enforcement on get/list/update/delete handlers
+  - Added label persistence fix in compute/mod.rs create_sandbox
+  - Changed provider create/update/delete roles from admin to user
+  - Added OwnershipConfigCore, CLI flags, TOML config support
+  - 22 files changed, ~855 lines added
+
+  ISSUES:
+  - SECURITY: Sandbox delete swallowed store errors (.ok().flatten())
+  - SECURITY: Provider update bypassed ownership on empty name
+  - BUG: CLI env var bool parsing without ArgAction::Set
+  - PERF: 5 unnecessary HashMap clones in ownership checks
+
+REVIEW V1 (code_gen_review_V1.patch) — Corrected patch:
+  - Fixed all 4 issues identified above
+  - Verified openshell-core: 297 tests pass, no regressions
+  - Verified all non-z3 workspace members: cargo check passes
+  - Patch applies cleanly to a clean working tree
+  - 22 files changed, ~855 lines added (net change similar;
+    security fixes are structural, not additive)
+
+================================================================================
+END OF CODE GENERATION REVIEW SUMMARY V1
+================================================================================

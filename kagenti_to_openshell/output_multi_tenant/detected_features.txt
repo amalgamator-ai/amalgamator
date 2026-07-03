@@ -1,0 +1,638 @@
+================================================================================
+DETECTED FEATURES: KAGENTI → OPENSHELL PORTING CANDIDATES
+================================================================================
+Generated: 2026-07-02
+Source: Kagenti (features_kagenti.txt) vs OpenShell (features_openshell.txt)
+Method: Gap analysis + GitHub issue evidence search
+================================================================================
+
+ANALYSIS METHODOLOGY
+================================================================================
+
+For each of the 48 Kagenti features, we determined its status in OpenShell:
+  - MISSING: Feature does not exist at all in OpenShell
+  - INADEQUATE: Feature exists but has significant gaps
+  - EQUIVALENT: Feature exists and is roughly equivalent
+  - SUPERIOR: OpenShell's implementation is better
+
+We then searched NVIDIA/OpenShell GitHub issues for CONCRETE evidence of
+community demand (reactions, comments, related issues) for each gap.
+
+Features were scored on 5 dimensions (1-10):
+  - Community demand (30% weight): Issue counts, reactions, comments
+  - Gap severity (25% weight): MISSING=10, INADEQUATE=5-8
+  - Impact (25% weight): How much this improves OpenShell
+  - Feasibility (15% weight): Practical to port Python/Go → Rust?
+  - Independence (5% weight): Can be ported independently?
+
+================================================================================
+FULL GAP ANALYSIS — ALL 48 KAGENTI FEATURES
+================================================================================
+
+# EQUIVALENT OR SUPERIOR (OpenShell handles well — NOT candidates)
+
+K1.  SPIFFE/SPIRE Workload Identity → PARTIAL (OpenShell consumes SPIFFE via
+     dynamic token grants; does not deploy SPIRE itself)
+K2.  OAuth2/OIDC (Keycloak) → EQUIVALENT (OpenShell has OIDC auth, DEVELOPING)
+K3.  Token Exchange (RFC 8693) → MISSING (No delegation chains)
+K4.  AuthBridge Sidecar → MISSING (No transparent sidecar)
+K5.  Zero-Trust Access Control → PARTIAL (Strong per-sandbox, no fleet hierarchy)
+K6.  Keycloak Client Registration → NOT APPLICABLE (Different architecture)
+K7.  MCP Gateway (Tool Routing) → MISSING (MCP policy exists, no routing gateway)
+K8.  Plugins Adapter (Envoy ext_proc) → NOT APPLICABLE (Different architecture)
+K9.  Agent Lifecycle Mgmt → MISSING (No K8s operator for agent workloads)
+K10. Agent/Tool Discovery → MISSING (No label-based discovery)
+K11. AgentRuntime CRD → MISSING (No agent-level CRDs)
+K12. A2A Protocol → MISSING (Single-sandbox focus)
+K13. MCP Protocol → EQUIVALENT (OpenShell has mature MCP policy + enforcement)
+K14. Container Build System → MISSING (BYOC only, no in-cluster builds)
+K15. Skills System → MISSING (Dev skills only, no runtime agent skills)
+K16. Skillberry Store → MISSING (No external skill registry)
+K17. LLM Budget Proxy → MISSING (No token/cost tracking)
+K18. OTel Tracing → MISSING (OCSF logging only, no distributed tracing)
+K19. MLflow Integration → MISSING (No LLM observability platform)
+K20. Kiali Visualization → MISSING (No mesh visualization)
+K21. Istio Mesh → MISSING (No Istio integration)
+K22. Ingress Gateway → EQUIVALENT (Helm chart has GRPCRoute + Service)
+K23. Web UI Dashboard → MISSING (CLI and TUI only)
+K24. TUI → EQUIVALENT (OpenShell has ratatui TUI, DEVELOPING)
+K25. Backend API → EQUIVALENT (OpenShell has mature gRPC API, 50+ RPCs)
+K26. Session Mgmt → MISSING (No conversation persistence)
+K27. Sandbox Integration → SUPERIOR (This IS OpenShell's core)
+K28. Multi-Tenant Isolation → INADEQUATE (Single-player mode)
+K29. Dynamic Agent Materialization → MISSING (No DynamicAgentRequest)
+K30. Event Triggers → MISSING (No cron/webhook triggers)
+K31. Integration Mgmt → MISSING (No webhook management)
+K32. LLM Flexibility → EQUIVALENT (Privacy Router handles multi-provider)
+K33. Feature Flags → MISSING (No runtime feature flag system)
+K34. Helm Charts → EQUIVALENT (OpenShell has Helm chart, DEVELOPING)
+K35. Deployment Scripts → NOT APPLICABLE (Different deployment model)
+K36. Terraform → NOT APPLICABLE (Different scope)
+K37. E2E Testing → EQUIVALENT (OpenShell has comprehensive E2E)
+K38. HITL Workflows → INADEQUATE (Policy advisor has approve/reject, no exec HITL)
+K39. Session Graphs → MISSING (No delegation DAGs)
+K40. Workspace Files → INADEQUATE (PVC mounts exist, no file browser API)
+K41. Bearer Auth → EQUIVALENT (OpenShell has OIDC + JWT auth)
+K42. Keycloak Demo → NOT APPLICABLE (Different IdP setup)
+K43. Claude Code Skills → EQUIVALENT (OpenShell has 21 agent skills)
+K44. ACP WebSocket → NOT APPLICABLE (Being phased out)
+K45. Sidecar Agents → MISSING (No monitoring sidecars)
+K46. Build Reconciliation → NOT APPLICABLE (No build system)
+K47. CRD Migration → NOT APPLICABLE (Different CRDs)
+K48. GitHub Auth Plugin → NOT APPLICABLE (Different IdP)
+
+
+================================================================================
+TOP 10 PORTING CANDIDATES (RANKED BY OVERALL SCORE)
+================================================================================
+
+------------------------------------------------------------------------
+RANK 1: MULTI-TENANT DEPLOYMENT SUPPORT
+------------------------------------------------------------------------
+Kagenti Feature:     #28 Multi-Tenant Namespace Isolation
+Category:            Security / Multi-Tenancy
+Kagenti Status:      IMPLEMENTED
+OpenShell Status:    INADEQUATE
+Community Demand:    HIGH (8/10)
+Gap Severity:        8/10
+Impact:              9/10
+Feasibility:         6/10
+Independence:        7/10
+Overall Score:       7.85
+
+Kagenti Implementation:
+  - Namespace-based tenant isolation with per-tenant workloads
+  - Per-namespace RBAC, network policies, secrets
+  - Gateway-per-tenant pattern with Keycloak audience scoping
+  - Istio namespace-level mesh enrollment
+  Key files: charts/kagenti/, scripts/openshell/deploy-tenant.sh
+  Language: Shell, YAML, Python
+
+OpenShell Gap:
+  OpenShell is explicitly in "single-player mode" (stated in README).
+  The K8s compute driver supports sandbox_namespace but there is no
+  per-tenant gateway isolation, RBAC per namespace, or multi-team
+  deployment architecture. No user ownership model beyond OIDC.
+
+Community Evidence:
+  - #1722: "Multi-tenant deployments" — 5 reactions, 1 comment (OPEN)
+  - #1145: "Multi-tenant support roadmap?" — 0 reactions, 2 comments (OPEN)
+  - #1795: "Support creating sandbox CRs in configurable target namespace" (OPEN)
+  - #1678: "Support platform-managed K8s sandboxes with namespace controls" (OPEN)
+  - #1977: "multi-player use cases" (OPEN)
+  - #2109: "Enterprise permission modes with managed maximum policies" (OPEN)
+  - #1012: "High-availability Kubernetes Support" — 1 reaction (OPEN)
+  - #1021: "Enable running Gateway with multiple replicas" (OPEN)
+
+Porting Approach:
+  - Extend K8s compute driver with namespace-scoped sandbox creation
+  - Add owner/tenant label on sandbox objects in gateway persistence
+  - Implement tenant-scoped provider isolation at gateway level
+  - Add RBAC authorization policies per tenant scope
+  - Extend Helm chart with namespace provisioning templates
+
+Risk: HIGH — touches gateway persistence, auth, K8s driver, policy delivery
+Complexity: HIGH
+
+------------------------------------------------------------------------
+RANK 2: KUBERNETES OPERATOR FOR AGENT LIFECYCLE
+------------------------------------------------------------------------
+Kagenti Feature:     #9 Agent Lifecycle + #11 AgentRuntime CRD
+Category:            Orchestration / Lifecycle
+Kagenti Status:      IMPLEMENTED
+OpenShell Status:    MISSING
+Community Demand:    HIGH (7/10)
+Gap Severity:        9/10
+Impact:              8/10
+Feasibility:         5/10
+Independence:        6/10
+Overall Score:       7.35
+
+Kagenti Implementation:
+  - AgentRuntime CRD (agent.kagenti.dev/v1alpha1)
+  - Operator with AgentRuntimeReconciler + ClientRegistrationReconciler
+  - Automatic Keycloak client registration + sidecar injection
+  - Label-based discovery (kagenti.io/type, protocol.kagenti.io/*)
+  Key files: External repo: kagenti-extensions/kagenti-webhook (Go)
+  Language: Go (operator), YAML (CRDs)
+
+OpenShell Gap:
+  OpenShell has no Kubernetes operator. The gateway manages sandboxes
+  directly through its compute driver. There is no CRD-based agent
+  lifecycle management, no automatic webhook injection, no operator
+  reconciliation loop. The gateway IS the control plane — there is no
+  separate operator watching higher-level agent abstractions.
+
+Community Evidence:
+  - #1719: "Kubernetes Operator" — 0 reactions, 4 comments (OPEN)
+  - #1678: "Support platform-managed K8s sandboxes with namespace controls" (OPEN)
+  - #1886: "Support Provider Configuration via Helm Values / Config File" (OPEN)
+  - #981: "Split Supervisor and Agent into Separate Pods" — 2 reactions, 13 comments (OPEN)
+  - #1737: "Establish the Isolation Backend interface" — 2 reactions, 8 comments (OPEN)
+
+Porting Approach:
+  - Implement a Rust K8s operator using kube-rs (mature Rust K8s library)
+  - Define SandboxRuntime CRD that wraps agent lifecycle semantics
+  - Reconciler watches CRs and calls gateway gRPC API
+  - Label-based discovery for agent/tool workloads
+  - Webhook for sandbox identity injection
+
+Risk: HIGH — Rust K8s operator is a significant undertaking; kube-rs ecosystem
+  is less mature than Go's controller-runtime
+Complexity: VERY HIGH
+
+------------------------------------------------------------------------
+RANK 3: OPENTELEMETRY DISTRIBUTED TRACING
+------------------------------------------------------------------------
+Kagenti Feature:     #18 Phoenix/Langfuse Tracing (OpenTelemetry)
+Category:            Observability / Tracing
+Kagenti Status:      IMPLEMENTED
+OpenShell Status:    MISSING
+Community Demand:    MEDIUM (6/10)
+Gap Severity:        9/10
+Impact:              8/10
+Feasibility:         7/10
+Independence:        9/10
+Overall Score:       7.55
+
+Kagenti Implementation:
+  - OpenTelemetry Collector with OTLP receiver
+  - Phoenix for LLM observability (OpenInference spans)
+  - GenAI semantic conventions via opentelemetry-instrumentation-openai
+  - Dual export to Phoenix and MLflow
+  Key files: charts/kagenti-deps/templates/ (OTEL Collector, Phoenix)
+  Language: Python (instrumentation), YAML (Helm/OTEL config)
+
+OpenShell Gap:
+  OpenShell has OCSF structured security logging (excellent) and
+  anonymous telemetry, but NO OpenTelemetry integration. There is no
+  span injection into gateway RPCs, no trace correlation across
+  gateway-supervisor communication, no OTLP export, and no LLM
+  observability integration. Issue #1055 "Enterprise Observability"
+  is explicitly on the roadmap.
+
+Community Evidence:
+  - #1818: "Add optional OpenTelemetry tracing hooks to Python SDK" (OPEN)
+  - #1758: "Add OpenTelemetry trace correlation across gateway activity" — 1 reaction (OPEN)
+  - #1055: "Enterprise Observability" (OPEN, roadmap)
+  - #909: "metrics instrumentation" — 1 reaction (OPEN)
+  - #1922: "investigate portable sandbox log collection" (OPEN)
+  - #954: "Long-term CI observability via OTLP → Mimir + Grafana" (CLOSED)
+
+Porting Approach:
+  - Add opentelemetry-rust crate to openshell-server and openshell-sandbox
+  - Instrument gRPC handlers with tracing spans (tonic already uses tracing)
+  - Add OTLP exporter to gateway configuration
+  - Bridge OCSF events to OTel spans where appropriate
+  - Add trace context propagation across supervisor relay
+  - Optionally add LLM-specific span attributes (GenAI semantic conventions)
+
+Risk: LOW — OTel Rust crate is mature; tracing integration is well-understood
+Complexity: MEDIUM
+
+------------------------------------------------------------------------
+RANK 4: LLM TOKEN BUDGET AND COST TRACKING
+------------------------------------------------------------------------
+Kagenti Feature:     #17 LLM Budget Proxy
+Category:            Observability / Cost Control
+Kagenti Status:      IMPLEMENTED
+OpenShell Status:    MISSING
+Community Demand:    MEDIUM (5/10)
+Gap Severity:        10/10
+Impact:              7/10
+Feasibility:         7/10
+Independence:        8/10
+Overall Score:       7.05
+
+Kagenti Implementation:
+  - FastAPI proxy between agents and LiteLLM
+  - Per-session and per-agent token budgets
+  - PostgreSQL tables for usage records and budget limits
+  - HTTP 402 when budget exceeded
+  - Streaming support with token accumulation
+  - Internal usage API for UI display
+  Key files: kagenti/llm-budget-proxy/app/main.py
+  Language: Python (FastAPI)
+
+OpenShell Gap:
+  OpenShell's Privacy Router handles inference routing and credential
+  injection, but has ZERO token tracking, cost accounting, or budget
+  enforcement. There is no way to limit how many tokens a sandbox
+  consumes, no usage reporting, and no cost attribution. The router
+  strips and injects credentials but doesn't count tokens.
+
+Community Evidence:
+  - No direct "budget" or "cost tracking" issues found, but:
+  - #1055: "Enterprise Observability" (OPEN, roadmap) — implies usage visibility
+  - #909: "metrics instrumentation" (OPEN) — metrics infrastructure prerequisite
+  - #2118: "Managed inference returns 200 with content:null on token exhaustion"
+    — shows real-world LLM exhaustion scenario with no visibility (OPEN)
+  - #1825: "Inference set multiple models" — 2 reactions (OPEN, implies routing
+    sophistication needs)
+
+Porting Approach:
+  - Extend openshell-router to parse token counts from LLM responses
+  - Add token counting middleware in the inference proxy path
+  - Store usage records in gateway persistence (new object type)
+  - Add budget limits per sandbox/provider in gateway settings
+  - Expose usage RPCs in the gRPC API
+  - Budget exceeded → return HTTP 402 from proxy before forwarding
+
+Risk: MEDIUM — clean extension of existing router crate; PostgreSQL already supported
+Complexity: MEDIUM
+
+------------------------------------------------------------------------
+RANK 5: SESSION AND CONVERSATION LIFECYCLE
+------------------------------------------------------------------------
+Kagenti Feature:     #26 Session Management + Conversation Persistence
+Category:            State / Persistence
+Kagenti Status:      IMPLEMENTED
+OpenShell Status:    MISSING
+Community Demand:    MEDIUM (5/10)
+Gap Severity:        9/10
+Impact:              7/10
+Feasibility:         6/10
+Independence:        7/10
+Overall Score:       6.85
+
+Kagenti Implementation:
+  - PostgreSQL for session and message storage
+  - Session types: root, child (delegated), passover
+  - Session tree (DAG) for delegation visualization
+  - LLM usage tracking per session
+  - Context persistence survives pod restarts
+  Key files: kagenti/backend/app/routers/sessions.py, chat.py
+  Language: Python (FastAPI), TypeScript (UI)
+
+OpenShell Gap:
+  OpenShell has no concept of "sessions" beyond SSH sessions and
+  sandbox lifecycle. There is no conversation persistence, no message
+  history, no session trees, and no ability to track agent interactions
+  across sandbox restarts. Sandbox state is ephemeral.
+
+Community Evidence:
+  - #1884: "add first-class session and conversation lifecycle support"
+    — 0 reactions, 2 comments (OPEN)
+  - #1049: "Sandbox to Sandbox Communications" (OPEN)
+  - #1977: "multi-player use cases" (OPEN)
+  - #1993: "add first-class sandbox-to-sandbox network policy primitive" (OPEN)
+
+Porting Approach:
+  - Define Session proto message in openshell.proto
+  - Add session persistence as new object type in gateway store
+  - Implement CreateSession, GetSession, ListSessions RPCs
+  - Store message history as session-scoped records
+  - Extend Python SDK with session management methods
+  - Add CLI commands for session listing/inspection
+
+Risk: MEDIUM — clean addition to existing persistence model
+Complexity: MEDIUM
+
+------------------------------------------------------------------------
+RANK 6: SPIFFE/SPIRE WORKLOAD IDENTITY INTEGRATION
+------------------------------------------------------------------------
+Kagenti Feature:     #1 SPIFFE/SPIRE Workload Identity
+Category:            Security / Identity
+Kagenti Status:      IMPLEMENTED
+OpenShell Status:    INADEQUATE
+Community Demand:    MEDIUM (5/10)
+Gap Severity:        7/10
+Impact:              7/10
+Feasibility:         5/10
+Independence:        5/10
+Overall Score:       6.20
+
+Kagenti Implementation:
+  - SPIRE Server + Agent deployment via Helm
+  - CSI Driver mounts SVIDs into pods
+  - JWT SVIDs as client identifiers for Keycloak
+  - OIDC discovery for JWT validation
+  Key files: kagenti/auth/spiffe-idp-setup/, charts/kagenti-deps/
+  Language: Shell, YAML
+
+OpenShell Gap:
+  OpenShell consumes SPIFFE as an external identity source through
+  dynamic token grants (ProviderCredentialTokenGrant), but does not
+  natively deploy, manage, or integrate with SPIRE. The Helm chart
+  has SPIRE CI values (ci/values-spire.yaml) but integration is
+  nascent. There is no automatic workload attestation or SVID issuance.
+
+Community Evidence:
+  - #1665: "Add SPIFFE workload identity provider for sandbox attestation" (OPEN)
+  - #1736: "add dynamic identity sources to Oauth2TokenExchange strategy" (OPEN)
+  - #1755: "Tracking: generalize brokered credential delivery" (OPEN)
+  - #2091: "expand OpenShift guide with TLS, OIDC, ingress, federated identity" (OPEN)
+  - Helm chart ci/values-spire.yaml and ci/values-spire-stack.yaml exist
+
+Porting Approach:
+  - Extend Helm chart with SPIRE subchart integration
+  - Add SPIFFE workload attestation for sandbox supervisors
+  - Implement SVID-to-sandbox-identity mapping at gateway
+  - Integrate SPIRE CSI driver for automatic SVID mounting
+  - Add SPIFFE ID as sandbox identity primitive
+
+Risk: HIGH — requires SPIRE infrastructure deployment + integration testing
+Complexity: HIGH
+
+------------------------------------------------------------------------
+RANK 7: SANDBOX-TO-SANDBOX AND MULTI-AGENT COMMUNICATION
+------------------------------------------------------------------------
+Kagenti Feature:     #12 A2A Protocol + #29 Dynamic Agent Materialization
+Category:            Orchestration / Communication
+Kagenti Status:      IMPLEMENTED (A2A) / DESIGN PROPOSAL (Dynamic Agents)
+OpenShell Status:    MISSING
+Community Demand:    MEDIUM (5/10)
+Gap Severity:        8/10
+Impact:              7/10
+Feasibility:         4/10
+Independence:        4/10
+Overall Score:       6.05
+
+Kagenti Implementation:
+  - A2A protocol: Agent Cards, JSON-RPC tasks, streaming, discovery
+  - DynamicAgentRequest CRD for spawning task-scoped child agents
+  - spawn_subagent / get_subagent_status / cancel_subagent MCP tools
+  Key files: kagenti/backend/app/routers/agents.py, design proposals
+  Language: Python, Go
+
+OpenShell Gap:
+  OpenShell sandboxes are completely isolated from each other by design.
+  There is no sandbox-to-sandbox communication primitive, no agent
+  discovery across sandboxes, no multi-agent orchestration, and no
+  A2A protocol support. Each sandbox is an island.
+
+Community Evidence:
+  - #1049: "Sandbox to Sandbox Communications" (OPEN)
+  - #1993: "add first-class sandbox-to-sandbox network policy primitive" (OPEN)
+  - #1056: "Cross-sandbox and multi-agent flow verification" (OPEN)
+  - #2025: "agents setting maximum policies for spawned agents" (OPEN)
+  - #1977: "multi-player use cases" (OPEN)
+
+Porting Approach:
+  - Define sandbox-to-sandbox relay primitive through gateway
+  - Add sandbox service discovery (list sandbox endpoints)
+  - Implement A2A protocol support as a sandbox capability
+  - Add parent-child sandbox relationship model
+  - Cross-sandbox policy for allowed communication paths
+
+Risk: VERY HIGH — fundamentally changes OpenShell's isolation model
+Complexity: VERY HIGH
+
+------------------------------------------------------------------------
+RANK 8: MCP GATEWAY / TOOL ROUTING
+------------------------------------------------------------------------
+Kagenti Feature:     #7 MCP Gateway (Envoy-Based Tool Routing)
+Category:            Networking / Gateway
+Kagenti Status:      IMPLEMENTED
+OpenShell Status:    MISSING
+Community Demand:    LOW-MEDIUM (4/10)
+Gap Severity:        8/10
+Impact:              6/10
+Feasibility:         5/10
+Independence:        6/10
+Overall Score:       5.75
+
+Kagenti Implementation:
+  - Envoy-based MCP gateway in gateway-system namespace
+  - MCPServerRegistration CRD for tool registration
+  - HTTPRoute-based routing to MCP servers
+  - Tool discovery: tools/list, tools/call routing
+  - Credential-based registration for authenticated tools
+  Key files: docs/gateway.md, External: github.com/Kuadrant/mcp-gateway
+  Language: Go (controller), YAML
+
+OpenShell Gap:
+  OpenShell has excellent MCP policy enforcement at the L7 proxy level
+  (MCP method, tool name, params matching), but no MCP ROUTING gateway.
+  The sandbox proxy enforces which MCP calls are allowed, but there is
+  no centralized gateway that discovers, registers, and routes to
+  multiple MCP servers across the cluster.
+
+Community Evidence:
+  - #1733: "Sandbox egress middleware" — 0 reactions, 4 comments (OPEN)
+  - #998: "embed agentgateway in openshell-sandbox for inference + MCP" (CLOSED)
+  - #1386: "agent-readable policy manifest for tool/endpoint discovery" (CLOSED)
+  - #2011: "implement RFC 0009 phase 2 external middleware services" (OPEN)
+
+Porting Approach:
+  - Implement MCP server registry in gateway persistence
+  - Add MCP routing middleware in the sandbox proxy
+  - Expose tool discovery API through gateway gRPC
+  - Support MCPServerRegistration as a gateway resource type
+  - Route tools/list and tools/call to registered servers
+
+Risk: HIGH — new subsystem; must integrate with existing policy proxy
+Complexity: HIGH
+
+------------------------------------------------------------------------
+RANK 9: TOKEN EXCHANGE AND DELEGATION CHAINS (RFC 8693)
+------------------------------------------------------------------------
+Kagenti Feature:     #3 OAuth2 Token Exchange + #4 AuthBridge
+Category:            Security / Identity
+Kagenti Status:      IMPLEMENTED
+OpenShell Status:    MISSING
+Community Demand:    LOW-MEDIUM (4/10)
+Gap Severity:        8/10
+Impact:              6/10
+Feasibility:         5/10
+Independence:        4/10
+Overall Score:       5.65
+
+Kagenti Implementation:
+  - RFC 8693 token exchange via Keycloak
+  - User → Agent → Tool delegation chains
+  - Audience-scoped tokens with act.sub claims
+  - AuthBridge sidecar for transparent interception
+  Key files: kagenti/examples/identity/keycloak_token_exchange/
+  Language: Python (examples), Go (ext-proc)
+
+OpenShell Gap:
+  OpenShell's credential system injects provider credentials into
+  sandboxes and can perform OAuth2 token grants via SPIFFE JWTs.
+  However, there is no RFC 8693 token exchange for delegation chains
+  (user → sandbox → tool audience scoping). The proxy does credential
+  injection but not audience-scoped token exchange.
+
+Community Evidence:
+  - #1756: "Add scope attenuation for broker-issued downstream tokens" (OPEN)
+  - #1736: "add dynamic identity sources to Oauth2TokenExchange strategy" (OPEN)
+  - #1755: "Tracking: generalize brokered credential delivery" (OPEN)
+  - #1987: "support user-subject dynamic token grants" (OPEN)
+  - #1883: "support request-scoped provider credentials" (OPEN)
+
+Porting Approach:
+  - Extend token grant system with RFC 8693 exchange semantics
+  - Add delegation chain tracking in sandbox credentials
+  - Implement audience-scoped token generation at gateway level
+  - Add token exchange endpoint in provider credential flow
+  - Track act.sub claims through the delegation chain
+
+Risk: HIGH — RFC 8693 is complex; requires IdP integration
+Complexity: HIGH
+
+------------------------------------------------------------------------
+RANK 10: ENTERPRISE RBAC AND HIERARCHICAL ACCESS CONTROL
+------------------------------------------------------------------------
+Kagenti Feature:     #5 Fine-Grained Zero-Trust Access Control
+Category:            Security / Policy
+Kagenti Status:      IMPLEMENTED
+OpenShell Status:    INADEQUATE
+Community Demand:    MEDIUM (5/10)
+Gap Severity:        6/10
+Impact:              6/10
+Feasibility:         5/10
+Independence:        4/10
+Overall Score:       5.40
+
+Kagenti Implementation:
+  - Four-tier access control: Cluster, Namespace, Component, Developer
+  - Cortex sidecar with PIPs → PDP (OPA) → PEP architecture
+  - XACML-aligned policy model
+  - Content-aware authorization (input/output guardrails)
+  Key files: docs/access-control/, docs/access-control/zero-trust.md
+  Language: Go (plugins), Rego (policies)
+
+OpenShell Gap:
+  OpenShell has strong per-sandbox policy enforcement but no fleet-wide
+  hierarchical access control. Gateway-global policy can override
+  sandbox-scoped policy (two tiers), but there is no namespace-tier,
+  no component-tier, and no developer-tier hierarchy. OIDC role policy
+  is still being developed. There is no RBAC for gRPC operations beyond
+  user vs sandbox principal types.
+
+Community Evidence:
+  - #2109: "Enterprise permission modes with managed maximum policies" (OPEN)
+  - #2025: "agents setting maximum policies for spawned agents" (OPEN)
+  - #1722: "Multi-tenant deployments" — 5 reactions (OPEN)
+  - #1719: "Kubernetes Operator" — 4 comments (OPEN)
+  - #1678: "platform-managed K8s sandboxes with namespace controls" (OPEN)
+
+Porting Approach:
+  - Extend gateway auth with role-based method authorization
+  - Add namespace/tenant scoping to policy hierarchy
+  - Implement policy inheritance model (cluster > tenant > sandbox)
+  - Add RBAC policy definitions in gateway configuration
+  - Integrate with OIDC role claims for authorization decisions
+
+Risk: HIGH — fundamental auth model change affecting all gRPC handlers
+Complexity: HIGH
+
+
+================================================================================
+CANDIDATES ANALYZED BUT NOT IN TOP 10 (INSUFFICIENT DEMAND OR POOR FIT)
+================================================================================
+
+- Web UI Dashboard: MISSING in OpenShell, but no issues requesting it;
+  OpenShell is CLI-first by design. Poor fit.
+
+- Container Build System (Shipwright): MISSING, but OpenShell uses BYOC
+  by design. No demand for in-cluster builds.
+
+- Skills System (ConfigMap Registry): MISSING, but OpenShell has a different
+  skills model (.agents/skills/). No demand for ConfigMap-based runtime skills.
+
+- Event-Driven Triggers: MISSING, but no issues requesting cron/webhook
+  triggers. OpenShell sandboxes are interactive, not event-driven.
+
+- Istio Service Mesh: MISSING, but OpenShell handles mTLS natively at
+  the gateway level. No demand for Istio integration.
+
+- MLflow / Phoenix Integration: MISSING, but covered by OTel tracing
+  candidate above. No direct MLflow demand found.
+
+- Feature Flag System: MISSING, but OpenShell uses Cargo feature flags
+  at compile time (e.g., telemetry). No demand for runtime flags.
+
+- Session Graph Visualization: MISSING, but prerequisite (sessions)
+  must exist first. Low independence score.
+
+- Sidecar Agent System: MISSING, but OpenShell's policy advisor pipeline
+  covers the policy monitoring use case differently. No demand found.
+
+- HITL Approval Workflows: INADEQUATE, but OpenShell's policy advisor
+  already has human approval gates for policy changes. Minimal gap.
+
+- Workspace File Browsing: INADEQUATE, but OpenShell has tar-based file
+  sync and service forwarding. Low demand priority.
+
+- Integration Mgmt (Webhooks): MISSING, no demand found. OpenShell
+  focuses on sandbox execution, not external integrations.
+
+- Dynamic Agent Materialization: MISSING, but this is a Kagenti design
+  proposal, not fully implemented. Too speculative to port.
+
+
+================================================================================
+SCORING SUMMARY TABLE
+================================================================================
+
+Rank  Feature                          Demand  Gap   Impact  Feas  Indep  OVERALL
+ 1    Multi-Tenant Deployment           8      8     9       6     7      7.85
+ 2    K8s Operator for Agent Lifecycle  7      9     8       5     6      7.35
+ 3    OpenTelemetry Distributed Tracing 6      9     8       7     9      7.55
+ 4    LLM Token Budget / Cost Control   5      10    7       7     8      7.05
+ 5    Session & Conversation Lifecycle  5      9     7       6     7      6.85
+ 6    SPIFFE/SPIRE Workload Identity    5      7     7       5     5      6.20
+ 7    Sandbox-to-Sandbox / Multi-Agent  5      8     7       4     4      6.05
+ 8    MCP Gateway / Tool Routing        4      8     6       5     6      5.75
+ 9    Token Exchange (RFC 8693)         4      8     6       5     4      5.65
+10    Enterprise RBAC / Hierarchical AC 5      6     6       5     4      5.40
+
+Note: Ranks 3 and 1 swap if re-weighted for feasibility, since OTel is
+significantly easier to implement than multi-tenancy.
+
+
+================================================================================
+TOTAL ANALYSIS STATISTICS
+================================================================================
+
+Total Kagenti features analyzed:           48
+Features EQUIVALENT/SUPERIOR in OpenShell: 15
+Features NOT APPLICABLE to OpenShell:       8
+Features MISSING in OpenShell:             20
+Features INADEQUATE in OpenShell:           5
+Candidates with concrete community demand: 10
+
+================================================================================
+END OF DETECTED FEATURES ANALYSIS
+================================================================================

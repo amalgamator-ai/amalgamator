@@ -1,0 +1,995 @@
+================================================================================
+KAGENTI CODE TRACE: Multi-Tenant Deployment Support
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Category: Security / Multi-Tenancy
+Porting Complexity: HIGH
+Date: 2026-07-03
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Feature Overview
+2. Architecture Summary
+3. Entry Points & Deployment Flow
+4. Component Breakdown
+   4.1  deploy-shared.sh (Shared Infrastructure)
+   4.2  deploy-tenant.sh (Per-Tenant Deployment)
+   4.3  charts/openshell/ Helm Chart (Per-Tenant Stack)
+   4.4  Keycloak OIDC & Audience Scoping
+   4.5  Per-User Ownership (Owner-Label Approach)
+   4.6  RBAC Authorization Per Tenant
+   4.7  Namespace Provisioning & Labeling
+   4.8  Tenant-Scoped Provider Isolation
+   4.9  Cleanup Scripts
+   4.10 CLI Configuration
+   4.11 E2E Test Suite
+   4.12 CI Orchestration
+5. Data Flow
+6. State Management
+7. External Dependencies
+8. Configuration Options & Defaults
+9. Error Handling Patterns
+10. File Inventory (Complete)
+
+================================================================================
+1. FEATURE OVERVIEW
+================================================================================
+
+Kagenti implements multi-tenancy for OpenShell through a "gateway-per-tenant"
+pattern. Each tenant (team) gets:
+
+- A dedicated Kubernetes namespace
+- An isolated OpenShell gateway StatefulSet (gateway + compute-driver +
+  credentials-driver sidecars)
+- Namespace-scoped RBAC (Role, not ClusterRole)
+- OIDC audience scoping via Keycloak (JWT aud=<tenant>)
+- Per-tenant TLS certificates via cert-manager
+- ResourceQuota and LimitRange per namespace
+- Per-user sandbox ownership within a tenant (openshell.ai/owner label)
+- Tenant-scoped credential/provider isolation
+- Platform-specific ingress (Istio TLSRoute for Kind, passthrough Route for OCP)
+
+The architecture separates shared cluster-wide infrastructure (Keycloak realm,
+cert-manager CA, sandbox controller, Gateway API CRDs) from per-tenant
+resources, enabling independent lifecycle management.
+
+================================================================================
+2. ARCHITECTURE SUMMARY
+================================================================================
+
+Deployment Model:
+```
+Cluster
+├── keycloak/                      Shared OIDC provider (openshell realm)
+├── agent-sandbox-system/          Shared CRD controller (k8s SIG)
+├── cert-manager/                  Shared CA chain (openshell-ca)
+├── kagenti-system/                Shared TLS passthrough Gateway (Kind only)
+│
+├── team1/                         Tenant 1 — isolated stack
+│   ├── openshell-server (StatefulSet)
+│   │   ├── gateway container
+│   │   ├── compute-driver sidecar
+│   │   └── credentials-driver sidecar
+│   ├── Service (ClusterIP)
+│   ├── RBAC (Role + RoleBinding)
+│   ├── TLSRoute or Route (ingress)
+│   ├── ResourceQuota + LimitRange
+│   ├── TLS certs (cert-manager Certificate CRs)
+│   └── sandbox pods (owned by gateway)
+│
+└── team2/                         Tenant 2 — same structure, isolated
+    └── ...
+```
+
+Isolation Layers:
+1. Namespace isolation (K8s namespace per tenant)
+2. OIDC audience scoping (JWT aud=<tenant> validated per gateway)
+3. Namespace-scoped RBAC (gateway SA can only access own namespace)
+4. Per-user ownership (openshell.ai/owner label on sandboxes/providers)
+5. Separate SQLite DB per gateway (emptyDir or PVC)
+6. TLS certificate isolation (per-tenant leaf certs from shared CA)
+7. Credential isolation (per-tenant credentials-driver config)
+
+================================================================================
+3. ENTRY POINTS & DEPLOYMENT FLOW
+================================================================================
+
+The feature is activated through a layered script architecture:
+
+Phase 1: Shared Infrastructure
+  scripts/openshell/deploy-shared.sh
+  └── Creates: sandbox controller, Gateway API CRDs, cert-manager CA chain,
+      Keycloak realm with OIDC clients/roles/users/groups/audience scopes
+
+Phase 2: Per-Tenant Deployment (repeat per tenant)
+  scripts/openshell/deploy-tenant.sh <tenant>
+  └── Creates: namespace, labels, Helm install (charts/openshell/),
+      TLS cert verification, rollout wait, optional agent deployment
+
+Phase 3: CLI Configuration
+  scripts/openshell/configure-cli.sh <tenant>
+  └── Registers gateway endpoint, extracts mTLS certs, triggers OIDC login
+
+Cleanup (reverse order):
+  scripts/openshell/cleanup-tenant.sh <tenant>
+  scripts/openshell/cleanup-shared.sh
+  scripts/openshell/cleanup-all.sh  (orchestrates both)
+
+CI Orchestration:
+  .github/scripts/local-setup/openshell-full-test.sh
+  └── 7-phase pipeline: cluster → platform → images → shared → tenants → tests → destroy
+
+================================================================================
+4. COMPONENT BREAKDOWN
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+4.1 deploy-shared.sh (Shared Infrastructure)
+────────────────────────────────────────────────────────────────────────────────
+File: scripts/openshell/deploy-shared.sh (1102 lines)
+Language: Bash
+
+Purpose: Deploy cluster-wide shared infrastructure for multi-tenant OpenShell.
+Idempotent. Supports --dry-run.
+
+Steps (7 major):
+
+Step 1: agent-sandbox-controller
+  - Deploys upstream k8s SIG controller (v0.4.6)
+  - Source: deployments/openshell/agent-sandbox-crd.yaml (vendored manifest)
+  - Creates: namespace agent-sandbox-system, CRD sandboxes.agents.x-k8s.io,
+    controller StatefulSet, RBAC
+
+Step 2: Gateway API Experimental CRDs
+  - Installs TLSRoute/TCPRoute CRDs (v1.4.0) — Kind only, OCP has Routes
+  - Skipped on OpenShift (is_openshift() checks for clusterversion API)
+
+Step 2b: Shared TLS Passthrough Gateway
+  - Creates: Gateway "tls-passthrough" in kagenti-system namespace
+  - Config: protocol=TLS, mode=Passthrough, allowedRoutes.namespaces.from=All
+  - Kind only: fixes NodePort to 30443
+
+Step 2c: Istio Alpha Gateway API
+  - Patches istiod to enable PILOT_ENABLE_ALPHA_GATEWAY_API=true
+
+Step 3: cert-manager CA Chain
+  - ClusterIssuer "openshell-selfsigned" (self-signed bootstrap)
+  - Certificate "openshell-ca" (ECDSA P-256, 10-year, in cert-manager ns)
+  - ClusterIssuer "openshell-ca-issuer" (signs per-tenant leaf certs)
+
+Step 4: Keycloak Realm Setup (CRITICAL FOR MULTI-TENANCY)
+  - Creates realm "openshell"
+  - Creates PKCE public client "openshell-cli" (for browser auth)
+  - Creates confidential client "kagenti-backend" (for backend)
+  - Creates roles: "openshell-admin", "openshell-user"
+  - Creates groups: /team1, /team2
+  - Creates test users:
+    - alice (team1 group, admin role, password stored in K8s secret)
+    - bob (team2 group, admin role, password stored in K8s secret)
+    - admin (both groups, admin role, password stored in K8s secret)
+  - Creates per-tenant audience client scopes:
+    - "team1-audience" and "team2-audience" client scopes
+    - Each scope has a "Hardcoded Audience" mapper with clientAudience=<tenant>
+    - Scopes are added as optional to "openshell-cli" client
+    - Group-based conditional audience: team1 users get aud=team1 in their JWT
+
+Step 5: Optional LiteLLM Model Proxy
+  - ConfigMap with model routing (gpt-4o, claude-sonnet-4, etc.)
+  - Deployment + Service in tenant namespace
+
+Step 6: Optional Base Image Pre-Pull
+
+Step 7: Optional kagenti-backend + PostgreSQL
+
+Key Functions:
+  is_openshift()          - platform detection via kubectl get clusterversion
+  wait_deployment_ready() - polls deployment rollout
+  usage()                 - help text
+
+Key Variables:
+  AGENT_SANDBOX_VERSION="v0.4.6"
+  GATEWAY_API_VERSION="v1.4.0"
+  KEYCLOAK_NS (default: "keycloak")
+  KEYCLOAK_REALM="openshell"
+
+Flags:
+  --skip-sandbox, --skip-gateway-api, --skip-tls, --skip-keycloak
+  --litellm, --pre-pull, --with-backend
+  --kind-cluster, --keycloak-ns, --dry-run
+
+────────────────────────────────────────────────────────────────────────────────
+4.2 deploy-tenant.sh (Per-Tenant Deployment)
+────────────────────────────────────────────────────────────────────────────────
+File: scripts/openshell/deploy-tenant.sh (393 lines)
+Language: Bash
+
+Purpose: Deploy one tenant's isolated OpenShell gateway stack via Helm.
+Idempotent. Supports --dry-run.
+
+Arguments:
+  Positional: <tenant>  (e.g., team1, team2)
+  --chart-dir <dir>     Helm chart directory (default: charts/openshell/)
+  --keycloak-ns <ns>    Keycloak namespace (default: keycloak)
+  --image-tag <tag>     Override image tag
+  --set <key=value>     Extra Helm --set values
+  --timeout <seconds>   Rollout timeout
+  --agents              Also deploy agent manifests
+  --dry-run             Print commands without executing
+
+Steps:
+
+Step 0: Early namespace creation
+  - Creates namespace before platform-specific setup
+  - On OCP: builds combined CA bundle (system + ingress CA)
+
+Step 1: Namespace creation + labeling
+  - kubectl create namespace "$TENANT"
+  - kubectl label namespace "$TENANT"
+      shared-gateway-access=true
+      openshell.ai/tenant="$TENANT"
+      --overwrite
+
+Step 2: Helm upgrade --install
+  Core Helm values passed:
+    --namespace "$TENANT"
+    --set "tenant=$TENANT"
+    --set "oidc.issuer=$OIDC_ISSUER"    (auto-detected from Keycloak)
+    --set "oidc.audience=$TENANT"
+    --set "driver.namespace=$TENANT"
+    --set "ingress.type=$INGRESS_TYPE"   (istio or route)
+    --set "ingress.host=$INGRESS_HOST"   (openshell-<tenant>.<domain>)
+
+  Kind-specific:
+    --set "keycloakClusterIP=$KEYCLOAK_CLUSTER_IP"
+
+  OCP-specific:
+    --set "openshift.enabled=true"
+    --set "trustedCABundle=openshell-trusted-ca"
+
+Step 3: TLS Secret Verification
+  - Waits for openshell-server-tls and openshell-client-tls secrets
+    (created by certgen Helm hook Job)
+
+Step 4: StatefulSet Rollout Wait
+  - kubectl rollout status statefulset/openshell-server
+
+Step 5: Optional Agent Deployment (--agents flag)
+  - On OCP: grants privileged SCC to openshell-supervisor SA
+  - On Kind: patches validating webhook to exclude tenant namespace
+  - Creates openshell-supervisor ServiceAccount
+  - Creates kagenti-skills ConfigMap
+  - Applies agent manifests from deployments/openshell/agents/*/deployment.yaml
+  - Creates policy ConfigMaps from policy-data.yaml + sandbox-policy.rego
+  - Patches agents for LiteLLM proxy (if available)
+  - Waits for agent rollouts
+
+Key Functions:
+  is_openshift()        - platform detection
+  get_ocp_base_domain() - reads OCP ingress domain
+  get_keycloak_issuer() - returns OIDC issuer URL
+  get_ingress_host()    - builds per-tenant hostname
+  get_ingress_type()    - returns "route" or "istio"
+
+Hostname Patterns:
+  OCP:  openshell-${TENANT}.${base_domain}
+  Kind: openshell-${TENANT}.${KIND_DOMAIN}  (KIND_DOMAIN=localtest.me)
+
+Release Naming:
+  RELEASE_NAME="${HELM_RELEASE_PREFIX}-${TENANT}"  (e.g., openshell-team1)
+
+────────────────────────────────────────────────────────────────────────────────
+4.3 charts/openshell/ Helm Chart (Per-Tenant Stack)
+────────────────────────────────────────────────────────────────────────────────
+Files:
+  charts/openshell/Chart.yaml              - Chart metadata (v0.1.0)
+  charts/openshell/values.yaml             - Default values (143 lines)
+  charts/openshell/templates/_helpers.tpl   - Template helpers
+  charts/openshell/templates/statefulset.yaml
+  charts/openshell/templates/service.yaml
+  charts/openshell/templates/serviceaccount.yaml
+  charts/openshell/templates/rbac.yaml
+  charts/openshell/templates/gateway-config.yaml
+  charts/openshell/templates/secrets.yaml
+  charts/openshell/templates/certgen.yaml
+  charts/openshell/templates/credentials-configmap.yaml
+  charts/openshell/templates/tlsroute.yaml
+  charts/openshell/templates/route.yaml
+  charts/openshell/templates/resourcequota.yaml
+  charts/openshell/templates/limitrange.yaml
+  charts/openshell/templates/scc.yaml
+  charts/openshell/templates/NOTES.txt
+
+Chart.yaml:
+  name: openshell
+  description: "Per-tenant OpenShell gateway stack with cert-manager TLS and OIDC"
+  type: application
+  version: 0.1.0
+
+values.yaml Key Values:
+  tenant: ""                                      # REQUIRED — namespace and audience
+  images:
+    gateway: ghcr.io/kagenti/openshell/gateway:v0.0.56-rc.5
+    computeDriver: ghcr.io/kagenti/openshell-driver-openshift/compute-driver:v0.1.0-rc.7
+    credentialsDriver: ghcr.io/kagenti/openshell-credentials-keycloak/credentials-driver:main-d7d8306
+  oidc:
+    issuer: ""                                    # Set by deploy-tenant.sh
+    audience: ""                                  # Defaults to tenant via helper
+    enabled: true
+  driver:
+    namespace: ""                                 # Defaults to tenant
+  ingress:
+    type: istio                                   # "istio" (Kind) or "route" (OCP)
+    host: ""
+    gatewayName: tls-passthrough
+    gatewayNamespace: kagenti-system
+  quota:
+    pods: "15", requestsCpu: "20", requestsMemory: "40Gi", pvcs: "10"
+  openshift:
+    enabled: false
+  gatewayJwt:
+    enabled: true, ttlSecs: 3600
+
+_helpers.tpl Key Definitions:
+  openshell.labels       - includes openshell.ai/tenant: {{ .Values.tenant }}
+  openshell.driverNamespace - defaults to .Values.tenant
+  openshell.oidcAudience   - defaults to .Values.tenant
+  openshell.validateValues - requires tenant; requires oidc.issuer when oidc.enabled
+
+--- statefulset.yaml ---
+  StatefulSet "openshell-server" in namespace {{ .Values.tenant }}
+  3 containers:
+    1. gateway     - main control plane, gRPC API, SSH bridge, OIDC validation
+       args: --config /etc/openshell/gateway.toml --db-url sqlite:///data/openshell.db
+       env: OPENSHELL_DRIVERS=external, OPENSHELL_COMPUTE_DRIVER_SOCKET,
+            OPENSHELL_CREDENTIALS_DRIVER_SOCKET, OPENSHELL_SSH_HANDSHAKE_SECRET
+       volumes: driver-sockets (emptyDir), data (PVC), gateway-config (ConfigMap),
+                server-tls (Secret), jwt-keys (Secret, optional), trusted-ca (optional)
+    2. compute-driver - sandbox lifecycle via Sandbox CRD
+       args: -socket, -namespace (tenant), -supervisor-image, -gateway-endpoint,
+             -tls-ca-secret, -tls-client-secret, -sandbox-image-pull-policy,
+             -sa-token-audience, -sa-token-ttl-secs
+    3. credentials-driver - OAuth2 token resolution via Keycloak
+       args: --socket, --config, --secrets-dir
+  ServiceAccount: openshell-gateway
+  VolumeClaimTemplate: data (1Gi default)
+  Inter-container communication: Unix domain sockets on shared emptyDir
+
+--- gateway-config.yaml ---
+  ConfigMap "openshell-gateway-config" with gateway.toml:
+    [openshell.gateway]
+      sandbox_namespace = <driver namespace (defaults to tenant)>
+      supervisor_image  = <supervisor image>
+    [openshell.gateway.tls]
+      cert_path, key_path, client_ca_path (from server-tls secret mount)
+    [openshell.gateway.gateway_jwt]
+      gateway_id = "openshell-<tenant>"
+    [openshell.gateway.oidc]
+      issuer   = <keycloak issuer URL>
+      audience = <tenant name>  ← KEY MULTI-TENANCY CONFIG
+
+--- rbac.yaml ---
+  ServiceAccount: openshell-sandbox (for sandbox pods)
+  On OCP: ClusterRoleBinding for privileged SCC (openshell-sandbox SA)
+  Role "openshell-gateway" (NAMESPACE-SCOPED):
+    - agents.x-k8s.io/sandboxes: get, list, watch, create, update, delete
+    - pods, events, PVCs: get, list, watch
+    - secrets: get, list, watch
+  RoleBinding: openshell-gateway (binds Role to openshell-gateway SA)
+  When gatewayJwt.enabled:
+    ClusterRole + ClusterRoleBinding for TokenReview (per-tenant named)
+
+--- certgen.yaml ---
+  Helm pre-install/pre-upgrade hook Job:
+    Runs openshell-gateway generate-certs command
+    Creates: openshell-server-tls, openshell-client-tls, JWT signing keys
+    Server SANs: openshell-server, .tenant, .tenant.svc, .tenant.svc.cluster.local,
+                 localhost, ingress.host
+
+--- tlsroute.yaml (Kind ingress) ---
+  TLSRoute: SNI-based routing to openshell-server via shared tls-passthrough Gateway
+  ParentRef: shared Gateway in kagenti-system
+
+--- route.yaml (OpenShift ingress) ---
+  Route: passthrough TLS termination, 24h timeout
+  Host: openshell-<tenant>.<apps-domain>
+
+--- resourcequota.yaml ---
+  Per-tenant ResourceQuota: pods, CPU, memory, PVCs
+
+--- limitrange.yaml ---
+  Default resource requests for containers without explicit requests
+
+--- scc.yaml (OpenShift only) ---
+  SecurityContextConstraints for openshell-certgen and openshell-gateway SAs
+  Restrictive: no host access, drop ALL caps, readOnlyRootFilesystem
+
+--- secrets.yaml ---
+  openshell-credentials-secrets: placeholder credential secret
+  openshell-gateway-secrets: SSH handshake secret (random, stable across upgrades)
+
+--- credentials-configmap.yaml ---
+  ConfigMap with per-tenant credentials.yaml:
+    credentials.placeholder.client_id = "<tenant>-placeholder"
+    credentials.placeholder.token_endpoint = <oidc issuer>/protocol/openid-connect/token
+
+--- serviceaccount.yaml ---
+  ServiceAccount "openshell-gateway" in tenant namespace
+
+--- service.yaml ---
+  Service "openshell-server" ClusterIP, port 8080 (grpc)
+
+────────────────────────────────────────────────────────────────────────────────
+4.4 Keycloak OIDC & Audience Scoping
+────────────────────────────────────────────────────────────────────────────────
+
+Keycloak Configuration (created by deploy-shared.sh Step 4):
+
+Realm: "openshell"
+  Client: "openshell-cli" (public, PKCE enabled)
+    - Standard flow + direct access grants enabled
+    - Valid redirect URIs: http://localhost:*
+    - Web origins: *
+    - Optional client scopes: team1-audience, team2-audience
+
+Audience Scoping Mechanism:
+  1. Per-tenant client scopes created: "<tenant>-audience"
+  2. Each scope has a "Hardcoded Audience" protocol mapper:
+     - Mapper type: oidc-audience-resolve
+     - Included client audience: <tenant>
+  3. Scopes are added as OPTIONAL to openshell-cli client
+  4. Group-based conditional scoping:
+     - Users in /team1 group → audience scope includes team1
+     - Users in /team2 group → audience scope includes team2
+  5. Gateway validates: JWT.aud MUST contain gateway's configured audience
+     (OPENSHELL_OIDC_AUDIENCE env var / oidc.audience Helm value)
+
+Authentication Flow:
+  CLI → Keycloak (PKCE Authorization Code) → JWT with aud=<tenant>
+  CLI → Gateway (Bearer JWT in gRPC metadata)
+  Gateway → validates iss, aud=<configured-tenant>, roles, scopes
+  → Reject if aud mismatch (401/403)
+
+Test Users:
+  alice: team1 group, openshell-admin role → gets aud=team1
+  bob:   team2 group, openshell-admin role → gets aud=team2
+  admin: team1+team2 groups, openshell-admin → gets aud=team1,team2
+
+OIDC Roles:
+  openshell-admin: Provider CRUD, config mutations, admin bypass
+  openshell-user:  Sandbox CRUD, exec, SSH
+
+Related Keycloak Utility Code:
+  kagenti/common/keycloak.py
+    - read_keycloak_credentials(api, secret_name, namespace, user_key, pass_key)
+      → returns (username, password) tuple from K8s secret
+  kagenti/auth/shared_utils.py
+    - get_session_lifetime_payload() → Keycloak session config
+    - register_client(keycloak_admin, client_id, payload) → creates/gets client
+
+────────────────────────────────────────────────────────────────────────────────
+4.5 Per-User Ownership (Owner-Label Approach)
+────────────────────────────────────────────────────────────────────────────────
+
+Design Doc: docs/research/openshell-per-user-tenancy.md
+Implementation: Kagenti OpenShell fork (crates/openshell-server/src/auth/ownership.rs)
+Status: Implemented (v0.0.56-rc.2+)
+
+Within a single shared gateway (one namespace/team), per-user isolation is
+enforced via the openshell.ai/owner label:
+
+Create Flow:
+  1. Gateway reads Principal::User from OIDC-validated request extensions
+  2. Stamps openshell.ai/owner = identity.subject (Keycloak UUID sub claim)
+  3. Client-supplied openshell.ai/* keys are STRIPPED (anti-spoofing)
+
+List Flow:
+  Gateway ANDs openshell.ai/owner=<caller> into label selector before DB query
+
+Get/Delete/Connect/Exec:
+  After fetch by name/ID, returns PermissionDenied if owner != caller
+
+Admin Bypass:
+  Callers with openshell-admin role skip ownership filter
+
+OIDC Disabled:
+  Ownership skipped for Anonymous principal (backward-compatible)
+
+Label-value charset:
+  K8s rules: alnum, -, _, ., <=63 chars
+  Keycloak sub is UUID (satisfies this)
+  Sanitization helper in auth/ownership.rs for non-UUID deployments
+
+Provider Ownership (v0.0.56-rc.3+):
+  Same owner-label pattern applied to providers
+  Resolution order: user-owned provider > shared (admin-created) provider
+  Name uniqueness scoped to (owner, name)
+
+────────────────────────────────────────────────────────────────────────────────
+4.6 RBAC Authorization Per Tenant
+────────────────────────────────────────────────────────────────────────────────
+
+Kubernetes RBAC (Helm chart: charts/openshell/templates/rbac.yaml):
+
+Gateway ServiceAccount RBAC (namespace-scoped):
+  Role "openshell-gateway" in tenant namespace:
+    agents.x-k8s.io/sandboxes → get, list, watch, create, update, delete
+    core/pods, events, PVCs    → get, list, watch
+    core/secrets               → get, list, watch
+  RoleBinding: binds to openshell-gateway SA in tenant namespace
+
+  CRITICAL: This is a ROLE (not ClusterRole), so the gateway SA has ZERO
+  access to other tenant namespaces. Even if compromised, lateral movement
+  is impossible at the K8s RBAC level.
+
+TokenReview RBAC (cluster-scoped, per-tenant named):
+  ClusterRole "openshell-gateway-tokenreview-<tenant>":
+    authentication.k8s.io/tokenreviews → create
+  ClusterRoleBinding: binds to openshell-gateway SA
+
+Sandbox SA RBAC (OpenShift only):
+  ClusterRoleBinding for privileged SCC:
+    system:openshift:scc:privileged → openshell-sandbox SA in tenant namespace
+
+PoC/Legacy RBAC (deployments/openshell/rbac.yaml):
+  ClusterRole: sandboxes CRD + namespaces (read-only)
+  Namespace-scoped Role in team1: pods (full CRUD), specific secrets, etc.
+  NOTE: This is the older PoC RBAC; the Helm chart version is the current one.
+
+────────────────────────────────────────────────────────────────────────────────
+4.7 Namespace Provisioning & Labeling
+────────────────────────────────────────────────────────────────────────────────
+
+Created by: deploy-tenant.sh Step 0 + Step 1
+
+Namespace Creation:
+  kubectl create namespace "$TENANT"
+
+Namespace Labels:
+  shared-gateway-access=true      # Allows TLSRoute to reference shared Gateway
+  openshell.ai/tenant="$TENANT"   # Tenant identifier label
+
+All Helm chart resources use:
+  namespace: {{ .Values.tenant }}   (from values.yaml / --set tenant=<name>)
+
+Common labels on all chart resources include:
+  openshell.ai/tenant: {{ .Values.tenant }}   (defined in _helpers.tpl)
+
+Agent deployments get:
+  kagenti.io/type=agent           # Label for discovery during cleanup
+
+────────────────────────────────────────────────────────────────────────────────
+4.8 Tenant-Scoped Provider Isolation
+────────────────────────────────────────────────────────────────────────────────
+
+Provider isolation operates at two levels:
+
+Level 1: Namespace isolation
+  Each tenant's gateway has its own SQLite database (PVC-backed via
+  StatefulSet volumeClaimTemplate). Providers stored in the gateway's DB
+  are inherently tenant-scoped.
+
+Level 2: Per-user ownership within tenant
+  When OIDC is enabled, providers are stamped with openshell.ai/owner.
+  User-owned providers are only visible to their owner + admins.
+  Shared (admin-created) providers have no owner label and are visible to all.
+
+  Resolution order when binding a sandbox to a provider by name:
+    1. User's own provider (if exists with that name)
+    2. Shared provider (fallback)
+
+Credentials Driver Configuration:
+  charts/openshell/templates/credentials-configmap.yaml:
+    Per-tenant credentials.yaml with tenant-scoped client_id
+
+  charts/openshell/templates/secrets.yaml:
+    openshell-credentials-secrets: per-tenant credential secrets
+
+────────────────────────────────────────────────────────────────────────────────
+4.9 Cleanup Scripts
+────────────────────────────────────────────────────────────────────────────────
+
+cleanup-tenant.sh (212 lines):
+  File: scripts/openshell/cleanup-tenant.sh
+  Arguments: <tenant> [--delete-namespace] [--dry-run]
+
+  Steps:
+    1. Remove agent deployments (label kagenti.io/type=agent)
+       - Delete policy ConfigMaps, kagenti-skills CM, openshell-supervisor SA
+    2. Remove OpenShift SCCs (ClusterRoleBinding, SCC policies)
+    3. Remove non-Helm resources (openshell-trusted-ca ConfigMap on OCP)
+    4. Helm uninstall (openshell-<tenant>)
+    5. Remove namespace labels (shared-gateway-access, openshell.ai/tenant)
+    6. Optional: Delete namespace (--delete-namespace flag, DESTRUCTIVE)
+
+cleanup-shared.sh (356 lines):
+  File: scripts/openshell/cleanup-shared.sh
+
+  Steps (reverse of deploy-shared.sh):
+    1. Remove kagenti-backend + PostgreSQL
+    2. Remove LiteLLM proxy
+    3. Remove Keycloak realm (openshell)
+    4. Remove cert-manager CA chain
+    5. Remove shared TLS passthrough Gateway
+    6. Revert Istio alpha Gateway API env var
+    7. Remove Gateway API experimental CRDs
+    8. Remove agent-sandbox-controller
+
+cleanup-all.sh (168 lines):
+  File: scripts/openshell/cleanup-all.sh
+  Discovers all tenants via Helm releases or namespace labels.
+  Calls cleanup-tenant.sh for each, then cleanup-shared.sh.
+
+────────────────────────────────────────────────────────────────────────────────
+4.10 CLI Configuration
+────────────────────────────────────────────────────────────────────────────────
+
+File: scripts/openshell/configure-cli.sh (186 lines)
+
+Purpose: Register a deployed gateway with the local openshell CLI.
+
+Flow:
+  1. Auto-detect platform (OCP vs Kind)
+  2. Derive gateway endpoint:
+     Kind: https://openshell-<tenant>.localtest.me:30443
+     OCP:  https://openshell-<tenant>.<apps-domain>
+  3. Derive OIDC issuer URL:
+     Kind: http://keycloak.localtest.me:30080/realms/openshell
+     OCP:  https://keycloak-<keycloak-ns>.<apps-domain>/realms/openshell
+  4. Extract mTLS certificates from K8s secrets:
+     openshell-server-tls → ca.crt
+     openshell-client-tls → tls.crt, tls.key
+     Writes to: ~/.config/openshell/gateways/<name>/mtls/
+  5. Register: openshell gateway add <name> \
+       --url <endpoint> \
+       --issuer <oidc-issuer> \
+       --client-id openshell-cli \
+       --audience <tenant> \
+       --mtls-ca <ca.crt> --mtls-cert <tls.crt> --mtls-key <tls.key>
+  6. Trigger: openshell gateway login (browser PKCE flow)
+
+────────────────────────────────────────────────────────────────────────────────
+4.11 E2E Test Suite
+────────────────────────────────────────────────────────────────────────────────
+
+Test files in kagenti/tests/e2e/openshell/:
+
+conftest.py (1136 lines):
+  Shared fixtures: namespace helpers, port-forward, A2A JSON-RPC helpers,
+  kubectl helpers, agent registry, sandbox helpers, LiteLLM helpers.
+  Key: find_free_port(), kubectl_run(), _port_forward()
+
+test_T4_2_tenant_isolation.py (637 lines):
+  Multi-tenant isolation validation across 3 dimensions:
+
+  TestTenantIsolationAuth (Criterion #6):
+    - test_alice_token_has_team1_audience
+    - test_bob_token_has_team2_audience
+    - test_alice_token_rejected_by_team2_gateway (port-forward + HTTP 401/403)
+    - test_bob_token_rejected_by_team1_gateway
+    - test_tokens_have_different_audiences (no overlap except "account")
+
+  TestTenantIsolationRBAC (Criterion #7):
+    - test_team1_sa_cannot_list_sandboxes_in_team2 (kubectl auth can-i)
+    - test_team2_sa_cannot_list_sandboxes_in_team1
+    - test_team1_sa_cannot_get_pods_in_team2
+    - test_team1_sa_cannot_read_secrets_in_team2
+    - test_team2_sa_cannot_read_secrets_in_team1
+    - test_team1_sa_has_sandbox_access_in_own_namespace
+
+  TestCredentialIsolation (Criterion #8):
+    - test_team1_secrets_not_in_team2 (provider secrets don't leak)
+    - test_credentials_configmap_scoped_to_tenant
+    - test_gateway_env_does_not_leak_other_tenant
+    - test_litellm_proxy_isolated_per_tenant
+
+test_T4_4_per_user_isolation.py (491 lines):
+  Per-user sandbox ownership validation:
+
+  TestOwnershipCreate:
+    - test_create_stamps_owner_label (verifies openshell.ai/owner = JWT sub)
+    - test_client_supplied_owner_stripped (anti-spoofing: server overwrites)
+
+  TestOwnershipList:
+    - test_alice_list_shows_own_sandbox
+    - test_bob_list_excludes_alice_sandbox
+    - test_bob_list_shows_own_sandbox
+
+  TestOwnershipAccessDenied:
+    - test_bob_get_alice_sandbox_denied (403/404)
+    - test_bob_delete_alice_sandbox_denied
+    - test_alice_get_bob_sandbox_denied
+
+  TestOwnershipAdminBypass:
+    - test_admin_list_shows_all_sandboxes
+    - test_admin_get_alice_sandbox
+    - test_admin_delete_bob_sandbox
+
+  GatewayClient class: HTTP wrapper for sandbox API
+    create_sandbox(name, labels) → POST /api/sandboxes
+    list_sandboxes()             → GET /api/sandboxes
+    get_sandbox(name)            → GET /api/sandboxes/{name}
+    delete_sandbox(name)         → DELETE /api/sandboxes/{name}
+
+Test Infrastructure:
+  - Token acquisition via Resource Owner Password Grant (direct access)
+  - JWT payload decoding (base64, no signature verification)
+  - Port-forwarding to gateway services for HTTP testing
+  - Skip conditions: OPENSHELL_OIDC_ENABLED, second tenant deployed
+
+────────────────────────────────────────────────────────────────────────────────
+4.12 CI Orchestration
+────────────────────────────────────────────────────────────────────────────────
+
+File: .github/scripts/local-setup/openshell-full-test.sh (449 lines)
+
+7-Phase Pipeline:
+  Phase 1: Create cluster (Kind or HyperShift)
+  Phase 1.5: Early image pre-pull on OCP
+  Phase 2: Install Kagenti platform (Helm)
+  Phase 3: Build images (build-images.sh)
+  Phase 4: Deploy shared infrastructure (deploy-shared.sh)
+  Phase 5: Deploy tenants
+    - team1 always deployed
+    - team2 optionally deployed (OPENSHELL_DEPLOY_TEAM2 env var)
+  Phase 6: Run E2E tests (pytest with configurable workers)
+  Phase 7: Destroy cluster
+
+CI Workflows:
+  .github/workflows/e2e-openshell-kind.yaml  (Kind-based E2E)
+  .github/workflows/e2e-openshell-hypershift.yaml  (HyperShift-based E2E)
+
+Key CI Environment Variables:
+  OPENSHELL_DEPLOY_TEAM2: deploy second tenant for isolation tests
+  OPENSHELL_LLM_AVAILABLE: whether LLM proxy is reachable
+  OPENSHELL_LLM_MODELS: comma-separated model list
+  OPENSHELL_OIDC_ENABLED: enable/disable OIDC tests
+  OPENSHELL_AGENT_NAMESPACE: namespace for agents (default: team1)
+
+================================================================================
+5. DATA FLOW
+================================================================================
+
+Tenant Deployment Data Flow:
+  1. deploy-tenant.sh receives <tenant> argument
+  2. Detects platform (OCP/Kind) → determines ingress type and OIDC issuer
+  3. Creates K8s namespace → labels with tenant identity
+  4. Invokes Helm with tenant-specific values:
+     tenant → namespace name, audience, driver namespace
+     oidc.issuer → Keycloak URL
+     oidc.audience → tenant name (scopes JWT validation)
+     ingress.host → per-tenant hostname
+  5. Helm chart templates render all resources with tenant namespace
+  6. certgen Job creates TLS secrets (server + client + JWT signing keys)
+  7. StatefulSet creates gateway pod with 3 containers communicating via UDS
+
+Authentication Data Flow:
+  1. User invokes openshell login
+  2. CLI opens browser → Keycloak PKCE Authorization Code flow
+  3. Keycloak issues JWT with:
+     iss: https://keycloak.<domain>/realms/openshell
+     aud: [<tenant>, "account"]  (based on group membership + audience scope)
+     sub: <user-uuid>
+     realm_access.roles: ["openshell-admin" | "openshell-user"]
+  4. CLI stores tokens locally, sends Bearer JWT in gRPC metadata
+  5. Gateway validates: iss matches config, aud contains configured audience
+  6. On per-user operations: extracts sub from validated JWT → owner label
+
+Sandbox Creation Data Flow:
+  1. CLI → Gateway (gRPC CreateSandbox with Bearer JWT)
+  2. Gateway validates JWT (iss, aud, roles)
+  3. Gateway stamps openshell.ai/owner = JWT.sub
+  4. Gateway → Compute Driver (gRPC over UDS)
+  5. Compute Driver creates Sandbox CRD in tenant namespace
+  6. agent-sandbox-controller reconciles → creates Pod + PVC
+  7. Init container copies supervisor binary into sandbox
+  8. Supervisor starts, establishes kernel isolation, runs agent process
+
+================================================================================
+6. STATE MANAGEMENT
+================================================================================
+
+Per-Tenant Persistent State:
+  1. SQLite Database: /data/openshell.db (PVC, 1Gi default)
+     - Sandbox metadata, provider configs, credentials
+     - One DB per gateway instance (tenant isolation)
+  2. Sandbox PVCs: workspace persistence per sandbox pod
+  3. TLS Secrets: openshell-server-tls, openshell-client-tls
+     - cert-manager managed, auto-renewal
+  4. JWT Signing Keys: openshell-gateway-jwt-keys
+     - Ed25519 keypair, generated by certgen hook
+  5. Gateway Secrets: openshell-gateway-secrets
+     - SSH handshake secret (stable across upgrades)
+
+Shared Persistent State:
+  1. Keycloak DB: PostgreSQL in keycloak namespace
+     - Realm config, users, groups, clients, scopes
+  2. cert-manager CA: openshell-ca-secret in cert-manager namespace
+     - ECDSA P-256 CA certificate, 10-year validity
+  3. agent-sandbox-controller: StatefulSet in agent-sandbox-system
+  4. Test user passwords: K8s secrets (openshell-alice-password, etc.)
+
+================================================================================
+7. EXTERNAL DEPENDENCIES
+================================================================================
+
+Kubernetes APIs:
+  - agents.x-k8s.io/v1alpha1 (Sandbox CRD) — kubernetes-sigs/agent-sandbox
+  - gateway.networking.k8s.io/v1 (Gateway) — Gateway API
+  - gateway.networking.k8s.io/v1alpha2 (TLSRoute) — Gateway API experimental
+  - cert-manager.io/v1 (Certificate, ClusterIssuer)
+  - route.openshift.io/v1 (Route) — OpenShift only
+  - security.openshift.io/v1 (SecurityContextConstraints) — OpenShift only
+
+Container Images:
+  ghcr.io/kagenti/openshell/gateway:v0.0.56-rc.5
+  ghcr.io/kagenti/openshell/supervisor:v0.0.56-rc.5
+  ghcr.io/kagenti/openshell-driver-openshift/compute-driver:v0.1.0-rc.7
+  ghcr.io/kagenti/openshell-credentials-keycloak/credentials-driver:main-d7d8306
+  registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.1.0
+
+Services:
+  Keycloak (OIDC provider)
+  cert-manager (TLS certificate lifecycle)
+  Istio (Kind: Gateway API ingress + service mesh)
+  LiteLLM (optional: model proxy)
+
+Libraries/Tools:
+  Helm 3.x (chart deployment)
+  kubectl/oc (cluster operations)
+  jq (JSON processing in shell scripts)
+  Python: pytest, httpx, urllib (E2E tests)
+
+================================================================================
+8. CONFIGURATION OPTIONS & DEFAULTS
+================================================================================
+
+Helm Values (charts/openshell/values.yaml):
+  tenant: ""                          # REQUIRED
+  oidc.enabled: true                  # OIDC auth enabled by default
+  oidc.issuer: ""                     # Set per-deployment
+  oidc.audience: ""                   # Defaults to tenant name
+  ingress.type: "istio"               # "istio" or "route"
+  openshift.enabled: false            # OCP-specific resources
+  gatewayJwt.enabled: true            # JWT token minting
+  gatewayJwt.ttlSecs: 3600            # 1 hour
+  quota.pods: "15"                    # Per-tenant pod limit
+  quota.requestsCpu: "20"             # Per-tenant CPU limit
+  quota.requestsMemory: "40Gi"        # Per-tenant memory limit
+  quota.pvcs: "10"                    # Per-tenant PVC limit
+  persistence.size: "1Gi"             # Gateway DB PVC
+  sandboxImagePullPolicy: "IfNotPresent"
+
+Script Defaults:
+  HELM_RELEASE_PREFIX="openshell"     # Release name prefix
+  KIND_DOMAIN="localtest.me"          # Kind domain
+  KIND_NODEPORT=30443                 # Kind NodePort
+  KEYCLOAK_NS="keycloak"              # Keycloak namespace
+  TIMEOUT=300                         # Rollout timeout (seconds)
+
+Keycloak Defaults:
+  OIDC_REALM="openshell"
+  OIDC_CLIENT_ID="openshell-cli"      # PKCE public client
+  Test user passwords: alice123, bob123, admin123
+
+Environment Variables:
+  OPENSHELL_AGENT_NAMESPACE           # Agent namespace (default: team1)
+  OPENSHELL_SECOND_TENANT             # Second tenant (default: team2)
+  OPENSHELL_OIDC_ENABLED              # Enable/disable OIDC tests
+  OPENSHELL_KEYCLOAK_URL              # Keycloak URL override
+  OPENSHELL_DEPLOY_TEAM2              # Deploy second tenant in CI
+
+================================================================================
+9. ERROR HANDLING PATTERNS
+================================================================================
+
+Shell Scripts:
+  - set -euo pipefail (fail fast on errors)
+  - Idempotent: all scripts safe to re-run
+  - Dry-run mode: --dry-run flag prints commands without executing
+  - Explicit error messages with colored output (RED/GREEN/YELLOW/BLUE)
+  - Timeout-based waits with fallback skip
+  - Platform detection fallbacks (OCP vs Kind)
+
+Helm Chart:
+  - Required value validation: tenant is required (openshell.validateValues)
+  - Conditional rendering: OCP resources only when openshift.enabled=true
+  - Stable secrets: SSH handshake secret preserved across upgrades (lookup)
+
+E2E Tests:
+  - Skip conditions: OIDC disabled, second tenant not deployed
+  - pytest.skip for infrastructure prerequisites (Keycloak, port-forward)
+  - pytest.fail for actual test failures
+  - Cleanup fixtures (autouse) for sandbox creation/deletion
+  - Port-forward retry loops with timeout
+
+Keycloak Operations:
+  - Retry loops for token acquisition
+  - Graceful handling of existing resources (idempotent realm/client creation)
+  - Secret-based credential storage (never hardcoded)
+
+================================================================================
+10. FILE INVENTORY (Complete)
+================================================================================
+
+DEPLOYMENT SCRIPTS (scripts/openshell/):
+  deploy-shared.sh          (1102 lines) Shared infrastructure deployment
+  deploy-tenant.sh          (393 lines)  Per-tenant gateway deployment
+  cleanup-tenant.sh         (212 lines)  Per-tenant cleanup
+  cleanup-shared.sh         (356 lines)  Shared infrastructure cleanup
+  cleanup-all.sh            (168 lines)  Full cleanup orchestrator
+  configure-cli.sh          (186 lines)  CLI registration + cert extraction
+  build-images.sh           (313 lines)  Image building (gateway, drivers)
+  prepull-images.sh         (124 lines)  Image pre-pulling via K8s Jobs
+  teleport-session.sh       (462 lines)  Session teleportation to sandbox
+
+HELM CHART (charts/openshell/):
+  Chart.yaml                (7 lines)    Chart metadata
+  values.yaml               (143 lines)  Default values
+  templates/_helpers.tpl     (75 lines)   Template helpers
+  templates/statefulset.yaml (182 lines)  Gateway StatefulSet (3 containers)
+  templates/service.yaml     (18 lines)   ClusterIP Service
+  templates/serviceaccount.yaml (8 lines) Gateway ServiceAccount
+  templates/rbac.yaml        (89 lines)   RBAC (Role, RoleBinding, TokenReview)
+  templates/gateway-config.yaml (49 lines) Gateway TOML configuration
+  templates/secrets.yaml     (24 lines)   Gateway + credentials secrets
+  templates/certgen.yaml     (108 lines)  TLS cert generation Job (hook)
+  templates/credentials-configmap.yaml (16 lines) Credentials driver config
+  templates/tlsroute.yaml    (23 lines)   Istio TLSRoute (Kind ingress)
+  templates/route.yaml       (23 lines)   OpenShift Route (OCP ingress)
+  templates/resourcequota.yaml (14 lines) Per-tenant resource quota
+  templates/limitrange.yaml  (13 lines)   Default resource requests
+  templates/scc.yaml         (39 lines)   OpenShift SCC
+
+DEPLOYMENT MANIFESTS (deployments/openshell/):
+  agent-sandbox-crd.yaml    (4135 lines) Vendored sandbox controller + CRD
+  gateway.yaml              (106 lines)  PoC gateway StatefulSet
+  namespace.yaml            (12 lines)   openshell-system namespace
+  rbac.yaml                 (87 lines)   PoC RBAC
+  tls-secrets.yaml          (65 lines)   TLS secret placeholders
+  kustomization.yaml        (18 lines)   Kustomize overlay
+
+DEPLOYMENT VALUES:
+  deployments/envs/dev_values_openshell.yaml (108 lines) Dev config
+
+AGENT MANIFESTS (deployments/openshell/agents/):
+  adk-agent-supervised/deployment.yaml, agent.py, Dockerfile, policy-data.yaml, sandbox-policy.rego
+  claude-sdk-agent/deployment.yaml, agent.py, Dockerfile, policy-data.yaml, sandbox-policy.rego
+  nemoclaw-hermes/deployment.yaml, Dockerfile
+  nemoclaw-openclaw/deployment.yaml, Dockerfile
+  weather-agent-supervised/deployment.yaml, Dockerfile, policy-data.yaml, sandbox-policy.rego
+
+E2E TESTS (kagenti/tests/e2e/openshell/):
+  conftest.py               (1136 lines) Shared fixtures + helpers
+  test_T4_2_tenant_isolation.py (637 lines) Multi-tenant isolation tests
+  test_T4_4_per_user_isolation.py (491 lines) Per-user ownership tests
+  test_T1_8_sandbox_auth.py  (363 lines) Sandbox JWT auth bootstrap
+
+CI ORCHESTRATION:
+  .github/scripts/local-setup/openshell-full-test.sh (449 lines)
+  .github/scripts/local-setup/openshell-build-agents.sh (112 lines)
+  .github/workflows/e2e-openshell-kind.yaml
+  .github/workflows/e2e-openshell-hypershift.yaml
+
+BACKEND API (multi-tenancy enforcement):
+  kagenti/backend/app/routers/acp.py (223 lines) ACP WebSocket with JWT audience validation
+  kagenti/backend/app/routers/namespaces.py (35 lines) Namespace listing
+
+AUTH UTILITIES:
+  kagenti/common/keycloak.py  (79 lines)  Keycloak credential reader
+  kagenti/common/config.py    (87 lines)  Environment config helpers
+  kagenti/common/kube.py      (41 lines)  K8s config loader
+  kagenti/auth/shared_utils.py (75 lines) Keycloak client registration
+  kagenti/auth/agent-oauth-secret/agent_oauth_secret.py (578 lines) Multi-namespace secret distribution
+
+DOCUMENTATION:
+  docs/sandbox-guide.md                    User-facing sandbox/multi-tenant guide
+  docs/research/openshell-mvp.md           MVP architecture (gateway-per-tenant)
+  docs/research/openshell-per-user-tenancy.md  Per-user ownership design
+  docs/research/openshell-fork-analysis.md Fork architecture + patches
+  docs/identity-guide.md                   Identity/OIDC/SPIFFE guide
+  docs/api-authentication.md               API auth guide
+
+================================================================================
+END OF CODE TRACE
+================================================================================

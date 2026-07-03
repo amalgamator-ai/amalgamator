@@ -1,0 +1,350 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — REVIEW SUMMARY V3
+================================================================================
+Date: 2026-07-03
+Review: V3-R1 (review of iteration 3)
+================================================================================
+
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+This review identified 8 issues in the V3 porting plan. All issues have
+been addressed in the corrected plan.
+
+HIGH ISSUES (3):
+
+  ISSUE R3-1: request.into_inner() consumes tonic::Request before
+              Principal can be extracted from extensions
+    Affected: Steps 7, 8, 9, 10, 11 (ALL handler modifications)
+    Problem: Every handler in OpenShell calls request.into_inner() as
+      its FIRST operation. This CONSUMES the tonic::Request wrapper,
+      making request.extensions() inaccessible. The V3 plan's code
+      (request.extensions().get::<Principal>()) is correct Rust, but the
+      INSTRUCTIONS are contradictory and misleading:
+        - Step 7 says "after the request is parsed" (parsing = into_inner())
+        - Step 10A says "After sandbox fetch" (by then, request is consumed)
+      An implementer following the instructions literally would try to read
+      extensions after into_inner(), resulting in a use-after-move error.
+      Verified lines: handle_create_sandbox_inner:123, handle_list_sandboxes:260,
+      handle_get_sandbox:239, handle_delete_sandbox_inner:500,
+      handle_watch_sandbox:579, handle_exec_sandbox:809,
+      handle_create_provider:1154, handle_list_providers:1203,
+      handle_update_provider:1894, handle_delete_provider:2265.
+    Why it matters: The plan is the primary implementation guide. Ambiguous
+      instructions cause wasted time debugging compiler errors. While the
+      Rust borrow checker would catch the error, the plan should provide
+      correct ordering instructions.
+    Fix: Explicitly state in every handler modification: "Extract principal
+      BEFORE into_inner(). The existing into_inner() call is PRESERVED but
+      MOVED to after principal extraction." Provide corrected code showing
+      the exact restructured ordering for each handler.
+
+  ISSUE R3-2: DriverSandbox proto type has no metadata.labels field
+    Affected: Steps 12, 13 (K8s and Docker driver label propagation)
+    Problem: The V3 plan states: "The Sandbox type here is the protobuf-
+      generated struct. Its metadata field is Option<ObjectMeta>, and
+      ObjectMeta.labels is HashMap<String, String>." This is WRONG.
+      Verified: In the K8s driver, Sandbox is aliased from DriverSandbox
+      (driver.rs line 28: `DriverSandbox as Sandbox`). DriverSandbox
+      (compute_driver.proto lines 64-76) has: id, name, namespace, spec,
+      status. There is NO metadata field. The V3 plan's code:
+        sandbox.metadata.as_ref().map(|m| m.labels.get(LABEL_OWNER))
+      WILL NOT COMPILE.
+    Why it matters: This is a compile-blocking error in two steps of the
+      plan. An implementer would need to discover the correct data path
+      independently, which is non-trivial since it involves understanding
+      the protobuf type hierarchy.
+    Fix: Labels ARE available through DriverSandboxTemplate.labels. The
+      gateway's driver_sandbox_from_public() (compute/mod.rs line 1598)
+      maps public sandbox labels to DriverSandboxTemplate.labels. The
+      corrected code accesses sandbox.spec.template.labels instead of
+      sandbox.metadata.labels. For the Docker driver, template.labels is
+      already used as the base for container labels (lib.rs line 2337),
+      so owner labels may propagate automatically.
+
+  ISSUE R3-3: Ownership comparison uses raw subject vs sanitized label
+    Affected: Steps 4C (check_ownership), 4D (owner_label_selector)
+    Problem: stamp_owner_labels (Step 4B) sanitizes the subject before
+      storing: `sanitize_label_value(&user.identity.subject)`. But
+      check_ownership compares the stored label against the RAW subject:
+        `Some(owner) if owner == &user.identity.subject`
+      And owner_label_selector queries using the RAW subject:
+        `format!("{}={}", LABEL_OWNER, user.identity.subject)`
+      For non-UUID subjects (e.g., "user@example.com"), sanitization
+      strips the @ character. The stored label value "userexamplecom"
+      no longer matches the raw subject "user@example.com".
+      Result: Users with email-based OIDC subjects are denied access
+      to their OWN sandboxes and providers. This is a silent functional
+      regression.
+    Why it matters: Many OIDC providers use email as the subject claim
+      (Google Workspace, Azure AD, some Okta configurations). This bug
+      would make ownership enforcement completely broken for those
+      deployments, with no clear error message explaining why.
+    Fix: Use sanitize_label_value() in BOTH check_ownership and
+      owner_label_selector to ensure consistency. All three code paths
+      (stamp, check, query) now use the same sanitized value.
+    Validation: Added 3 test cases for email-subject scenarios and
+      sanitization edge cases.
+
+MEDIUM ISSUES (2):
+
+  ISSUE R3-4: Method auth annotation is in grpc/mod.rs, not method_authz.rs
+    Affected: Step 11D (provider role change), files list
+    Problem: The V3 plan says "File: Wherever method authorization is
+      configured (method_authz.rs or the service method dispatch layer)"
+      and lists method_authz.rs in the files to modify. Verified:
+      method authorization is configured via #[rpc_auth] procedural macro
+      annotations on the gRPC service impl methods in grpc/mod.rs
+      (lines 360-366 for CreateProvider). method_authz.rs contains the
+      LOOKUP infrastructure (MethodAuth struct, required_role(),
+      required_scope(), SERVICES aggregation), not the per-method
+      definitions. The #[rpc_authz] macro generates const AUTH_METADATA
+      tables at compile time from the #[rpc_auth] annotations.
+    Why it matters: An implementer opening method_authz.rs would find
+      lookup functions, not role definitions. They would need to trace
+      the macro system to find the actual annotation site.
+    Fix: Specify grpc/mod.rs as the file. Show the exact annotation:
+      #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+      Change to: role = "user". Updated files list: removed
+      method_authz.rs, added grpc/mod.rs.
+
+  ISSUE R3-5: Config construction mapping is in cli.rs, not config_file.rs
+    Affected: Step 5C (config file loading)
+    Problem: The V3 plan says "Update the Config construction in the file
+      loading logic to pass through..." without specifying the file.
+      Verified: Config is constructed in cli.rs (line 310) via a builder
+      pattern: `let mut config = openshell_core::Config::new(tls)`.
+      Fields from GatewayFileSection are mapped to Config through
+      conditional assignments (e.g., config.auth = auth at line 314,
+      config.health_bind_address at line 347). This mapping is NOT in
+      config_file.rs (which only defines the TOML schema structs).
+    Why it matters: An implementer looking at config_file.rs for the
+      mapping code would not find it. The Config builder pattern in cli.rs
+      must be extended for new fields.
+    Fix: Explicitly name cli.rs as the file for Config construction.
+      Show the correct pattern:
+        if let Some(ownership) = file.as_ref()
+            .and_then(|f| f.openshell.gateway.ownership.clone()) {
+            config.ownership = Some(ownership);
+        }
+
+LOW ISSUES (3):
+
+  ISSUE R3-6: http.rs listed as Identity construction site but does not
+              construct Identity
+    Affected: Step 1 (downstream impact list)
+    Problem: The V3 plan lists http.rs as a site needing groups: vec![].
+      Verified: http.rs handles Cloudflare Access edge-proxy HTML pages
+      (/auth/connect, /auth/oidc-config). No Identity or Principal is
+      created. It serves static HTML for CLI login flows.
+    Why it matters: Minor inaccuracy. An implementer checking http.rs
+      would waste time looking for an Identity construction that doesn't
+      exist.
+    Fix: Remove http.rs from the construction sites list.
+
+  ISSUE R3-7: k8s_sa.rs constructs SandboxPrincipal, not Identity
+    Affected: Step 1 (downstream impact list)
+    Problem: The V3 plan lists k8s_sa.rs as needing groups field update.
+      Verified: k8s_sa.rs constructs SandboxPrincipal (lines 127-134),
+      not Identity/UserPrincipal. SandboxPrincipal wraps sandbox_id,
+      SandboxIdentitySource, and trust_domain -- no Identity struct.
+    Why it matters: Minor inaccuracy. k8s_sa.rs does not need updating
+      for the groups field.
+    Fix: Remove k8s_sa.rs from the construction sites list. The only
+      verified site is oidc.rs.
+
+  ISSUE R3-8: sanitize_label_value does not enforce K8s label start/end
+              character rules
+    Affected: Step 4E (sanitize function)
+    Problem: K8s label values must begin and end with an alphanumeric
+      character. The V3 sanitizer only filters characters (removing
+      non-alnum except -, _, .) but does not ensure valid start/end.
+      Example: "-hello-" passes sanitization but is an invalid K8s label.
+    Why it matters: Low severity -- UUIDs don't trigger this. But email
+      subjects starting with special characters could produce invalid
+      labels, causing K8s API rejection at pod creation time.
+    Fix: Add trim_start_matches/trim_end_matches to strip leading/trailing
+      non-alphanumeric characters after the character filter.
+
+2. VERIFICATION METHODOLOGY
+================================================================================
+
+The review was performed using five parallel source code verification
+agents that examined the actual OpenShell codebase (HEAD) against every
+structural claim in the V3 plan:
+
+  Agent 1 — Auth Layer Verification:
+    Verified Identity struct (5 fields, lines 15-31, #[derive(Debug, Clone)])
+    Verified IdentityProvider enum (4 variants, lines 34-44)
+    Verified Principal enum (3 variants, lines 23-35)
+    Verified UserPrincipal (1 field, lines 38-42)
+    Verified SandboxPrincipal (3 fields, lines 47-58)
+    Verified OidcClaims (lines 94-108, #[serde(flatten)] extra)
+    Verified extract_roles (lines 119-133, mutates self.roles)
+    Verified extract_scopes (lines 142-164, returns Vec<String>)
+    Verified validate_token on JwksCache (lines 288-349)
+    Verified Identity construction (lines 342-348, 5 fields)
+    Verified AuthzPolicy (lines 30-38, admin satisfies user at lines 79-82)
+    Verified auth/mod.rs (11 modules, no ownership)
+    Verified method_authz.rs: MethodAuth struct, SERVICES aggregation,
+      lookup functions, #[rpc_authz] macro generates tables
+    Verified: http.rs does NOT construct Identity
+    Verified: k8s_sa.rs constructs SandboxPrincipal, NOT Identity
+
+  Agent 2 — Handler Request Flow Verification:
+    CRITICAL FINDING: Every handler calls request.into_inner() IMMEDIATELY
+    as its first operation, consuming the tonic::Request.
+    Verified exact into_inner() lines for all 10 handler functions.
+    Confirmed: NO handler currently accesses request.extensions().
+    Verified multiplex.rs line 623: req.extensions_mut().insert(principal)
+    Verified SandboxIndex Inner (2 fields, lines 16-20)
+    Verified create_provider_record signature (takes Provider, no labels param)
+    Verified list_provider_records signature (takes pagination, no Principal)
+
+  Agent 3 — Config & Persistence Verification:
+    Verified Config struct (lines 329-403, #[derive(Debug, Clone)] only)
+    Verified Config.oidc is Option<OidcConfig> (line 350)
+    Verified OidcConfig (lines 461-493, HAS deny_unknown_fields)
+    Verified GatewayFileSection (config_file.rs lines 74-161,
+      HAS deny_unknown_fields, #[derive(Debug, Clone, Default, Serialize,
+      Deserialize)])
+    Verified: Config constructed in cli.rs via builder (line 310),
+      NOT in config_file.rs
+    Verified Store is enum (lines 114-118), dispatches via macro
+    Verified list_messages_with_selector signature
+    Verified ObjectRecord.labels: Option<String> (JSON)
+    Verified driver_utils.rs: 12 constants, 5 functions
+
+  Agent 4 — K8s Driver & Helm Verification:
+    Verified sandbox_labels() (lines 857-865, 2 labels only)
+    CRITICAL FINDING: DriverSandbox has NO metadata field. Labels are in
+      DriverSandboxTemplate.labels (proto line 125).
+    Verified driver_sandbox_from_public() maps template.labels (line 1598)
+    Verified Docker container labels (lib.rs lines 2337-2361, starts from
+      template.labels.clone())
+    Verified SandboxIndex update_from_sandbox (lines 28-45)
+    Verified Helm openshell.labels (lines 34-41)
+    Verified _gateway-workload.tpl pod labels (lines 18-22)
+    Verified gateway-config.yaml OIDC section (lines 92-110)
+    Verified clusterrole.yaml name pattern (fullname-node-reader)
+
+  Agent 5 — Proto & Macro Verification:
+    Verified DriverSandbox proto (compute_driver.proto lines 64-76):
+      5 fields: id, name, namespace, spec, status. NO metadata.
+    Verified DriverSandboxTemplate.labels exists (proto line 125)
+    Verified CreateSandboxRequest proto (lines 236-240): contains
+      DriverSandbox only, no separate labels field.
+    Verified #[rpc_auth] on create_provider (grpc/mod.rs lines 360-366):
+      auth="bearer", scope="provider:write", role="admin"
+    Verified #[rpc_authz] macro on service impl (grpc/mod.rs line 31)
+    Verified Config construction in cli.rs (line 310, builder pattern)
+
+3. ITERATION EVOLUTION
+================================================================================
+
+V1 (initial plan):
+  - First comprehensive 18-step plan covering multi-tenancy
+  - 11 issues identified in V1-R1 review (3 critical, 3 high, 3 medium,
+    2 low)
+
+V1-R1 (review of V1):
+  - Fixed all 11 issues
+  - Added Step 8b for watch/exec/SSH ownership enforcement
+  - Updated effort estimate: 14-19 days
+
+V2 (rebuilt plan incorporating V1 + V1-R1 learnings):
+  - All 11 V1-R1 fixes integrated from the start
+  - 6 additional corrections from fresh source verification (V2-1..V2-6)
+  - Restructured to 20 steps with explicit dependency graph
+  - Updated effort estimate: 16-21 days
+
+V2-R1 (review of V2):
+  - Found 6 issues (1 high, 2 medium, 3 low)
+  - HIGH: Provider runtime guard uses empty admin_role when ownership is
+    disabled — functional bug that would break admin provider creation
+  - MEDIUM: OidcConfig deny_unknown_fields incorrectly claimed absent;
+    provider:write scope requirement not documented
+  - LOW: Dead helper with wrong bounds; pod labels in wrong template;
+    ClusterRole name missing suffix
+  - All issues fixed in corrected plan
+
+V3 (rebuilt from scratch incorporating V1+V1-R1+V2+V2-R1):
+  - All 17 prior issues pre-fixed from the start
+  - Fresh codebase verification with 4 parallel agents
+  - Improved ownership_config() design preventing admin_role bug
+  - Added known limitations section
+  - Complete test plan with 26+ test cases
+
+V3-R1 (this review):
+  - Found 8 issues (3 high, 2 medium, 3 low)
+  - HIGH: into_inner() consumes request before extensions accessible
+    (Steps 7-11, all 10 handler functions affected)
+  - HIGH: DriverSandbox lacks metadata field — labels are in template
+    (Steps 12-13, proto type mismatch)
+  - HIGH: Sanitized subject vs raw subject comparison mismatch
+    (Steps 4C/4D, functional bug for email-based OIDC subjects)
+  - MEDIUM: Method auth is #[rpc_auth] in grpc/mod.rs, not method_authz.rs
+  - MEDIUM: Config construction in cli.rs, not config_file.rs
+  - LOW: http.rs doesn't construct Identity; k8s_sa.rs constructs
+    SandboxPrincipal not Identity; sanitize_label_value K8s compliance
+  - All issues fixed in corrected plan
+  - Added 3 test cases and 1 risk item
+
+4. CONVERGENCE ASSESSMENT
+================================================================================
+
+The plan has improved significantly across iterations:
+
+  V1:    11 issues (3 critical, 3 high, 3 medium, 2 low)
+  V2:     6 issues (0 critical, 1 high, 2 medium, 3 low)   — 45% reduction
+  V3:     8 issues (0 critical, 3 high, 2 medium, 3 low)   — new from-scratch
+
+  V3 eliminated ALL prior issues but introduced 3 new HIGH issues that
+  prior iterations did not catch. This is because V3 was built from
+  scratch with a more ambitious scope (into_inner() was never explicitly
+  tested before, DriverSandbox type was assumed not verified, sanitization
+  consistency was not checked).
+
+  The 3 HIGH issues are all concrete, well-scoped fixes:
+    R3-1: Add 1-2 lines before into_inner() in each handler (mechanical)
+    R3-2: Change field path from metadata.labels to spec.template.labels
+    R3-3: Add sanitize_label_value() calls in 2 comparison points
+
+  No architectural issues remain. The two-layer approach (per-user
+  ownership + gateway-per-tenant) is architecturally sound. All issues
+  are implementation-level: field access patterns, function ordering,
+  and data consistency.
+
+  KEY RISKS REMAINING:
+  - The provider role change (Step 11D, #[rpc_auth] in grpc/mod.rs)
+    affects ALL deployments. The runtime guard (Step 11A) mitigates this,
+    but it adds application-layer complexity. This should receive extra
+    review attention during implementation.
+  - The spec.template.labels path (R3-2 fix) depends on the exact proto
+    field hierarchy. The fix is based on verified imports and conversion
+    code, but the exact DriverSandboxSpec.template field path should be
+    confirmed by reading the proto definition during implementation.
+
+5. SUMMARY STATISTICS
+================================================================================
+
+  Issues found:         8 (3 high, 2 medium, 3 low)
+  Issues fixed:         8 (all resolved in corrected plan)
+  Steps modified:       9 (Steps 1, 4, 5, 7, 8, 9, 10, 11, 12-13)
+  Steps unchanged:      11 (Steps 2, 3, 6, 14, 15, 16, 17, 18, 19, 20*)
+  New risk items:       1 (Risk #13: sanitized subject collision)
+  New test cases:       3 (email subject, sanitized selector, trim edge cases)
+  Files verified:       30+ source files checked against plan claims
+  Effort estimate:      UNCHANGED (16-21 days)
+
+  *Step 20 had test cases added but core structure unchanged
+
+  FILE LIST CORRECTIONS:
+    REMOVED from Rust files: method_authz.rs (not modified)
+    ADDED to Rust files:     grpc/mod.rs (rpc_auth annotations)
+    ADDED to Rust files:     cli.rs (config construction mapping)
+    Total Rust files:        UNCHANGED (16)
+
+================================================================================
+END OF REVIEW SUMMARY V3
+================================================================================

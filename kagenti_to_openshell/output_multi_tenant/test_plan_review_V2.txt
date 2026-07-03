@@ -1,0 +1,854 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — REVIEWED TEST PLAN V2
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Source: Kagenti (Python/Shell/YAML)
+Target: OpenShell (Rust)
+Port Plan: code_port_plan_review_V4.txt (20 steps)
+Review: V2-R1 (review of iteration 2)
+Date: 2026-07-03
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Issues Found and Corrections Applied
+2. Corrected Sections (only changed sections reproduced)
+3. Unchanged Sections (referenced by number)
+
+================================================================================
+1. ISSUES FOUND AND CORRECTIONS APPLIED
+================================================================================
+
+ISSUE R2-1 (HIGH): Provider handler tests call handle_create_provider which
+  does request.into_inner() before principal extraction is possible
+
+  PROBLEM: Section 10.1 tests call handle_create_provider() directly, passing
+  a tonic::Request with Principal in extensions. But the port plan modifies
+  handle_create_provider to extract the principal BEFORE request.into_inner()
+  (line 1154). The test plan's request_with_principal() helper attaches a
+  Principal to Request extensions, which is the correct approach.
+
+  HOWEVER: The current handle_create_provider() at line 1154 calls
+  request.into_inner() IMMEDIATELY, consuming the Request. The port plan
+  must insert principal extraction BEFORE this line. The test plan assumes
+  this change is made but does not verify it directly.
+
+  The problem is that the test `create_provider_runtime_guard_blocks_user_
+  when_disabled` (Section 10.1) describes a "runtime guard" inside the
+  handler, but the PORT PLAN (Step 11E) says: "when ownership is disabled,
+  check that the caller has admin role." This guard needs the Principal,
+  which means handle_create_provider MUST be modified to extract Principal
+  from extensions before into_inner(). The V2 test plan correctly tests this
+  behavior, but it should explicitly note that handle_create_provider itself
+  is being modified (not just create_provider_record).
+
+  IMPACT: The test descriptions are correct in what they verify. The issue
+  is that Section 10 doesn't document the handle_create_provider
+  modification as clearly as Section 9 does for sandbox. This is a
+  documentation clarity issue, not a test correctness issue.
+
+  FIX: Added explicit note to Section 10 header documenting that
+  handle_create_provider is modified to extract Principal before
+  into_inner(), matching the sandbox pattern.
+
+------------------------------------------------------------------------
+
+ISSUE R2-2 (HIGH): Section 9.1 test create_sandbox_principal_extracted_
+  before_into_inner is redundant with create_sandbox_stamps_owner_label
+
+  PROBLEM: The test `create_sandbox_principal_extracted_before_into_inner`
+  (Section 9.1, last test) verifies that principal is extracted before
+  into_inner() by checking that the owner label is set. But this is
+  EXACTLY what `create_sandbox_stamps_owner_label` already verifies.
+  If the principal were not extracted before into_inner(), the owner label
+  would not be set, and the first test would already fail.
+
+  The test name suggests it's testing something special about ordering,
+  but the verification (checking owner label exists) is identical to the
+  first test. There is no way to independently verify "extraction order"
+  from a black-box perspective — the only observable effect IS the owner
+  label being stamped.
+
+  IMPACT: Redundant test wastes test-writing effort and could mislead
+  implementers into thinking there's something additional to verify.
+
+  FIX: Removed. The test's intent is already covered by
+  create_sandbox_stamps_owner_label. The extraction ordering is a code
+  structure concern verified by code review, not by a separate test.
+
+------------------------------------------------------------------------
+
+ISSUE R2-3 (MEDIUM): Section 9.2 test list_sandboxes_anonymous_sees_all
+  has an impossible setup
+
+  PROBLEM: The test says:
+    Setup: test_server_state_with_ownership(true, None)
+    Action: Create sandbox (no principal), list as Anonymous
+    Verify: Returns all sandboxes (no filtering for anonymous)
+
+  But "Create sandbox (no principal)" is ambiguous. In the CURRENT code,
+  handle_create_sandbox_inner calls request.into_inner() immediately and
+  never checks a principal. But with the port plan's changes, creating a
+  sandbox as Anonymous would result in NO owner label being stamped (per
+  Section 9.1 test create_sandbox_no_owner_for_anonymous). Then listing
+  as Anonymous would see all sandboxes.
+
+  The actual issue: creating a sandbox with Principal::Anonymous when
+  ownership is ENABLED means the sandbox has no owner label. Then any
+  user listing would not see it (because the label selector wouldn't
+  match), but admin and anonymous would see it. This is actually a
+  valid test scenario.
+
+  HOWEVER, the setup needs clarification: "Create sandbox (no principal)"
+  should be "Create sandbox with Principal::Anonymous". The sandbox will
+  have no owner label. Then when anonymous lists, since ownership
+  enforcement skips for anonymous, all sandboxes are returned.
+
+  FIX: Clarified the test setup to use Principal::Anonymous explicitly
+  for the create step. Added note about what "no principal" means in
+  context.
+
+------------------------------------------------------------------------
+
+ISSUE R2-4 (MEDIUM): Section 10.3 shared provider tests assume admin
+  creates provider without owner label, but the port plan stamps owner
+  on all providers
+
+  PROBLEM: Section 10.2 test list_providers_includes_shared_providers says:
+    "Admin creates provider-shared (no owner label, or with allow_unowned)"
+
+  And Section 10.3 test get_shared_provider_allowed_for_any_user says:
+    "Provider with no owner label (admin-created shared)"
+
+  But the port plan Step 11A stamps owner labels on ALL providers created
+  when ownership is enabled, including admin-created ones. An admin user
+  creating a provider would get openshell.ai/owner = admin-uuid stamped.
+
+  For a provider to be "shared" (no owner label), it must be created
+  BEFORE ownership was enabled, or the admin must have a way to create
+  without owner stamping. The port plan doesn't define a "create shared
+  provider" mechanism — it just says that providers without owner labels
+  are treated as shared (allow_unowned=true).
+
+  REAL SCENARIOS for shared providers:
+    a) Provider created before ownership was enabled (migration)
+    b) Provider created by admin with ownership disabled in config
+
+  The tests should use one of these scenarios, not assume admin creates
+  a provider without owner label when ownership is enabled.
+
+  FIX: Corrected shared provider test setups to create the shared provider
+  via a ServerState with ownership DISABLED (scenario b), then switch to
+  an ownership-enabled ServerState for the user's operations. Since both
+  states share the same Store, the provider persists across config changes.
+
+  ALTERNATIVE SIMPLER FIX: Use a single ServerState and insert the shared
+  provider directly into the store with no owner label, bypassing the
+  handler. This is more realistic (simulates a pre-existing provider
+  from before ownership was enabled).
+
+  Applied the simpler fix: shared provider tests insert directly into
+  the store using store.put_if() with manually constructed protobuf,
+  bypassing the handler (which would stamp an owner label).
+
+------------------------------------------------------------------------
+
+ISSUE R2-5 (MEDIUM): Section 11 tests create sandboxes via
+  ComputeRuntime.create_sandbox() but this is NOT the handler path
+
+  PROBLEM: Section 11.1 says:
+    "Create sandbox via ComputeRuntime.create_sandbox() with
+    metadata.labels = {"openshell.ai/owner": "user-1"}"
+
+  The compute/mod.rs create_sandbox() function at line 490-501 takes a
+  Sandbox proto and a sandbox_token. It does NOT accept labels separately.
+  The labels are embedded in the Sandbox proto's metadata.labels field.
+  The compute layer then calls store.put_if() with the labels.
+
+  The R4-8 fix changes this put_if call from labels: None to
+  labels: labels_json (serialized from metadata.labels). So the test
+  should verify that after calling create_sandbox() with a Sandbox that
+  has metadata.labels set, the labels end up in the DB labels column.
+
+  But create_sandbox() is a method on ComputeRuntime, which is a struct
+  wrapping the store and driver. In tests, this is created via
+  new_test_runtime(store). The test would need to:
+    1. Create a ComputeRuntime from a store
+    2. Construct a Sandbox proto with metadata.labels
+    3. Call compute.create_sandbox(sandbox, None)
+    4. Query the store directly to verify labels column
+
+  This is actually correct as described, but the test must construct the
+  full Sandbox proto correctly. The description "Create sandbox via
+  ComputeRuntime.create_sandbox()" is slightly misleading because it's
+  not a simple function — it involves the full compute pipeline including
+  driver validation.
+
+  With NoopTestDriver, the create_sandbox call may fail because the
+  driver's ValidateSandboxCreate returns an error by default (since the
+  driver returns not_found/unimplemented for most operations).
+
+  FIX: Changed Section 11 tests to use store.put_if() directly instead
+  of going through the compute runtime. This is what the R4-8 fix
+  actually changes — the labels parameter in the put_if call. Testing
+  put_if directly is more targeted and avoids NoopTestDriver complications.
+
+  For the roundtrip tests (11.2), using store.put_if() + list_with_selector
+  directly tests the persistence layer without compute runtime involvement,
+  which is the actual path being modified.
+
+------------------------------------------------------------------------
+
+ISSUE R2-6 (MEDIUM): Section 16 wiremock test infrastructure uses rcgen
+  for JWT key generation, but rcgen generates X.509 certificates, not
+  raw RSA key pairs for JWT signing
+
+  PROBLEM: Section 16 says:
+    "fn create_test_jwk_pair() -> (EncodingKey, DecodingKey, Jwk) {
+        // Generate RSA key pair using rcgen (already a dev-dependency)"
+
+  rcgen is a certificate generation library. It generates X.509
+  certificates and RSA/ECDSA private keys. For JWT testing, what's needed
+  is:
+    1. An RSA private key (for signing JWTs with RS256)
+    2. The corresponding public key in JWK format (for the JWKS endpoint)
+    3. An EncodingKey (from jsonwebtoken crate) for signing
+    4. A DecodingKey (from jsonwebtoken crate) for verification
+
+  rcgen CAN generate RSA keys, but the typical pattern is:
+    - Use rcgen to create a key pair
+    - Extract the private key as DER/PEM
+    - Use jsonwebtoken's EncodingKey::from_rsa_pem() or from_rsa_der()
+    - Construct the JWK manually from the public key components
+
+  The test infrastructure description is correct in concept but unclear
+  on the specific library interactions. The jsonwebtoken crate (already
+  in dependencies) has the actual EncodingKey/DecodingKey types.
+
+  FIX: Clarified that rcgen provides key generation and jsonwebtoken
+  provides EncodingKey/DecodingKey. Added more precise pseudocode for
+  the key pair creation. Also noted that the OpenShell codebase already
+  has rcgen usage in tests (tls_test_utils.rs) which demonstrates the
+  key generation pattern.
+
+------------------------------------------------------------------------
+
+ISSUE R2-7 (MEDIUM): Section 16 wiremock OIDC tests mock the
+  .well-known/openid-configuration endpoint, but JwksCache in
+  OpenShell does NOT fetch the OIDC discovery document
+
+  PROBLEM: Section 16 mocks:
+    Mock::given(method("GET"))
+        .and(path("/.well-known/openid-configuration"))
+        .respond_with(...)
+
+  But JwksCache at oidc.rs does NOT fetch the OIDC discovery document.
+  It uses the issuer URL directly to construct the JWKS URL. Looking at
+  the actual JwksCache implementation:
+    - JwksCache::new() takes an OidcConfig
+    - refresh_keys() fetches keys from {issuer}/protocol/openid-connect/certs
+      (hardcoded Keycloak path, not from discovery)
+    - OR it constructs the JWKS URL from the issuer
+
+  The mock for .well-known/openid-configuration is unnecessary. Only
+  the JWKS endpoint (/protocol/openid-connect/certs or similar) needs
+  to be mocked.
+
+  VERIFICATION: In oidc.rs, the JwksCache constructs JWKS URL from
+  config.issuer + a path. The exact path depends on the implementation,
+  but the test must match it.
+
+  FIX: Removed the .well-known/openid-configuration mock. Only the JWKS
+  endpoint needs to be mocked. Added a note to verify the exact JWKS URL
+  construction from JwksCache before implementing.
+
+------------------------------------------------------------------------
+
+ISSUE R2-8 (LOW): Section 5.1 sanitize_email_replaces_at_and_dots says
+  "alice@example.com" -> "alice_example.com" but @ and dots are different
+
+  PROBLEM: The test says:
+    Input: "alice@example.com"
+    Expect: "alice_example.com" or equivalent valid label
+
+  But K8s label values DO allow dots (.). Only @ is invalid. So the
+  expected output should be "alice_example.com" (only @ replaced), not
+  both @ and dots. The test description says "replaces_at_and_dots" but
+  dots are valid in K8s labels.
+
+  K8s label value regex: [a-z0-9A-Z._-]{0,63}
+  Valid chars: alphanumeric, dot, underscore, hyphen
+  Invalid: @, /, :, space, etc.
+
+  FIX: Corrected test name and expectation. Only @ is replaced, dots
+  are preserved. Test renamed to sanitize_email_replaces_at_sign.
+
+------------------------------------------------------------------------
+
+ISSUE R2-9 (LOW): Section 18.2 concurrent sandbox creation test is
+  not actually testing concurrency safety of ownership logic
+
+  PROBLEM: Section 18.2 says:
+    "stamp_owner_labels is stateless (pure function), but the handler's
+    Principal extraction + into_inner sequence could theoretically race"
+
+  stamp_owner_labels is a pure function that takes inputs and returns
+  outputs. It cannot race. The handler's Principal extraction +
+  into_inner sequence is per-request and cannot race with other requests
+  either (each request has its own tonic::Request object).
+
+  The only real concurrency concern is:
+    1. Two users creating sandboxes with the same name (already tested
+       by name_collision_across_owners_returns_error in Section 15.2)
+    2. Database-level concurrency for label selector queries (handled
+       by SQLite/Postgres transaction isolation)
+
+  The concurrent_sandbox_creation_by_different_users test is testing
+  something that fundamentally cannot race in Rust's ownership model.
+  The concurrent_list_during_creates test is testing SQLite's ACID
+  properties, not ownership logic.
+
+  These tests are harmless but provide no actual safety guarantees
+  beyond what the type system and database already provide.
+
+  FIX: Reclassified from "Concurrency Safety Tests" to "Stress Tests"
+  with updated descriptions. The tests are still valuable for catching
+  unexpected panics under load, but they don't test concurrency safety
+  specifically.
+
+------------------------------------------------------------------------
+
+ISSUE R2-10 (LOW): Test count arithmetic doesn't add up to ~150
+
+  PROBLEM: The traceability matrix (Section 21) claims ~150 total tests,
+  but adding up the "# Tests" column:
+    4+14+4+30+12+5+14+6+8+7+19+4+2+3+4+2+4+2+0+8+4+3+6 = 159
+
+  Also, Section 9 claims ~32 tests but enumerated tests are:
+    9.1: 8 tests (but one is removed per R2-2, so 7)
+    9.2: 6 tests
+    9.3: 5 tests
+    9.4: 3 tests
+    9.5: 7 tests
+    Total: 28 (not 32)
+
+  Section 5 claims ~30 tests:
+    5.1: 10 tests
+    5.2: 10 tests
+    5.3: 11 tests
+    5.4: 5 tests
+    Total: 36 (not 30)
+
+  FIX: Corrected all test counts in the traceability matrix.
+  Actual totals after R2-2 correction: ~153 tests.
+
+------------------------------------------------------------------------
+
+ISSUE R2-11 (LOW): Section 7.3 CLI argument tests may not be
+  implementable as described
+
+  PROBLEM: Section 7.3 proposes tests like:
+    "ownership_enabled_from_cli_flag"
+    "cli_flags_override_toml_config"
+    "env_var_sets_ownership_enabled"
+
+  But OpenShell's Config is populated through config_file.rs
+  (GatewayFileSection -> Config mapping), not through clap argument
+  parsing directly. The CLI argument parsing happens in cli.rs, which
+  constructs a Config. Testing CLI flag behavior requires either:
+    a) Calling the CLI argument parser, or
+    b) Testing the GatewayFileSection -> Config mapping with TOML
+       that includes the new fields
+
+  The tests as described assume Config::new() can take CLI args directly,
+  but Config::new() only takes tls: Option<TlsConfig>. The actual
+  config merging happens in GatewayConfigFile parsing.
+
+  FIX: Reclassified Section 7.3 tests. The CLI/env tests are better
+  suited as E2E or integration tests (run the binary with args). The
+  TOML->Config mapping is already tested in 7.1/7.2. Added note that
+  CLI argument mapping is tested implicitly by existing GatewayFileSection
+  parsing tests.
+
+================================================================================
+2. CORRECTED SECTIONS
+================================================================================
+
+Only sections with changes are reproduced below. Unchanged sections
+from V2 are referenced by section number.
+
+------------------------------------------------------------------------
+SECTION 2: TESTING CONVENTIONS & INFRASTRUCTURE
+------------------------------------------------------------------------
+
+  [Sections 2.1-2.4 UNCHANGED FROM V2]
+
+------------------------------------------------------------------------
+SECTION 5.1: sanitize_label_value() Tests (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected test for email sanitization (Issue R2-8)
+
+  TEST: sanitize_email_replaces_at_sign                    (CORRECTED)
+    Input:  "alice@example.com"
+    Expect: "alice_example.com" (@ replaced with _, dots preserved)
+    Why:    @ is invalid in K8s labels, but dots are valid.
+            K8s label regex: [a-z0-9A-Z._-]{0,63}
+
+  [All other 5.1 tests UNCHANGED FROM V2]
+
+------------------------------------------------------------------------
+SECTION 7.3: CLI Argument Mapping (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Reclassified CLI tests (Issue R2-11)
+
+  NOTE: Config::new() takes only tls: Option<TlsConfig>. It does not
+  accept CLI arguments directly. The ownership and tenant_id fields
+  are populated through GatewayFileSection TOML parsing, which is
+  already tested in Sections 7.1 and 7.2.
+
+  The following CLI-specific behaviors are tested through the
+  GatewayConfigFile -> Config mapping:
+
+  TEST: ownership_enabled_from_config_file_section         (RENAMED)
+    Setup:  GatewayFileSection with ownership.enabled = true
+    Action: Convert to Config via the standard config mapping
+    Expect: config.ownership == Some(OwnershipConfig { enabled: true })
+    Why:    Config file section maps to Config fields.
+
+  TEST: tenant_id_from_config_file_section                 (RENAMED)
+    Setup:  GatewayFileSection with tenant_id = "team1"
+    Action: Convert to Config
+    Expect: config.tenant_id == Some("team1")
+    Why:    Config file section maps to Config fields.
+
+  REMOVED: cli_flags_override_toml_config
+    Reason: Config precedence (CLI > file > defaults) is an integration
+            concern tested by running the actual binary. Not suitable
+            for unit tests within config.rs.
+
+  REMOVED: env_var_sets_ownership_enabled
+    Reason: Environment variable handling is in cli.rs, not config.rs.
+            Testing it requires process-level integration testing.
+
+  CORRECTED TOTAL SECTION 7: 10 tests (was 12, removed 2 CLI-specific)
+
+------------------------------------------------------------------------
+SECTION 9.1: Sandbox Create — Owner Label Stamping (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Removed redundant test (Issue R2-2)
+
+  [Tests create_sandbox_stamps_owner_label through
+  create_sandbox_no_owner_for_anonymous — UNCHANGED FROM V2]
+
+  REMOVED: create_sandbox_principal_extracted_before_into_inner
+    Reason: This test verifies the same thing as
+            create_sandbox_stamps_owner_label (checking that the owner
+            label exists). The extraction ordering is a code structure
+            concern, not a testable behavior. If the principal were not
+            extracted before into_inner(), the first test would already
+            fail.
+
+  CORRECTED TOTAL SECTION 9.1: 7 tests (was 8)
+
+------------------------------------------------------------------------
+SECTION 9.2: Sandbox List — Owner Filtering (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Clarified anonymous test setup (Issue R2-3)
+
+  TEST: list_sandboxes_anonymous_sees_all                  (CORRECTED)
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: 1. Create sandbox with Principal::Anonymous (no owner label
+               will be stamped per Section 9.1 create_sandbox_no_owner_
+               for_anonymous)
+            2. List as Principal::Anonymous
+    Verify: Returns the sandbox created in step 1 (no filtering for
+            anonymous; ownership enforcement is skipped for Anonymous
+            principal).
+    Async:  Yes
+    Why:    Backward compat: OIDC is required for ownership. Without
+            OIDC (anonymous), all resources are visible. The sandwich
+            created anonymously has no owner label, and the list
+            operation skips owner filtering for anonymous callers.
+
+  [All other 9.2 tests UNCHANGED FROM V2]
+
+------------------------------------------------------------------------
+SECTION 10: HANDLER TESTS — PROVIDER OWNERSHIP (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Added explicit documentation of handler modification
+  (Issue R2-1)
+
+  File: crates/openshell-server/src/grpc/provider.rs
+  Module: Extend existing #[cfg(test)] mod tests (starts at line 2336)
+  Async: YES (#[tokio::test])
+  Port Plan Steps: 11 (11A through 11E)
+
+  IMPORTANT: handle_create_provider (line 1150) is MODIFIED by the port
+  plan to extract Principal from Request extensions BEFORE calling
+  request.into_inner() (currently at line 1154). This matches the
+  sandbox handler pattern from Step 7. The modification is:
+
+    pub(super) async fn handle_create_provider(
+        state: &Arc<ServerState>,
+        request: Request<CreateProviderRequest>,
+    ) -> Result<Response<ProviderResponse>, Status> {
+        // === OWNERSHIP: Extract principal BEFORE into_inner() ===
+        let principal = request.extensions()
+            .get::<Principal>()
+            .cloned()
+            .unwrap_or(Principal::Anonymous);
+        let ownership_config = state.ownership_config();
+
+        let req = request.into_inner();  // consumes Request
+        // ... rest of handler
+    }
+
+  Tests call handle_create_provider() with request_with_principal()
+  which sets Principal in Request extensions. This works because
+  handle_create_provider reads extensions before into_inner().
+
+  [Section 10.1 UNCHANGED FROM V2 except for the header note above]
+
+------------------------------------------------------------------------
+SECTION 10.2: Provider List — Filtered by Owner (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected shared provider test setup (Issue R2-4)
+
+  TEST: list_providers_includes_shared_providers            (CORRECTED)
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: 1. Insert a shared provider directly into the store using
+               store.put_if() with manually constructed Provider protobuf
+               that has NO owner label in metadata.labels. This simulates
+               a provider created before ownership was enabled.
+            2. User-A creates provider-A via handle_create_provider
+               (gets owner label stamped automatically)
+            3. User-A lists providers
+    Verify: Returns BOTH provider-A (user-A's) and provider-shared
+            (no owner label, accessible via allow_unowned=true)
+    Async:  Yes
+    Why:    R1-2 fix: Providers use allow_unowned=true. Shared providers
+            (pre-existing, no owner label) are accessible to any user.
+
+    NOTE: The shared provider MUST be inserted directly into the store
+    (bypassing the handler) because handle_create_provider with ownership
+    enabled would stamp an owner label. Pre-existing shared providers
+    come from before ownership was enabled — they simply have no
+    openshell.ai/owner label.
+
+  [Other tests in 10.2 UNCHANGED FROM V2]
+
+------------------------------------------------------------------------
+SECTION 10.3: Provider Get/Update/Delete — Ownership (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected shared provider test setup (Issue R2-4)
+
+  TEST: get_shared_provider_allowed_for_any_user            (CORRECTED)
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: 1. Insert a provider directly into the store with no
+               openshell.ai/owner label (simulating pre-ownership
+               provider).
+            2. Get as user-A (non-admin), ownership ENABLED
+    Verify: Ok
+    Async:  Yes
+    Why:    R1-2 fix: Providers use allow_unowned=true. Shared providers
+            (no owner label) are accessible to any authenticated user.
+            This differs from sandboxes where allow_unowned=false.
+
+  [Other tests in 10.3 UNCHANGED FROM V2]
+
+------------------------------------------------------------------------
+SECTION 11: INTEGRATION TESTS — SANDBOX LABEL PERSISTENCE (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Changed to use store.put_if() directly (Issue R2-5)
+
+  File: crates/openshell-server/src/compute/mod.rs
+  Module: Extend existing #[cfg(test)] mod tests (starts at line 2115)
+    OR: crates/openshell-server/src/persistence/tests.rs (for store tests)
+  Async: YES (#[tokio::test])
+  Port Plan Steps: 7 (R4-8 fix: label serialization in create_sandbox)
+
+11.1 Label Serialization on Create (V2-3, R4-8 fix)
+-----------------------------------------------------
+
+  TEST: put_if_persists_labels_in_db_column                (CORRECTED)
+    Setup:  let store = test_store().await;
+    Action: store.put_if(
+                Sandbox::object_type(),
+                "sbx-id-1",
+                "my-sandbox",
+                &sandbox_proto.encode_to_vec(),
+                Some(r#"{"openshell.ai/owner":"user-1"}"#),
+                WriteCondition::MustCreate,
+            )
+    Verify: store.get(Sandbox::object_type(), "sbx-id-1")
+            ObjectRecord.labels == Some(r#"{"openshell.ai/owner":"user-1"}"#)
+    Async:  Yes
+    Why:    V2-3: The R4-8 fix changes the compute layer's create_sandbox
+            to pass labels_json instead of None. This test verifies that
+            store.put_if with labels: Some(...) actually persists the
+            labels string in the DB column and can be read back.
+
+    NOTE: This is a PERSISTENCE-LAYER test, not a compute-layer test.
+    The R4-8 fix is in the compute layer, but the underlying mechanism
+    is store.put_if(). Testing put_if directly is more targeted and
+    avoids complications from NoopTestDriver.
+
+  TEST: put_if_without_labels_stores_none                  (CORRECTED)
+    Setup:  let store = test_store().await;
+    Action: store.put_if(..., None, WriteCondition::MustCreate)
+    Verify: ObjectRecord.labels is None
+    Async:  Yes
+    Why:    Baseline: labels: None should persist as NULL in DB.
+
+11.2 Label Selector Queries (Roundtrip Verification)
+-----------------------------------------------------
+
+  TEST: list_with_selector_finds_labeled_object            (CORRECTED)
+    Setup:  let store = test_store().await;
+    Action: 1. store.put_if(Sandbox::object_type(), "sbx-1", "sandbox-a",
+                &sandbox_a.encode_to_vec(),
+                Some(r#"{"openshell.ai/owner":"user-1"}"#), MustCreate)
+            2. store.put_if(Sandbox::object_type(), "sbx-2", "sandbox-b",
+                &sandbox_b.encode_to_vec(),
+                Some(r#"{"openshell.ai/owner":"user-2"}"#), MustCreate)
+            3. store.list_messages_with_selector::<Sandbox>(
+                "openshell.ai/owner=user-1", 100, 0)
+    Verify: Returns only sandbox-a
+    Async:  Yes
+    Why:    End-to-end roundtrip: labels stored via put_if -> queried via
+            list_with_selector. This is the critical path for owner
+            filtering in Step 8.
+
+  [Other 11.2 tests conceptually UNCHANGED but now use store directly]
+
+  TEST: list_with_selector_returns_empty_for_no_match      (UNCHANGED)
+  TEST: list_with_selector_tenant_label_filtering          (UNCHANGED)
+  TEST: list_without_selector_returns_all                  (UNCHANGED)
+
+  CORRECTED TOTAL: 6 tests (unchanged count, but test approach changed)
+
+------------------------------------------------------------------------
+SECTION 15.3: Multi-User Provider Lifecycle (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected shared provider setup (Issue R2-4)
+
+  TEST: shared_providers_visible_to_all_users               (CORRECTED)
+    Setup:  test_server_state_with_ownership(true, None)
+    Sequence:
+      1. Insert provider-shared directly into store with no owner label
+         (simulating pre-ownership provider)
+      2. User-A creates provider-A via handle_create_provider
+      3. User-A lists -> sees both provider-shared and provider-A
+      4. User-B lists -> sees only provider-shared (not provider-A)
+    Verify: Shared providers (no owner label, allow_unowned=true)
+            visible to all users.
+    Async:  Yes
+    Why:    R1-2 fix: shared providers must be accessible to all.
+            Pre-existing providers without owner labels are the real
+            shared provider scenario.
+
+  [Other 15.3 tests UNCHANGED FROM V2]
+
+------------------------------------------------------------------------
+SECTION 16: WIREMOCK-BASED OIDC INTEGRATION TESTS (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected key generation approach (Issue R2-6)
+  REVIEW FIX: Removed unnecessary OIDC discovery mock (Issue R2-7)
+
+  File: crates/openshell-server/src/auth/oidc.rs
+  Module: #[cfg(test)] mod integration_tests (NEW)
+  Async: YES (#[tokio::test])
+  Port Plan Steps: 2
+
+  TEST INFRASTRUCTURE:
+
+  fn create_test_rsa_key_pair() -> (
+      jsonwebtoken::EncodingKey,
+      serde_json::Value, // JWK for JWKS endpoint
+      String,            // kid (key ID)
+  ) {
+      // 1. Use rcgen to generate an RSA key pair (like tls_test_utils.rs does)
+      // 2. Extract private key PEM from rcgen::KeyPair
+      // 3. Create jsonwebtoken::EncodingKey::from_rsa_pem(&private_key_pem)
+      // 4. Extract the RSA public key components (n, e) for JWK construction
+      // 5. Build JWK JSON: {"kty": "RSA", "kid": "test-key-1", "use": "sig",
+      //    "alg": "RS256", "n": base64url(modulus), "e": base64url(exponent)}
+      // 6. Return (encoding_key, jwk_json, kid)
+
+      // NOTE: rcgen provides key generation. jsonwebtoken provides
+      // EncodingKey/DecodingKey for JWT signing/verification.
+      // The JWK must be constructed manually from public key components.
+  }
+
+  async fn setup_mock_jwks_server() -> (MockServer, OidcConfig, jsonwebtoken::EncodingKey) {
+      let mock_server = MockServer::start().await;
+      let (encoding_key, jwk, kid) = create_test_rsa_key_pair();
+
+      // Mock ONLY the JWKS endpoint (NOT .well-known/openid-configuration)
+      // JwksCache constructs the JWKS URL from the issuer, not from OIDC discovery.
+      // Verify the exact URL path by checking JwksCache::refresh_keys() implementation.
+      Mock::given(method("GET"))
+          .and(path("/protocol/openid-connect/certs"))  // Verify this path
+          .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+              "keys": [jwk]
+          })))
+          .mount(&mock_server).await;
+
+      let config = OidcConfig {
+          issuer: mock_server.uri(),
+          audience: "test-audience".to_string(),
+          jwks_ttl_secs: 300,
+          roles_claim: "realm_access.roles".to_string(),
+          admin_role: "openshell-admin".to_string(),
+          user_role: "openshell-user".to_string(),
+          scopes_claim: "scope".to_string(),
+          groups_claim: "groups".to_string(),
+      };
+
+      (mock_server, config, encoding_key)
+  }
+
+  fn sign_jwt(
+      claims: serde_json::Value,
+      key: &jsonwebtoken::EncodingKey,
+      kid: &str,
+  ) -> String {
+      use jsonwebtoken::{Header, Algorithm};
+      let mut header = Header::new(Algorithm::RS256);
+      header.kid = Some(kid.to_string());
+      jsonwebtoken::encode(&header, &claims, key).unwrap()
+  }
+
+  NOTE: Before implementing these tests, verify the exact JWKS URL
+  construction in JwksCache by reading refresh_keys() in oidc.rs.
+  The mock must serve the JWKS at the exact URL that JwksCache fetches.
+
+  [Test cases UNCHANGED FROM V2 — only the infrastructure is corrected]
+
+------------------------------------------------------------------------
+SECTION 18.2: Stress Tests (RENAMED from Concurrency Safety Tests)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Reclassified tests (Issue R2-9)
+
+  18.2 Stress Tests (previously "Concurrency Safety Tests")
+  ─────────────────────────────────────────────────────────
+
+  NOTE: These tests exercise the ownership logic under concurrent load.
+  They do not test concurrency safety per se (Rust's type system prevents
+  data races, and SQLite provides ACID guarantees). They verify that no
+  unexpected panics or incorrect behavior occurs under parallel requests.
+
+  TEST: concurrent_sandbox_creation_by_different_users     (DESCRIPTION UPDATED)
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: Spawn 10 tasks, each creating a sandbox as a different user
+    Verify: All 10 sandboxes created with correct owner labels
+            No panics
+    Async:  Yes (#[tokio::test])
+    Why:    Exercises the handler under concurrent load. While Rust's
+            ownership model prevents data races, this catches unexpected
+            deadlocks, lock poisoning, or logic errors under concurrent access.
+
+  TEST: concurrent_list_during_creates                     (DESCRIPTION UPDATED)
+    Setup:  One task creating sandboxes, another listing concurrently
+    Verify: List always returns a valid snapshot (no panics, no deserialization errors)
+    Async:  Yes
+    Why:    Exercises concurrent read/write on the SQLite store.
+            SQLite with WAL mode allows concurrent reads during writes.
+
+------------------------------------------------------------------------
+SECTION 21: TRACEABILITY MATRIX (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected test counts (Issue R2-10)
+
+  +---------+---------------------------------------------+------------+-----------+
+  | Step    | Description                                 | Test Sec.  | # Tests   |
+  +---------+---------------------------------------------+------------+-----------+
+  |  1      | Identity groups field                       | 3          | 4         |
+  |  2      | OidcConfig groups_claim + extraction        | 4, 16      | 14        |
+  |  3      | Label constants (LABEL_OWNER/TENANT)        | 6          | 4         |
+  |  4      | Ownership module (auth/ownership.rs)        | 5          | 36        |
+  |  5      | OwnershipConfig in Config                   | 7          | 10        |
+  |  6      | ServerState.ownership_config() helper       | 8          | 5         |
+  |  7      | Sandbox create (owner stamping + DB fix)    | 9.1, 11    | 13        |
+  |  8      | Sandbox list (owner filtering)              | 9.2        | 6         |
+  |  9      | Sandbox get/delete (ownership check)        | 9.3, 9.4   | 8         |
+  | 10      | Sandbox watch/exec/SSH (ownership check)    | 9.5        | 7         |
+  | 11      | Provider CRUD ownership                     | 10         | 19        |
+  | 12      | K8s driver labels                           | 12         | 4         |
+  | 13      | Docker driver verification                  | 13         | 2         |
+  | 14      | SandboxIndex owner tracking (optional)      | 14         | 3         |
+  | 15      | Helm chart tenant values                    | 17.1       | 4         |
+  | 16      | Helm per-tenant RBAC                        | 17.2       | 2         |
+  | 17      | Helm ResourceQuota/LimitRange               | 17.3       | 4         |
+  | 18      | Helm certificate SANs                       | 17.4       | 2         |
+  | 19      | CLI multi-tenant display                    | (E2E)      | 0 *       |
+  | 20      | Tests themselves                            | ALL        | N/A       |
+  +---------+---------------------------------------------+------------+-----------+
+  |         | E2E ownership lifecycle flows               | 15         | 8         |
+  |         | Wiremock OIDC integration (V2-1)            | 16         | 4         |
+  |         | Helm OpenShift templates (V2 new)           | 17.5       | 3         |
+  |         | Cross-cutting concerns                      | 18         | 6         |
+  +---------+---------------------------------------------+------------+-----------+
+  |         | TOTAL                                       |            | ~148      |
+  +---------+---------------------------------------------+------------+-----------+
+
+  Changes from V2:
+    - Section 5: 36 (was 30 — actual count from enumeration)
+    - Section 7: 10 (was 12 — removed 2 CLI-specific tests per R2-11)
+    - Section 9.1: 7 (was 8 — removed redundant test per R2-2)
+    - Step 7 total: 13 (was 14)
+
+  * Step 19 (CLI display) is display-only. Verified via E2E CLI smoke test.
+
+  CI GATE CHECKS (not counted as individual tests):
+    - Existing test suite passes without ownership config
+    - Existing test suite passes with ownership explicitly disabled
+
+================================================================================
+3. UNCHANGED SECTIONS (by reference)
+================================================================================
+
+  The following sections are UNCHANGED FROM V2 and are not reproduced:
+
+  Section 1  - Learnings Incorporated from V1/V1-R1
+  Section 2  - Testing Conventions & Infrastructure (2.1-2.4)
+  Section 3  - Unit Tests — Identity Struct (auth/identity.rs)
+  Section 4  - Unit Tests — OIDC Groups Extraction (auth/oidc.rs)
+  Section 5.2-5.4 — stamp_owner_labels, check_ownership, owner_label_selector
+  Section 6  - Unit Tests — Label Constants (openshell-core/driver_utils.rs)
+  Section 7.1-7.2 - OwnershipConfig TOML Parsing, OidcConfig groups_claim
+  Section 8  - Unit Tests — ServerState Helper (lib.rs)
+  Section 9.3 - Sandbox Get — Ownership Check (Step 9)
+  Section 9.4 - Sandbox Delete — Ownership Check (Step 9)
+  Section 9.5 - Sandbox Watch/Exec/SSH — Ownership Check (Step 10)
+  Section 10.1 - Provider Create — Owner Stamping (except header note)
+  Section 10.4 - Provider Admin-Only Methods
+  Section 12 - Integration Tests — Kubernetes Driver Labels
+  Section 13 - Integration Tests — Docker Driver Verification
+  Section 14 - Unit Tests — SandboxIndex Owner Tracking
+  Section 15.1-15.2 - Multi-User Sandbox Lifecycle
+  Section 17 - Helm Chart Tests — Template Rendering
+  Section 18.1 - Backward Compatibility (CI Gate Checks)
+  Section 18.3 - Regression Tests
+  Section 18.4 - Error Message Quality Tests
+  Section 19 - Test Dependency Map
+  Section 20 - Test Fixtures & Mocks Inventory
+  Section 22 - Test File Layout
+  Appendix A - Kagenti E2E Test Mapping
+  Appendix B - Differences from V1-R1
+
+================================================================================
+END OF REVIEWED TEST PLAN V2
+================================================================================

@@ -1,0 +1,759 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — REVIEWED TEST PLAN V3
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Source: Kagenti (Python/Shell/YAML)
+Target: OpenShell (Rust)
+Port Plan: code_port_plan_review_V4.txt (20 steps)
+Review: V3-R1 (review of iteration 3)
+Date: 2026-07-03
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Issues Found and Corrections Applied
+2. Corrected Sections (only changed sections reproduced)
+3. Unchanged Sections (referenced by number)
+
+================================================================================
+1. ISSUES FOUND AND CORRECTIONS APPLIED
+================================================================================
+
+ISSUE R3-1 (HIGH): Wiremock OIDC tests remove discovery mock, but
+  JwksCache DOES use OIDC discovery
+
+  PROBLEM: Section 17 says:
+    "Mock ONLY the JWKS endpoint — NOT .well-known/openid-configuration.
+    JwksCache constructs the JWKS URL directly from the issuer, not from
+    OIDC discovery."
+
+  This is WRONG. Verified against the actual code at oidc.rs:
+
+    Line 170: JwksCache::new() is documented "discovering the JWKS URI
+              and fetching the initial key set"
+    Lines 177-178:
+      let discovery_url = format!(
+          "{}/.well-known/openid-configuration",
+          config.issuer.trim_end_matches('/')
+      );
+    Lines 183-190: Fetches the discovery URL as OidcDiscovery struct
+    Line 192-199: Validates discovery.issuer matches config.issuer
+    Line 205: Stores discovery.jwks_uri as self.jwks_uri
+    Lines 222-233: refresh_keys() fetches from self.jwks_uri (discovered URI)
+
+    The OidcDiscovery struct (line 71) has fields: issuer, jwks_uri.
+
+  ROOT CAUSE: The V2-R1 review (Issue R2-7) incorrectly claimed that
+  "JwksCache does NOT fetch the OIDC discovery document." This was wrong.
+  V3 incorporated this incorrect correction by design.
+
+  IMPACT: All 4 wiremock OIDC tests (Section 17) would fail at setup
+  time because JwksCache::new() cannot fetch the discovery document.
+
+  FIX: The wiremock setup MUST mock TWO endpoints:
+    1. /.well-known/openid-configuration → returns {"issuer": "<uri>",
+       "jwks_uri": "<uri>/certs"}
+    2. /certs → returns {"keys": [jwk]}
+
+  Additionally, JwksCache::new() validates that the discovery document's
+  issuer matches config.issuer (lines 192-199). The mock discovery
+  response MUST include the correct issuer field.
+
+------------------------------------------------------------------------
+
+ISSUE R3-2 (MEDIUM): stamp_owner_labels() signature assumes tenant_id
+  is on OwnershipConfig, but it's defined on Config
+
+  PROBLEM: Section 6.2 tests reference:
+    "config.tenant_id = Some("team1"), enabled = true"
+
+  But the OwnershipConfig struct defined in Section 7 only has:
+    pub struct OwnershipConfig {
+        pub enabled: bool,
+        pub allow_unowned_providers: bool,
+    }
+
+  The tenant_id field is on Config, not OwnershipConfig. In the
+  test_server_state_with_ownership helper (Section 2.2), tenant_id is
+  set on Config:
+    config.tenant_id = Some(tid.to_string());
+
+  The stamp_owner_labels function takes &OwnershipConfig, not &Config,
+  so it cannot access tenant_id.
+
+  IMPACT: Test descriptions that set "config.tenant_id" in the context
+  of stamp_owner_labels are specifying a parameter that doesn't exist
+  on the function's config argument.
+
+  FIX: stamp_owner_labels needs an additional parameter for tenant_id.
+  Corrected signature:
+    pub fn stamp_owner_labels(
+        principal: &Principal,
+        config: &OwnershipConfig,
+        tenant_id: Option<&str>,       // ← ADDED
+        existing_labels: HashMap<String, String>,
+    ) -> HashMap<String, String>
+
+  Test setups corrected to pass tenant_id explicitly rather than
+  setting it on config.
+
+------------------------------------------------------------------------
+
+ISSUE R3-3 (MEDIUM): check_ownership() test references config.admin_role,
+  but OwnershipConfig has no admin_role field
+
+  PROBLEM: Section 6.3 test admin_bypasses_ownership_check says:
+    "config.admin_role = "openshell-admin""
+
+  But OwnershipConfig (Section 7) has no admin_role field. The
+  admin_role is defined on OidcConfig (config.rs line 477):
+    pub admin_role: String,    // default: "openshell-admin"
+
+  The check_ownership function needs to know the admin role to
+  implement admin bypass, but it only receives &OwnershipConfig.
+
+  IMPACT: The test description specifies a field that doesn't exist on
+  the struct. The admin bypass logic needs a way to determine if a
+  principal has the admin role.
+
+  FIX: The simplest approach is for check_ownership to determine admin
+  status from the principal's roles directly, using a well-known role
+  name. Add admin_role to OwnershipConfig:
+    pub struct OwnershipConfig {
+        pub enabled: bool,
+        pub allow_unowned_providers: bool,
+        pub admin_role: String,          // ← ADDED, default: "openshell-admin"
+    }
+
+  Alternatively, check_ownership can accept a separate admin_role
+  parameter. The test's intent (admin bypasses ownership) is correct;
+  only the mechanism needs specification.
+
+  Corrected test setup uses OwnershipConfig { admin_role: "openshell-admin".into(), .. }.
+
+------------------------------------------------------------------------
+
+ISSUE R3-4 (MEDIUM): SandboxIndex tests assume APIs that don't match
+  the actual SandboxIndex struct
+
+  PROBLEM: Section 15 tests assume:
+    - index.insert("sandbox-1", "sbx-id-1", Some("user-1")) — no such method
+    - index.get_owner("sbx-id-1") — no such method
+
+  The actual SandboxIndex (sandbox_index.rs, 65 lines) has:
+    - update_from_sandbox(&self, sandbox: &Sandbox) — takes a Sandbox proto
+    - remove_sandbox(&self, sandbox_id: &str)
+    - sandbox_id_for_sandbox_name(&self, name: &str) -> Option<String>
+    - sandbox_id_for_agent_pod(&self, pod: &str) -> Option<String>
+
+  The Inner struct has:
+    sandbox_name_to_id: HashMap<String, String>
+    agent_pod_to_id: HashMap<String, String>
+
+  There is no owner tracking at all. Step 14 is optional and would ADD
+  owner tracking, but the new API should follow the existing pattern of
+  update_from_sandbox(), not an insert() method.
+
+  IMPACT: Tests describe an API that would diverge from the existing
+  SandboxIndex design. An implementer following these tests would create
+  an inconsistent API.
+
+  FIX: Corrected Section 15 tests to follow the existing API pattern:
+    - Owner tracking uses the sandbox's metadata.labels (specifically
+      LABEL_OWNER) extracted during update_from_sandbox()
+    - New method: get_owner_for_sandbox(&self, sandbox_id: &str) -> Option<String>
+    - Tests construct Sandbox protos with owner labels and call
+      update_from_sandbox(), then verify get_owner_for_sandbox()
+
+------------------------------------------------------------------------
+
+ISSUE R3-5 (LOW): Error quality tests (Section 19.4) are redundant with
+  ownership module tests (Section 6.3)
+
+  PROBLEM: Section 19.4 has 3 tests:
+    - permission_denied_message_is_generic — same check as Section 6.3
+      test permission_denied_does_not_leak_owner_info
+    - permission_denied_code_is_correct — same check as Section 6.3
+      test owner_mismatch_returns_permission_denied
+    - ownership_disabled_message_not_present — same check as Section 6.3
+      test ownership_disabled_allows_all
+
+  Each Section 19.4 test is a strict subset of the corresponding
+  Section 6.3 test, verifying the same assertion on the same code path.
+
+  IMPACT: 3 redundant tests waste implementation effort and inflate
+  the test count without adding coverage.
+
+  FIX: Removed Section 19.4. The ownership module tests in Section 6.3
+  already verify these behaviors. This reduces the total by 3 tests.
+
+  Updated ownership.rs test file count: 34 tests (was 37 = 34 + 3).
+  Updated Section 19 total: 5 tests (was 8, removed 3 error quality).
+
+------------------------------------------------------------------------
+
+ISSUE R3-6 (LOW): Cross-resource test sandbox_with_another_users_provider_denied
+  assumes provider ownership enforcement during sandbox creation that is
+  not described in the port plan
+
+  PROBLEM: Section 16.3 test sandbox_with_another_users_provider_denied
+  assumes that when User-B creates a sandbox referencing User-A's
+  provider "my-llm", the creation fails because User-B can't see
+  User-A's provider.
+
+  But the sandbox creation handler validates providers by calling
+  store.get_message_by_name::<Provider>(name) at sandbox.rs line 168,
+  which is a direct store lookup that BYPASSES ownership filtering.
+  The provider would be found, and the sandbox would be created
+  successfully, even though User-B shouldn't be able to use User-A's
+  provider.
+
+  For this test to work, the sandbox creation handler's provider
+  validation would need additional modification (not described in
+  the port plan) to check provider ownership.
+
+  IMPACT: Test expects behavior that isn't implemented. Would fail
+  because the sandbox creation would succeed when it should fail.
+
+  FIX: Added a NOTE to the test documenting that this requires
+  additional implementation beyond the port plan:
+    - Provider validation during sandbox create must be modified to
+      use ownership-aware provider lookup (either via label selector
+      or by calling check_ownership after the direct lookup)
+    - This is a gap in the port plan, not a gap in the test plan
+
+------------------------------------------------------------------------
+
+ISSUE R3-7 (LOW): Test count arithmetic after corrections
+
+  PROBLEM: After applying fixes:
+    - Section 19.4 removed: -3 tests
+    - Section 6.2 stamp_owner_labels: no count change (signature fix only)
+    - Section 6.3 check_ownership: no count change (setup fix only)
+    - Section 15: no count change (API fix only)
+    - Section 17: no count change (mock fix only)
+
+  Original total: 158
+  After R3-5 removal: 158 - 3 = 155
+
+  FIX: Updated traceability matrix and totals to 155.
+
+------------------------------------------------------------------------
+
+================================================================================
+2. CORRECTED SECTIONS
+================================================================================
+
+Only sections with changes are reproduced below. Unchanged sections
+from V3 are referenced by section number in Section 3.
+
+------------------------------------------------------------------------
+SECTION 2.2: New Test Helpers — stamp_owner_labels signature correction
+------------------------------------------------------------------------
+
+  No change to request_with_principal, make_user, make_admin, or
+  test_server_state_with_ownership.
+
+  NOTE on stamp_owner_labels: When calling stamp_owner_labels in
+  handler code, the tenant_id comes from state.config.tenant_id:
+
+    let labels = crate::auth::ownership::stamp_owner_labels(
+        &principal,
+        &state.ownership_config(),
+        state.config.tenant_id.as_deref(),   // tenant_id parameter
+        request.labels.clone(),
+    );
+
+  Tests calling stamp_owner_labels directly pass tenant_id explicitly:
+    stamp_owner_labels(&principal, &config, Some("team1"), labels)
+
+------------------------------------------------------------------------
+SECTION 6.2: stamp_owner_labels() Tests (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected function signature (Issue R3-2)
+
+  Corrected Signature:
+    pub fn stamp_owner_labels(
+        principal: &Principal,
+        config: &OwnershipConfig,
+        tenant_id: Option<&str>,
+        existing_labels: HashMap<String, String>,
+    ) -> HashMap<String, String>
+
+  TEST: stamps_owner_for_user_principal                    (UNCHANGED)
+    Setup:  principal = make_user("user-uuid-1", "openshell-user")
+            config = OwnershipConfig { enabled: true, .. }
+            tenant_id = None
+            labels = HashMap::new()
+    Action: stamp_owner_labels(&principal, &config, None, labels)
+    Expect: result.get(LABEL_OWNER) == Some("user-uuid-1")
+
+  TEST: stamps_tenant_when_configured                      (CORRECTED)
+    Setup:  config = OwnershipConfig { enabled: true, .. }
+            tenant_id = Some("team1")
+    Action: stamp_owner_labels(&principal, &config, Some("team1"), labels)
+    Expect: result.get(LABEL_TENANT) == Some("team1")
+    Why:    tenant_id is a separate parameter, not on OwnershipConfig.
+
+  TEST: stamps_both_owner_and_tenant                       (CORRECTED)
+    Setup:  User principal, tenant_id = Some("team1")
+    Action: stamp_owner_labels(&principal, &config, Some("team1"), labels)
+    Expect: result contains both LABEL_OWNER and LABEL_TENANT
+
+  TEST: strips_client_supplied_owner_label                 (UNCHANGED)
+    Setup:  labels = {LABEL_OWNER: "spoofed-user"}, tenant_id = None
+    Action: stamp_owner_labels(&make_user("real-user", ...), &config, None, labels)
+    Expect: result.get(LABEL_OWNER) == Some("real-user")
+
+  TEST: strips_client_supplied_tenant_label                (CORRECTED)
+    Setup:  labels = {LABEL_TENANT: "spoofed-tenant"}, tenant_id = Some("team1")
+    Action: stamp_owner_labels(...)
+    Expect: LABEL_TENANT == "team1" (not "spoofed-tenant")
+
+  TEST: preserves_non_openshell_labels                     (UNCHANGED)
+    (tenant_id = None added to call)
+
+  TEST: no_stamp_for_anonymous_principal                   (UNCHANGED)
+    (tenant_id = None added to call)
+
+  TEST: no_stamp_when_ownership_disabled                   (UNCHANGED)
+    (tenant_id = None added to call)
+
+  TEST: admin_still_gets_owner_stamp                       (UNCHANGED)
+    (tenant_id = None added to call)
+
+  TEST: subject_sanitized_before_stamping                  (UNCHANGED)
+    (tenant_id = None added to call)
+
+  SUBTOTAL: 10 tests (unchanged count)
+
+------------------------------------------------------------------------
+SECTION 6.3: check_ownership() Tests (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected admin_role handling (Issue R3-3)
+
+  OwnershipConfig gains admin_role field:
+    pub struct OwnershipConfig {
+        pub enabled: bool,
+        pub allow_unowned_providers: bool,   // default: true
+        pub admin_role: String,              // default: "openshell-admin"
+    }
+
+  Corrected Signature (unchanged from V3):
+    pub fn check_ownership(
+        principal: &Principal,
+        record_labels: &HashMap<String, String>,
+        config: &OwnershipConfig,
+        allow_unowned: bool,
+    ) -> Result<(), Status>
+
+  TEST: admin_bypasses_ownership_check                     (CORRECTED)
+    Setup:  principal = make_admin("admin-1")
+            record_labels = {LABEL_OWNER: "user-2"}
+            config = OwnershipConfig {
+                enabled: true,
+                allow_unowned_providers: true,
+                admin_role: "openshell-admin".to_string(),
+            }
+    Action: check_ownership(&principal, &labels, &config, false)
+    Expect: Ok(())
+    Why:    check_ownership checks if principal.identity.roles contains
+            config.admin_role. If so, ownership check is bypassed.
+
+  [All other 6.3 tests UNCHANGED FROM V3 — the config construction
+  now includes admin_role: "openshell-admin".to_string() in all setups]
+
+  SUBTOTAL: 9 tests (unchanged count)
+
+------------------------------------------------------------------------
+SECTION 7: OwnershipConfig in Config (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Added admin_role field (Issue R3-3)
+
+  OwnershipConfig struct (corrected):
+    pub struct OwnershipConfig {
+        pub enabled: bool,
+        pub allow_unowned_providers: bool,   // default: true
+        pub admin_role: String,              // default: "openshell-admin"
+    }
+
+  TEST 7.3: ownership_config_enabled_true                  (CORRECTED)
+    Setup:  OwnershipConfig { enabled: true, allow_unowned_providers: true,
+            admin_role: "openshell-admin".to_string() }
+    Verify: ownership.enabled == true
+    Why:    Basic construction now includes admin_role.
+
+  TEST 7.4: ownership_config_defaults_allow_unowned_true   (UNCHANGED)
+
+  ADD TEST 7.7: ownership_config_default_admin_role
+    Setup:  OwnershipConfig::default() or with ..Default::default()
+    Verify: ownership.admin_role == "openshell-admin"
+    Why:    Default admin role matches OpenShell's standard role name.
+
+  SECTION TOTAL: 7 tests (was 6, added 1 for admin_role default)
+
+------------------------------------------------------------------------
+SECTION 8: Config File Parsing (CORRECTED)
+------------------------------------------------------------------------
+
+  OwnershipFileSection gains admin_role:
+    pub struct OwnershipFileSection {
+        pub enabled: Option<bool>,
+        pub allow_unowned_providers: Option<bool>,
+        pub admin_role: Option<String>,
+    }
+
+  ADD TEST 8.5: toml_ownership_admin_role_parsed
+    Setup:  write_tmp("[openshell.gateway.ownership]\nadmin_role = \"custom-admin\"\n")
+    Action: Parse GatewayFileSection
+    Verify: section.ownership.unwrap().admin_role == Some("custom-admin".to_string())
+    Why:    Custom admin role via TOML.
+
+  SECTION TOTAL: 5 tests (was 4, added 1)
+
+------------------------------------------------------------------------
+SECTION 15: SandboxIndex Owner Tracking (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Corrected API to match existing SandboxIndex pattern
+  (Issue R3-4)
+
+  File: crates/openshell-server/src/sandbox_index.rs
+  Module: ADD #[cfg(test)] mod tests (sandbox_index.rs has no tests)
+  Async: NO
+  Port Plan Step: 14 (optional enhancement)
+
+  The optional Step 14 enhancement adds owner tracking to SandboxIndex.
+  Following the existing API pattern:
+    - update_from_sandbox() already extracts metadata from Sandbox proto
+    - Extended to also extract LABEL_OWNER from metadata.labels
+    - New method: get_owner_for_sandbox(&self, sandbox_id: &str) -> Option<String>
+    - Inner struct gains: sandbox_id_to_owner: HashMap<String, String>
+
+  TEST 15.1: update_from_sandbox_tracks_owner
+    Setup:  let index = SandboxIndex::new();
+            let sandbox = Sandbox {
+                metadata: Some(ObjectMeta {
+                    id: "sbx-id-1".to_string(),
+                    name: "my-sandbox".to_string(),
+                    labels: HashMap::from([
+                        (LABEL_OWNER.to_string(), "user-1".to_string())
+                    ]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+    Action: index.update_from_sandbox(&sandbox);
+    Verify: index.get_owner_for_sandbox("sbx-id-1") == Some("user-1".to_string())
+    Why:    Owner extracted from sandbox labels during index update.
+
+  TEST 15.2: update_from_sandbox_no_owner_label
+    Setup:  Sandbox with metadata but NO LABEL_OWNER in labels
+    Action: index.update_from_sandbox(&sandbox);
+    Verify: index.get_owner_for_sandbox("sbx-id-1").is_none()
+    Why:    Pre-ownership sandboxes have no owner label.
+
+  TEST 15.3: remove_sandbox_clears_owner
+    Setup:  Insert sandbox with owner via update_from_sandbox, then remove
+    Action: index.remove_sandbox("sbx-id-1");
+    Verify: index.get_owner_for_sandbox("sbx-id-1").is_none()
+    Why:    Owner tracking cleaned up on sandbox deletion.
+
+  SECTION TOTAL: 3 tests (unchanged count, corrected API)
+
+------------------------------------------------------------------------
+SECTION 17: Wiremock-Based OIDC Integration Tests (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Re-added discovery mock (Issue R3-1)
+
+  File: crates/openshell-server/src/auth/oidc.rs
+  Module: ADD #[cfg(test)] mod integration_tests (separate from existing tests)
+  Async: YES (#[tokio::test])
+  Port Plan Step: 2
+
+  TEST INFRASTRUCTURE (CORRECTED):
+
+  fn create_test_rsa_key_pair() -> (
+      jsonwebtoken::EncodingKey,
+      serde_json::Value,  // JWK JSON for JWKS endpoint
+      String,             // kid (key ID)
+  ) {
+      // [UNCHANGED FROM V3 — rcgen + jsonwebtoken approach]
+  }
+
+  async fn setup_mock_jwks_server() -> (
+      wiremock::MockServer,
+      OidcConfig,
+      jsonwebtoken::EncodingKey,
+  ) {
+      let mock_server = wiremock::MockServer::start().await;
+      let (encoding_key, jwk, kid) = create_test_rsa_key_pair();
+
+      // ===================================================================
+      // CORRECTED: JwksCache::new() uses OIDC discovery (oidc.rs line 177).
+      // It fetches {issuer}/.well-known/openid-configuration, extracts
+      // jwks_uri from the response, then fetches keys from that URI.
+      // Additionally, it validates that discovery.issuer matches
+      // config.issuer (oidc.rs lines 192-199).
+      //
+      // BOTH endpoints must be mocked:
+      // 1. Discovery endpoint — returns issuer + jwks_uri
+      // 2. JWKS endpoint — returns the actual keys
+      // ===================================================================
+
+      // Mock 1: OIDC Discovery endpoint
+      wiremock::Mock::given(wiremock::matchers::method("GET"))
+          .and(wiremock::matchers::path(
+              "/.well-known/openid-configuration"
+          ))
+          .respond_with(wiremock::ResponseTemplate::new(200)
+              .set_body_json(serde_json::json!({
+                  "issuer": mock_server.uri(),
+                  "jwks_uri": format!("{}/certs", mock_server.uri())
+              })))
+          .mount(&mock_server).await;
+
+      // Mock 2: JWKS endpoint (at the path declared in discovery)
+      wiremock::Mock::given(wiremock::matchers::method("GET"))
+          .and(wiremock::matchers::path("/certs"))
+          .respond_with(wiremock::ResponseTemplate::new(200)
+              .set_body_json(serde_json::json!({"keys": [jwk]})))
+          .mount(&mock_server).await;
+
+      let config = OidcConfig {
+          issuer: mock_server.uri(),
+          audience: "test-audience".to_string(),
+          jwks_ttl_secs: 300,
+          roles_claim: "realm_access.roles".to_string(),
+          admin_role: "openshell-admin".to_string(),
+          user_role: "openshell-user".to_string(),
+          scopes_claim: "scope".to_string(),
+          groups_claim: "groups".to_string(),  // NEW field
+      };
+
+      (mock_server, config, encoding_key)
+  }
+
+  fn sign_jwt(
+      claims: serde_json::Value,
+      key: &jsonwebtoken::EncodingKey,
+      kid: &str,
+  ) -> String {
+      // [UNCHANGED FROM V3]
+  }
+
+  WHY THE DISCOVERY MOCK IS NEEDED:
+    JwksCache::new() (oidc.rs line 170) calls:
+      1. HTTP GET {issuer}/.well-known/openid-configuration
+      2. Parses response as OidcDiscovery { issuer, jwks_uri }
+      3. Validates discovery.issuer == config.issuer
+      4. Stores jwks_uri for subsequent refresh_keys() calls
+      5. Calls refresh_keys() which fetches from jwks_uri
+
+    Without the discovery mock, JwksCache::new() returns Err("OIDC
+    discovery request failed: ...") and all tests fail at setup.
+
+    The V2-R1 review (Issue R2-7) incorrectly stated that JwksCache
+    does NOT fetch the discovery document. This review corrects that
+    error with verified evidence from the source code.
+
+  TESTS (unchanged from V3):
+
+  TEST 17.1: jwt_with_groups_claim_populates_identity_groups
+  TEST 17.2: jwt_without_groups_claim_has_empty_groups
+  TEST 17.3: jwt_with_custom_groups_claim_path
+  TEST 17.4: jwt_with_audience_mismatch_rejected
+
+  SECTION TOTAL: 4 tests (unchanged count, corrected infrastructure)
+
+------------------------------------------------------------------------
+SECTION 16.3: Cross-Resource Scenarios (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Added implementation note (Issue R3-6)
+
+  TEST: sandbox_with_another_users_provider_denied         (NOTE ADDED)
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: 1. User-A creates provider "my-llm"
+            2. User-B creates sandbox with providers: ["my-llm"]
+    Verify: Sandbox creation fails (provider not found for user-B)
+    Why:    User-B cannot reference user-A's provider.
+
+    IMPLEMENTATION NOTE: This test requires the sandbox creation handler's
+    provider validation (sandbox.rs line 168) to be modified for ownership
+    awareness. Currently, store.get_message_by_name::<Provider>(name)
+    does a direct store lookup that bypasses ownership filtering.
+
+    The provider validation must be changed to either:
+      a) Use ownership-aware provider lookup (label selector query), OR
+      b) Call check_ownership() after the direct lookup
+
+    This is a gap in the port plan (not in the test plan). The test
+    correctly describes the desired security behavior.
+
+  [Other 16.3 tests UNCHANGED]
+
+------------------------------------------------------------------------
+SECTION 19: Cross-Cutting Concerns (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Removed redundant Section 19.4 (Issue R3-5)
+
+  19.1 Backward Compatibility (CI Gate Checks)              (UNCHANGED)
+  19.2 Stress Tests                                         (UNCHANGED)
+      2 tests
+  19.3 Regression Tests                                     (UNCHANGED)
+      3 tests
+
+  19.4 Error Message Quality Tests                          (REMOVED)
+      REMOVED: All 3 tests were redundant with Section 6.3:
+        - permission_denied_message_is_generic
+            = same as 6.3 permission_denied_does_not_leak_owner_info
+        - permission_denied_code_is_correct
+            = same as 6.3 owner_mismatch_returns_permission_denied
+        - ownership_disabled_message_not_present
+            = same as 6.3 ownership_disabled_allows_all
+
+  SECTION 19 TOTAL: 5 tests (was 8, removed 3)
+
+------------------------------------------------------------------------
+SECTION 20: TRACEABILITY MATRIX (CORRECTED)
+------------------------------------------------------------------------
+
+  REVIEW FIX: Updated totals (Issues R3-3, R3-5, R3-7)
+
+  +---------+---------------------------------------------+----------+---------+
+  | Step    | Description                                 | Test Sec.| # Tests |
+  +---------+---------------------------------------------+----------+---------+
+  |  1      | Identity groups field                       | 3        |   4     |
+  |  2      | OidcConfig groups_claim + extraction        | 4, 17    |  10     |
+  |  3      | Label constants (LABEL_OWNER/TENANT)        | 5        |   4     |
+  |  4      | Ownership module (auth/ownership.rs)        | 6        |  34     |
+  |  5      | OwnershipConfig in Config + TOML parsing    | 7, 8     |  12     |
+  |  6      | ServerState.ownership_config() helper       | 9        |   4     |
+  |  7      | Sandbox create (owner stamping + DB fix)    | 10.1, 12 |  13     |
+  |  8      | Sandbox list (owner filtering)              | 10.2     |   6     |
+  |  9      | Sandbox get/delete (ownership check)        | 10.3-4   |   7     |
+  | 10      | Sandbox watch/exec/SSH (ownership check)    | 10.5     |   7     |
+  | 11      | Provider CRUD ownership                     | 11       |  19     |
+  | 12      | K8s driver labels                           | 13       |   4     |
+  | 13      | Docker driver verification                  | 14       |   2     |
+  | 14      | SandboxIndex owner tracking (optional)      | 15       |   3     |
+  | 15-18   | Helm chart tenant values/RBAC/quotas/certs  | 18       |  15     |
+  | 19      | CLI multi-tenant display                    | (E2E)    |   0 *   |
+  | 20      | Tests themselves                            | ALL      | N/A     |
+  +---------+---------------------------------------------+----------+---------+
+  |         | E2E ownership lifecycle flows               | 16       |   8     |
+  |         | Cross-cutting (stress + regression)         | 19       |   5     |
+  +---------+---------------------------------------------+----------+---------+
+  |         | TOTAL                                       |          | 157     |
+  +---------+---------------------------------------------+----------+---------+
+
+  Changes from V3:
+    - Step 5 (Sec 7+8): 12 (was 10 — added 1 admin_role default + 1 TOML)
+    - Cross-cutting (Sec 19): 5 (was 8 — removed 3 redundant error tests)
+    - Total: 157 (was 158 — net change: +2 new, -3 removed)
+
+  Arithmetic verification:
+    4+10+4+34+12+4+13+6+7+7+19+4+2+3+15+0+8+5 = 157 ✓
+
+  * Step 19 (CLI display) is display-only.
+  * Wiremock OIDC tests (Sec 17, 4 tests) counted under Step 2.
+
+------------------------------------------------------------------------
+SECTION 21: TEST FILE LAYOUT (CORRECTED)
+------------------------------------------------------------------------
+
+  MODIFIED RUST FILES (14):
+
+  crates/openshell-server/src/
+    auth/
+      identity.rs           → ADD #[cfg(test)] mod tests (4 tests)
+      oidc.rs               → EXTEND tests (6 unit + 4 wiremock = 10 tests)
+      ownership.rs          → NEW file with #[cfg(test)] mod tests (34 tests)
+    grpc/
+      mod.rs                → EXTEND test_support (4 new helpers)
+      sandbox.rs            → EXTEND tests (27 + 2 stress + 3 regression = 32)
+      provider.rs           → EXTEND tests (19 tests)
+    lib.rs                  → EXTEND tests (4 tests)
+    persistence/tests.rs    → EXTEND (6 tests)
+    sandbox_index.rs        → ADD tests (3 tests)
+
+  crates/openshell-core/src/
+    config.rs               → EXTEND tests (7 tests, was 6)
+    driver_utils.rs         → ADD tests (4 tests)
+
+  crates/openshell-server/src/
+    config_file.rs          → EXTEND tests (5 tests, was 4)
+
+  crates/openshell-driver-kubernetes/src/
+    driver.rs               → ADD or EXTEND tests (4 tests)
+
+  crates/openshell-driver-docker/src/
+    tests.rs                → EXTEND (2 tests)
+
+  NEW FILES (2):
+
+  e2e/rust/tests/
+    ownership_lifecycle.rs  → NEW E2E test file (8 tests)
+
+  deploy/helm/openshell/
+    test_templates.sh       → NEW Helm test script (15 tests)
+
+  Changes from V3:
+    - ownership.rs: 34 (was 37 — removed 3 redundant error tests)
+    - config.rs: 7 (was 6 — added admin_role default test)
+    - config_file.rs: 5 (was 4 — added admin_role TOML test)
+
+------------------------------------------------------------------------
+SECTION 22.2: Wiremock Infrastructure (CORRECTED)
+------------------------------------------------------------------------
+
+  | Helper                    | Type     | Returns                          |
+  |───────────────────────────|──────────|──────────────────────────────────|
+  | create_test_rsa_key_pair  | fn       | (EncodingKey, JWK JSON, kid)     |
+  | setup_mock_jwks_server    | async fn | (MockServer, OidcConfig, Key)    |
+  | sign_jwt(claims, key, kid)| fn       | String (JWT token)               |
+
+  setup_mock_jwks_server now mocks TWO endpoints:
+    1. /.well-known/openid-configuration → discovery document
+    2. /certs → JWKS key set
+
+  The discovery document includes:
+    - issuer: mock_server.uri() (must match config.issuer for validation)
+    - jwks_uri: format!("{}/certs", mock_server.uri())
+
+================================================================================
+3. UNCHANGED SECTIONS (by reference)
+================================================================================
+
+  The following sections are UNCHANGED FROM V3 and are not reproduced:
+
+  Section 1  - Overview & Scope (total updated to 157)
+  Section 2.1 - Verified OpenShell Conventions
+  Section 2.2 - New Test Helpers (except stamp_owner_labels note)
+  Section 2.3 - Relationship to Existing Tests
+  Section 3  - Unit Tests — Identity Groups Field (Step 1)
+  Section 4  - Unit Tests — OIDC Groups Extraction (Step 2)
+  Section 5  - Unit Tests — Label Constants (Step 3)
+  Section 6.1 - sanitize_label_value() Tests
+  Section 6.4 - owner_label_selector() Tests
+  Section 9  - Unit Tests — ServerState Helper (Step 6)
+  Section 10 - Handler Tests — Sandbox Ownership (Steps 7-10)
+  Section 11 - Handler Tests — Provider Ownership (Step 11)
+  Section 12 - Integration Tests — Label Persistence Fix
+  Section 13 - Integration Tests — K8s Driver Labels (Step 12)
+  Section 14 - Integration Tests — Docker Driver Verification (Step 13)
+  Section 16.1-16.2 - E2E Multi-User Lifecycle (sandbox + provider)
+  Section 18 - Helm Chart Template Tests (Steps 15-18)
+  Section 19.1-19.3 - Backward Compat, Stress, Regression
+  Section 22.1, 22.3, 22.4 - Test Fixtures & Mocks
+  Appendix A - Kagenti E2E Test Mapping
+
+================================================================================
+END OF REVIEWED TEST PLAN V3
+================================================================================

@@ -1,0 +1,1985 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — TEST PLAN V3
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Source: Kagenti (Python/Shell/YAML)
+Target: OpenShell (Rust)
+Port Plan: code_port_plan_review_V4.txt (20 steps)
+Iteration: V3 (from scratch, incorporates all V1/V1-R1/V2/V2-R1 learnings)
+Date: 2026-07-03
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1.  Overview & Scope
+2.  Testing Conventions & Infrastructure
+3.  Unit Tests — Identity Groups Field (Step 1)
+4.  Unit Tests — OIDC Groups Extraction (Step 2)
+5.  Unit Tests — Label Constants (Step 3)
+6.  Unit Tests — Ownership Module (Step 4)
+7.  Unit Tests — OwnershipConfig in Config (Step 5)
+8.  Unit Tests — Config File Parsing (Step 5)
+9.  Unit Tests — ServerState Helper (Step 6)
+10. Handler Tests — Sandbox Ownership (Steps 7-10)
+11. Handler Tests — Provider Ownership (Step 11)
+12. Integration Tests — Label Persistence Fix (Step 7/R4-8)
+13. Integration Tests — K8s Driver Labels (Step 12)
+14. Integration Tests — Docker Driver Verification (Step 13)
+15. Unit Tests — SandboxIndex Owner Tracking (Step 14)
+16. E2E Tests — Multi-User Ownership Lifecycle (Steps 7-11)
+17. Wiremock-Based OIDC Integration Tests (Step 2)
+18. Helm Chart Template Tests (Steps 15-18)
+19. Cross-Cutting Concerns
+20. Traceability Matrix
+21. Test File Layout
+22. Test Fixtures & Mocks Inventory
+Appendix A — Kagenti E2E Test Mapping
+
+================================================================================
+1. OVERVIEW & SCOPE
+================================================================================
+
+This test plan covers all new code introduced by the 20-step porting plan for
+multi-tenant deployment support. It is built from scratch incorporating ALL
+learnings from four prior iterations (V1, V1-R1, V2, V2-R1).
+
+Design principles:
+  1. Match OpenShell's existing test conventions exactly (inline #[cfg(test)],
+     factory helpers, no external mock frameworks, #[tokio::test] for async)
+  2. Test only NEW code — don't re-test existing functionality (label parsing,
+     label validation, label round-trip are already covered by ~30 existing tests)
+  3. Every test is actionable — includes exact helper calls, file paths, and
+     the specific assertion being made
+  4. Correct by construction — shared providers inserted via store.put_message()
+     (not handler), label persistence tested via store.put_if() (not compute
+     runtime), Principal injected via request.extensions_mut() (matching
+     guard.rs pattern at line 163)
+  5. No redundant tests — each test verifies exactly one distinct behavior
+  6. Precise test counts — every test is enumerated and counted
+
+Total new tests: 158
+Test files modified/created: 14 Rust files + 1 Helm test script + 1 E2E test file
+
+================================================================================
+2. TESTING CONVENTIONS & INFRASTRUCTURE
+================================================================================
+
+2.1 Verified OpenShell Conventions (from codebase analysis)
+───────────────────────────────────────────────────────────
+
+  LOCATION:  In-source #[cfg(test)] mod tests at bottom of each file.
+             Shared helpers in #[cfg(test)] pub mod test_support blocks.
+
+  ASYNC:     #[tokio::test] for async code, #[test] for pure logic.
+
+  HELPERS:   Small factory functions scoped per test module.
+             No centralized request_with_principal() exists today.
+             Auth injected via request.extensions_mut().insert(principal).
+             (Pattern from guard.rs:163, policy.rs:3920, auth_rpc.rs:214)
+
+  FIXTURES:  test_server_state() in grpc/mod.rs:693 → Arc<ServerState>
+             test_store() in persistence/mod.rs:629 → Store
+             new_test_runtime() in compute/mod.rs:2096 → ComputeRuntime
+
+  SEEDING:   state.store.put_message(&object) — test-only unconditional write.
+
+  MOCKS:     Hand-rolled. MockAuthenticator, FakeComputeDriver, NoopTestDriver.
+             No mockall, proptest, or external mock frameworks.
+
+  NAMING:    snake_case descriptive: user_cannot_access_admin_methods.
+
+  ASSERTIONS: .is_ok(), .is_err(), err.code() == tonic::Code::*,
+              err.message().contains("...").
+
+  DEV DEPS:  wiremock 0.6, rcgen 0.13, temp-env 0.3, tempfile 3.
+
+2.2 New Test Helpers Required
+─────────────────────────────
+
+  These helpers are ADDED to existing test infrastructure. Each follows
+  verified patterns from the codebase.
+
+  FILE: crates/openshell-server/src/grpc/mod.rs (extend test_support module)
+
+  Helper 1: request_with_principal<T>(inner: T, principal: Principal) -> Request<T>
+
+    /// Wraps inner in a tonic::Request and injects Principal into extensions.
+    /// Pattern: guard.rs line 163 — extensions_mut().insert(principal).
+    pub fn request_with_principal<T>(inner: T, principal: Principal) -> Request<T> {
+        let mut req = Request::new(inner);
+        req.extensions_mut().insert(principal);
+        req
+    }
+
+    NOTE: This is a new helper that does NOT exist in the current codebase.
+    Today, handler tests bypass auth entirely. The ownership feature requires
+    handlers to read Principal from extensions, so tests must inject it.
+
+  Helper 2: make_user(subject: &str, role: &str) -> Principal
+
+    /// Factory for a Principal::User with OIDC identity.
+    /// Pattern: guard.rs:102 fn user(), authz.rs:135 identity_with_roles().
+    pub fn make_user(subject: &str, role: &str) -> Principal {
+        Principal::User(UserPrincipal {
+            identity: Identity {
+                subject: subject.to_string(),
+                display_name: None,
+                roles: vec![role.to_string()],
+                scopes: vec![],
+                groups: vec![],    // NEW field from Step 1
+                provider: IdentityProvider::Oidc,
+            },
+        })
+    }
+
+  Helper 3: make_admin(subject: &str) -> Principal
+
+    pub fn make_admin(subject: &str) -> Principal {
+        make_user(subject, "openshell-admin")
+    }
+
+  Helper 4: test_server_state_with_ownership(enabled, tenant_id) -> Arc<ServerState>
+
+    /// Like test_server_state() but with OwnershipConfig set on Config.
+    /// Pattern: test_server_state() at grpc/mod.rs:693.
+    pub async fn test_server_state_with_ownership(
+        enabled: bool,
+        tenant_id: Option<&str>,
+    ) -> Arc<ServerState> {
+        let store = Arc::new(
+            Store::connect("sqlite::memory:?cache=shared").await.unwrap(),
+        );
+        let compute = new_test_runtime(store.clone()).await;
+        let mut config = Config::new(None)
+            .with_database_url("sqlite::memory:?cache=shared");
+        config.ownership = Some(OwnershipConfig {
+            enabled,
+            allow_unowned_providers: true,  // default
+        });
+        if let Some(tid) = tenant_id {
+            config.tenant_id = Some(tid.to_string());
+        }
+        Arc::new(ServerState::new(
+            config, store, compute,
+            SandboxIndex::new(), SandboxWatchBus::new(),
+            TracingLogBus::new(),
+            Arc::new(SupervisorSessionRegistry::new()), None,
+        ))
+    }
+
+    NOTE: Config::new(None) takes tls: Option<TlsConfig>. The ownership
+    and tenant_id fields are added by Steps 5-6 of the port plan.
+
+2.3 Relationship to Existing Tests
+───────────────────────────────────
+
+  The following existing tests are NOT duplicated by this plan:
+
+  EXISTING LABEL INFRASTRUCTURE (30+ tests):
+    persistence/tests.rs:
+      - labels_round_trip (line 438)
+      - label_selector_single_match (line 458)
+      - label_selector_multiple_labels (line 492)
+      - label_selector_no_match (line 536)
+      - label_selector_respects_paging (line 553)
+      - empty_labels_not_matched_by_selector (line 584)
+      - parse_label_selector_* (8 tests, lines 847-916)
+    grpc/validation.rs:
+      - validate_label_key (14 tests)
+      - validate_label_value (8 tests)
+      - validate_label_selector (10 tests)
+
+  EXISTING AUTH (44+ tests):
+    auth/oidc.rs: extract_roles_* (5 tests), extract_scopes_* (5 tests)
+    auth/authz.rs: RBAC policy checks (20 tests)
+    auth/guard.rs: sandbox scope guards (8 tests)
+    auth/authenticator.rs: chain behavior (4 tests)
+
+  These tests will continue to pass unchanged. The ownership feature adds
+  NEW tests that exercise NEW code paths.
+
+================================================================================
+3. UNIT TESTS — IDENTITY GROUPS FIELD (Step 1)
+================================================================================
+
+File: crates/openshell-server/src/auth/identity.rs
+Module: ADD #[cfg(test)] mod tests (identity.rs currently has NO tests)
+Async: NO
+Port Plan Step: 1
+
+The Identity struct (line 16) gains a new field:
+  pub groups: Vec<String>
+
+Tests verify the groups field is properly integrated.
+
+TEST 3.1: identity_includes_groups_field
+  Setup:  Construct Identity with groups: vec!["team1".to_string()]
+  Verify: identity.groups == vec!["team1"]
+  Why:    Baseline: groups field exists and holds data.
+
+TEST 3.2: identity_default_groups_empty
+  Setup:  Construct Identity with groups: vec![]
+  Verify: identity.groups.is_empty()
+  Why:    Default construction (all existing code uses groups: vec![]).
+
+TEST 3.3: identity_multiple_groups
+  Setup:  Construct Identity with groups: vec!["team1", "team2", "org-admins"]
+  Verify: identity.groups.len() == 3
+  Why:    Users can belong to multiple groups (Keycloak group hierarchy).
+
+TEST 3.4: identity_groups_preserves_order
+  Setup:  Construct Identity with groups: vec!["z-team", "a-team"]
+  Verify: identity.groups[0] == "z-team", identity.groups[1] == "a-team"
+  Why:    Group order from JWT should be preserved (no sorting).
+
+SECTION TOTAL: 4 tests
+
+================================================================================
+4. UNIT TESTS — OIDC GROUPS EXTRACTION (Step 2)
+================================================================================
+
+File: crates/openshell-server/src/auth/oidc.rs
+Module: Extend existing #[cfg(test)] mod tests (starts at line 388)
+Async: NO (matches existing sync tests in oidc.rs)
+Port Plan Step: 2
+
+OidcConfig gains: pub groups_claim: String (default: "groups")
+OidcClaims gains: pub groups: Vec<String> (#[serde(skip)])
+
+Groups are extracted from JWT's extra claims using the configured
+groups_claim path, following the same pattern as extract_roles()
+(line 356-370) and extract_scopes() (line 373-386).
+
+A new function extract_groups(&claims, &groups_claim) -> Vec<String>
+is added, following the exact pattern of extract_roles().
+
+TEST 4.1: extract_groups_flat_array
+  Setup:  claims.extra = json!({"groups": ["/team1", "/team2"]})
+  Action: extract_groups(&claims, "groups")
+  Expect: vec!["/team1", "/team2"]
+  Why:    Keycloak returns groups as a flat JSON array.
+
+TEST 4.2: extract_groups_nested_path
+  Setup:  claims.extra = json!({"org": {"groups": ["dev", "qa"]}})
+  Action: extract_groups(&claims, "org.groups")
+  Expect: vec!["dev", "qa"]
+  Why:    Custom OIDC providers may nest groups under a path.
+
+TEST 4.3: extract_groups_missing_claim
+  Setup:  claims.extra = json!({})
+  Action: extract_groups(&claims, "groups")
+  Expect: vec![] (empty)
+  Why:    Graceful degradation when groups claim is absent.
+
+TEST 4.4: extract_groups_wrong_type
+  Setup:  claims.extra = json!({"groups": "not-an-array"})
+  Action: extract_groups(&claims, "groups")
+  Expect: vec![] (empty)
+  Why:    Malformed claim should not panic.
+
+TEST 4.5: extract_groups_single_string_in_array
+  Setup:  claims.extra = json!({"groups": ["/team1"]})
+  Action: extract_groups(&claims, "groups")
+  Expect: vec!["/team1"]
+  Why:    Single-element array.
+
+TEST 4.6: groups_claim_default_value
+  Setup:  OidcConfig with default groups_claim
+  Verify: config.groups_claim == "groups"
+  Why:    Default matches Keycloak's standard claim name.
+
+SECTION TOTAL: 6 tests
+
+================================================================================
+5. UNIT TESTS — LABEL CONSTANTS (Step 3)
+================================================================================
+
+File: crates/openshell-core/src/driver_utils.rs
+Module: ADD #[cfg(test)] mod tests (driver_utils.rs currently has NO tests)
+Async: NO
+Port Plan Step: 3
+
+Two new constants added alongside existing LABEL_SANDBOX_ID etc. (line 17):
+  pub const LABEL_OWNER: &str = "openshell.ai/owner";
+  pub const LABEL_TENANT: &str = "openshell.ai/tenant";
+
+TEST 5.1: label_owner_has_openshell_prefix
+  Verify: LABEL_OWNER.starts_with("openshell.ai/")
+  Why:    Convention consistency with LABEL_SANDBOX_ID etc.
+
+TEST 5.2: label_tenant_has_openshell_prefix
+  Verify: LABEL_TENANT.starts_with("openshell.ai/")
+  Why:    Convention consistency.
+
+TEST 5.3: label_owner_is_valid_k8s_label_key
+  Verify: LABEL_OWNER matches K8s label key regex (prefix/name, each part valid)
+  Why:    Invalid keys would cause K8s API rejection.
+
+TEST 5.4: label_tenant_is_valid_k8s_label_key
+  Verify: LABEL_TENANT matches K8s label key regex
+  Why:    Same validation.
+
+SECTION TOTAL: 4 tests
+
+================================================================================
+6. UNIT TESTS — OWNERSHIP MODULE (Step 4)
+================================================================================
+
+File: crates/openshell-server/src/auth/ownership.rs (NEW file)
+Module: #[cfg(test)] mod tests at bottom of new file
+Async: NO (all functions are pure/sync)
+Port Plan Step: 4
+
+This is the core module. Four public functions tested:
+  1. sanitize_label_value(s: &str) -> String
+  2. stamp_owner_labels(principal, config, labels) -> HashMap<String, String>
+  3. check_ownership(principal, record, config, allow_unowned) -> Result<(), Status>
+  4. owner_label_selector(principal, config) -> Option<String>
+
+Also: OwnershipConfig struct (used across all functions)
+
+6.1 sanitize_label_value() Tests
+─────────────────────────────────
+
+  K8s label value rules: [a-z0-9A-Z._-]{0,63}, must start/end with alnum.
+  Keycloak sub is UUID (already valid), but other IdPs may use email/username.
+
+  TEST: uuid_passthrough
+    Input:  "550e8400-e29b-41d4-a716-446655440000"
+    Expect: Same string (UUIDs are already valid K8s label values)
+
+  TEST: email_replaces_at_sign
+    Input:  "alice@example.com"
+    Expect: "alice_example.com"
+    Why:    @ is invalid in K8s labels. Dots are VALID (K8s allows dots).
+            (V2-R1 Issue R2-8 corrected: only @ replaced, dots preserved)
+
+  TEST: truncates_to_63_chars
+    Input:  "a".repeat(100)
+    Expect: "a".repeat(63)
+    Why:    K8s label value max length is 63.
+
+  TEST: strips_leading_non_alnum
+    Input:  ".leading-dot"
+    Expect: "leading-dot"
+    Why:    K8s labels must start with alphanumeric.
+
+  TEST: strips_trailing_non_alnum
+    Input:  "trailing-dot."
+    Expect: "trailing-dot"
+    Why:    K8s labels must end with alphanumeric.
+
+  TEST: replaces_invalid_chars
+    Input:  "user:name/org"
+    Expect: "user_name_org" (colons and slashes replaced)
+    Why:    Only [a-z0-9A-Z._-] are valid.
+
+  TEST: preserves_hyphens_and_dots
+    Input:  "my-user.name"
+    Expect: "my-user.name" (unchanged)
+    Why:    Hyphens and dots are valid mid-value.
+
+  TEST: empty_input_returns_empty
+    Input:  ""
+    Expect: ""
+    Why:    Edge case. Empty labels are valid in K8s.
+
+  TEST: all_invalid_chars_returns_empty_or_fallback
+    Input:  "@@@@"
+    Expect: "" or sanitized to underscores then stripped (implementation-specific)
+    Why:    Edge case when every char is invalid.
+
+  TEST: mixed_case_preserved
+    Input:  "UserName123"
+    Expect: "UserName123"
+    Why:    K8s labels are case-sensitive; don't lowercase.
+
+  SUBTOTAL: 10 tests
+
+6.2 stamp_owner_labels() Tests
+───────────────────────────────
+
+  Signature: stamp_owner_labels(
+      principal: &Principal,
+      config: &OwnershipConfig,
+      existing_labels: HashMap<String, String>,
+  ) -> HashMap<String, String>
+
+  TEST: stamps_owner_for_user_principal
+    Setup:  principal = make_user("user-uuid-1", "openshell-user")
+            config = OwnershipConfig { enabled: true, .. }
+            labels = HashMap::new()
+    Action: stamp_owner_labels(&principal, &config, labels)
+    Expect: result.get(LABEL_OWNER) == Some("user-uuid-1")
+    Why:    Core behavior: owner label stamped from identity.subject.
+
+  TEST: stamps_tenant_when_configured
+    Setup:  config.tenant_id = Some("team1"), enabled = true
+    Action: stamp_owner_labels(...)
+    Expect: result.get(LABEL_TENANT) == Some("team1")
+    Why:    Tenant label identifies the gateway's tenant.
+
+  TEST: stamps_both_owner_and_tenant
+    Setup:  User principal + tenant_id = Some("team1")
+    Action: stamp_owner_labels(...)
+    Expect: result contains both LABEL_OWNER and LABEL_TENANT
+    Why:    Both labels are independent and should coexist.
+
+  TEST: strips_client_supplied_owner_label
+    Setup:  labels = {LABEL_OWNER: "spoofed-user"}
+    Action: stamp_owner_labels(&make_user("real-user", ...), &config, labels)
+    Expect: result.get(LABEL_OWNER) == Some("real-user")
+    Why:    Anti-spoofing: server overwrites client-supplied openshell.ai/owner.
+            (Maps to Kagenti test_T4_4 TestOwnershipCreate.test_client_supplied_owner_stripped)
+
+  TEST: strips_client_supplied_tenant_label
+    Setup:  labels = {LABEL_TENANT: "spoofed-tenant"}
+    Action: stamp_owner_labels(...)
+    Expect: LABEL_TENANT equals config.tenant_id (not "spoofed-tenant")
+    Why:    Anti-spoofing: server overwrites client-supplied openshell.ai/tenant.
+
+  TEST: preserves_non_openshell_labels
+    Setup:  labels = {"team": "engineering", "env": "prod"}
+    Action: stamp_owner_labels(...)
+    Expect: result contains "team"="engineering" AND "env"="prod" AND LABEL_OWNER
+    Why:    User-supplied labels that don't use openshell.ai/ prefix are preserved.
+
+  TEST: no_stamp_for_anonymous_principal
+    Setup:  principal = Principal::Anonymous, config.enabled = true
+    Action: stamp_owner_labels(...)
+    Expect: result does NOT contain LABEL_OWNER
+    Why:    Anonymous requests (no OIDC) don't have an identity to stamp.
+            Backward compat: pre-OIDC deployments keep working.
+
+  TEST: no_stamp_when_ownership_disabled
+    Setup:  config.enabled = false, principal = make_user(...)
+    Action: stamp_owner_labels(...)
+    Expect: result does NOT contain LABEL_OWNER
+    Why:    Feature toggle: disabled = no ownership labels stamped.
+
+  TEST: admin_still_gets_owner_stamp
+    Setup:  principal = make_admin("admin-uuid-1"), config.enabled = true
+    Action: stamp_owner_labels(...)
+    Expect: result.get(LABEL_OWNER) == Some("admin-uuid-1")
+    Why:    Admin users still get their own owner label stamped. The admin
+            bypass is in check_ownership (list/get), not in stamp.
+
+  TEST: subject_sanitized_before_stamping
+    Setup:  principal with identity.subject = "alice@example.com"
+    Action: stamp_owner_labels(...)
+    Expect: result.get(LABEL_OWNER) == Some("alice_example.com")
+    Why:    Subject is passed through sanitize_label_value() before stamping.
+
+  SUBTOTAL: 10 tests
+
+6.3 check_ownership() Tests
+────────────────────────────
+
+  Signature: check_ownership(
+      principal: &Principal,
+      record_labels: &HashMap<String, String>,
+      config: &OwnershipConfig,
+      allow_unowned: bool,
+  ) -> Result<(), Status>
+
+  record_labels is extracted from the ObjectRecord's protobuf metadata.labels.
+  Called AFTER fetching a sandbox/provider by name/id.
+
+  TEST: owner_matches_allows_access
+    Setup:  principal = make_user("user-1", "openshell-user")
+            record_labels = {LABEL_OWNER: "user-1"}
+    Action: check_ownership(&principal, &labels, &config, false)
+    Expect: Ok(())
+    Why:    Happy path: user accesses own resource.
+
+  TEST: owner_mismatch_returns_permission_denied
+    Setup:  principal = make_user("user-1", "openshell-user")
+            record_labels = {LABEL_OWNER: "user-2"}
+    Action: check_ownership(...)
+    Expect: Err with code == tonic::Code::PermissionDenied
+    Why:    Core isolation: user-1 cannot access user-2's resources.
+
+  TEST: admin_bypasses_ownership_check
+    Setup:  principal = make_admin("admin-1")
+            record_labels = {LABEL_OWNER: "user-2"}
+            config.admin_role = "openshell-admin"
+    Action: check_ownership(...)
+    Expect: Ok(())
+    Why:    Admin users bypass owner checks (can see/modify any resource).
+
+  TEST: anonymous_skipped_when_ownership_enabled
+    Setup:  principal = Principal::Anonymous, config.enabled = true
+    Action: check_ownership(...)
+    Expect: Ok(()) — ownership logic is skipped for anonymous principals.
+    Why:    Backward compat: without OIDC, all resources are accessible.
+            (V2-R1 Issue R2-3 clarification incorporated)
+
+  TEST: no_owner_label_allow_unowned_true
+    Setup:  principal = make_user("user-1", "openshell-user")
+            record_labels = {} (empty — no LABEL_OWNER)
+            allow_unowned = true
+    Action: check_ownership(...)
+    Expect: Ok(())
+    Why:    Providers use allow_unowned=true. Pre-existing shared providers
+            (created before ownership was enabled) have no owner label.
+            (V1-R1 Issue R1-2 correction: allow_unowned parameter added)
+
+  TEST: no_owner_label_allow_unowned_false
+    Setup:  Same as above but allow_unowned = false
+    Action: check_ownership(...)
+    Expect: Err with code == tonic::Code::PermissionDenied
+    Why:    Sandboxes use allow_unowned=false. Unowned resources are blocked.
+
+  TEST: ownership_disabled_allows_all
+    Setup:  config.enabled = false, principal = make_user("user-1", "openshell-user")
+            record_labels = {LABEL_OWNER: "user-2"}
+    Action: check_ownership(...)
+    Expect: Ok(())
+    Why:    Feature toggle: disabled = no ownership enforcement.
+
+  TEST: permission_denied_does_not_leak_owner_info
+    Setup:  principal = make_user("user-1", ...), record_labels = {LABEL_OWNER: "user-2"}
+    Action: check_ownership(...)
+    Expect: Err message does NOT contain "user-2" (the actual owner)
+    Why:    Security: error messages must not reveal who owns a resource.
+
+  TEST: sandbox_principal_denied
+    Setup:  principal = Principal::Sandbox(SandboxPrincipal { ... })
+            record_labels = {LABEL_OWNER: "user-1"}
+    Action: check_ownership(...)
+    Expect: Err with code == tonic::Code::PermissionDenied
+    Why:    Sandbox principals should not bypass ownership. Only User/Anonymous.
+
+  SUBTOTAL: 9 tests
+
+6.4 owner_label_selector() Tests
+─────────────────────────────────
+
+  Signature: owner_label_selector(
+      principal: &Principal,
+      config: &OwnershipConfig,
+  ) -> Option<String>
+
+  Returns a label selector string for list operations, or None to skip filtering.
+
+  TEST: returns_selector_for_user
+    Setup:  principal = make_user("user-uuid-1", "openshell-user")
+            config.enabled = true
+    Action: owner_label_selector(&principal, &config)
+    Expect: Some("openshell.ai/owner=user-uuid-1")
+    Why:    List operations filter by owner label.
+
+  TEST: returns_none_for_admin
+    Setup:  principal = make_admin("admin-uuid-1")
+    Action: owner_label_selector(...)
+    Expect: None
+    Why:    Admin users see all resources (no filter applied).
+
+  TEST: returns_none_for_anonymous
+    Setup:  principal = Principal::Anonymous
+    Action: owner_label_selector(...)
+    Expect: None
+    Why:    Anonymous (no OIDC) sees all resources for backward compat.
+
+  TEST: returns_none_when_disabled
+    Setup:  config.enabled = false, principal = make_user(...)
+    Action: owner_label_selector(...)
+    Expect: None
+    Why:    Feature disabled = no filtering.
+
+  TEST: selector_value_is_sanitized
+    Setup:  principal with subject = "alice@example.com"
+    Action: owner_label_selector(...)
+    Expect: Some("openshell.ai/owner=alice_example.com")
+    Why:    Subject passes through sanitize_label_value().
+
+  SUBTOTAL: 5 tests
+
+SECTION 6 TOTAL: 34 tests
+
+================================================================================
+7. UNIT TESTS — OWNERSHIPCONFIG IN CONFIG (Step 5)
+================================================================================
+
+File: crates/openshell-core/src/config.rs
+Module: Extend existing #[cfg(test)] mod tests (starts at line 788)
+Async: NO
+Port Plan Step: 5
+
+Config gains:
+  pub ownership: Option<OwnershipConfig>,
+  pub tenant_id: Option<String>,
+
+OwnershipConfig struct:
+  pub struct OwnershipConfig {
+      pub enabled: bool,
+      pub allow_unowned_providers: bool,   // default: true
+  }
+
+OidcConfig gains:
+  pub groups_claim: String,  // default: "groups"
+
+TEST 7.1: config_default_ownership_is_none
+  Setup:  Config::new(None)
+  Verify: config.ownership.is_none()
+  Why:    Backward compat: ownership disabled by default.
+
+TEST 7.2: config_default_tenant_id_is_none
+  Setup:  Config::new(None)
+  Verify: config.tenant_id.is_none()
+  Why:    Single-tenant is the default mode.
+
+TEST 7.3: ownership_config_enabled_true
+  Setup:  OwnershipConfig { enabled: true, allow_unowned_providers: true }
+  Verify: ownership.enabled == true
+  Why:    Basic construction.
+
+TEST 7.4: ownership_config_defaults_allow_unowned_true
+  Setup:  OwnershipConfig::default() or { enabled: true, ..Default::default() }
+  Verify: ownership.allow_unowned_providers == true
+  Why:    Default matches the design: shared providers accessible without
+          owner label (pre-existing providers from before ownership was enabled).
+
+TEST 7.5: oidc_config_default_groups_claim
+  Setup:  OidcConfig with default values
+  Verify: config.groups_claim == "groups"
+  Why:    Default matches Keycloak's standard claim name.
+
+TEST 7.6: oidc_config_custom_groups_claim
+  Setup:  OidcConfig { groups_claim: "cognito:groups".to_string(), .. }
+  Verify: config.groups_claim == "cognito:groups"
+  Why:    Custom OIDC providers use different claim paths.
+
+SECTION TOTAL: 6 tests
+
+================================================================================
+8. UNIT TESTS — CONFIG FILE PARSING (Step 5)
+================================================================================
+
+File: crates/openshell-server/src/config_file.rs
+Module: Extend existing #[cfg(test)] mod tests (starts at line 322)
+Async: NO
+Port Plan Step: 5
+
+GatewayFileSection gains (with #[serde(deny_unknown_fields)]):
+  pub ownership: Option<OwnershipFileSection>,
+  pub tenant_id: Option<String>,
+
+OwnershipFileSection:
+  pub struct OwnershipFileSection {
+      pub enabled: Option<bool>,
+      pub allow_unowned_providers: Option<bool>,
+  }
+
+OidcFileSection gains:
+  pub groups_claim: Option<String>,
+
+NOTE: GatewayFileSection uses #[serde(deny_unknown_fields)], so ANY new
+field MUST be added to the struct or TOML parsing will reject the config.
+
+TEST 8.1: toml_ownership_enabled_parsed
+  Setup:  write_tmp("[openshell.gateway.ownership]\nenabled = true\n")
+  Action: Parse GatewayFileSection from TOML
+  Verify: section.ownership.unwrap().enabled == Some(true)
+  Why:    TOML config file is the primary way to enable ownership.
+
+TEST 8.2: toml_tenant_id_parsed
+  Setup:  write_tmp("[openshell.gateway]\ntenant_id = \"team1\"\n")
+  Action: Parse GatewayFileSection
+  Verify: section.tenant_id == Some("team1".to_string())
+  Why:    Tenant ID set via TOML config.
+
+TEST 8.3: toml_oidc_groups_claim_parsed
+  Setup:  write_tmp("[openshell.gateway.oidc]\ngroups_claim = \"cognito:groups\"\n")
+  Action: Parse GatewayFileSection
+  Verify: section.oidc.unwrap().groups_claim == Some("cognito:groups".to_string())
+  Why:    Custom groups claim path via TOML.
+
+TEST 8.4: toml_missing_ownership_section_is_none
+  Setup:  write_tmp("[openshell.gateway]\nbind_address = \"0.0.0.0:8080\"\n")
+  Action: Parse GatewayFileSection
+  Verify: section.ownership.is_none()
+  Why:    Backward compat: existing configs without [ownership] still parse.
+
+SECTION TOTAL: 4 tests
+
+================================================================================
+9. UNIT TESTS — SERVERSTATE HELPER (Step 6)
+================================================================================
+
+File: crates/openshell-server/src/lib.rs
+Module: Extend existing #[cfg(test)] mod tests
+Async: YES (#[tokio::test])
+Port Plan Step: 6
+
+ServerState gains a helper method:
+  pub fn ownership_config(&self) -> OwnershipConfig
+
+This extracts OwnershipConfig from self.config.ownership, defaulting to
+OwnershipConfig { enabled: false } when None.
+
+TEST 9.1: ownership_config_returns_default_when_none
+  Setup:  state from test_server_state().await (no ownership in config)
+  Action: state.ownership_config()
+  Expect: OwnershipConfig { enabled: false, .. }
+  Why:    Default test state has no ownership config.
+
+TEST 9.2: ownership_config_returns_configured_value
+  Setup:  state from test_server_state_with_ownership(true, Some("team1")).await
+  Action: state.ownership_config()
+  Expect: OwnershipConfig { enabled: true, .. }
+  Why:    Configured ownership is returned.
+
+TEST 9.3: ownership_config_disabled_explicitly
+  Setup:  state from test_server_state_with_ownership(false, None).await
+  Action: state.ownership_config()
+  Expect: OwnershipConfig { enabled: false, .. }
+  Why:    Explicitly disabled ownership.
+
+TEST 9.4: tenant_id_accessible_from_config
+  Setup:  state from test_server_state_with_ownership(true, Some("team2")).await
+  Action: state.config.tenant_id.as_deref()
+  Expect: Some("team2")
+  Why:    Tenant ID flows through Config to handlers.
+
+SECTION TOTAL: 4 tests
+
+================================================================================
+10. HANDLER TESTS — SANDBOX OWNERSHIP (Steps 7-10)
+================================================================================
+
+File: crates/openshell-server/src/grpc/sandbox.rs
+Module: Extend existing #[cfg(test)] mod tests (starts at line 2000)
+Async: YES (#[tokio::test])
+Port Plan Steps: 7 (create), 8 (list), 9 (get/delete), 10 (watch/exec/SSH)
+
+IMPORTANT: handle_create_sandbox_inner (line 119) is MODIFIED by the port
+plan to extract Principal from request.extensions() BEFORE calling
+request.into_inner() (currently at line 123). The modification:
+
+  pub(super) async fn handle_create_sandbox_inner(
+      state: &Arc<ServerState>,
+      request: Request<CreateSandboxRequest>,
+  ) -> Result<Response<SandboxResponse>, Status> {
+      // === OWNERSHIP: Extract principal BEFORE into_inner() ===
+      let principal = request.extensions()
+          .get::<Principal>()
+          .cloned()
+          .unwrap_or(Principal::Anonymous);
+      let ownership_config = state.ownership_config();
+
+      let request = request.into_inner();
+      // ... rest of handler
+  }
+
+Tests inject Principal via request_with_principal() (Section 2.2).
+
+10.1 Sandbox Create — Owner Label Stamping (Step 7)
+─────────────────────────────────────────────────────
+
+  TEST: create_sandbox_stamps_owner_label
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: handle_create_sandbox(&state, request_with_principal(
+              CreateSandboxRequest { name: "s1", spec: Some(...), labels: HashMap::new() },
+              make_user("user-uuid-1", "openshell-user"),
+            ))
+    Verify: response.sandbox.metadata.labels.get(LABEL_OWNER) == Some("user-uuid-1")
+    Why:    Core feature: owner label stamped from JWT sub.
+            (Maps to Kagenti test_T4_4 TestOwnershipCreate.test_create_stamps_owner_label)
+
+  TEST: create_sandbox_stamps_tenant_label
+    Setup:  state = test_server_state_with_ownership(true, Some("team1"))
+    Action: handle_create_sandbox(&state, request_with_principal(...))
+    Verify: response.sandbox.metadata.labels.get(LABEL_TENANT) == Some("team1")
+    Why:    Tenant label identifies which gateway created the sandbox.
+
+  TEST: create_sandbox_stamps_template_labels
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: handle_create_sandbox(...)
+    Verify: response.sandbox.spec.template.labels contains LABEL_OWNER
+    Why:    Port plan Step 7 stamps BOTH metadata.labels AND spec.template.labels.
+            Template labels flow to K8s pods and Docker containers.
+            (V4-R1 Issue R4-1 correction: dual-label stamping)
+
+  TEST: create_sandbox_strips_client_owner_label
+    Setup:  labels = {LABEL_OWNER: "spoofed-owner"}
+    Action: handle_create_sandbox(&state, request_with_principal(
+              CreateSandboxRequest { name: "s2", spec: Some(...), labels },
+              make_user("real-user", "openshell-user"),
+            ))
+    Verify: response.sandbox.metadata.labels.get(LABEL_OWNER) == Some("real-user")
+    Why:    Anti-spoofing: server overwrites client-supplied owner label.
+
+  TEST: create_sandbox_preserves_user_labels
+    Setup:  labels = {"env": "dev", "team": "platform"}
+    Action: handle_create_sandbox(...)
+    Verify: response.sandbox.metadata.labels contains "env"="dev" AND LABEL_OWNER
+    Why:    Non-openshell.ai/ labels are preserved alongside owner labels.
+
+  TEST: create_sandbox_no_owner_for_anonymous
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: handle_create_sandbox(&state, Request::new(
+              CreateSandboxRequest { ... }  // No principal in extensions
+            ))
+    Verify: response.sandbox.metadata.labels does NOT contain LABEL_OWNER
+    Why:    Anonymous (no OIDC) → no owner stamp. Backward compat.
+
+  TEST: create_sandbox_no_owner_when_disabled
+    Setup:  state = test_server_state_with_ownership(false, None)
+    Action: handle_create_sandbox(&state, request_with_principal(
+              ..., make_user("user-1", "openshell-user"),
+            ))
+    Verify: response.sandbox.metadata.labels does NOT contain LABEL_OWNER
+    Why:    Ownership disabled → no labels stamped even for authenticated users.
+
+  SUBTOTAL: 7 tests
+
+10.2 Sandbox List — Owner Filtering (Step 8)
+──────────────────────────────────────────────
+
+  TEST: list_sandboxes_filtered_by_owner
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: 1. Create sandbox as user-1 via handle_create_sandbox
+            2. Create sandbox as user-2 via handle_create_sandbox
+            3. List as user-1 via handle_list_sandboxes
+    Verify: List returns only user-1's sandbox
+    Why:    Core isolation: users see only their own sandboxes.
+
+  TEST: list_sandboxes_admin_sees_all
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: 1. Create sandboxes as user-1 and user-2
+            2. List as admin via handle_list_sandboxes
+    Verify: Returns both sandboxes
+    Why:    Admin bypass: admin users see all resources.
+
+  TEST: list_sandboxes_anonymous_sees_all
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: 1. Create sandbox with Principal::Anonymous (no owner label stamped)
+            2. List as Principal::Anonymous (no principal in request)
+    Verify: Returns the sandbox (ownership filtering skipped for anonymous)
+    Why:    Backward compat: without OIDC, no filtering applied.
+            (V2-R1 Issue R2-3 correction: explicit Principal::Anonymous)
+
+  TEST: list_sandboxes_unfiltered_when_disabled
+    Setup:  state = test_server_state_with_ownership(false, None)
+    Action: 1. Create sandboxes as two different users
+            2. List as user-1
+    Verify: Returns all sandboxes (no owner filtering)
+    Why:    Ownership disabled → no filtering.
+
+  TEST: list_sandboxes_user_label_selector_combined_with_owner
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: 1. User-1 creates sandbox-a with labels {"env": "prod"}
+            2. User-1 creates sandbox-b with labels {"env": "dev"}
+            3. User-1 lists with label_selector = "env=prod"
+    Verify: Returns only sandbox-a (owner filter AND user filter both applied)
+    Why:    User-supplied label_selector is ANDed with owner filter.
+
+  TEST: list_sandboxes_returns_empty_for_new_user
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: 1. User-1 creates a sandbox
+            2. User-2 lists sandboxes (has no sandboxes)
+    Verify: Returns empty list
+    Why:    New user with no resources sees empty list.
+
+  SUBTOTAL: 6 tests
+
+10.3 Sandbox Get — Ownership Check (Step 9)
+─────────────────────────────────────────────
+
+  TEST: get_sandbox_allowed_for_owner
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: 1. User-1 creates sandbox "my-sbx"
+            2. User-1 calls handle_get_sandbox(&state, request_with_principal(
+                 GetSandboxRequest { name: "my-sbx" }, make_user("user-1", ...) ))
+    Verify: Ok — returns the sandbox
+    Why:    Owner can access their own sandbox.
+
+  TEST: get_sandbox_denied_for_non_owner
+    Setup:  Same setup as above
+    Action: User-2 calls handle_get_sandbox for "my-sbx"
+    Verify: Err with code == tonic::Code::PermissionDenied (or NotFound)
+    Why:    Core isolation: user-2 cannot access user-1's sandbox.
+            (Maps to Kagenti test_T4_4 TestOwnershipAccessDenied)
+
+  TEST: get_sandbox_allowed_for_admin
+    Setup:  User-1 creates sandbox, admin gets it
+    Action: Admin calls handle_get_sandbox for user-1's sandbox
+    Verify: Ok
+    Why:    Admin bypass.
+
+  TEST: get_sandbox_no_check_when_disabled
+    Setup:  state = test_server_state_with_ownership(false, None)
+    Action: User-2 calls handle_get_sandbox for user-1's sandbox
+    Verify: Ok (no ownership check)
+    Why:    Ownership disabled → any user can access any sandbox.
+
+  SUBTOTAL: 4 tests
+
+10.4 Sandbox Delete — Ownership Check (Step 9)
+────────────────────────────────────────────────
+
+  TEST: delete_sandbox_allowed_for_owner
+    Setup:  User-1 creates sandbox, user-1 deletes it
+    Verify: Ok
+    Why:    Owner can delete own sandbox.
+
+  TEST: delete_sandbox_denied_for_non_owner
+    Setup:  User-1 creates sandbox, user-2 tries to delete
+    Verify: Err with code PermissionDenied (or NotFound)
+    Why:    Core isolation.
+
+  TEST: delete_sandbox_allowed_for_admin
+    Setup:  User-1 creates sandbox, admin deletes it
+    Verify: Ok
+    Why:    Admin bypass.
+
+  SUBTOTAL: 3 tests
+
+10.5 Sandbox Watch/Exec/SSH — Ownership Check (Step 10)
+─────────────────────────────────────────────────────────
+
+  NOTE: These handlers (handle_watch_sandbox, handle_exec_sandbox,
+  handle_create_ssh_session) all follow the same pattern:
+    1. Fetch sandbox by name
+    2. check_ownership(principal, sandbox_labels, config, allow_unowned=false)
+    3. Proceed if Ok, return error if Err
+
+  TEST: watch_sandbox_denied_for_non_owner
+    Setup:  User-1 creates sandbox, user-2 tries to watch
+    Verify: Err with PermissionDenied
+    Why:    Watch streams must be owner-scoped.
+
+  TEST: exec_sandbox_denied_for_non_owner
+    Setup:  User-1 creates sandbox, user-2 tries to exec
+    Verify: Err with PermissionDenied
+    Why:    Exec access must be owner-scoped.
+
+  TEST: ssh_session_denied_for_non_owner
+    Setup:  User-1 creates sandbox, user-2 tries to create SSH session
+    Verify: Err with PermissionDenied
+    Why:    SSH access must be owner-scoped.
+
+  TEST: watch_sandbox_allowed_for_admin
+    Setup:  User-1 creates sandbox, admin watches
+    Verify: Ok (or at least no PermissionDenied — actual streaming may error)
+    Why:    Admin bypass.
+
+  TEST: exec_sandbox_allowed_for_owner
+    Setup:  User-1 creates sandbox, user-1 execs
+    Verify: Ok (no PermissionDenied — actual exec may error due to NoopTestDriver)
+    Why:    Owner can exec into own sandbox.
+
+  TEST: watch_sandbox_no_check_when_disabled
+    Setup:  state = test_server_state_with_ownership(false, None)
+    Action: User-2 watches user-1's sandbox
+    Verify: No PermissionDenied
+    Why:    Ownership disabled → no check.
+
+  TEST: ssh_session_allowed_for_admin
+    Setup:  User-1 creates sandbox, admin creates SSH session
+    Verify: Ok (no PermissionDenied)
+    Why:    Admin bypass for SSH.
+
+  SUBTOTAL: 7 tests
+
+SECTION 10 TOTAL: 27 tests
+
+================================================================================
+11. HANDLER TESTS — PROVIDER OWNERSHIP (Step 11)
+================================================================================
+
+File: crates/openshell-server/src/grpc/provider.rs
+Module: Extend existing #[cfg(test)] mod tests (starts at line 2336)
+Async: YES (#[tokio::test])
+Port Plan Step: 11 (11A through 11E)
+
+IMPORTANT: handle_create_provider (line 1150) is MODIFIED to extract
+Principal from request.extensions() BEFORE request.into_inner() (line 1154),
+following the same pattern as the sandbox handler modification.
+
+Provider ownership differs from sandbox in two key ways:
+  1. Providers use allow_unowned=true in check_ownership (shared providers)
+  2. Provider create/update/delete roles are changed from admin-only to
+     user role (when ownership is enabled, any user can CRUD their own providers)
+
+11.1 Provider Create — Owner Stamping (Step 11A)
+──────────────────────────────────────────────────
+
+  TEST: create_provider_stamps_owner_label
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: handle_create_provider(&state, request_with_principal(
+              CreateProviderRequest { provider: Some(Provider { .. }) },
+              make_user("user-1", "openshell-user"),
+            ))
+    Verify: response.provider.metadata.labels.get(LABEL_OWNER) == Some("user-1")
+    Why:    Owner label stamped on provider creation.
+
+  TEST: create_provider_initializes_metadata_before_stamping
+    Setup:  Provider with metadata = None (client didn't send metadata)
+    Action: handle_create_provider(...)
+    Verify: response.provider.metadata is Some AND contains LABEL_OWNER
+    Why:    Port plan ensures metadata exists before stamping to prevent
+            create_provider_record from overwriting with empty labels.
+            (V4-R1 Issue R4-7 correction)
+
+  TEST: create_provider_no_owner_when_disabled
+    Setup:  state = test_server_state_with_ownership(false, None)
+    Action: handle_create_provider(...)
+    Verify: response.provider.metadata.labels does NOT contain LABEL_OWNER
+    Why:    Ownership disabled → no owner stamp.
+
+  TEST: create_provider_runtime_guard_when_ownership_enabled
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: handle_create_provider(&state, request_with_principal(
+              ..., make_user("user-1", "openshell-user"),
+            ))
+    Verify: Ok — user role allowed to create when ownership enabled
+    Why:    Step 11E: with ownership, create_provider is opened to user role.
+            (V1-R1 Issue R1-4 correction: runtime guard, not decorator change)
+
+  SUBTOTAL: 4 tests
+
+11.2 Provider List — Filtered by Owner (Step 11B)
+──────────────────────────────────────────────────
+
+  TEST: list_providers_filtered_by_owner
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: 1. User-1 creates provider-A
+            2. User-2 creates provider-B
+            3. User-1 lists providers
+    Verify: Returns only provider-A
+    Why:    Core isolation: users see only their own providers.
+
+  TEST: list_providers_admin_sees_all
+    Setup:  Two users create providers, admin lists
+    Verify: Returns both
+    Why:    Admin bypass.
+
+  TEST: list_providers_includes_shared_providers
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: 1. INSERT shared provider directly into store using
+               state.store.put_message(&shared_provider) where shared_provider
+               has metadata.labels = HashMap::new() (NO owner label).
+               This simulates a pre-existing provider from before ownership
+               was enabled.
+            2. User-1 creates provider-A via handle_create_provider
+            3. User-1 lists providers
+    Verify: Returns BOTH provider-A (owned) and shared provider (no owner label)
+    Why:    allow_unowned=true: shared providers (no owner label) visible to all.
+            (V2-R1 Issue R2-4 correction: shared provider inserted via store)
+
+    NOTE: The shared provider MUST be inserted directly into the store
+    (bypassing the handler) because handle_create_provider with ownership
+    enabled would stamp an owner label. Pre-existing shared providers are
+    from before ownership was enabled — they have no openshell.ai/owner label.
+
+  TEST: list_providers_unfiltered_when_disabled
+    Setup:  state = test_server_state_with_ownership(false, None)
+    Action: Multiple users create providers, any user lists
+    Verify: Returns all providers
+    Why:    Ownership disabled → no filtering.
+
+  SUBTOTAL: 4 tests
+
+11.3 Provider Get/Update/Delete — Ownership (Steps 11C-11E)
+─────────────────────────────────────────────────────────────
+
+  TEST: get_provider_allowed_for_owner
+    Setup:  User-1 creates provider, user-1 gets it
+    Verify: Ok
+    Why:    Owner can access own provider.
+
+  TEST: get_provider_denied_for_non_owner
+    Setup:  User-1 creates provider, user-2 gets it
+    Verify: Err with PermissionDenied (or NotFound)
+    Why:    Core isolation.
+
+  TEST: get_shared_provider_allowed_for_any_user
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: 1. Insert shared provider into store (no owner label)
+            2. User-2 calls handle_get_provider for the shared provider
+    Verify: Ok
+    Why:    allow_unowned=true: shared providers accessible to all users.
+            (V2-R1 Issue R2-4 correction: store insertion, not handler creation)
+
+  TEST: update_provider_allowed_for_owner
+    Setup:  User-1 creates provider, user-1 updates it
+    Verify: Ok
+    Why:    Owner can update own provider.
+
+  TEST: update_provider_denied_for_non_owner
+    Setup:  User-1 creates provider, user-2 updates it
+    Verify: Err with PermissionDenied
+    Why:    Core isolation.
+
+  TEST: delete_provider_allowed_for_owner
+    Setup:  User-1 creates provider, user-1 deletes it
+    Verify: Ok
+    Why:    Owner can delete own provider.
+
+  TEST: delete_provider_denied_for_non_owner
+    Setup:  User-1 creates provider, user-2 deletes it
+    Verify: Err with PermissionDenied
+    Why:    Core isolation.
+
+  TEST: delete_provider_allowed_for_admin
+    Setup:  User-1 creates provider, admin deletes it
+    Verify: Ok
+    Why:    Admin bypass.
+
+  TEST: get_provider_no_check_when_disabled
+    Setup:  state = test_server_state_with_ownership(false, None)
+    Action: User-2 gets user-1's provider
+    Verify: Ok (no ownership check)
+    Why:    Ownership disabled.
+
+  SUBTOTAL: 9 tests
+
+11.4 Provider Admin-Only Methods (Step 11, Issue R4-4)
+───────────────────────────────────────────────────────
+
+  These methods (import_provider_profiles, rotate_provider_credential, etc.)
+  remain admin-only. When ownership is enabled, they should also verify
+  that the admin has access to the target provider.
+
+  TEST: import_profiles_requires_admin_with_ownership_enabled
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: User-role calls import_provider_profiles
+    Verify: Err (Unauthorized or PermissionDenied)
+    Why:    Profile management stays admin-only.
+
+  TEST: admin_import_profiles_checks_provider_ownership
+    Setup:  state = test_server_state_with_ownership(true, None)
+    Action: 1. User-1 creates a provider
+            2. Admin imports profiles for that provider
+    Verify: Ok (admin has access to any provider)
+    Why:    Admin bypass + admin-only restriction both satisfied.
+
+  SUBTOTAL: 2 tests
+
+SECTION 11 TOTAL: 19 tests
+
+================================================================================
+12. INTEGRATION TESTS — LABEL PERSISTENCE FIX (Step 7, R4-8)
+================================================================================
+
+File: crates/openshell-server/src/persistence/tests.rs
+Module: Extend existing test file (it has no #[cfg(test)] wrapper — it IS
+        a test module referenced by mod.rs)
+Async: YES (#[tokio::test])
+Port Plan Steps: 7 (R4-8 fix: sandbox label serialization in create_sandbox)
+
+The R4-8 fix changes compute/mod.rs create_sandbox() to pass labels_json
+instead of None to store.put_if(). These tests verify the persistence layer
+behavior that underlies the fix.
+
+NOTE: These test store.put_if() directly, not the compute runtime. The R4-8
+fix changes what's passed TO put_if; these tests verify put_if handles it
+correctly. The existing labels_round_trip test (line 438) uses store.put()
+(unconditional write). These tests use store.put_if() (conditional write,
+which is what create_sandbox uses in production).
+
+12.1 Label Serialization via put_if
+─────────────────────────────────────
+
+  TEST: put_if_persists_owner_labels_in_db_column
+    Setup:  let store = test_store().await;
+    Action: store.put_if(
+              Sandbox::object_type(),
+              "sbx-id-1", "my-sandbox",
+              &sandbox_proto.encode_to_vec(),
+              Some(r#"{"openshell.ai/owner":"user-1"}"#),
+              WriteCondition::MustCreate,
+            ).await
+    Verify: store.get(Sandbox::object_type(), "sbx-id-1")
+            record.labels == Some(r#"{"openshell.ai/owner":"user-1"}"#)
+    Why:    R4-8 fix: labels parameter in put_if must persist to DB.
+            (V2-R1 Issue R2-5 correction: test put_if directly)
+
+  TEST: put_if_without_labels_stores_none
+    Setup:  store.put_if(..., None, WriteCondition::MustCreate)
+    Verify: record.labels is None
+    Why:    Baseline: labels: None → NULL in DB (current behavior).
+
+12.2 Label Selector Queries After put_if
+──────────────────────────────────────────
+
+  TEST: list_with_selector_finds_put_if_labeled_object
+    Setup:  1. store.put_if(Sandbox, "sbx-1", "s-a", ...,
+               Some(r#"{"openshell.ai/owner":"user-1"}"#), MustCreate)
+            2. store.put_if(Sandbox, "sbx-2", "s-b", ...,
+               Some(r#"{"openshell.ai/owner":"user-2"}"#), MustCreate)
+    Action: store.list_with_selector(Sandbox::object_type(),
+              "openshell.ai/owner=user-1", 100, 0)
+    Verify: Returns only sbx-1
+    Why:    Roundtrip: labels stored via put_if → queryable via list_with_selector.
+            This is the critical path for owner filtering in Step 8.
+
+  TEST: list_with_selector_returns_empty_for_no_match
+    Setup:  Store a sandbox with owner "user-1"
+    Action: list_with_selector("openshell.ai/owner=user-99", ...)
+    Verify: Returns empty vec
+    Why:    No match → empty result.
+
+  TEST: list_with_selector_tenant_label_filtering
+    Setup:  Store sandboxes with different LABEL_TENANT values
+    Action: list_with_selector("openshell.ai/tenant=team1", ...)
+    Verify: Returns only team1 sandboxes
+    Why:    Tenant label filtering works the same as owner label filtering.
+
+  TEST: list_without_selector_returns_all_labeled_objects
+    Setup:  Store 3 sandboxes with different owners via put_if
+    Action: store.list(Sandbox::object_type(), 100, 0) — no selector
+    Verify: Returns all 3
+    Why:    Baseline: without selector, all objects returned regardless of labels.
+
+SECTION TOTAL: 6 tests
+
+================================================================================
+13. INTEGRATION TESTS — K8S DRIVER LABELS (Step 12)
+================================================================================
+
+File: crates/openshell-driver-kubernetes/src/driver.rs
+Module: ADD or extend #[cfg(test)] mod tests
+Async: NO (testing a pure function)
+Port Plan Step: 12
+
+The sandbox_labels() function in driver.rs is modified to include owner/
+tenant labels from spec.template.labels. This is a pure function test.
+
+Label flow (corrected per V4-R1 Issue R4-1):
+  SandboxTemplate.labels (stamped in Step 7)
+    → driver_sandbox_template_from_public() (line 1598)
+    → DriverSandboxTemplate.labels
+    → sandbox_labels() reads from spec.template.labels
+    → K8s CRD labels
+
+TEST 13.1: sandbox_labels_includes_owner
+  Setup:  DriverSandbox with spec.template.labels containing LABEL_OWNER
+  Action: sandbox_labels(&driver_sandbox)
+  Expect: Output contains LABEL_OWNER key
+  Why:    Owner label propagates to K8s CRD labels.
+
+TEST 13.2: sandbox_labels_includes_tenant
+  Setup:  DriverSandbox with LABEL_TENANT in spec.template.labels
+  Action: sandbox_labels(&driver_sandbox)
+  Expect: Output contains LABEL_TENANT key
+  Why:    Tenant label propagates to K8s CRD.
+
+TEST 13.3: sandbox_labels_preserves_existing_labels
+  Setup:  DriverSandbox with both owner labels AND existing system labels
+          (LABEL_SANDBOX_ID, LABEL_MANAGED_BY)
+  Action: sandbox_labels(&driver_sandbox)
+  Expect: Output contains ALL labels (system + owner + tenant)
+  Why:    Owner labels must coexist with existing system labels.
+
+TEST 13.4: sandbox_labels_without_owner_labels
+  Setup:  DriverSandbox with NO owner labels in template (ownership disabled)
+  Action: sandbox_labels(&driver_sandbox)
+  Expect: Output contains system labels but NOT LABEL_OWNER/LABEL_TENANT
+  Why:    Backward compat: no owner labels when ownership disabled.
+
+SECTION TOTAL: 4 tests
+
+================================================================================
+14. INTEGRATION TESTS — DOCKER DRIVER VERIFICATION (Step 13)
+================================================================================
+
+File: crates/openshell-driver-docker/src/tests.rs
+Module: Extend existing test module
+Async: NO
+Port Plan Step: 13 (verification only — no code change to Docker driver)
+
+Docker driver receives labels from DriverSandboxTemplate.labels (set by
+driver_sandbox_template_from_public in compute/mod.rs). The labels flow
+through template.labels.clone() at the container creation point. No code
+change is needed — this test verifies the existing label propagation.
+
+TEST 14.1: docker_container_labels_include_template_labels
+  Setup:  DriverSandbox with spec.template.labels containing LABEL_OWNER
+  Action: Trace the label map through container label construction
+  Verify: Container labels include LABEL_OWNER from template
+  Why:    Verify no-change-needed: Docker driver already propagates
+          template labels to container labels.
+
+TEST 14.2: docker_container_labels_include_system_labels
+  Setup:  DriverSandbox with owner labels AND system labels
+  Action: Construct container labels
+  Verify: Both system labels (LABEL_SANDBOX_ID) and owner labels present
+  Why:    Owner labels don't interfere with system labels.
+
+SECTION TOTAL: 2 tests
+
+================================================================================
+15. UNIT TESTS — SANDBOXINDEX OWNER TRACKING (Step 14, Optional)
+================================================================================
+
+File: crates/openshell-server/src/sandbox_index.rs
+Module: ADD #[cfg(test)] mod tests (sandbox_index.rs is 65 lines, no tests)
+Async: NO
+Port Plan Step: 14 (optional enhancement)
+
+SandboxIndex is an in-memory HashMap (sandbox_name → sandbox_id, agent_pod
+→ sandbox_id). Optionally extended to track sandbox_id → owner for fast
+lookups without DB queries.
+
+TEST 15.1: index_tracks_owner_for_sandbox
+  Setup:  SandboxIndex::new()
+  Action: index.insert("sandbox-1", "sbx-id-1", Some("user-1"))
+  Verify: index.get_owner("sbx-id-1") == Some("user-1")
+  Why:    Fast owner lookup without DB round-trip.
+
+TEST 15.2: index_returns_none_for_unowned_sandbox
+  Setup:  Insert sandbox with owner = None
+  Verify: index.get_owner("sbx-id-1") == None
+  Why:    Pre-ownership sandboxes have no owner.
+
+TEST 15.3: index_remove_clears_owner
+  Setup:  Insert sandbox with owner, then remove
+  Verify: index.get_owner("sbx-id-1") == None
+  Why:    Cleanup on sandbox deletion.
+
+SECTION TOTAL: 3 tests
+
+================================================================================
+16. E2E TESTS — MULTI-USER OWNERSHIP LIFECYCLE (Steps 7-11)
+================================================================================
+
+File: e2e/rust/tests/ownership_lifecycle.rs (NEW)
+Async: YES (#[tokio::test])
+Feature: #[cfg(feature = "e2e-docker")] or #[cfg(feature = "e2e-kubernetes")]
+Port Plan Steps: 7-11 (all ownership handlers)
+
+These tests exercise the full ownership lifecycle through the gRPC API.
+They require a running gateway with OIDC configured (or mock OIDC) and
+two different user identities.
+
+NOTE: If full E2E is impractical, these scenarios can be tested as
+integration tests using test_server_state_with_ownership() and direct
+handler calls (as in Sections 10-11). The integration-test approach is
+preferred for CI reliability.
+
+16.1 Multi-User Sandbox Lifecycle
+──────────────────────────────────
+
+  TEST: sandbox_create_list_get_delete_owner_isolated
+    Setup:  test_server_state_with_ownership(true, None)
+    Sequence:
+      1. User-A creates sandbox-A
+      2. User-B creates sandbox-B
+      3. User-A lists → sees only sandbox-A
+      4. User-B lists → sees only sandbox-B
+      5. User-A gets sandbox-A → Ok
+      6. User-A gets sandbox-B → PermissionDenied
+      7. User-A deletes sandbox-A → Ok
+      8. User-A deletes sandbox-B → PermissionDenied
+    Verify: Each assertion matches expected owner isolation
+    Why:    Full lifecycle validates all ownership handlers together.
+            (Maps to Kagenti test_T4_4: TestOwnershipCreate + TestOwnershipList
+            + TestOwnershipAccessDenied combined)
+
+  TEST: admin_sees_all_sandboxes
+    Setup:  test_server_state_with_ownership(true, None)
+    Sequence:
+      1. User-A creates sandbox-A
+      2. User-B creates sandbox-B
+      3. Admin lists → sees sandbox-A and sandbox-B
+      4. Admin gets sandbox-A → Ok
+      5. Admin deletes sandbox-B → Ok
+    Verify: Admin bypass works across full lifecycle
+    Why:    Maps to Kagenti test_T4_4 TestOwnershipAdminBypass
+
+  TEST: ownership_disabled_no_isolation
+    Setup:  test_server_state_with_ownership(false, None)
+    Sequence:
+      1. User-A creates sandbox-A
+      2. User-B lists → sees sandbox-A (no filtering)
+      3. User-B gets sandbox-A → Ok (no check)
+    Verify: Without ownership, all resources are visible to all users
+    Why:    Backward compat: pre-ownership behavior preserved.
+
+16.2 Multi-User Provider Lifecycle
+───────────────────────────────────
+
+  TEST: provider_create_list_get_delete_owner_isolated
+    Setup:  test_server_state_with_ownership(true, None)
+    Sequence:
+      1. User-A creates provider-A
+      2. User-B creates provider-B
+      3. User-A lists → sees provider-A (not provider-B)
+      4. User-B gets provider-B → Ok
+      5. User-B gets provider-A → PermissionDenied
+      6. User-A deletes provider-A → Ok
+    Verify: Provider isolation matches sandbox isolation pattern
+    Why:    Providers follow the same ownership model as sandboxes.
+
+  TEST: shared_providers_visible_to_all_users
+    Setup:  test_server_state_with_ownership(true, None)
+    Sequence:
+      1. Insert shared provider (no owner label) directly into store
+      2. User-A creates provider-A
+      3. User-A lists → sees shared + provider-A
+      4. User-B lists → sees shared (not provider-A)
+    Verify: Shared providers (pre-ownership, no owner label) visible to all.
+    Why:    allow_unowned=true for providers.
+            (V2-R1 Issue R2-4 correction: store insertion for shared provider)
+
+16.3 Cross-Resource Scenarios
+──────────────────────────────
+
+  TEST: name_collision_across_owners_returns_error
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: 1. User-A creates sandbox "my-sandbox"
+            2. User-B creates sandbox "my-sandbox"
+    Verify: Second create returns AlreadyExists error
+    Why:    Sandbox name uniqueness is GLOBAL (not per-owner) in OpenShell's
+            DB schema. This is a known limitation documented in the port plan.
+
+  TEST: sandbox_with_user_owned_provider
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: 1. User-A creates provider "my-llm"
+            2. User-A creates sandbox with providers: ["my-llm"]
+    Verify: Sandbox creation succeeds with user's own provider
+    Why:    Provider validation during sandbox create must respect ownership.
+
+  TEST: sandbox_with_another_users_provider_denied
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: 1. User-A creates provider "my-llm"
+            2. User-B creates sandbox with providers: ["my-llm"]
+    Verify: Sandbox creation fails (provider not found for user-B)
+    Why:    User-B cannot reference user-A's provider.
+
+SECTION TOTAL: 8 tests
+
+================================================================================
+17. WIREMOCK-BASED OIDC INTEGRATION TESTS (Step 2)
+================================================================================
+
+File: crates/openshell-server/src/auth/oidc.rs
+Module: ADD #[cfg(test)] mod integration_tests (separate from existing tests)
+Async: YES (#[tokio::test])
+Port Plan Step: 2
+Dev Dependency: wiremock 0.6 (already in Cargo.toml), rcgen 0.13 (already
+                in Cargo.toml), jsonwebtoken (already a regular dependency)
+
+These tests verify that the full OIDC validation pipeline (JwksCache +
+JWT validation + claim extraction) works end-to-end with a mock JWKS
+endpoint.
+
+TEST INFRASTRUCTURE:
+
+  fn create_test_rsa_key_pair() -> (
+      jsonwebtoken::EncodingKey,
+      serde_json::Value,  // JWK JSON for JWKS endpoint
+      String,             // kid (key ID)
+  ) {
+      // 1. Use rcgen to generate an RSA key pair
+      //    (pattern from tls_test_utils.rs which already uses rcgen)
+      // 2. Extract private key PEM from rcgen::KeyPair
+      // 3. Create EncodingKey::from_rsa_pem(&private_key_pem)
+      //    (jsonwebtoken crate, already a dependency)
+      // 4. Extract RSA public key components (n, e) for JWK
+      // 5. Build JWK JSON: {"kty":"RSA","kid":"test-key-1","use":"sig",
+      //    "alg":"RS256","n":base64url(n),"e":base64url(e)}
+      // 6. Return (encoding_key, jwk_json, kid)
+      //
+      // NOTE: rcgen provides key generation.
+      //       jsonwebtoken provides EncodingKey/DecodingKey.
+      //       JWK must be constructed manually from public key components.
+      //       (V2-R1 Issue R2-6 correction: clarified library roles)
+  }
+
+  async fn setup_mock_jwks_server() -> (
+      wiremock::MockServer,
+      OidcConfig,
+      jsonwebtoken::EncodingKey,
+  ) {
+      let mock_server = wiremock::MockServer::start().await;
+      let (encoding_key, jwk, kid) = create_test_rsa_key_pair();
+
+      // Mock ONLY the JWKS endpoint — NOT .well-known/openid-configuration.
+      // JwksCache constructs the JWKS URL directly from the issuer,
+      // not from OIDC discovery.
+      // (V2-R1 Issue R2-7 correction: removed discovery mock)
+      //
+      // VERIFY the exact URL path by checking JwksCache::refresh_keys()
+      // implementation before implementing.
+      wiremock::Mock::given(wiremock::matchers::method("GET"))
+          .and(wiremock::matchers::path("/protocol/openid-connect/certs"))
+          .respond_with(wiremock::ResponseTemplate::new(200)
+              .set_body_json(serde_json::json!({"keys": [jwk]})))
+          .mount(&mock_server).await;
+
+      let config = OidcConfig {
+          issuer: mock_server.uri(),
+          audience: "test-audience".to_string(),
+          jwks_ttl_secs: 300,
+          roles_claim: "realm_access.roles".to_string(),
+          admin_role: "openshell-admin".to_string(),
+          user_role: "openshell-user".to_string(),
+          scopes_claim: "scope".to_string(),
+          groups_claim: "groups".to_string(),  // NEW field
+      };
+
+      (mock_server, config, encoding_key)
+  }
+
+  fn sign_jwt(
+      claims: serde_json::Value,
+      key: &jsonwebtoken::EncodingKey,
+      kid: &str,
+  ) -> String {
+      let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+      header.kid = Some(kid.to_string());
+      jsonwebtoken::encode(&header, &claims, key).unwrap()
+  }
+
+TESTS:
+
+TEST 17.1: jwt_with_groups_claim_populates_identity_groups
+  Setup:  setup_mock_jwks_server()
+  Action: Sign JWT with claims: {"sub":"user-1","aud":"test-audience",
+          "iss":<mock_uri>,"groups":["/team1","/team2"],
+          "realm_access":{"roles":["openshell-user"]}}
+  Verify: Validate JWT via JwksCache, extract Identity.
+          identity.groups == vec!["/team1", "/team2"]
+  Why:    End-to-end: groups claim in JWT → Identity.groups field.
+
+TEST 17.2: jwt_without_groups_claim_has_empty_groups
+  Setup:  setup_mock_jwks_server()
+  Action: Sign JWT WITHOUT "groups" claim
+  Verify: identity.groups == vec![]
+  Why:    Graceful degradation when groups not present in JWT.
+
+TEST 17.3: jwt_with_custom_groups_claim_path
+  Setup:  OidcConfig with groups_claim = "custom_groups"
+  Action: Sign JWT with claims: {"custom_groups":["/org1"]}
+  Verify: identity.groups == vec!["/org1"]
+  Why:    Custom claim path works.
+
+TEST 17.4: jwt_with_audience_mismatch_rejected
+  Setup:  OidcConfig with audience = "team1"
+  Action: Sign JWT with aud = "team2"
+  Verify: Validation returns Err (audience mismatch)
+  Why:    Per-tenant audience scoping: JWT for team2 rejected by team1 gateway.
+          (Maps to Kagenti TestTenantIsolationAuth.test_alice_token_rejected_by_team2_gateway)
+
+SECTION TOTAL: 4 tests
+
+================================================================================
+18. HELM CHART TEMPLATE TESTS (Steps 15-18)
+================================================================================
+
+File: deploy/helm/openshell/test_templates.sh (NEW script)
+    OR: tests as inline validation in CI pipeline
+Language: Shell (bash + helm template + grep/yq)
+Port Plan Steps: 15 (values), 16 (RBAC), 17 (ResourceQuota), 18 (certs)
+
+These tests render Helm templates with specific values and verify the
+output YAML contains expected resources and configurations.
+
+Tool: helm template openshell ./deploy/helm/openshell/ --set <values> | yq
+
+18.1 Tenant Values Rendering (Step 15)
+───────────────────────────────────────
+
+  TEST: gateway_config_includes_tenant
+    Action: helm template --set tenant=team1
+    Verify: gateway.toml in gateway-config ConfigMap contains
+            gateway_id = "openshell-team1"
+    Why:    Tenant flows into gateway config for audit/logging.
+
+  TEST: oidc_audience_defaults_to_tenant
+    Action: helm template --set tenant=team1 --set oidc.enabled=true
+    Verify: gateway.toml contains audience = "team1"
+    Why:    Per-tenant audience scoping.
+
+  TEST: driver_namespace_defaults_to_tenant
+    Action: helm template --set tenant=team1
+    Verify: compute-driver container args include -namespace=team1
+    Why:    Sandbox pods created in tenant namespace.
+
+  TEST: namespace_labels_include_tenant
+    Action: helm template --set tenant=team1
+    Verify: Resources have label openshell.ai/tenant: team1
+    Why:    All chart resources labeled with tenant.
+
+  SUBTOTAL: 4 tests
+
+18.2 Per-Tenant RBAC (Step 16)
+───────────────────────────────
+
+  TEST: rbac_role_is_namespace_scoped
+    Action: helm template --set tenant=team1
+    Verify: Output contains Role (not ClusterRole) for openshell-gateway
+    Why:    Namespace-scoped RBAC prevents cross-tenant access.
+
+  TEST: rbac_rolebinding_targets_tenant_namespace
+    Action: helm template --set tenant=team1
+    Verify: RoleBinding namespace: team1, subjects[0].namespace: team1
+    Why:    RBAC binding scoped to tenant namespace.
+
+  SUBTOTAL: 2 tests
+
+18.3 ResourceQuota & LimitRange (Step 17)
+──────────────────────────────────────────
+
+  TEST: resourcequota_rendered_with_defaults
+    Action: helm template --set tenant=team1
+    Verify: ResourceQuota with pods: "15", requests.cpu: "20"
+    Why:    Per-tenant resource limits.
+
+  TEST: resourcequota_custom_values
+    Action: helm template --set tenant=team1 --set quota.pods="30"
+    Verify: ResourceQuota with pods: "30"
+    Why:    Custom quotas per tenant.
+
+  TEST: limitrange_rendered
+    Action: helm template --set tenant=team1
+    Verify: LimitRange with default resource requests
+    Why:    Default requests prevent unbounded pod scheduling.
+
+  TEST: resourcequota_in_tenant_namespace
+    Action: helm template --set tenant=team1
+    Verify: ResourceQuota metadata.namespace == team1
+    Why:    Quota applied to correct namespace.
+
+  SUBTOTAL: 4 tests
+
+18.4 Certificate SANs (Step 18)
+────────────────────────────────
+
+  TEST: certgen_includes_tenant_san
+    Action: helm template --set tenant=team1
+    Verify: certgen Job args include --server-san with
+            openshell-server.team1.svc.cluster.local
+    Why:    TLS certificates valid for tenant-namespaced DNS names.
+
+  TEST: certgen_includes_ingress_host_san
+    Action: helm template --set tenant=team1 --set ingress.host=gw.example.com
+    Verify: certgen Job args include --server-san with gw.example.com
+    Why:    TLS cert valid for external ingress hostname.
+
+  SUBTOTAL: 2 tests
+
+18.5 OpenShift-Specific Templates
+──────────────────────────────────
+
+  TEST: openshift_route_rendered_when_enabled
+    Action: helm template --set tenant=team1 --set openshift.enabled=true
+    Verify: Route resource rendered with host pattern including tenant
+    Why:    OCP uses Routes instead of TLSRoutes.
+
+  TEST: openshift_scc_rendered
+    Action: helm template --set tenant=team1 --set openshift.enabled=true
+    Verify: SecurityContextConstraints rendered for gateway SA
+    Why:    OCP requires SCCs for pod security.
+
+  TEST: tlsroute_rendered_when_openshift_disabled
+    Action: helm template --set tenant=team1
+    Verify: TLSRoute resource rendered (Istio/Kind ingress)
+    Why:    Non-OCP uses TLSRoutes.
+
+  SUBTOTAL: 3 tests
+
+SECTION 18 TOTAL: 15 tests
+
+================================================================================
+19. CROSS-CUTTING CONCERNS
+================================================================================
+
+19.1 Backward Compatibility (CI Gate Checks)
+──────────────────────────────────────────────
+
+  Not counted as individual tests — these are CI pipeline assertions.
+
+  CHECK: existing_tests_pass_without_ownership_config
+    Action: cargo test --workspace with NO ownership config
+    Verify: All existing tests pass (ownership defaults to disabled)
+    Why:    Zero regression: existing deployments unaffected.
+
+  CHECK: existing_tests_pass_with_ownership_disabled
+    Action: cargo test with Config.ownership = Some(OwnershipConfig { enabled: false })
+    Verify: All existing tests pass
+    Why:    Explicit disable must match no-config behavior.
+
+19.2 Stress Tests
+──────────────────
+
+  File: crates/openshell-server/src/grpc/sandbox.rs (extend test module)
+  Async: YES (#[tokio::test])
+
+  NOTE: These are load/stress tests, NOT concurrency safety tests.
+  Rust's type system prevents data races. SQLite provides ACID guarantees.
+  These tests verify no panics or unexpected behavior under parallel requests.
+  (V2-R1 Issue R2-9 correction: renamed from "Concurrency Safety Tests")
+
+  TEST: concurrent_sandbox_creation_by_different_users
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: Spawn 10 tokio tasks, each creating a sandbox as a different user
+    Verify: All 10 sandboxes created with correct owner labels. No panics.
+    Why:    Exercises handler under concurrent load.
+
+  TEST: concurrent_list_during_creates
+    Setup:  One task creating sandboxes, another listing concurrently
+    Verify: List always returns a valid snapshot (no deserialization errors)
+    Why:    Exercises concurrent read/write on SQLite store.
+
+  SUBTOTAL: 2 tests
+
+19.3 Regression Tests
+──────────────────────
+
+  File: crates/openshell-server/src/grpc/sandbox.rs (extend test module)
+  Async: YES (#[tokio::test])
+
+  TEST: labels_column_populated_on_sandbox_create
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: Create sandbox as user-1
+    Verify: Query store directly — ObjectRecord.labels is Some (not None)
+    Why:    Regression: R4-8 fix ensures labels column populated on creation.
+            Before the fix, store.put_if was called with labels: None.
+
+  TEST: provider_labels_column_populated_on_create
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: Create provider as user-1
+    Verify: Query store directly — ObjectRecord.labels contains LABEL_OWNER
+    Why:    Regression: R4-2 fix ensures provider labels column populated.
+
+  TEST: provider_metadata_initialized_before_stamping
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: Create provider with metadata = None (client doesn't send metadata)
+    Verify: Response has metadata with LABEL_OWNER (not empty labels)
+    Why:    Regression: R4-7 fix ensures metadata exists before stamping.
+
+  SUBTOTAL: 3 tests
+
+19.4 Error Message Quality Tests
+─────────────────────────────────
+
+  File: crates/openshell-server/src/auth/ownership.rs (in test module)
+  Async: NO
+
+  TEST: permission_denied_message_is_generic
+    Setup:  check_ownership with owner mismatch
+    Verify: err.message() does not contain the actual owner's identity
+    Why:    Security: error messages must not leak owner information.
+
+  TEST: permission_denied_code_is_correct
+    Setup:  check_ownership with owner mismatch
+    Verify: err.code() == tonic::Code::PermissionDenied
+    Why:    Correct gRPC status code for access denied.
+
+  TEST: ownership_disabled_message_not_present
+    Setup:  check_ownership with ownership disabled
+    Verify: Ok (no error message at all)
+    Why:    When disabled, no ownership-related messages should appear.
+
+  SUBTOTAL: 3 tests
+
+SECTION 19 TOTAL: 8 tests (2 stress + 3 regression + 3 error quality)
+                  + 2 CI gate checks (not counted as individual tests)
+
+================================================================================
+20. TRACEABILITY MATRIX
+================================================================================
+
+  +---------+---------------------------------------------+----------+---------+
+  | Step    | Description                                 | Test Sec.| # Tests |
+  +---------+---------------------------------------------+----------+---------+
+  |  1      | Identity groups field                       | 3        |   4     |
+  |  2      | OidcConfig groups_claim + extraction        | 4, 17    |  10     |
+  |  3      | Label constants (LABEL_OWNER/TENANT)        | 5        |   4     |
+  |  4      | Ownership module (auth/ownership.rs)        | 6        |  34     |
+  |  5      | OwnershipConfig in Config + TOML parsing    | 7, 8     |  10     |
+  |  6      | ServerState.ownership_config() helper       | 9        |   4     |
+  |  7      | Sandbox create (owner stamping + DB fix)    | 10.1, 12 |  13     |
+  |  8      | Sandbox list (owner filtering)              | 10.2     |   6     |
+  |  9      | Sandbox get/delete (ownership check)        | 10.3-4   |   7     |
+  | 10      | Sandbox watch/exec/SSH (ownership check)    | 10.5     |   7     |
+  | 11      | Provider CRUD ownership                     | 11       |  19     |
+  | 12      | K8s driver labels                           | 13       |   4     |
+  | 13      | Docker driver verification                  | 14       |   2     |
+  | 14      | SandboxIndex owner tracking (optional)      | 15       |   3     |
+  | 15-18   | Helm chart tenant values/RBAC/quotas/certs  | 18       |  15     |
+  | 19      | CLI multi-tenant display                    | (E2E)    |   0 *   |
+  | 20      | Tests themselves                            | ALL      | N/A     |
+  +---------+---------------------------------------------+----------+---------+
+  |         | E2E ownership lifecycle flows               | 16       |   8     |
+  |         | Cross-cutting (stress + regression + errors)| 19       |   8     |
+  +---------+---------------------------------------------+----------+---------+
+  |         | TOTAL                                       |          | 158     |
+  +---------+---------------------------------------------+----------+---------+
+
+  * Step 19 (CLI display) is display-only, verified via E2E CLI smoke test.
+  * Wiremock OIDC tests (Sec 17, 4 tests) already counted under Step 2.
+
+  CI GATE CHECKS (not counted): 2 backward-compatibility assertions.
+
+  Arithmetic verification (by document section):
+    Sec 3:  4     Sec 4:  6     Sec 5:  4     Sec 6:  34 (10+10+9+5)
+    Sec 7:  6     Sec 8:  4     Sec 9:  4     Sec 10: 27 (7+6+4+3+7)
+    Sec 11: 19 (4+4+9+2)       Sec 12: 6     Sec 13: 4     Sec 14: 2
+    Sec 15: 3     Sec 16: 8    Sec 17: 4 (counted under Step 2)
+    Sec 18: 15 (4+2+4+2+3)    Sec 19: 8 (2+3+3)
+    SUM: 4+6+4+34+6+4+4+27+19+6+4+2+3+8+4+15+8 = 158
+
+================================================================================
+21. TEST FILE LAYOUT
+================================================================================
+
+  MODIFIED RUST FILES (14):
+
+  crates/openshell-server/src/
+    auth/
+      identity.rs           → ADD #[cfg(test)] mod tests (4 tests)
+      oidc.rs               → EXTEND tests (6 unit + 4 wiremock = 10 tests)
+      ownership.rs          → NEW file with #[cfg(test)] mod tests (34+3 = 37 tests)
+    grpc/
+      mod.rs                → EXTEND test_support (4 new helpers)
+      sandbox.rs            → EXTEND tests (27 + 2 stress + 3 regression = 32 tests)
+      provider.rs           → EXTEND tests (19 tests)
+    lib.rs                  → EXTEND tests (4 tests)
+    persistence/tests.rs    → EXTEND (6 tests)
+    sandbox_index.rs        → ADD tests (3 tests)
+
+  crates/openshell-core/src/
+    config.rs               → EXTEND tests (6 tests)
+    driver_utils.rs         → ADD tests (4 tests)
+
+  crates/openshell-server/src/
+    config_file.rs          → EXTEND tests (4 tests)
+
+  crates/openshell-driver-kubernetes/src/
+    driver.rs               → ADD or EXTEND tests (4 tests)
+
+  crates/openshell-driver-docker/src/
+    tests.rs                → EXTEND (2 tests)
+
+  NEW FILES (2):
+
+  e2e/rust/tests/
+    ownership_lifecycle.rs  → NEW E2E test file (8 tests)
+
+  deploy/helm/openshell/
+    test_templates.sh       → NEW Helm test script (15 tests)
+
+  TOTAL: 14 modified + 2 new = 16 test locations
+
+================================================================================
+22. TEST FIXTURES & MOCKS INVENTORY
+================================================================================
+
+22.1 New Helpers (added to grpc/mod.rs test_support)
+─────────────────────────────────────────────────────
+
+  | Helper                          | Type     | Returns              |
+  |─────────────────────────────────|──────────|──────────────────────|
+  | request_with_principal<T>       | fn       | Request<T>           |
+  | make_user(subject, role)        | fn       | Principal            |
+  | make_admin(subject)             | fn       | Principal            |
+  | test_server_state_with_ownership| async fn | Arc<ServerState>     |
+
+22.2 Wiremock Infrastructure (in oidc.rs integration_tests)
+────────────────────────────────────────────────────────────
+
+  | Helper                    | Type     | Returns                          |
+  |───────────────────────────|──────────|──────────────────────────────────|
+  | create_test_rsa_key_pair  | fn       | (EncodingKey, JWK JSON, kid)     |
+  | setup_mock_jwks_server    | async fn | (MockServer, OidcConfig, Key)    |
+  | sign_jwt(claims, key, kid)| fn       | String (JWT token)               |
+
+22.3 Existing Helpers Reused (unchanged)
+─────────────────────────────────────────
+
+  | Helper                    | Location               | Purpose              |
+  |───────────────────────────|────────────────────────|──────────────────────|
+  | test_server_state()       | grpc/mod.rs:693        | Default ServerState  |
+  | test_store()              | persistence/mod.rs:629 | In-memory Store      |
+  | new_test_runtime()        | compute/mod.rs:2096    | Noop ComputeRuntime  |
+  | store.put_message()       | persistence/mod.rs:605 | Test-only seeding    |
+  | test_provider(name, type) | sandbox.rs:2240        | Provider factory     |
+  | test_sandbox(name, provs) | sandbox.rs:2265        | Sandbox factory      |
+  | write_tmp(contents)       | config_file.rs:~325    | TOML temp file       |
+
+22.4 Protobuf Factories Needed
+───────────────────────────────
+
+  For tests that insert objects directly into the store (bypassing handlers),
+  the following protobuf construction patterns are used:
+
+  Sandbox with owner label:
+    Sandbox {
+        metadata: Some(ObjectMeta {
+            id: "sbx-id-1".to_string(),
+            name: "my-sandbox".to_string(),
+            created_at_ms: 0,
+            labels: HashMap::from([(LABEL_OWNER.to_string(), "user-1".to_string())]),
+            resource_version: 0,
+        }),
+        spec: Some(SandboxSpec::default()),
+        status: None,
+    }
+
+  Provider without owner label (shared/pre-ownership):
+    Provider {
+        metadata: Some(ObjectMeta {
+            id: "prov-shared".to_string(),
+            name: "shared-provider".to_string(),
+            created_at_ms: 0,
+            labels: HashMap::new(),  // NO owner label
+            resource_version: 0,
+        }),
+        // ... provider type, credentials, etc.
+    }
+
+================================================================================
+APPENDIX A — KAGENTI E2E TEST MAPPING
+================================================================================
+
+Mapping between Kagenti's Python E2E tests and this plan's Rust tests.
+
+  KAGENTI TEST                            → OPENSHELL TEST SECTION
+  ──────────────────────────────────────────────────────────────────────────
+  TestTenantIsolationAuth:
+    test_alice_token_has_team1_audience    → 17.4 (jwt_with_audience_mismatch)
+    test_bob_token_has_team2_audience      → 17.4 (same, different scenario)
+    test_alice_token_rejected_by_team2     → 17.4 (audience mismatch rejected)
+    test_bob_token_rejected_by_team1      → 17.4 (audience mismatch rejected)
+    test_tokens_have_different_audiences  → 7.5 (OidcConfig audience config)
+
+  TestTenantIsolationRBAC:
+    test_team1_sa_cannot_list_in_team2    → 18.2 (RBAC Role is namespace-scoped)
+    test_team1_sa_cannot_get_pods_team2   → 18.2 (same)
+    test_team1_sa_cannot_read_secrets     → 18.2 (same)
+    test_team1_sa_has_own_namespace_access→ 18.2 (same)
+
+  TestCredentialIsolation:
+    test_team1_secrets_not_in_team2       → 18.1 (namespace labels include tenant)
+    test_credentials_configmap_scoped     → 18.1 (same)
+
+  TestOwnershipCreate:
+    test_create_stamps_owner_label        → 10.1 (create_sandbox_stamps_owner_label)
+    test_client_supplied_owner_stripped    → 10.1 (create_sandbox_strips_client_owner)
+
+  TestOwnershipList:
+    test_alice_list_shows_own_sandbox     → 10.2 (list_sandboxes_filtered_by_owner)
+    test_bob_list_excludes_alice_sandbox  → 10.2 (same)
+    test_bob_list_shows_own_sandbox       → 10.2 (same)
+
+  TestOwnershipAccessDenied:
+    test_bob_get_alice_sandbox_denied     → 10.3 (get_sandbox_denied_for_non_owner)
+    test_bob_delete_alice_sandbox_denied  → 10.4 (delete_sandbox_denied_for_non_owner)
+    test_alice_get_bob_sandbox_denied     → 10.3 (get_sandbox_denied_for_non_owner)
+
+  TestOwnershipAdminBypass:
+    test_admin_list_shows_all_sandboxes   → 10.2 (list_sandboxes_admin_sees_all)
+    test_admin_get_alice_sandbox          → 10.3 (get_sandbox_allowed_for_admin)
+    test_admin_delete_bob_sandbox         → 10.4 (delete_sandbox_allowed_for_admin)
+
+  COVERAGE: All 20 Kagenti E2E test cases are mapped to equivalent Rust tests.
+
+================================================================================
+END OF TEST PLAN V3
+================================================================================

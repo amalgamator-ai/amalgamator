@@ -1,0 +1,254 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — TEST PLAN REVIEW SUMMARY V2
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Date: 2026-07-03
+Iteration: V2-R1 (review of iteration 2)
+================================================================================
+
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+11 issues were identified across 4 severity levels. All have been corrected
+in the reviewed test plan (test_plan_review_V2.txt).
+
+1.1 HIGH ISSUES (2)
+────────────────────
+
+  R2-1: Provider handler modification not documented clearly
+
+    PROBLEM: Section 10 tests call handle_create_provider() with a
+    Principal in Request extensions, but the current code at line 1154
+    calls request.into_inner() immediately, consuming the Request
+    before any extensions can be read. The port plan modifies the
+    handler to extract the Principal before into_inner() (matching the
+    sandbox handler pattern), but Section 10 didn't document this
+    handler modification clearly, unlike Section 9 which explicitly
+    describes the sandbox handler modification.
+
+    IMPACT: Documentation clarity issue. Tests are correct in behavior
+    but the reader might not understand why the tests work.
+
+    FIX: Added explicit documentation at the Section 10 header
+    showing the handle_create_provider modification, with a code
+    snippet demonstrating the principal extraction before into_inner().
+
+  R2-2: Redundant test create_sandbox_principal_extracted_before_into_inner
+
+    PROBLEM: This test verifies the same thing as create_sandbox_stamps_
+    owner_label (checking owner label exists). The "extraction ordering"
+    cannot be independently tested from a black-box perspective — if the
+    principal weren't extracted before into_inner(), the first test
+    would already fail.
+
+    IMPACT: Redundant test wastes implementation effort and misleads.
+
+    FIX: Removed the redundant test. Section 9.1 now has 7 tests (was 8).
+
+1.2 MEDIUM ISSUES (4)
+──────────────────────
+
+  R2-3: Anonymous sandbox creation/listing test has ambiguous setup
+
+    PROBLEM: Test list_sandboxes_anonymous_sees_all said "Create sandbox
+    (no principal)" which is ambiguous.
+
+    FIX: Clarified to "Create sandbox with Principal::Anonymous" and
+    explained that the sandbox will have no owner label, and anonymous
+    listing skips owner filtering.
+
+  R2-4: Shared provider tests assume admin creates without owner label
+
+    PROBLEM: Tests list_providers_includes_shared_providers and
+    get_shared_provider_allowed_for_any_user assumed admin can create
+    a provider without an owner label when ownership is enabled. But
+    the port plan stamps owner labels on ALL providers, including
+    admin-created ones.
+
+    ROOT CAUSE: Shared providers come from BEFORE ownership was enabled
+    (migration scenario), not from admin creation with ownership enabled.
+
+    FIX: Changed shared provider test setups to insert the provider
+    directly into the store using store.put_if() with no owner label,
+    bypassing the handler. This accurately simulates a pre-existing
+    shared provider from before ownership was enabled.
+
+  R2-5: Section 11 tests use ComputeRuntime.create_sandbox() incorrectly
+
+    PROBLEM: Tests tried to use ComputeRuntime.create_sandbox() to test
+    label persistence, but this involves the full compute pipeline
+    including NoopTestDriver, which may fail on ValidateSandboxCreate.
+
+    FIX: Changed to use store.put_if() directly, which is what the R4-8
+    fix actually modifies. This is more targeted and avoids driver
+    complications.
+
+  R2-6: Wiremock OIDC tests misuse rcgen for JWT key generation
+
+    PROBLEM: The test infrastructure described using rcgen to generate
+    "RSA key pairs for JWT signing," but rcgen generates X.509 certs.
+    The actual JWT signing requires jsonwebtoken's EncodingKey.
+
+    FIX: Clarified the interaction between rcgen (key generation),
+    jsonwebtoken (JWT signing/verification), and manual JWK construction.
+
+1.3 LOW ISSUES (5)
+───────────────────
+
+  R2-7: Unnecessary OIDC discovery mock in wiremock tests
+
+    PROBLEM: Section 16 mocked .well-known/openid-configuration, but
+    JwksCache does not fetch the OIDC discovery document. It constructs
+    the JWKS URL directly from the issuer.
+
+    FIX: Removed the discovery mock. Only the JWKS endpoint is mocked.
+
+  R2-8: Sanitize email test expects dots to be replaced
+
+    PROBLEM: Test sanitize_email_replaces_at_and_dots incorrectly
+    expected dots to be replaced, but dots are valid in K8s labels.
+
+    FIX: Renamed test, corrected expectation (only @ is replaced).
+
+  R2-9: Concurrency tests miscategorized
+
+    PROBLEM: Tests were labeled "Concurrency Safety Tests" but Rust's
+    type system prevents data races. The tests actually exercise load
+    behavior, not concurrency safety.
+
+    FIX: Renamed to "Stress Tests" with corrected descriptions.
+
+  R2-10: Test count arithmetic errors
+
+    PROBLEM: Total claimed ~150 but actual enumerated totals didn't
+    match. Section 5 claimed ~30 but had 36 tests; Section 9 claimed
+    ~32 but had 28 tests.
+
+    FIX: Corrected all counts in traceability matrix. Actual: ~148.
+
+  R2-11: CLI argument tests not implementable as described
+
+    PROBLEM: Tests assumed Config::new() can accept CLI arguments, but
+    Config::new() only takes tls: Option<TlsConfig>. CLI/env handling
+    is in cli.rs, not config.rs.
+
+    FIX: Reclassified as GatewayFileSection -> Config mapping tests.
+    Removed 2 CLI-specific tests.
+
+================================================================================
+2. SUMMARY OF CHANGES
+================================================================================
+
+  QUANTITATIVE:
+    ┌────────────────────────┬──────────┬──────────┬──────────────────────┐
+    │ Metric                 │ V2       │ V2-R1    │ Change               │
+    ├────────────────────────┼──────────┼──────────┼──────────────────────┤
+    │ Total test cases       │ ~150     │ ~148     │ -2 (removed 1 dup +  │
+    │                        │          │          │   2 CLI tests)       │
+    │ Issues found           │ N/A      │ 11       │                      │
+    │ High issues            │ N/A      │ 2        │                      │
+    │ Medium issues          │ N/A      │ 4        │                      │
+    │ Low issues             │ N/A      │ 5        │                      │
+    │ Test file count        │ 13+1     │ 13+1     │ unchanged            │
+    │ Sections modified      │ N/A      │ 8        │                      │
+    └────────────────────────┴──────────┴──────────┴──────────────────────┘
+
+  QUALITATIVE:
+    - No compilation-blocking issues found (V1 had R1-1 critical)
+    - No logical contradictions found (V1 had R1-2 high)
+    - No visibility/accessibility errors found (V1 had R1-3 high)
+    - Main issues are documentation clarity, test setup accuracy,
+      and test infrastructure correctness
+    - Shared provider test setup corrected to use direct store insertion
+      (bypassing handler) to accurately simulate pre-ownership providers
+    - Wiremock OIDC test infrastructure clarified (rcgen/jsonwebtoken
+      interaction, removed unnecessary discovery mock)
+    - Test count arithmetic corrected
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+3.1 ITERATION 1 (V1) — Initial Test Plan
+─────────────────────────────────────────
+
+  Scope: First comprehensive test plan generation.
+  Output: test_plan_V1.txt — ~143 tests across 14 files.
+
+  Key contributions:
+    - Mapped all 20 port plan steps to test cases
+    - Translated Kagenti E2E test dimensions to Rust
+    - Defined test helper patterns
+    - Created traceability matrix
+
+  Weaknesses found by review (12 issues):
+    - 1 CRITICAL: OidcConfig field names would not compile
+    - 3 HIGH: shared access contradiction, private handler access, wrong role gate
+    - 4 MEDIUM: OIDC extraction mechanism, K8s driver behavior, streaming assertions, test overlap
+    - 4 LOW: nonexistent functions, meta-tests, missing edge cases
+
+3.2 ITERATION 1 REVIEW (V1-R1) — Critical Review
+──────────────────────────────────────────────────
+
+  Output: test_plan_review_V1.txt — ~141 tests across 13 files + 2 CI checks
+
+  Key corrections:
+    - Fixed compile-blocking OidcConfig field names
+    - Added allow_unowned parameter for provider shared access
+    - Moved all handler tests to in-source #[cfg(test)] modules
+    - Reframed provider role tests to test runtime guard
+    - Rewrote OIDC groups tests to use extract_groups() pattern
+
+3.3 ITERATION 2 (V2) — From-Scratch Rebuild
+────────────────────────────────────────────
+
+  Scope: Built from scratch with all V1-R1 learnings incorporated by design.
+  Output: test_plan_V2.txt — ~150 tests across 13 files + 1 script.
+
+  Key improvements:
+    - All 12 V1-R1 issues addressed by design, not retroactively
+    - Added wiremock-based OIDC integration tests (4 tests)
+    - Added dual-label stamping tests (ObjectMeta + SandboxTemplate)
+    - Added label serialization fix tests (R4-8)
+    - Added provider metadata initialization test (R4-7)
+    - Added OpenShift-specific Helm tests (3 tests)
+    - Added security-focused error message tests
+    - Added Kagenti E2E test mapping (Appendix A)
+
+3.4 ITERATION 2 REVIEW (V2-R1) — Current
+─────────────────────────────────────────
+
+  Output: test_plan_review_V2.txt — ~148 tests
+
+  Issue profile compared to V1-R1:
+    ┌─────────────┬──────────┬──────────┐
+    │ Severity    │ V1-R1    │ V2-R1    │
+    ├─────────────┼──────────┼──────────┤
+    │ CRITICAL    │ 1        │ 0        │
+    │ HIGH        │ 3        │ 2        │
+    │ MEDIUM      │ 4        │ 4        │
+    │ LOW         │ 4        │ 5        │
+    │ TOTAL       │ 12       │ 11       │
+    └─────────────┴──────────┴──────────┘
+
+  Key observations:
+    - No compilation-blocking issues (V1 had 1 CRITICAL)
+    - No logical contradictions (V1 had HIGH R1-2)
+    - No visibility errors (V1 had HIGH R1-3)
+    - V2-R1 issues are documentation/precision issues, not fundamental
+      design errors
+    - The two HIGH issues are: documentation clarity (R2-1) and
+      test redundancy (R2-2) — both minor compared to V1-R1's HIGH issues
+    - The shared provider test setup (R2-4) is the most substantive
+      correction — it changes HOW shared providers are created in tests
+      to match the actual system behavior
+
+  Convergence assessment:
+    The test plan is close to convergence. The issues found are
+    increasingly minor (documentation, test setup details, count
+    arithmetic). No fundamental architectural or design issues remain.
+    A V3 iteration would likely find only cosmetic or edge-case issues.
+
+================================================================================
+END OF TEST PLAN REVIEW SUMMARY V2
+================================================================================

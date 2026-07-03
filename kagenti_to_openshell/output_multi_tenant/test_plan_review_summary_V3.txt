@@ -1,0 +1,287 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — TEST PLAN REVIEW SUMMARY V3
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Date: 2026-07-03
+Iteration: V3-R1 (review of iteration 3)
+================================================================================
+
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+7 issues were identified across 3 severity levels. All have been corrected
+in the reviewed test plan (test_plan_review_V3.txt).
+
+1.1 HIGH ISSUES (1)
+────────────────────
+
+  R3-1: Wiremock OIDC tests incorrectly remove discovery mock
+
+    PROBLEM: The V3 test plan's wiremock setup (Section 17) mocks ONLY the
+    JWKS endpoint and explicitly states "Mock ONLY the JWKS endpoint — NOT
+    .well-known/openid-configuration. JwksCache constructs the JWKS URL
+    directly from the issuer, not from OIDC discovery."
+
+    This is factually wrong. Verified against oidc.rs:
+
+      Line 170: JwksCache::new() is documented as "discovering the JWKS URI
+                and fetching the initial key set"
+      Line 177: Constructs discovery URL:
+                format!("{}/.well-known/openid-configuration", ...)
+      Lines 183-190: Fetches discovery URL, parses as OidcDiscovery
+      Lines 192-199: Validates discovery.issuer matches config.issuer
+      Line 205: Stores discovery.jwks_uri as self.jwks_uri
+      Lines 222-233: refresh_keys() fetches from self.jwks_uri
+
+    ROOT CAUSE: The V2-R1 review (Issue R2-7) incorrectly claimed that
+    "JwksCache does NOT fetch the OIDC discovery document." V3 incorporated
+    this incorrect correction. The V2-R1 reviewer apparently examined a
+    different code path or misread the JwksCache implementation.
+
+    IMPACT: All 4 wiremock tests would fail at JwksCache::new() because
+    the discovery endpoint returns a connection error instead of JSON.
+
+    FIX: The wiremock setup now mocks TWO endpoints:
+      1. /.well-known/openid-configuration → returns
+         {"issuer": "<uri>", "jwks_uri": "<uri>/certs"}
+      2. /certs → returns {"keys": [jwk]}
+
+    The discovery response must include "issuer" matching config.issuer
+    because JwksCache validates this (lines 192-199).
+
+1.2 MEDIUM ISSUES (3)
+──────────────────────
+
+  R3-2: stamp_owner_labels() uses tenant_id from OwnershipConfig, but
+        tenant_id is on Config
+
+    PROBLEM: Section 6.2 tests set "config.tenant_id = Some("team1")"
+    when testing stamp_owner_labels(), but OwnershipConfig (defined in
+    Section 7) only has `enabled` and `allow_unowned_providers`. The
+    tenant_id field is on Config (set in test_server_state_with_ownership).
+
+    FIX: Added tenant_id as a separate parameter to stamp_owner_labels:
+      stamp_owner_labels(principal, config, tenant_id, existing_labels)
+
+    In handler code, tenant_id comes from state.config.tenant_id.
+    In unit tests, it's passed explicitly as Some("team1") or None.
+
+  R3-3: check_ownership() references config.admin_role, but OwnershipConfig
+        has no admin_role field
+
+    PROBLEM: Section 6.3 test admin_bypasses_ownership_check sets
+    "config.admin_role = 'openshell-admin'" but OwnershipConfig has no
+    such field.
+
+    FIX: Added admin_role to OwnershipConfig:
+      pub struct OwnershipConfig {
+          pub enabled: bool,
+          pub allow_unowned_providers: bool,
+          pub admin_role: String,  // default: "openshell-admin"
+      }
+
+    Added corresponding tests: one for config.rs default (Section 7)
+    and one for TOML parsing (Section 8).
+
+  R3-4: SandboxIndex tests assume APIs that don't exist
+
+    PROBLEM: Section 15 tests use index.insert(name, id, owner) and
+    index.get_owner(id), but the actual SandboxIndex has
+    update_from_sandbox(&sandbox) and sandbox_id_for_sandbox_name(&name).
+
+    FIX: Corrected tests to use the existing API pattern:
+      - update_from_sandbox(&sandbox) with Sandbox proto containing
+        LABEL_OWNER in metadata.labels
+      - New method: get_owner_for_sandbox(sandbox_id) -> Option<String>
+      - Tests construct full Sandbox protos matching existing patterns
+
+1.3 LOW ISSUES (3)
+───────────────────
+
+  R3-5: Error quality tests (Section 19.4) redundant with Section 6.3
+
+    PROBLEM: All 3 tests in Section 19.4 duplicate assertions already
+    verified by Section 6.3 ownership module tests.
+
+    FIX: Removed Section 19.4. Net change: -3 tests.
+
+  R3-6: Cross-resource provider ownership test requires unlisted port
+        plan modification
+
+    PROBLEM: sandbox_with_another_users_provider_denied (Section 16.3)
+    assumes provider validation during sandbox create is ownership-aware,
+    but the port plan doesn't describe this modification.
+
+    FIX: Added implementation note documenting the gap. The test correctly
+    describes the desired security behavior; the port plan needs extension.
+
+  R3-7: Test count arithmetic after corrections
+
+    PROBLEM: After adding 2 tests (+1 admin_role default, +1 TOML parse)
+    and removing 3 (Section 19.4), total changes from 158 to 157.
+
+    FIX: Updated traceability matrix and all totals.
+
+================================================================================
+2. SUMMARY OF CHANGES
+================================================================================
+
+  QUANTITATIVE:
+    ┌────────────────────────┬──────────┬──────────┬──────────────────────┐
+    │ Metric                 │ V3       │ V3-R1    │ Change               │
+    ├────────────────────────┼──────────┼──────────┼──────────────────────┤
+    │ Total test cases       │ 158      │ 157      │ -1 (net: +2, -3)    │
+    │ Issues found           │ N/A      │ 7        │                      │
+    │ High issues            │ N/A      │ 1        │                      │
+    │ Medium issues          │ N/A      │ 3        │                      │
+    │ Low issues             │ N/A      │ 3        │                      │
+    │ Test file count        │ 16       │ 16       │ unchanged            │
+    │ Sections modified      │ N/A      │ 9        │                      │
+    └────────────────────────┴──────────┴──────────┴──────────────────────┘
+
+  QUALITATIVE:
+    - ONE test-blocking issue found: wiremock OIDC setup would cause
+      all 4 tests to fail at initialization. This is the first HIGH issue
+      since V2 (no HIGH issues in V2-R1). It originated from an incorrect
+      V2-R1 correction (R2-7) that V3 incorporated by design.
+    - THREE design-level issues in the new OwnershipConfig struct:
+      missing admin_role field, misplaced tenant_id, mismatched SandboxIndex
+      API. These are not compilation errors but would cause incorrect
+      test-to-implementation mapping.
+    - THREE minor issues: redundant tests, unlisted port plan gap,
+      arithmetic update.
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+3.1 ITERATION 1 (V1) — Initial Test Plan
+─────────────────────────────────────────
+
+  Scope: First comprehensive test plan generation.
+  Output: test_plan_V1.txt — ~143 tests across 14 files.
+
+  Key contributions:
+    - Mapped all 20 port plan steps to test cases
+    - Translated Kagenti E2E test dimensions to Rust
+    - Defined test helper patterns
+    - Created traceability matrix
+
+  Weaknesses found by review (12 issues):
+    - 1 CRITICAL: OidcConfig field names would not compile
+    - 3 HIGH: shared access contradiction, private handler access, wrong role gate
+    - 4 MEDIUM: OIDC extraction mechanism, K8s driver behavior, streaming, overlap
+    - 4 LOW: nonexistent functions, meta-tests, missing edge cases
+
+3.2 ITERATION 1 REVIEW (V1-R1) — Critical Review
+──────────────────────────────────────────────────
+
+  Output: test_plan_review_V1.txt — ~141 tests across 13 files + 2 CI checks
+
+  Key corrections:
+    - Fixed compile-blocking OidcConfig field names
+    - Added allow_unowned parameter for provider shared access
+    - Moved all handler tests to in-source #[cfg(test)] modules
+    - Reframed provider role tests to test runtime guard
+    - Rewrote OIDC groups tests to use extract_groups() pattern
+
+3.3 ITERATION 2 (V2) — From-Scratch Rebuild
+────────────────────────────────────────────
+
+  Scope: Built from scratch with all V1-R1 learnings incorporated by design.
+  Output: test_plan_V2.txt — ~150 tests across 13 files + 1 script.
+
+  Key improvements:
+    - All 12 V1-R1 issues addressed by design, not retroactively
+    - Added wiremock-based OIDC integration tests (4 tests)
+    - Added dual-label stamping tests (ObjectMeta + SandboxTemplate)
+    - Added label serialization fix tests (R4-8)
+    - Added provider metadata initialization test (R4-7)
+    - Added OpenShift-specific Helm tests (3 tests)
+    - Added security-focused error message tests
+    - Added Kagenti E2E test mapping (Appendix A)
+
+3.4 ITERATION 2 REVIEW (V2-R1) — Review
+─────────────────────────────────────────
+
+  Output: test_plan_review_V2.txt — ~148 tests
+
+  11 issues found (0 CRITICAL, 2 HIGH, 4 MEDIUM, 5 LOW).
+
+  Key corrections:
+    - Corrected shared provider test setups (store insertion, not handler)
+    - Changed persistence tests to use store.put_if directly
+    - Corrected email sanitization (dots preserved in K8s labels)
+    - Renamed concurrency tests to stress tests
+
+  NOTABLE ERROR: Issue R2-7 incorrectly removed the OIDC discovery mock,
+  claiming JwksCache doesn't use discovery. This was propagated into V3
+  and caught in this V3-R1 review.
+
+3.5 ITERATION 3 (V3) — From-Scratch with Codebase Analysis
+───────────────────────────────────────────────────────────
+
+  Scope: Built from scratch after deep analysis of both codebases.
+  Output: test_plan_V3.txt — 158 tests across 14 Rust files + 2 new files.
+
+  Methodology change: Analyzed 254 #[cfg(test)] modules, all test helpers,
+  all auth injection patterns, dev dependencies, and function signatures
+  in the actual OpenShell codebase.
+
+  Key improvements over V2-R1:
+    - Codebase-verified conventions (not assumptions)
+    - Fully specified test helpers with code
+    - Documented 30+ existing tests NOT duplicated
+    - Accounted for #[serde(deny_unknown_fields)] on GatewayFileSection
+    - Precise arithmetic (no "approximately" counts)
+
+  Residual issues found by V3-R1 review (7):
+    - 1 HIGH: Inherited incorrect V2-R1 correction (OIDC discovery mock)
+    - 3 MEDIUM: OwnershipConfig design issues (admin_role, tenant_id, API)
+    - 3 LOW: Redundant tests, port plan gap, arithmetic update
+
+3.6 ITERATION 3 REVIEW (V3-R1) — Current
+─────────────────────────────────────────
+
+  Output: test_plan_review_V3.txt — 157 tests
+
+  Issue profile compared to previous reviews:
+    ┌─────────────┬──────────┬──────────┬──────────┐
+    │ Severity    │ V1-R1    │ V2-R1    │ V3-R1    │
+    ├─────────────┼──────────┼──────────┼──────────┤
+    │ CRITICAL    │ 1        │ 0        │ 0        │
+    │ HIGH        │ 3        │ 2        │ 1        │
+    │ MEDIUM      │ 4        │ 4        │ 3        │
+    │ LOW         │ 4        │ 5        │ 3        │
+    │ TOTAL       │ 12       │ 11       │ 7        │
+    └─────────────┴──────────┴──────────┴──────────┘
+
+  Key observations:
+    - No CRITICAL issues since V1 (compile-blocking eliminated)
+    - HIGH issue count: 3 → 2 → 1 (improving trajectory)
+    - The sole HIGH issue (R3-1) originated from an incorrect V2-R1
+      correction (R2-7), not from V3's own analysis
+    - MEDIUM issues are struct design questions (admin_role, tenant_id),
+      not fundamental architectural problems
+    - Total issue count: 12 → 11 → 7 (clear convergence)
+
+  Nature of remaining issues:
+    - R3-1 (HIGH): Factual error about JwksCache OIDC discovery behavior,
+      inherited from incorrect V2-R1 fix. Verifiable by reading oidc.rs.
+    - R3-2, R3-3 (MEDIUM): API design decisions for new code — where does
+      tenant_id and admin_role live? These are design choices, not bugs.
+    - R3-4 (MEDIUM): SandboxIndex API must follow existing patterns.
+    - R3-5, R3-6, R3-7 (LOW): Redundant tests, missing port plan detail,
+      arithmetic update.
+
+  Convergence assessment:
+    The test plan is at practical convergence for its purpose. The HIGH
+    issue (R3-1) is a clear factual fix. The MEDIUM issues (R3-2 through
+    R3-4) are design decisions that will be finalized during implementation.
+    No fundamental architectural, testing strategy, or coverage gaps remain.
+
+    A V4 iteration would likely find only naming/cosmetic issues.
+
+================================================================================
+END OF TEST PLAN REVIEW SUMMARY V3
+================================================================================

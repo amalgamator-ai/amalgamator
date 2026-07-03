@@ -1,0 +1,872 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — REVIEWED CODE PORTING PLAN V3
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Source: Kagenti (Python/Shell/YAML)
+Target: OpenShell (Rust)
+Porting Complexity: HIGH
+Date: 2026-07-03
+Review: V3-R1 (review of iteration 3)
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Executive Summary
+2. Architectural Decision
+3. Prerequisites & Assumptions
+4. Learnings Incorporated from Previous Iterations
+5. Step-by-Step Implementation Plan
+   Step 1:  Add groups Field to Identity Struct
+   Step 2:  Add groups_claim to OidcConfig & Extract Groups from JWT
+   Step 3:  Define Owner/Tenant Label Constants in openshell-core
+   Step 4:  Create Ownership Module (auth/ownership.rs)
+   Step 5:  Add OwnershipConfig to Configuration
+   Step 6:  Add ownership_config() Method to ServerState
+   Step 7:  Modify Sandbox Create Handler (Owner Stamping)
+   Step 8:  Modify Sandbox List Handler (Owner Filtering)
+   Step 9:  Modify Sandbox Get/Delete Handlers (Ownership Enforcement)
+   Step 10: Modify Sandbox Watch/Exec/SSH Handlers (Ownership Enforcement)
+   Step 11: Modify Provider CRUD for Per-User Ownership
+   Step 12: Add Owner Labels to Kubernetes Driver (Pod Labels)
+   Step 13: Add Owner Labels to Docker Driver
+   Step 14: Update SandboxIndex for Owner Tracking (Optional)
+   Step 15: Update Helm Chart for Gateway-Per-Tenant Deployment
+   Step 16: Add Per-Tenant RBAC Templates
+   Step 17: Add ResourceQuota and LimitRange Templates
+   Step 18: Update Certificate Generation for Tenant SANs
+   Step 19: Update CLI for Multi-Tenant Gateway Display
+   Step 20: Add Unit and Integration Tests
+6. Dependency Summary
+7. Risk Analysis
+8. Breaking Change Assessment
+9. Implementation Order & Milestones
+10. Name Uniqueness & Known Limitations
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+  [UNCHANGED FROM V3]
+
+================================================================================
+2. ARCHITECTURAL DECISION
+================================================================================
+
+  [UNCHANGED FROM V3]
+
+================================================================================
+3. PREREQUISITES & ASSUMPTIONS
+================================================================================
+
+  [UNCHANGED FROM V3, with one correction:]
+
+  REVIEW FIX: Identity construction sites list (Step 1 downstream impact)
+
+  The V3 plan lists the following as Identity construction sites:
+    - oidc.rs, lines 333-348 (OIDC JWT validation)
+    - k8s_sa.rs (K8s ServiceAccount bootstrap)
+    - http.rs (edge proxy browser login)
+    - Any dev/test Identity builders
+
+  This list contains two errors:
+
+    1. http.rs does NOT construct Identity. Verified: this module handles
+       Cloudflare Access edge-proxy HTML pages (/auth/connect,
+       /auth/oidc-config). No Identity or Principal is created.
+
+    2. k8s_sa.rs does NOT construct Identity. Verified: it constructs
+       SandboxPrincipal (lines 127-134), which wraps SandboxIdentitySource,
+       NOT Identity/UserPrincipal. SandboxPrincipal does not contain an
+       Identity struct, so no groups field is needed.
+
+  CORRECTED construction sites:
+    - oidc.rs, lines 342-348 (OIDC JWT validation)  <-- ONLY site
+    - Any dev/test Identity builders (with groups: vec![])
+
+  All other Identity construction sites (if any exist for Mtls,
+  CloudflareAccess, or LocalDev providers) should also add
+  groups: vec![].
+
+================================================================================
+4. LEARNINGS INCORPORATED FROM PREVIOUS ITERATIONS
+================================================================================
+
+  [UNCHANGED FROM V3]
+
+================================================================================
+5. STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+  [DEPENDENCY GRAPH UNCHANGED FROM V3]
+
+==============================================================================
+STEP 1: Add groups Field to Identity Struct
+==============================================================================
+
+  [MOSTLY UNCHANGED FROM V3, with corrected downstream impact:]
+
+  REVIEW FIX: Corrected construction sites
+
+  The V3 plan lists http.rs and k8s_sa.rs as Identity construction
+  sites needing groups: vec![]. Both are incorrect:
+    - http.rs: Does not construct Identity (serves Cloudflare Access HTML)
+    - k8s_sa.rs: Constructs SandboxPrincipal, not Identity
+
+  CORRECTED downstream impact:
+    Every place that constructs Identity must now include groups.
+    Verified construction sites:
+      - oidc.rs, lines 342-348 (OIDC JWT validation)
+        -> Add groups: claims.groups (extracted in Step 2)
+      - Any dev/test Identity builders
+        -> Add groups: vec![]
+
+  [Rest of Step 1 UNCHANGED FROM V3]
+
+==============================================================================
+STEP 2: Add groups_claim to OidcConfig & Extract Groups from JWT
+==============================================================================
+
+  [UNCHANGED FROM V3 -- verified correct]
+
+==============================================================================
+STEP 3: Define Owner/Tenant Label Constants in openshell-core
+==============================================================================
+
+  [UNCHANGED FROM V3 -- verified correct]
+
+==============================================================================
+STEP 4: Create Ownership Module (auth/ownership.rs)
+==============================================================================
+
+  [MOSTLY UNCHANGED FROM V3, with one critical fix:]
+
+  REVIEW FIX: Sanitized subject mismatch in check_ownership and
+  owner_label_selector (Issue R3-3)
+
+  The V3 plan has a functional bug where stamp_owner_labels() sanitizes
+  the subject before storing it as a label value, but check_ownership()
+  and owner_label_selector() compare/query using the RAW subject.
+
+  V3 stamp_owner_labels (Step 4B) -- CORRECT:
+    let owner = sanitize_label_value(&user.identity.subject);
+    labels.insert(LABEL_OWNER.to_string(), owner);
+    // Stored label value: sanitized subject
+
+  V3 check_ownership (Step 4C) -- BUGGY:
+    Some(owner) if owner == &user.identity.subject => Ok(()),
+    // Compares sanitized stored value against RAW subject
+
+  V3 owner_label_selector (Step 4D) -- BUGGY:
+    Some(format!("{}={}", LABEL_OWNER, user.identity.subject))
+    // Queries for RAW subject, but stored value is sanitized
+
+  BUG SCENARIO:
+    User subject: "user@example.com"
+    stamp_owner_labels sanitizes to: "userexamplecom" (stored)
+    check_ownership compares: "userexamplecom" == "user@example.com" -> FALSE
+    Result: User is denied access to their OWN sandbox.
+
+    This affects any OIDC provider that uses non-UUID subjects (e.g.,
+    email addresses from Google, Azure AD, Okta). Keycloak UUIDs are
+    unaffected since they pass through sanitization unchanged.
+
+  CORRECTED check_ownership (Step 4C):
+
+    pub fn check_ownership(
+        principal: &Principal,
+        config: &OwnershipEnforcement,
+        resource_labels: &HashMap<String, String>,
+        resource_kind: &str,
+        resource_id: &str,
+    ) -> Result<(), Status> {
+        if !config.enabled {
+            return Ok(());
+        }
+        match principal {
+            Principal::User(user) => {
+                if config.is_admin(principal) {
+                    return Ok(());
+                }
+                // CRITICAL: Sanitize subject before comparison to match
+                // what stamp_owner_labels() stored.
+                let sanitized_subject = sanitize_label_value(&user.identity.subject);
+                match resource_labels.get(LABEL_OWNER) {
+                    Some(owner) if owner == &sanitized_subject => Ok(()),
+                    Some(_) => Err(Status::permission_denied(format!(
+                        "{resource_kind} '{resource_id}' is owned by another user"
+                    ))),
+                    None => Err(Status::permission_denied(format!(
+                        "{resource_kind} '{resource_id}' has no owner and \
+                         requires admin access"
+                    ))),
+                }
+            }
+            Principal::Anonymous => Ok(()),
+            Principal::Sandbox(_) => Ok(()),
+        }
+    }
+
+  CORRECTED owner_label_selector (Step 4D):
+
+    pub fn owner_label_selector(
+        principal: &Principal,
+        config: &OwnershipEnforcement,
+    ) -> Option<String> {
+        if !config.enabled {
+            return None;
+        }
+        match principal {
+            Principal::User(user) => {
+                if config.is_admin(principal) {
+                    return None;
+                }
+                // CRITICAL: Sanitize subject to match stored label value
+                let sanitized = sanitize_label_value(&user.identity.subject);
+                Some(format!("{}={}", LABEL_OWNER, sanitized))
+            }
+            _ => None,
+        }
+    }
+
+  WHY THIS FIX IS CORRECT:
+    stamp_owner_labels stores: sanitize_label_value(subject)
+    check_ownership compares against: sanitize_label_value(subject)
+    owner_label_selector queries for: sanitize_label_value(subject)
+    All three now use the same sanitized value -> comparisons match.
+
+  --- Step 4E: sanitize_label_value (additional improvement) ---
+
+  REVIEW NOTE: The V3 sanitizer filters characters but does not enforce
+  that the result begins and ends with an alphanumeric character (a K8s
+  label value requirement). For example, "-hello-" passes sanitization
+  but is an invalid K8s label value.
+
+  IMPROVED sanitize_label_value:
+
+    pub fn sanitize_label_value(value: &str) -> String {
+        let sanitized: String = value
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+            .take(63)
+            .collect();
+        // K8s labels must begin and end with alphanumeric characters
+        let sanitized = sanitized
+            .trim_start_matches(|c: char| !c.is_alphanumeric())
+            .trim_end_matches(|c: char| !c.is_alphanumeric());
+        if sanitized.is_empty() {
+            "unknown".to_string()
+        } else {
+            sanitized.to_string()
+        }
+    }
+
+  [Steps 4A, 4B, 4F UNCHANGED FROM V3]
+
+==============================================================================
+STEP 5: Add OwnershipConfig to Configuration
+==============================================================================
+
+  [MOSTLY UNCHANGED FROM V3, with one correction:]
+
+  REVIEW FIX: Config construction mapping is in cli.rs (Issue R3-5)
+
+  The V3 plan (Step 5C) says:
+    "Update the Config construction in the file loading logic to pass
+     through: ownership: gateway.ownership.clone(), ..."
+
+  This is vague about WHERE the construction happens. Verified:
+  Config is constructed in cli.rs (line 310 onwards) via a builder
+  pattern, NOT in config_file.rs. The GatewayFileSection is parsed from
+  the TOML file in config_file.rs, but the MAPPING to Config happens
+  in cli.rs.
+
+  CORRECTED Step 5C:
+
+  File: crates/openshell-server/src/config_file.rs
+
+  Add to GatewayFileSection (in the nested tables section, around line 152):
+    pub ownership: Option<OwnershipConfig>,
+    pub tenant_id: Option<String>,
+
+  File: crates/openshell-server/src/cli.rs
+
+  In the Config construction block (after line 310, alongside existing
+  field mappings like config.auth = auth), add:
+
+    // Map ownership and tenant_id from file config to runtime Config
+    if let Some(ownership) = file.as_ref()
+        .and_then(|f| f.openshell.gateway.ownership.clone())
+    {
+        config.ownership = Some(ownership);
+    }
+    if let Some(tenant_id) = file.as_ref()
+        .and_then(|f| f.openshell.gateway.tenant_id.clone())
+    {
+        config.tenant_id = Some(tenant_id);
+    }
+
+  This follows the existing pattern used for other Config fields (e.g.,
+  config.auth at line 314, config.health_bind_address at line 347).
+
+  NOTE: Config struct has #[derive(Debug, Clone)] only (no Serialize/
+  Deserialize). Adding ownership: Option<OwnershipConfig> and
+  tenant_id: Option<String> as fields with default None is safe.
+
+  [Steps 5A, 5B, 5D UNCHANGED FROM V3]
+
+==============================================================================
+STEP 6: Add ownership_config() Method to ServerState
+==============================================================================
+
+  [UNCHANGED FROM V3 -- verified correct]
+
+==============================================================================
+STEP 7: Modify Sandbox Create Handler (Owner Stamping)
+==============================================================================
+
+  [SUBSTANTIALLY CORRECTED -- Issue R3-1:]
+
+  REVIEW FIX: request.into_inner() consumes tonic::Request (Issue R3-1)
+
+  CRITICAL: Every handler in OpenShell calls request.into_inner()
+  as its FIRST operation (e.g., line 123 in handle_create_sandbox_inner).
+  This CONSUMES the tonic::Request, making extensions INACCESSIBLE.
+
+  The V3 plan says: "Add at the beginning of the function, after the
+  request is parsed." This instruction is CONTRADICTORY because "parsing"
+  IS into_inner(), and extensions must be read BEFORE into_inner().
+
+  The V3 code snippet (request.extensions().get::<Principal>()) is
+  correct Rust, but the INSTRUCTIONS are misleading. An implementer
+  reading "after the request is parsed" might attempt to place the code
+  AFTER the existing into_inner() call, which would fail (use-after-move).
+
+  CORRECTED INSTRUCTIONS for handle_create_sandbox_inner:
+
+  File: crates/openshell-server/src/grpc/sandbox.rs
+
+  Current code (lines 119-123):
+    async fn handle_create_sandbox_inner(
+        state: &Arc<ServerState>,
+        request: Request<CreateSandboxRequest>,
+    ) -> Result<Response<SandboxResponse>, Status> {
+        let request = request.into_inner();  // <-- line 123: CONSUMES request
+        ...
+
+  CORRECTED code -- insert principal extraction BEFORE into_inner():
+
+    async fn handle_create_sandbox_inner(
+        state: &Arc<ServerState>,
+        request: Request<CreateSandboxRequest>,
+    ) -> Result<Response<SandboxResponse>, Status> {
+        // 1. Extract principal BEFORE into_inner() consumes the request
+        let principal = request.extensions()
+            .get::<Principal>()
+            .cloned()
+            .unwrap_or(Principal::Anonymous);
+
+        let ownership_config = state.ownership_config();
+
+        // 2. NOW consume the request (existing code, moved after extraction)
+        let request = request.into_inner();
+
+        // 3. Existing label validation runs on request.labels (unchanged)
+        // ... existing label validation (lines 132-135) ...
+
+        // 4. After validation, stamp owner labels (NEW)
+        let labels = crate::auth::ownership::stamp_owner_labels(
+            &principal,
+            &ownership_config,
+            request.labels.clone(),
+        );
+        // Use `labels` instead of `request.labels` for sandbox creation
+
+  KEY RULE (applies to ALL handler modifications in Steps 7-11):
+    Principal extraction via request.extensions().get::<Principal>()
+    MUST be the FIRST operation in the handler, BEFORE the existing
+    request.into_inner() call. The into_inner() call is PRESERVED but
+    MOVED to after the principal extraction.
+
+  [Rest of Step 7 (label flow, dependencies, breaking) UNCHANGED FROM V3]
+
+==============================================================================
+STEP 8: Modify Sandbox List Handler (Owner Filtering)
+==============================================================================
+
+  [CORRECTED for into_inner() ordering -- Issue R3-1:]
+
+  REVIEW FIX: Same into_inner() issue as Step 7.
+
+  Current code (line 260):
+    let request = request.into_inner();  // first line of handler
+
+  CORRECTED: Insert principal extraction BEFORE the existing into_inner():
+
+    pub async fn handle_list_sandboxes(
+        state: &Arc<ServerState>,
+        request: Request<ListSandboxesRequest>,
+    ) -> Result<Response<ListSandboxesResponse>, Status> {
+        // Extract principal BEFORE into_inner()
+        let principal = request.extensions()
+            .get::<Principal>()
+            .cloned()
+            .unwrap_or(Principal::Anonymous);
+
+        let ownership_config = state.ownership_config();
+
+        // Existing into_inner() preserved, moved after extraction
+        let request = request.into_inner();
+
+        // ... rest of handler with ownership filtering ...
+
+  [Rest of Step 8 (selector logic, dependencies) UNCHANGED FROM V3]
+
+==============================================================================
+STEP 9: Modify Sandbox Get/Delete Handlers (Ownership Enforcement)
+==============================================================================
+
+  [CORRECTED for into_inner() ordering -- Issue R3-1:]
+
+  REVIEW FIX: Same into_inner() issue.
+
+  Step 9A (handle_get_sandbox, line 235):
+    Current: line 239 calls request.into_inner().name immediately
+    Fix: Extract principal BEFORE into_inner(), then get name from
+    the consumed request as before.
+
+  Step 9B (handle_delete_sandbox_inner, line 496):
+    Current: line 500 calls request.into_inner().name immediately
+    Fix: Same pattern -- principal extraction first.
+
+  CORRECTED pattern (applies to both 9A and 9B):
+
+    let principal = request.extensions()
+        .get::<Principal>()
+        .cloned()
+        .unwrap_or(Principal::Anonymous);
+
+    let ownership_config = state.ownership_config();
+
+    // Now safe to consume request
+    let name = request.into_inner().name;
+
+    // ... existing handler logic ...
+    // ... ownership check after sandbox fetch ...
+
+  [Rest of Step 9 (ownership check logic) UNCHANGED FROM V3]
+
+==============================================================================
+STEP 10: Modify Sandbox Watch/Exec/SSH Handlers (Ownership Enforcement)
+==============================================================================
+
+  [CORRECTED for into_inner() ordering -- Issue R3-1:]
+
+  REVIEW FIX: Step 10A says "After sandbox fetch (where it validates
+  sandbox exists), add: let principal = request.extensions()...". This
+  is WRONG -- by the time of "after sandbox fetch," the request has
+  been consumed by into_inner() many lines earlier (line 579 for watch,
+  line 809 for exec).
+
+  CORRECTED: In ALL streaming handlers, extract principal as the
+  FIRST operation:
+
+  Step 10A (handle_watch_sandbox, line 575):
+
+    pub async fn handle_watch_sandbox(
+        state: &Arc<ServerState>,
+        request: Request<WatchSandboxRequest>,
+    ) -> Result<Response<ReceiverStream<Result<SandboxStreamEvent, Status>>>, Status> {
+        // Extract principal BEFORE into_inner() at line 579
+        let principal = request.extensions()
+            .get::<Principal>()
+            .cloned()
+            .unwrap_or(Principal::Anonymous);
+
+        let ownership_config = state.ownership_config();
+
+        // Existing into_inner() (line 579)
+        let request = request.into_inner();
+
+        // ... existing sandbox fetch ...
+
+        // After sandbox is fetched, check ownership
+        let labels = sandbox.metadata.as_ref()
+            .map(|m| &m.labels)
+            .cloned()
+            .unwrap_or_default();
+
+        crate::auth::ownership::check_ownership(
+            &principal,
+            &ownership_config,
+            &labels,
+            "sandbox",
+            &sandbox.object_id().to_string(),
+        )?;
+
+  Step 10B (handle_exec_sandbox, line 803): Same pattern.
+
+  [Rest of Step 10 UNCHANGED FROM V3]
+
+==============================================================================
+STEP 11: Modify Provider CRUD for Per-User Ownership
+==============================================================================
+
+  [MOSTLY UNCHANGED FROM V3, with two corrections:]
+
+  REVIEW FIX 1: into_inner() ordering (Issue R3-1)
+
+  All provider handlers call request.into_inner() immediately:
+    - handle_create_provider: line 1154
+    - handle_list_providers: line 1203
+    - handle_update_provider: line 1894
+    - handle_delete_provider: line 2265
+
+  ALL modifications must extract principal BEFORE into_inner().
+  The pattern is identical to Steps 7-10.
+
+  REVIEW FIX 2: Method auth is in grpc/mod.rs, not method_authz.rs
+  (Issue R3-4)
+
+  The V3 plan (Step 11D) says:
+    "File: Wherever method authorization is configured (method_authz.rs
+     or the service method dispatch layer)."
+
+  This is vague and the files list says method_authz.rs. Verified:
+  method authorization is configured via #[rpc_auth] procedural macro
+  annotations on the gRPC service impl methods in grpc/mod.rs.
+
+  The EXACT annotation (grpc/mod.rs, lines 360-366):
+
+    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+    async fn create_provider(
+        &self,
+        request: Request<CreateProviderRequest>,
+    ) -> Result<Response<ProviderResponse>, Status> {
+        provider::handle_create_provider(&self.state, request).await
+    }
+
+  CORRECTED Step 11D:
+
+  File: crates/openshell-server/src/grpc/mod.rs
+
+  Change the #[rpc_auth] annotation on create_provider (line 360):
+    FROM: #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+    TO:   #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
+
+  Also change for update_provider and delete_provider (same file):
+    FROM: role = "admin"
+    TO:   role = "user"
+
+  The #[rpc_authz] macro (on the service impl block, line 31) generates
+  the const AUTH_METADATA table used by method_authz.rs for runtime
+  lookup. The role change flows through automatically via the macro.
+
+  NOTE: method_authz.rs is NOT modified. It contains the lookup
+  infrastructure (MethodAuth struct, required_role(), required_scope())
+  which reads from the macro-generated tables. The tables are regenerated
+  at compile time when the #[rpc_auth] annotations change.
+
+  [Steps 11A, 11B, 11C, 11E, 11F UNCHANGED FROM V3 (except for the
+   into_inner() ordering fix which applies to all handler modifications)]
+
+==============================================================================
+STEP 12: Add Owner Labels to Kubernetes Driver (Pod Labels)
+==============================================================================
+
+  [SUBSTANTIALLY CORRECTED -- Issue R3-2:]
+
+  REVIEW FIX: DriverSandbox does not have metadata.labels (Issue R3-2)
+
+  The V3 plan says:
+    "NOTE: The Sandbox type here is the protobuf-generated struct. Its
+     metadata field is Option<ObjectMeta>, and ObjectMeta.labels is
+     HashMap<String, String>."
+
+  This is WRONG. Verified: In the K8s driver, Sandbox is an alias for
+  DriverSandbox (driver.rs line 28):
+
+    use openshell_core::proto::compute::v1::{
+        DriverSandbox as Sandbox,
+        ...
+    };
+
+  DriverSandbox (compute_driver.proto, lines 64-76) has:
+    - id: String
+    - name: String
+    - namespace: String
+    - spec: Option<DriverSandboxSpec>
+    - status: Option<DriverSandboxStatus>
+
+  There is NO metadata field. The V3 plan's code:
+    if let Some(ref metadata) = sandbox.metadata {
+        if let Some(owner) = metadata.labels.get(LABEL_OWNER) {
+  WILL NOT COMPILE.
+
+  HOWEVER, labels ARE available through DriverSandboxTemplate. Verified:
+  The gateway populates DriverSandboxTemplate.labels via
+  driver_sandbox_from_public() (compute/mod.rs, line 1598). The
+  DriverSandboxTemplate is accessible through the spec:
+
+    sandbox.spec -> DriverSandboxSpec -> template -> DriverSandboxTemplate
+    DriverSandboxTemplate has labels: HashMap<String, String> (proto line 125)
+
+  CORRECTED sandbox_labels() code:
+
+  File: crates/openshell-driver-kubernetes/src/driver.rs
+
+  fn sandbox_labels(sandbox: &Sandbox) -> BTreeMap<String, String> {
+      let mut labels = BTreeMap::new();
+      labels.insert(LABEL_SANDBOX_ID.to_string(), sandbox.id.clone());
+      labels.insert(
+          LABEL_MANAGED_BY.to_string(),
+          LABEL_MANAGED_BY_VALUE.to_string(),
+      );
+
+      // Propagate owner and tenant labels from the sandbox template.
+      // The gateway populates DriverSandboxTemplate.labels via
+      // driver_sandbox_from_public() in compute/mod.rs.
+      if let Some(ref spec) = sandbox.spec {
+          if let Some(ref template) = spec.template {
+              if let Some(owner) = template.labels.get(LABEL_OWNER) {
+                  labels.insert(LABEL_OWNER.to_string(), owner.clone());
+              }
+              if let Some(tenant) = template.labels.get(LABEL_TENANT) {
+                  labels.insert(LABEL_TENANT.to_string(), tenant.clone());
+              }
+          }
+      }
+
+      labels
+  }
+
+  WHY THIS FIX WORKS:
+  1. Gateway creates Sandbox (gateway proto type) with metadata.labels
+     including openshell.ai/owner
+  2. Gateway calls compute.create_sandbox() which invokes
+     driver_sandbox_from_public() (compute/mod.rs, line 1550+)
+  3. driver_sandbox_from_public maps public sandbox labels to
+     DriverSandboxTemplate.labels (line 1598)
+  4. Compute driver receives DriverSandbox with spec.template.labels
+  5. sandbox_labels() reads from spec.template.labels (CORRECTED)
+  6. Labels end up on the Kubernetes Sandbox CRD object
+
+  NOTE: The exact field path (spec.template) depends on DriverSandboxSpec
+  having a template field of type DriverSandboxTemplate. This is
+  confirmed by the driver's import of DriverSandboxTemplate as
+  SandboxTemplate and the gateway's driver_sandbox_from_public() code.
+
+  PREREQUISITE: Verify that the gateway's label stamping in Step 7
+  happens BEFORE driver_sandbox_from_public() is called. The flow is:
+    1. handle_create_sandbox_inner stamps owner label on request.labels
+    2. Labels are set in the Sandbox protobuf metadata.labels
+    3. compute.create_sandbox() converts Sandbox to DriverSandbox
+    4. driver_sandbox_from_public copies metadata.labels to template.labels
+  This ordering is correct.
+
+==============================================================================
+STEP 13: Add Owner Labels to Docker Driver
+==============================================================================
+
+  [CORRECTED for same DriverSandbox issue -- Issue R3-2:]
+
+  REVIEW FIX: Docker driver also uses DriverSandbox (aliased as Sandbox).
+
+  Verified: The Docker driver's label-setting code (lib.rs, lines
+  2337-2361) builds labels from template.labels, LABEL_MANAGED_BY,
+  LABEL_SANDBOX_ID, LABEL_SANDBOX_NAME, and config.sandbox_namespace.
+
+  The Docker driver already starts with template.labels:
+    let mut labels = template.labels.clone();
+
+  So owner labels set in template.labels by the gateway ALREADY
+  propagate to Docker containers automatically, as long as the gateway
+  stamps them before the template is created.
+
+  CORRECTED: No code change needed for Docker driver label propagation.
+  The labels flow through template.labels automatically.
+
+  HOWEVER, if the Docker driver's sandbox creation code does NOT use
+  template.labels (i.e., if it builds labels from scratch), then the
+  same fix as Step 12 applies:
+
+    if let Some(ref spec) = sandbox.spec {
+        if let Some(ref template) = spec.template {
+            if let Some(owner) = template.labels.get(LABEL_OWNER) {
+                labels.insert(LABEL_OWNER.to_string(), owner.clone());
+            }
+            if let Some(tenant) = template.labels.get(LABEL_TENANT) {
+                labels.insert(LABEL_TENANT.to_string(), tenant.clone());
+            }
+        }
+    }
+
+  Verify the exact Docker label-building code and determine if explicit
+  propagation is needed or if template.labels already covers it.
+
+==============================================================================
+STEP 14: Update SandboxIndex for Owner Tracking (Optional)
+==============================================================================
+
+  [UNCHANGED FROM V3 -- verified correct]
+
+  NOTE: SandboxIndex uses the GATEWAY's Sandbox type (which has
+  metadata.labels), not DriverSandbox. So sandbox.metadata.labels
+  IS correct here. No change needed.
+
+==============================================================================
+STEP 15: Update Helm Chart for Gateway-Per-Tenant Deployment
+==============================================================================
+
+  [UNCHANGED FROM V3 -- verified correct]
+
+==============================================================================
+STEP 16: Add Per-Tenant RBAC Templates
+==============================================================================
+
+  [UNCHANGED FROM V3 -- verified correct]
+
+==============================================================================
+STEP 17: Add ResourceQuota and LimitRange Templates
+==============================================================================
+
+  [UNCHANGED FROM V3 -- verified correct]
+
+==============================================================================
+STEP 18: Update Certificate Generation for Tenant SANs
+==============================================================================
+
+  [UNCHANGED FROM V3 -- verified correct]
+
+==============================================================================
+STEP 19: Update CLI for Multi-Tenant Gateway Display
+==============================================================================
+
+  [UNCHANGED FROM V3 -- verified correct]
+
+==============================================================================
+STEP 20: Add Unit and Integration Tests
+==============================================================================
+
+  [MOSTLY UNCHANGED FROM V3, with test additions:]
+
+  REVIEW FIX: Add tests for sanitized-subject comparison.
+
+  The subject sanitization bug (Issue R3-3) should have dedicated tests:
+
+  #[test]
+  fn check_ownership_with_email_subject() {
+      // Subject contains @ which is stripped by sanitize_label_value
+      let principal = make_user("user@example.com", &["openshell-user"]);
+      let config = make_config(true);
+      let mut labels = HashMap::new();
+      // Label stores the SANITIZED value
+      labels.insert(
+          LABEL_OWNER.to_string(),
+          sanitize_label_value("user@example.com"),
+      );
+
+      let result = check_ownership(&principal, &config, &labels, "sandbox", "s1");
+      assert!(result.is_ok(), "User must be able to access own sandbox \
+          even when subject requires sanitization");
+  }
+
+  #[test]
+  fn owner_selector_uses_sanitized_subject() {
+      let principal = make_user("user@example.com", &["openshell-user"]);
+      let config = make_config(true);
+
+      let selector = owner_label_selector(&principal, &config);
+      // Selector must use sanitized subject to match stored labels
+      assert_eq!(
+          selector,
+          Some("openshell.ai/owner=userexamplecom".to_string())
+      );
+  }
+
+  #[test]
+  fn sanitize_trims_leading_trailing_non_alnum() {
+      assert_eq!(sanitize_label_value("-hello-"), "hello");
+      assert_eq!(sanitize_label_value("..test.."), "test");
+      assert_eq!(sanitize_label_value("---"), "unknown");
+  }
+
+  [Rest of Step 20 UNCHANGED FROM V3]
+
+================================================================================
+6. DEPENDENCY SUMMARY
+================================================================================
+
+  [UNCHANGED FROM V3]
+
+================================================================================
+7. RISK ANALYSIS
+================================================================================
+
+  [UNCHANGED FROM V3, with one addition:]
+
+  13. Sanitized subject identity collision (LOW)
+      Risk: Two different OIDC subjects could sanitize to the same K8s
+            label value. For example, "user@a.com" and "user.a.com" both
+            sanitize to "useracom" (once trimmed).
+      Mitigation: UUIDs (the common case) have no sanitization-related
+            collisions. For email-based subjects, collisions are
+            theoretically possible but extremely unlikely in practice.
+            The sanitizer is a safety net for K8s compatibility, not a
+            primary identifier. The OIDC subject claim is the source of
+            truth; the label is an enforcement mechanism.
+      Validation: Log a warning when sanitization changes the subject.
+
+================================================================================
+8. BREAKING CHANGE ASSESSMENT
+================================================================================
+
+  [UNCHANGED FROM V3]
+
+================================================================================
+9. IMPLEMENTATION ORDER & MILESTONES
+================================================================================
+
+  [MOSTLY UNCHANGED FROM V3, with corrected file list:]
+
+  FILES MODIFIED (Rust -- 16 files):
+    crates/openshell-server/src/auth/identity.rs        (groups field)
+    crates/openshell-server/src/auth/oidc.rs             (groups extraction)
+    crates/openshell-server/src/auth/mod.rs              (ownership module)
+    crates/openshell-server/src/auth/ownership.rs        (NEW)
+    crates/openshell-server/src/lib.rs                   (ownership_config)
+    crates/openshell-server/src/grpc/sandbox.rs          (owner stamping/filtering)
+    crates/openshell-server/src/grpc/provider.rs         (owner stamping/filtering)
+    crates/openshell-server/src/grpc/mod.rs              (provider role change)
+    crates/openshell-server/src/sandbox_index.rs         (optional owner tracking)
+    crates/openshell-server/src/ssh_sessions.rs          (ownership check)
+    crates/openshell-server/src/cli.rs                   (config mapping)
+    crates/openshell-core/src/config.rs                  (OwnershipConfig, groups_claim)
+    crates/openshell-core/src/driver_utils.rs            (label constants)
+    crates/openshell-server/src/config_file.rs           (GatewayFileSection fields)
+    crates/openshell-driver-kubernetes/src/driver.rs     (pod labels)
+    crates/openshell-driver-docker/src/lib.rs            (container labels, verify)
+
+  CORRECTED vs V3:
+    - REMOVED: crates/openshell-server/src/auth/method_authz.rs
+      (method_authz.rs is NOT modified; role changes are in grpc/mod.rs
+       via the #[rpc_auth] macro annotation)
+    - ADDED: crates/openshell-server/src/grpc/mod.rs
+      (this is where #[rpc_auth] annotations define method roles)
+    - ADDED: crates/openshell-server/src/cli.rs
+      (this is where GatewayFileSection -> Config mapping happens)
+    - REMOVED: crates/openshell-cli/src/main.rs
+      (CLI display changes are in the openshell-cli crate, not grpc changes;
+       keeping for Step 19 but no change from V3)
+
+  FILES MODIFIED (Helm -- 9 files):
+    [UNCHANGED FROM V3]
+
+================================================================================
+10. NAME UNIQUENESS & KNOWN LIMITATIONS
+================================================================================
+
+  [UNCHANGED FROM V3]
+
+================================================================================
+END OF REVIEWED CODE PORTING PLAN V3
+================================================================================

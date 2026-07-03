@@ -1,0 +1,124 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — PORTING PLAN SUMMARY V1
+================================================================================
+Date: 2026-07-03
+Iteration: V1 (initial)
+================================================================================
+
+1. WORK PERFORMED IN THIS ITERATION
+================================================================================
+
+This iteration produced the initial comprehensive coding plan for porting
+Kagenti's Multi-Tenant Deployment Support feature to OpenShell. The work
+involved four major analysis phases:
+
+Phase A: Deep Code Trace Analysis
+  - Analyzed the Kagenti code trace (996 lines) covering all 12 multi-tenancy
+    subsystems: deploy-shared.sh, deploy-tenant.sh, Helm chart (16 templates),
+    Keycloak OIDC, per-user ownership, RBAC, namespace provisioning,
+    provider isolation, cleanup scripts, CLI configuration, E2E tests, and
+    CI orchestration.
+  - Analyzed the OpenShell code trace (779 lines) covering all 11 components:
+    gateway server, persistence layer, auth chain, sandbox lifecycle, provider
+    management, K8s/Docker drivers, CLI/OIDC, Helm chart, protobuf definitions,
+    and configuration.
+
+Phase B: Source Code Exploration (3 parallel deep-dives)
+  - Agent 1: Explored OpenShell auth & persistence in detail — Identity struct,
+    Principal enum, Authenticator chain, OIDC JWT validation, AuthzPolicy,
+    guard.rs, persistence Store API (all 22 methods), ObjectRecord, label
+    filtering infrastructure, CAS patterns, error types, and ServerState.
+  - Agent 2: Explored OpenShell K8s driver & Helm chart — KubernetesComputeConfig
+    (all 20+ fields), namespace handling patterns, sandbox lifecycle, pod
+    generation, RBAC templates, Helm helpers, values.yaml configuration, and
+    error handling patterns.
+  - Agent 3: Explored Kagenti multi-tenant implementation — deploy-tenant.sh
+    flow, Keycloak setup (Step 4), audience scoping mechanism, per-user
+    ownership tests, RBAC test assertions, credential isolation tests, template
+    helpers, and the end-to-end tenant onboarding sequence.
+
+Phase C: Direct Source Code Reading
+  - Read 15+ key source files directly to verify exact struct definitions,
+    function signatures, derive macros, import patterns, and error handling
+    conventions used throughout OpenShell.
+  - Key files read: identity.rs, principal.rs, guard.rs, authz.rs, oidc.rs,
+    persistence/mod.rs, grpc/sandbox.rs, grpc/provider.rs, lib.rs,
+    sandbox_index.rs, config.rs, config_file.rs, driver_utils.rs, error.rs,
+    and all 6 migration files.
+
+Phase D: Plan Design & Writing
+  - Designed the two-layer architecture (per-user ownership + gateway-per-tenant)
+  - Evaluated three architectural alternatives and selected the owner-label +
+    gateway-per-tenant approach
+  - Wrote 18 detailed implementation steps with exact Rust code examples
+  - Identified all files to modify (16 Rust files, 8 Helm files, 2 migrations)
+  - Assessed risks (8 risks categorized high/medium/low)
+  - Defined 5 implementation phases with milestones
+  - Estimated total effort at 12-17 days
+
+2. KEY ARCHITECTURAL DECISIONS
+================================================================================
+
+Decision 1: Two-Layer Multi-Tenancy
+  Layer 1 (per-user ownership) handles application-level user isolation within
+  a gateway instance via the openshell.ai/owner label. Layer 2 (gateway-per-
+  tenant) handles organizational isolation via Kubernetes namespaces and RBAC.
+  Both layers compose without coupling.
+
+Decision 2: Owner-Label Approach (not DB column for V1)
+  V1 stores ownership information in the existing labels JSON column, leveraging
+  the existing list_with_selector() API. This avoids database schema migrations
+  while providing full ownership enforcement. A future V2 can add an owner
+  column for name-scoped uniqueness if needed.
+
+Decision 3: Zero Breaking Changes
+  All multi-tenancy behavior is gated behind configuration flags (ownership.enabled
+  and tenant.id). Default values disable all new behavior, ensuring existing
+  single-user deployments are unaffected.
+
+Decision 4: Minimal Protobuf Changes
+  No changes to the protobuf message definitions. The owner is carried in the
+  existing ObjectMeta.labels map. This preserves API compatibility and avoids
+  forcing clients to update.
+
+3. ITERATION EVOLUTION
+================================================================================
+
+V1 (current iteration):
+  - First comprehensive plan covering the complete multi-tenancy feature
+  - Designed for incremental implementation across 5 phases
+  - Prioritizes backward compatibility and zero breaking changes
+  - Defers database migration to a future V2 iteration
+  - Covers both Rust gateway code and Helm chart infrastructure
+  - Includes detailed Rust code examples matching OpenShell's exact conventions
+    (derive macros, error handling with thiserror, tonic::Status mapping,
+    #[allow(clippy::...)] patterns, guard.rs test helper patterns)
+
+  Known limitations in V1:
+  - Name uniqueness remains global (two users in shared gateway cannot have
+    same-named sandboxes). Acceptable in gateway-per-tenant where each gateway
+    has its own database.
+  - Provider resolution for user-owned > shared requires listing all providers
+    and filtering client-side. A future optimization can add a DB-level query
+    for owner-scoped name lookup.
+  - Groups extraction from OIDC JWT is optional and not used for authorization
+    in V1. It's included for audit logging and future group-based policies.
+  - K8s E2E tests require a live cluster with Keycloak, which may not be
+    available in all CI environments.
+
+4. SUMMARY STATISTICS
+================================================================================
+
+  Plan size:           18 implementation steps across 5 phases
+  Rust files modified: 16 (14 existing + 2 new test files)
+  Helm files modified: 8 (6 existing + 2 new templates)
+  New Rust module:     1 (auth/ownership.rs, ~250 lines with tests)
+  New Cargo deps:      0 (all existing dependencies reused)
+  DB migrations:       0 for V1 (deferred to V2)
+  Breaking changes:    0 (all gated behind config flags)
+  Estimated effort:    12-17 days across 5 phases
+  Risk items:          8 (2 high, 3 medium, 3 low)
+
+================================================================================
+END OF SUMMARY V1
+================================================================================

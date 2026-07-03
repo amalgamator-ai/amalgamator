@@ -1,0 +1,780 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — REVIEWED CODE PORTING PLAN V4
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Source: Kagenti (Python/Shell/YAML)
+Target: OpenShell (Rust)
+Porting Complexity: HIGH
+Date: 2026-07-03
+Review: V4-R1 (review of iteration 4)
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Executive Summary
+2. Architectural Decision
+3. Prerequisites & Assumptions
+4. Learnings Incorporated from Previous Iterations
+5. Step-by-Step Implementation Plan
+6. Dependency Summary
+7. Risk Analysis
+8. Breaking Change Assessment
+9. Implementation Order & Milestones
+10. Name Uniqueness & Known Limitations
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+  [UNCHANGED FROM V4]
+
+================================================================================
+2. ARCHITECTURAL DECISION
+================================================================================
+
+  [UNCHANGED FROM V4]
+
+================================================================================
+3. PREREQUISITES & ASSUMPTIONS
+================================================================================
+
+  [MOSTLY UNCHANGED FROM V4, with one critical correction:]
+
+  REVIEW FIX: Complete Identity construction site enumeration (Issue R4-3)
+
+  The V4 plan lists 3 vague categories of Identity construction sites:
+    1. oidc.rs, lines 342-348
+    2. "Any mTLS or LocalDev Identity builders"
+    3. "Any dev/test Identity builders"
+
+  Verification found at least 10 SPECIFIC construction sites. Each must
+  add groups: vec![] when the groups field is added in Step 1:
+
+  VERIFIED COMPLETE LIST:
+
+    Production code:
+      1. crates/openshell-server/src/auth/oidc.rs:342
+         -> Add groups: claims.groups (extracted in Step 2)
+      2. crates/openshell-server/src/multiplex.rs:520
+         (unauthenticated_dev_user_principal — LocalDev)
+         -> Add groups: vec![]
+      3. crates/openshell-server/src/multiplex.rs:770
+         (mTLS peer certificate extraction)
+         -> Add groups: vec![]
+      4. crates/openshell-server/src/supervisor_session.rs:878
+         -> Add groups: vec![]
+      5. crates/openshell-server/src/grpc/auth_rpc.rs:300
+         -> Add groups: vec![]
+      6. crates/openshell-server/src/inference.rs:1005
+         -> Add groups: vec![]
+
+    Test helpers:
+      7.  crates/openshell-server/src/multiplex.rs:1419
+          (mtls_identity test helper)
+          -> Add groups: vec![]
+      8.  crates/openshell-server/src/auth/authenticator.rs:142
+          -> Add groups: vec![]
+      9.  crates/openshell-server/src/auth/guard.rs:104
+          -> Add groups: vec![]
+      10. crates/openshell-server/src/grpc/policy.rs:3924
+          -> Add groups: vec![]
+      11. crates/openshell-server/src/grpc/policy.rs:4026
+          -> Add groups: vec![]
+
+  WHY THIS MATTERS: The Rust compiler will flag every missed site with
+  a "missing field: groups" error. The plan must enumerate all sites so
+  an implementer doesn't have to discover them via trial-and-error.
+
+================================================================================
+4. LEARNINGS INCORPORATED FROM PREVIOUS ITERATIONS
+================================================================================
+
+  [UNCHANGED FROM V4]
+
+================================================================================
+5. STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+  [DEPENDENCY GRAPH UNCHANGED FROM V4]
+
+==============================================================================
+STEP 1: Add groups Field to Identity Struct
+==============================================================================
+
+  [MOSTLY UNCHANGED FROM V4, with corrected downstream impact:]
+
+  REVIEW FIX: Corrected construction site enumeration (Issue R4-3)
+
+  Replace the V4 "DOWNSTREAM IMPACT" section with the complete list
+  from Section 3 above. Every site must add groups: vec![] (or
+  groups: claims.groups for the OIDC path).
+
+  [Rest of Step 1 UNCHANGED FROM V4]
+
+==============================================================================
+STEP 2: Add groups_claim to OidcConfig & Extract Groups from JWT
+==============================================================================
+
+  [MOSTLY UNCHANGED FROM V4, with one cosmetic fix:]
+
+  REVIEW FIX: OidcClaims listing should include existing serde attributes
+  (Issue R4-5)
+
+  The V4 plan shows OidcClaims without #[serde(default)] on
+  preferred_username and email. The actual code has:
+    #[serde(default)]
+    pub preferred_username: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub email: Option<String>,
+
+  Corrected OidcClaims listing (for accuracy):
+    #[derive(Debug, Deserialize)]
+    pub(crate) struct OidcClaims {
+        pub sub: String,
+        #[serde(default)]
+        pub preferred_username: Option<String>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        pub email: Option<String>,
+        #[serde(skip)]
+        pub roles: Vec<String>,
+        // NEW:
+        #[serde(skip)]
+        pub groups: Vec<String>,
+        #[serde(flatten)]
+        extra: serde_json::Value,
+    }
+
+  This is cosmetic — the code change is the same (add groups field with
+  #[serde(skip)]) — but accurate listings prevent confusion.
+
+  [Rest of Step 2 UNCHANGED FROM V4]
+
+==============================================================================
+STEP 3: Define Owner/Tenant Label Constants in openshell-core
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 4: Create Ownership Module (auth/ownership.rs)
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 5: Add OwnershipConfig to Configuration
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 6: Add ownership_config() Helper to ServerState
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 7: Modify Sandbox Create Handler (Owner Stamping)
+==============================================================================
+
+  [SUBSTANTIALLY CORRECTED -- Issues R4-1 and R4-8:]
+
+  REVIEW FIX: Owner labels must be stamped on BOTH ObjectMeta.labels
+  AND SandboxTemplate.labels (Issue R4-1)
+
+  PROBLEM: The V4 plan stamps owner labels only on request.labels, which
+  flows into Sandbox.metadata.labels (ObjectMeta). However, the K8s and
+  Docker drivers receive labels through a SEPARATE path:
+    SandboxSpec.template.labels → DriverSandboxTemplate.labels
+
+  These are DIFFERENT label maps:
+    - ObjectMeta.labels (Sandbox.metadata.labels) — used for persistence
+      and ownership checks in the gateway.
+    - SandboxTemplate.labels (Sandbox.spec.template.labels) — flows to
+      compute drivers, appears on K8s pods and Docker containers.
+
+  The V4 plan's label flow diagram (Section 11) incorrectly claims that
+  owner labels flow from ObjectMeta.labels through to the compute driver.
+  They do NOT. driver_sandbox_template_from_public() at line 1598 copies
+  SandboxTemplate.labels, not ObjectMeta.labels.
+
+  CORRECTED Step 7 code:
+
+  File: crates/openshell-server/src/grpc/sandbox.rs
+
+  After the existing code at line 123-156 (into_inner, spec extraction,
+  template resolution), add owner label stamping to BOTH locations:
+
+    // === OWNERSHIP: Extract principal BEFORE into_inner() ===
+    let principal = request.extensions()
+        .get::<Principal>()
+        .cloned()
+        .unwrap_or(Principal::Anonymous);
+    let ownership_config = state.ownership_config();
+
+    let request = request.into_inner();
+    let spec = request.spec.ok_or_else(|| ...)?;
+
+    // ... existing validation (lines 128-152) ...
+
+    // Resolve template (existing code at line 155-156)
+    let mut spec = spec;
+    let template = spec.template.get_or_insert_with(SandboxTemplate::default);
+    // ... existing template image defaulting (line 157-159) ...
+
+    // === OWNERSHIP: Stamp labels (NEW) ===
+    // 1. Stamp on request.labels (goes to ObjectMeta for persistence)
+    let labels = crate::auth::ownership::stamp_owner_labels(
+        &principal,
+        &ownership_config,
+        request.labels.clone(),
+    );
+
+    // 2. ALSO stamp on template.labels (goes to compute drivers)
+    //    This ensures owner labels appear on K8s pods and Docker containers
+    //    via the SandboxTemplate → DriverSandboxTemplate → driver path.
+    if let Some(owner) = labels.get(LABEL_OWNER) {
+        template.labels.insert(LABEL_OWNER.to_string(), owner.clone());
+    }
+    if let Some(tenant) = labels.get(LABEL_TENANT) {
+        template.labels.insert(LABEL_TENANT.to_string(), tenant.clone());
+    }
+
+    // ... existing code continues ...
+    let mut sandbox = Sandbox {
+        metadata: Some(ObjectMeta {
+            id: id.clone(),
+            name: name.clone(),
+            created_at_ms: now_ms,
+            labels,  // <-- stamped labels
+            resource_version: 0,
+        }),
+        spec: Some(spec),  // <-- spec.template.labels also stamped
+        status: None,
+    };
+
+  WHY BOTH LOCATIONS:
+    - ObjectMeta.labels: Used by the gateway for persistence, ownership
+      checks (check_ownership), and label-selector queries
+      (list_with_selector). Stored in the DB labels column.
+    - SandboxTemplate.labels: Copied by driver_sandbox_template_from_public()
+      (compute/mod.rs line 1598) to DriverSandboxTemplate.labels, which
+      flows to K8s pod labels and Docker container labels.
+
+  REVIEW FIX: Sandbox labels must be persisted in DB labels column
+  (Issue R4-8)
+
+  PROBLEM: The compute layer's create_sandbox() at compute/mod.rs line 499
+  calls store.put_if() with labels: None:
+
+    self.store.put_if(
+        Sandbox::object_type(),
+        &sandbox_id,
+        sandbox.object_name(),
+        &sandbox.encode_to_vec(),
+        None,                        // <-- labels NOT persisted!
+        WriteCondition::MustCreate,
+    )
+
+  This means owner labels in ObjectMeta.labels are embedded in the
+  protobuf payload but NOT in the database's labels column. The label
+  column is used by list_with_selector for filtering. Without it,
+  owner_label_selector in Step 8 won't match newly created sandboxes.
+
+  (The delete path at line 682-702 DOES serialize labels. But the
+  initial creation does not.)
+
+  CORRECTED: Modify compute/mod.rs create_sandbox() to serialize labels:
+
+  File: crates/openshell-server/src/compute/mod.rs
+
+  In create_sandbox() (line 480), BEFORE the store.put_if call:
+
+    let labels_json = sandbox
+        .metadata
+        .as_ref()
+        .map(|metadata| &metadata.labels)
+        .filter(|labels| !labels.is_empty())
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| {
+            crate::persistence::PersistenceError::Encode(format!(
+                "failed to serialize labels: {e}"
+            ))
+        })
+        .map_err(|e| Status::internal(format!("serialize labels: {e}")))?;
+
+  Then change the put_if call (line 494-501):
+    self.store.put_if(
+        Sandbox::object_type(),
+        &sandbox_id,
+        sandbox.object_name(),
+        &sandbox.encode_to_vec(),
+        labels_json.as_deref(),    // <-- CHANGED from None
+        WriteCondition::MustCreate,
+    )
+
+  This follows the exact pattern used in the delete path at lines 682-702.
+
+  NOTE: This change also fixes a pre-existing issue where user-provided
+  labels on sandbox creation are not queryable via label selectors.
+
+Dependencies: Steps 1-6
+Breaking: NO (behavior unchanged when ownership disabled)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 8: Modify Sandbox List Handler (Owner Filtering)
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+  NOTE: Step 8 depends on the label serialization fix in Step 7
+  (Issue R4-8). Without it, list_with_selector won't find owner labels
+  on newly created sandboxes.
+
+==============================================================================
+STEP 9: Modify Sandbox Get/Delete Handlers (Ownership Enforcement)
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 10: Modify Sandbox Watch/Exec/SSH Handlers (Ownership Enforcement)
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 11: Modify Provider CRUD for Per-User Ownership
+==============================================================================
+
+  [SUBSTANTIALLY CORRECTED -- Issues R4-2 and R4-4 and R4-7:]
+
+  REVIEW FIX: Provider label persistence path is incomplete (Issue R4-2)
+
+  PROBLEM: The V4 plan's Step 11A stamps owner labels on
+  provider.metadata.labels before calling create_provider_record. This
+  correctly sets the labels on the protobuf metadata. However:
+
+  1. create_provider_record at provider.rs line 73 has:
+       if provider.metadata.is_none() {
+           provider.metadata = Some(ObjectMeta { ... labels: HashMap::new() ... });
+       }
+     If the client sends a provider WITHOUT metadata, this block creates
+     new metadata with EMPTY labels, AFTER the V4 plan stamps them.
+     The stamped labels would be lost.
+
+  2. The persistence call at line 119-127 passes labels: None to
+     store.put_if(). Even when labels are in the protobuf metadata, they
+     are NOT stored in the database's labels column:
+       store.put_if(
+           Provider::object_type(),
+           &provider_id,
+           provider.object_name(),
+           &provider.encode_to_vec(),
+           None,                      // <-- labels NOT persisted!
+           WriteCondition::MustCreate,
+       )
+
+  IMPACT:
+    - list_with_selector won't find provider owner labels
+    - The in-memory filtering approach in Step 11B needs to decode
+      protobuf payloads to get metadata.labels (which it does via
+      the Provider proto), but the labels still need to be in metadata
+
+  CORRECTED Step 11A — stamp owner labels AND persist them:
+
+  File: crates/openshell-server/src/grpc/provider.rs
+
+  In handle_create_provider, AFTER extracting the provider from the
+  request:
+
+    let mut provider = req.provider
+        .ok_or_else(|| Status::invalid_argument("provider is required"))?;
+
+    // === OWNERSHIP: Ensure metadata exists before stamping ===
+    // create_provider_record only initializes metadata when it's None.
+    // We must ensure metadata exists so we can stamp labels on it.
+    if provider.metadata.is_none() {
+        provider.metadata = Some(
+            openshell_core::proto::datamodel::v1::ObjectMeta::default()
+        );
+    }
+
+    // === OWNERSHIP: Stamp owner labels on provider metadata ===
+    if let Some(ref mut metadata) = provider.metadata {
+        let labels = crate::auth::ownership::stamp_owner_labels(
+            &principal,
+            &ownership_config,
+            metadata.labels.clone(),
+        );
+        metadata.labels = labels;
+    }
+
+  Then, inside create_provider_record (provider.rs, around line 118),
+  change the store.put_if call to include serialized labels:
+
+    // Serialize labels for DB storage (enables label-selector queries)
+    let labels_json = provider
+        .metadata
+        .as_ref()
+        .map(|metadata| &metadata.labels)
+        .filter(|labels| !labels.is_empty())
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| {
+            Status::internal(format!("failed to serialize labels: {e}"))
+        })?;
+
+    let result = store
+        .put_if(
+            Provider::object_type(),
+            &provider_id,
+            provider.object_name(),
+            &provider.encode_to_vec(),
+            labels_json.as_deref(),   // <-- CHANGED from None
+            WriteCondition::MustCreate,
+        )
+        .await...;
+
+  WHY THIS FIX IS NEEDED:
+    Without labels in the DB column, list_with_selector won't match
+    provider owner labels. The in-memory filtering in Step 11B works
+    by decoding protobuf payloads, but having labels in the DB column
+    is better for consistency and enables future optimizations.
+
+  REVIEW FIX: Provider metadata must exist before stamping
+  (Issue R4-7)
+
+  The V4 plan's code:
+    if let Some(ref mut metadata) = provider.metadata {
+        ...stamp labels...
+    }
+
+  This if-let fails when metadata is None (client didn't send metadata).
+  In that case, create_provider_record creates metadata with empty labels,
+  losing the owner stamp.
+
+  The corrected code above ensures metadata exists before stamping by
+  creating a default ObjectMeta when None.
+
+  REVIEW FIX: Additional provider admin methods not addressed (Issue R4-4)
+
+  The V4 plan only changes #[rpc_auth] roles for:
+    - create_provider (line 360)
+    - update_provider (line 424)
+    - delete_provider (line 464)
+
+  But there are additional admin-only provider methods:
+    - import_provider_profiles (line 400): role = "admin"
+    - update_provider_profiles (line 408): role = "admin"
+    - rotate_provider_credential (line 440): role = "admin"
+    - delete_provider_refresh (line 456): role = "admin"
+    - delete_provider_profile (line 472): role = "admin"
+
+  DECISION: These methods should REMAIN admin-only:
+    - import_provider_profiles: Bulk import is an admin operation
+    - update_provider_profiles: Profile management is an admin operation
+    - rotate_provider_credential: Credential rotation affects all users
+    - delete_provider_refresh: Token management is an admin operation
+    - delete_provider_profile: Profile cleanup is an admin operation
+
+  Per-user ownership applies to provider CRUD (create, update, delete
+  of the provider itself). Profile and credential management within a
+  provider should remain admin-only because these operations affect the
+  provider's runtime behavior for all sandboxes using it.
+
+  However, when ownership is enabled, these methods should also verify
+  that the admin calling them has access to the target provider (i.e.,
+  the provider exists and ownership check passes). Add ownership checks
+  to these handlers following the same pattern as Step 11C.
+
+  [Steps 11B through 11E UNCHANGED FROM V4, except that Step 11B's
+   in-memory filtering now works because labels ARE in the protobuf
+   metadata (stamped correctly with the fixes above)]
+
+==============================================================================
+STEP 12: Add Owner Labels to Kubernetes Driver (Sandbox CRD Labels)
+==============================================================================
+
+  [CORRECTED -- Issue R4-1 acknowledged:]
+
+  REVIEW FIX: Label flow verification corrected
+
+  The V4 plan's "LABEL FLOW VERIFICATION" section is corrected to
+  reflect the actual data flow:
+
+  CORRECTED LABEL FLOW:
+    1. handle_create_sandbox_inner stamps owner labels on:
+       a. request.labels → Sandbox.metadata.labels (ObjectMeta)
+       b. spec.template.labels → SandboxTemplate.labels (NEW in fix)
+    2. Gateway creates Sandbox proto with BOTH label maps populated
+    3. compute/mod.rs maps Sandbox to DriverSandbox
+    4. driver_sandbox_template_from_public() copies
+       SandboxTemplate.labels → DriverSandboxTemplate.labels (line 1598)
+    5. K8s driver receives DriverSandbox with spec.template.labels
+       containing owner labels (NOW CORRECT with Step 7 fix)
+    6. sandbox_labels() (MODIFIED) reads from spec.template.labels → CRD
+
+  The V4 plan's sandbox_labels() code is CORRECT as written — it reads
+  from spec.template.labels, which now contains owner labels thanks to
+  the Step 7 correction.
+
+  [Rest of Step 12 UNCHANGED FROM V4]
+
+==============================================================================
+STEP 13: Verify Docker Driver Label Propagation (No Code Change)
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+  NOTE: Docker driver propagation now works correctly because Step 7
+  stamps owner labels on spec.template.labels, which flows through
+  driver_sandbox_template_from_public() to Docker container labels.
+
+==============================================================================
+STEP 14: Update SandboxIndex for Owner Tracking (Optional)
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 15: Update Helm Chart for Gateway-Per-Tenant Deployment
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 16: Add Per-Tenant RBAC Templates
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 17: Add ResourceQuota and LimitRange Templates
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 18: Update Certificate Generation for Tenant SANs
+==============================================================================
+
+  [MINOR CORRECTION -- Issue R4-6:]
+
+  REVIEW FIX: SAN configuration should follow existing certgen pattern
+
+  The V4 plan shows:
+    {{- if .Values.ingress.host }}
+    - "--server-san"
+    - {{ .Values.ingress.host | quote }}
+    {{- end }}
+
+  The actual certgen.yaml (lines 106-115) uses a different pattern:
+  it iterates over the openshell.defaultServerDnsNames helper and
+  pkiInitJob.serverDnsNames lists. The V4 plan's approach of using
+  --server-san individually would WORK but is inconsistent with the
+  existing template pattern.
+
+  CORRECTED: Add ingress.host to the pkiInitJob.serverDnsNames list
+  in values.yaml so it's picked up by the existing certgen iteration:
+
+  File: deploy/helm/openshell/values.yaml
+
+  ADD to pkiInitJob section:
+    pkiInitJob:
+      serverDnsNames:
+        {{- if .Values.ingress.host }}
+        - {{ .Values.ingress.host }}
+        {{- end }}
+
+  OR, if the existing pattern doesn't support conditionals in values,
+  the V4 plan's separate --server-san approach is acceptable as a
+  fallback. The existing certgen template should be extended to handle
+  an optional ingress host SAN.
+
+  [Rest of Step 18 UNCHANGED FROM V4]
+
+==============================================================================
+STEP 19: Update CLI for Multi-Tenant Gateway Display
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+==============================================================================
+STEP 20: Add Unit and Integration Tests
+==============================================================================
+
+  [UNCHANGED FROM V4 -- verified correct]
+
+  NOTE: The test helpers (make_user) already include groups: vec![],
+  which is correct for the modified Identity struct.
+
+================================================================================
+6. DEPENDENCY SUMMARY
+================================================================================
+
+  [UNCHANGED FROM V4, with one addition:]
+
+  Step 7 now also modifies: crates/openshell-server/src/compute/mod.rs
+  (sandbox label serialization fix for create_sandbox)
+
+================================================================================
+7. RISK ANALYSIS
+================================================================================
+
+  [UNCHANGED FROM V4, with two additions:]
+
+  12. Dual-label stamping consistency (LOW)
+      Risk: Owner labels must be stamped on BOTH ObjectMeta.labels and
+            SandboxTemplate.labels. If one is missed, the labels will be
+            inconsistent between the persistence layer and the K8s driver.
+      Mitigation: Step 7 stamps both in the same code block, using the
+            same labels variable. A single stamp_owner_labels call
+            generates the labels, then copies owner/tenant to both maps.
+      Validation: Integration test verifies labels on both the gateway
+            Sandbox proto and the K8s pod/Docker container.
+
+  13. Labels column NULL on initial creation (pre-existing issue) (LOW)
+      Risk: Before the fix in Step 7 (Issue R4-8), sandbox labels were
+            NOT stored in the database's labels column on initial
+            creation (store.put_if with labels: None). This is a
+            pre-existing issue that affects ALL labels, not just owner.
+      Mitigation: The fix in Step 7 serializes labels on creation,
+            matching the pattern used in the delete/update paths.
+      Validation: Verify list_with_selector returns newly created
+            sandboxes with matching labels.
+
+================================================================================
+8. BREAKING CHANGE ASSESSMENT
+================================================================================
+
+  [UNCHANGED FROM V4]
+
+================================================================================
+9. IMPLEMENTATION ORDER & MILESTONES
+================================================================================
+
+  [MOSTLY UNCHANGED FROM V4, with corrected file list:]
+
+  FILES MODIFIED (Rust — 17 files):
+    crates/openshell-server/src/auth/identity.rs        (groups field)
+    crates/openshell-server/src/auth/oidc.rs             (groups extraction)
+    crates/openshell-server/src/auth/mod.rs              (ownership module)
+    crates/openshell-server/src/auth/ownership.rs        (NEW)
+    crates/openshell-server/src/auth/authenticator.rs    (groups: vec![] in test)
+    crates/openshell-server/src/auth/guard.rs            (groups: vec![] in test)
+    crates/openshell-server/src/lib.rs                   (ownership_config)
+    crates/openshell-server/src/multiplex.rs             (groups: vec![] in 3 sites)
+    crates/openshell-server/src/supervisor_session.rs    (groups: vec![])
+    crates/openshell-server/src/inference.rs             (groups: vec![])
+    crates/openshell-server/src/grpc/sandbox.rs          (owner stamping/filtering)
+    crates/openshell-server/src/grpc/provider.rs         (owner stamping/filtering)
+    crates/openshell-server/src/grpc/mod.rs              (provider role change)
+    crates/openshell-server/src/grpc/auth_rpc.rs         (groups: vec![])
+    crates/openshell-server/src/grpc/policy.rs           (groups: vec![] in 2 tests)
+    crates/openshell-server/src/compute/mod.rs           (label serialization)
+    crates/openshell-server/src/sandbox_index.rs         (optional owner tracking)
+    crates/openshell-server/src/cli.rs                   (config mapping + CLI arg)
+    crates/openshell-core/src/config.rs                  (OwnershipConfig, groups_claim)
+    crates/openshell-core/src/driver_utils.rs            (label constants)
+    crates/openshell-server/src/config_file.rs           (GatewayFileSection fields)
+    crates/openshell-driver-kubernetes/src/driver.rs     (CRD labels)
+    crates/openshell-driver-docker/src/lib.rs            (verification only)
+
+  CORRECTED vs V4:
+    - ADDED: compute/mod.rs (label serialization in create_sandbox)
+    - ADDED: multiplex.rs (Identity construction sites for groups field)
+    - ADDED: supervisor_session.rs (Identity construction site)
+    - ADDED: inference.rs (Identity construction site)
+    - ADDED: auth/authenticator.rs (test helper)
+    - ADDED: auth/guard.rs (test helper)
+    - ADDED: grpc/auth_rpc.rs (Identity construction site)
+    - ADDED: grpc/policy.rs (test helpers)
+    - REMOVED: ssh_sessions.rs (V4 listed this but ownership check is
+      in grpc/sandbox.rs handle_create_ssh_session, not ssh_sessions.rs)
+
+  FILES MODIFIED (Helm — up to 9 files):
+    [UNCHANGED FROM V4]
+
+================================================================================
+10. NAME UNIQUENESS & KNOWN LIMITATIONS
+================================================================================
+
+  [UNCHANGED FROM V4]
+
+================================================================================
+11. CORRECTED LABEL FLOW DIAGRAM
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ CLIENT: CreateSandboxRequest { name, spec, labels: {user_labels} } │
+  └────────────────────────────┬────────────────────────────────────────┘
+                               │
+                               ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ GATEWAY: handle_create_sandbox_inner (grpc/sandbox.rs)             │
+  │                                                                     │
+  │ 1. Extract Principal from request.extensions() (BEFORE into_inner)  │
+  │ 2. request.into_inner() — consumes tonic::Request                  │
+  │ 3. Validate labels                                                  │
+  │ 4. stamp_owner_labels(principal, config, request.labels)            │
+  │    ├── Strip client openshell.ai/* labels (anti-spoofing)           │
+  │    ├── Add openshell.ai/owner = sanitize(identity.subject)          │
+  │    └── Add openshell.ai/tenant = config.tenant_id (if set)          │
+  │ 5. Build Sandbox proto:                                             │
+  │    ├── metadata.labels = stamped labels  (for persistence/checks)   │
+  │    └── spec.template.labels += owner/tenant  (for compute drivers)  │
+  └────────────────────────────┬────────────────────────────────────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    ▼                      ▼
+  ┌─────────────────────────┐  ┌─────────────────────────────────────┐
+  │ PERSISTENCE (Store)     │  │ COMPUTE (compute/mod.rs)            │
+  │                         │  │                                     │
+  │ store.put_if(           │  │ driver_sandbox_from_public()        │
+  │   payload: protobuf,    │  │ → driver_sandbox_template_from_    │
+  │   labels: JSON(         │  │     public() [line 1598]            │
+  │     openshell.ai/owner  │  │   labels: template.labels.clone()   │
+  │   )                     │  │   (copies SandboxTemplate.labels)    │
+  │ )                       │  │                                     │
+  │                         │  │ DriverSandboxTemplate.labels now     │
+  │ labels column populated │  │ contains owner/tenant labels         │
+  │ for list_with_selector  │  │                                     │
+  └─────────────────────────┘  └──────────────┬──────────────────────┘
+                                              │
+                                   ┌──────────┴──────────┐
+                                   ▼                      ▼
+                         ┌──────────────┐    ┌──────────────────────┐
+                         │ K8S DRIVER   │    │ DOCKER DRIVER        │
+                         │              │    │                      │
+                         │ sandbox_     │    │ template.labels      │
+                         │  labels()    │    │  .clone() [line 2337]│
+                         │ reads from:  │    │ + system labels      │
+                         │ spec.template│    │                      │
+                         │  .labels     │    │ → Container labels   │
+                         │              │    │   include owner      │
+                         │ → CRD labels │    │                      │
+                         │   include    │    └──────────────────────┘
+                         │   owner      │
+                         │              │
+                         │ Pod template │
+                         │  labels:     │
+                         │  template.   │
+                         │  labels      │
+                         │  (automatic) │
+                         └──────────────┘
+
+  CRITICAL DIFFERENCE FROM V4:
+    The V4 diagram incorrectly showed metadata.labels flowing through
+    the compute layer. The ACTUAL flow has TWO separate label maps:
+      1. metadata.labels → persistence (DB labels column)
+      2. template.labels → compute drivers (K8s pods, Docker containers)
+    Step 7 must stamp owner labels on BOTH maps.
+
+================================================================================
+END OF REVIEWED CODE PORTING PLAN V4
+================================================================================

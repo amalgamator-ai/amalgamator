@@ -1,0 +1,1333 @@
+================================================================================
+COMPREHENSIVE FEATURE ANALYSIS: OPENSHELL (NVIDIA)
+================================================================================
+Generated: 2026-07-02
+Source: https://github.com/NVIDIA/openshell
+Languages: Rust (89%), Shell (6%), Python (4%)
+Status: Alpha — single-player mode
+================================================================================
+
+This document provides an exhaustive analysis of all major features and
+capabilities in the OpenShell project, organized as a numbered list with
+detailed metadata for each feature.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+  1.  Gateway Control Plane
+  2.  Sandbox Supervisor Runtime
+  3.  Policy Engine (OPA-Based)
+  4.  Filesystem Isolation (Landlock)
+  5.  Process Isolation (Seccomp, Privilege Reduction)
+  6.  Network Namespace and Proxy Routing
+  7.  L7 Policy Proxy (HTTP/TLS Inspection)
+  8.  Privacy Router (Inference Routing)
+  9.  Credential Provider System
+ 10.  Provider Profile Framework
+ 11.  Dynamic Token Grants (SPIFFE / OAuth2)
+ 12.  AWS SigV4 Request Signing
+ 13.  Credential Refresh and Rotation
+ 14.  Docker Compute Driver
+ 15.  Podman Compute Driver
+ 16.  Kubernetes Compute Driver
+ 17.  MicroVM Compute Driver (libkrun)
+ 18.  Extension Compute Driver (Out-of-Tree)
+ 19.  CLI (Command-Line Interface)
+ 20.  Terminal UI (TUI Dashboard)
+ 21.  Python SDK
+ 22.  gRPC API Service
+ 23.  mTLS and PKI Bootstrap
+ 24.  OIDC Authentication
+ 25.  Sandbox JWT Authentication
+ 26.  Gateway Persistence (SQLite / Postgres)
+ 27.  Supervisor Relay System
+ 28.  SSH Server and Session Management
+ 29.  Sandbox Service Forwarding
+ 30.  Sandbox Watch and Log Streaming
+ 31.  Policy Advisor Pipeline
+ 32.  Formal Policy Prover (Z3)
+ 33.  OCSF Structured Security Logging
+ 34.  Telemetry System
+ 35.  MCP Protocol Policy Support
+ 36.  GraphQL Protocol Policy Support
+ 37.  WebSocket Policy Support
+ 38.  JSON-RPC Protocol Policy Support
+ 39.  GPU Passthrough
+ 40.  Helm Chart Deployment
+ 41.  BYOC (Bring Your Own Container)
+ 42.  Agent Skills System
+ 43.  Community Sandbox Catalog
+ 44.  E2E Testing Framework
+ 45.  Google Vertex AI Provider
+ 46.  Sandbox Resource Requirements
+ 47.  Hot-Reloadable Dynamic Policy
+ 48.  SSRF Protection
+ 49.  Binary Identity Trust (TOFU)
+ 50.  Gateway Configuration System
+
+================================================================================
+DETAILED FEATURE ANALYSIS
+================================================================================
+
+--------------------------------------------------------------------------------
+1. GATEWAY CONTROL PLANE
+--------------------------------------------------------------------------------
+Category:         Core / Control Plane
+Maturity:         MATURE
+Description:      The gateway is the OpenShell control plane. It exposes gRPC
+                  and HTTP APIs for sandbox lifecycle management, provider
+                  credentials, policy updates, settings, inference configuration,
+                  log streaming, and relay coordination. It persists domain
+                  objects in SQLite or Postgres, authenticates clients via mTLS
+                  or OIDC, and coordinates supervisor relay sessions.
+Key Files:
+  - crates/openshell-server/               (Gateway server implementation)
+  - crates/openshell-server/src/           (API handlers, persistence, auth)
+  - proto/openshell.proto                   (gRPC service definition)
+  - architecture/gateway.md                 (Architecture doc)
+Known Limitations:
+  - Currently single-player mode; multi-tenant enterprise is planned
+  - JWT signing-key rotation is an offline operator action
+  - Delete operations not yet CAS-protected
+
+--------------------------------------------------------------------------------
+2. SANDBOX SUPERVISOR RUNTIME
+--------------------------------------------------------------------------------
+Category:         Core / Runtime
+Maturity:         MATURE
+Description:      The sandbox supervisor runs inside every sandbox workload as
+                  root, prepares isolation layers, fetches config from the
+                  gateway, injects credentials, runs the policy proxy, starts
+                  the SSH server, opens a supervisor relay back to the gateway,
+                  and launches the agent command as a restricted unprivileged
+                  child process with cleared capability bounding set.
+Key Files:
+  - crates/openshell-sandbox/               (Supervisor binary)
+  - architecture/sandbox.md                 (Architecture doc)
+Known Limitations:
+  - Child setup clears capability bounding set; fails closed on EPERM
+  - Gateway config polling fails → keeps last-known-good policy
+  - Live policy update invalid → rejects, keeps current policy
+
+--------------------------------------------------------------------------------
+3. POLICY ENGINE (OPA-BASED)
+--------------------------------------------------------------------------------
+Category:         Security / Policy
+Maturity:         MATURE
+Description:      Declarative YAML policy engine enforcing filesystem, network,
+                  process, and inference constraints. Network policy evaluation
+                  uses an in-process OPA engine. Policies are validated at load
+                  time. Supports named rules, endpoint wildcards, binary
+                  identity, L7 inspection, credential injection, and per-endpoint
+                  enforcement modes (enforce/audit). Default-deny posture.
+Key Files:
+  - crates/openshell-policy/                (Policy engine crate)
+  - proto/sandbox.proto                     (SandboxPolicy message)
+  - architecture/security-policy.md         (Architecture doc)
+Known Limitations:
+  - Static policy (filesystem, process) requires sandbox recreation
+  - OPA evaluation is local to each sandbox, not centralized
+
+--------------------------------------------------------------------------------
+4. FILESYSTEM ISOLATION (LANDLOCK)
+--------------------------------------------------------------------------------
+Category:         Security / Isolation
+Maturity:         MATURE
+Description:      Linux Landlock LSM restricts file paths the agent can read or
+                  write. Configured via declarative YAML with read_only and
+                  read_write path lists. Locked at sandbox creation. Supports
+                  include_workdir for automatic working directory access.
+                  Missing baseline paths are skipped gracefully. GPU device
+                  paths auto-enriched when GPU present.
+Key Files:
+  - crates/openshell-sandbox/               (Landlock application)
+  - crates/openshell-policy/                (FilesystemPolicy proto)
+Known Limitations:
+  - Requires Linux kernel 5.13+ with Landlock ABI support
+  - Locked at creation; changes require new sandbox
+
+--------------------------------------------------------------------------------
+5. PROCESS ISOLATION (SECCOMP, PRIVILEGE REDUCTION)
+--------------------------------------------------------------------------------
+Category:         Security / Isolation
+Maturity:         MATURE
+Description:      Agent child processes run as unprivileged users with reduced
+                  capabilities. Seccomp BPF blocks dangerous syscalls including
+                  raw socket paths that bypass the proxy. The supervisor clears
+                  the capability bounding set during privilege drop (fail-closed).
+                  Supports configurable run_as_user and run_as_group.
+Key Files:
+  - crates/openshell-supervisor-process/    (Process restriction crate)
+  - crates/openshell-sandbox/               (Child process spawning)
+Known Limitations:
+  - Locked at creation; cannot change at runtime
+
+--------------------------------------------------------------------------------
+6. NETWORK NAMESPACE AND PROXY ROUTING
+--------------------------------------------------------------------------------
+Category:         Security / Networking
+Maturity:         MATURE
+Description:      Each sandbox creates a network namespace that forces all
+                  ordinary agent egress through the local CONNECT proxy. This
+                  ensures no traffic can bypass policy evaluation. Combined with
+                  seccomp blocking of raw socket syscalls.
+Key Files:
+  - crates/openshell-supervisor-network/    (Network namespace setup)
+  - crates/openshell-sandbox/               (Proxy integration)
+Known Limitations:
+  - Network namespace setup requires root/CAP_NET_ADMIN in supervisor
+
+--------------------------------------------------------------------------------
+7. L7 POLICY PROXY (HTTP/TLS INSPECTION)
+--------------------------------------------------------------------------------
+Category:         Security / Proxy
+Maturity:         MATURE
+Description:      All sandbox egress is intercepted by a policy proxy that can
+                  terminate TLS with an ephemeral sandbox CA for HTTP inspection.
+                  Supports REST method/path rules, WebSocket upgrade rules,
+                  GraphQL operation rules, MCP method/tool rules, and JSON-RPC
+                  method rules. Credential injection on terminated streams.
+                  Deny rules take precedence over allow rules. Access presets
+                  (read-only, read-write, full) for quick configuration.
+Key Files:
+  - crates/openshell-sandbox/               (Proxy implementation)
+  - crates/openshell-policy/                (L7Rule, L7DenyRule protos)
+Known Limitations:
+  - JSON-RPC responses and server-to-client MCP messages not parsed for policy
+  - Raw streams are connection-scoped; policy reloads affect next connection
+  - HTTP upgrades switch to raw relay by default
+
+--------------------------------------------------------------------------------
+8. PRIVACY ROUTER (INFERENCE ROUTING)
+--------------------------------------------------------------------------------
+Category:         Privacy / Inference
+Maturity:         MATURE
+Description:      Privacy-aware LLM routing that keeps sensitive context on
+                  sandbox compute. Requests to https://inference.local bypass
+                  OPA network policy and are handled by the inference router.
+                  The proxy terminates local TLS, strips caller credentials
+                  and disallowed headers, detects OpenAI/Anthropic request
+                  shapes, and forwards through openshell-router using route
+                  bundles fetched from the gateway. Supports multiple protocols
+                  and provider-specific routing (Vertex AI, OpenAI, Anthropic,
+                  NVIDIA, DeepInfra).
+Key Files:
+  - crates/openshell-router/                (Inference router crate)
+  - proto/inference.proto                   (Inference service definition)
+  - architecture/google-vertex-ai-provider.md
+Known Limitations:
+  - External inference endpoints not using inference.local must be in policy
+
+--------------------------------------------------------------------------------
+9. CREDENTIAL PROVIDER SYSTEM
+--------------------------------------------------------------------------------
+Category:         Security / Credentials
+Maturity:         MATURE
+Description:      Providers are named credential bundles injected into sandboxes
+                  at creation. Credentials never leak into sandbox filesystem;
+                  injected as environment variables at runtime. CLI auto-discovers
+                  credentials from shell environment for recognized agents.
+                  Provider credentials stored at gateway and fetched by supervisor.
+                  Revision-scoped placeholders for rotating credentials. Per-
+                  credential expiry enforcement at both gateway and sandbox.
+Key Files:
+  - crates/openshell-providers/             (Provider management crate)
+  - providers/                              (Provider profile YAML definitions)
+  - proto/openshell.proto                   (Provider messages)
+Known Limitations:
+  - Driver-controlled env vars override template values
+
+--------------------------------------------------------------------------------
+10. PROVIDER PROFILE FRAMEWORK
+--------------------------------------------------------------------------------
+Category:         SDK / Configuration
+Maturity:         MATURE
+Description:      Provider profiles define credential schemas, endpoints,
+                  binaries, and discovery rules for different agent/tool types.
+                  Built-in profiles for Claude Code, Codex, Copilot, OpenCode,
+                  GitHub, NVIDIA, DeepInfra, Google Cloud, Google Vertex AI,
+                  AWS Bedrock, Cursor, PyPI. Custom profiles can be imported,
+                  updated, exported, validated (lint), and deleted. Categories:
+                  inference, agent, source_control, messaging, data, knowledge.
+Key Files:
+  - providers/                              (Built-in profile YAML files)
+  - proto/openshell.proto                   (ProviderProfile messages)
+  - crates/openshell-providers/             (Profile management)
+Known Limitations:
+  - Profile updates require optimistic concurrency version
+
+--------------------------------------------------------------------------------
+11. DYNAMIC TOKEN GRANTS (SPIFFE / OAUTH2)
+--------------------------------------------------------------------------------
+Category:         Security / Identity
+Maturity:         DEVELOPING
+Description:      Provider profiles can declare dynamic token grants. For matching
+                  HTTP endpoints, the supervisor obtains a SPIFFE JWT-SVID from
+                  the local Workload API, exchanges it for an OAuth2 access token,
+                  caches the token, and injects it as an Authorization: Bearer
+                  header. Token grant endpoints are HTTPS-only (except loopback
+                  and K8s service DNS). Token response lifetimes capped and cached
+                  with expiry margin. Supports audience overrides per endpoint.
+Key Files:
+  - proto/openshell.proto                   (ProviderCredentialTokenGrant)
+  - crates/openshell-sandbox/               (Token grant implementation)
+  - examples/spiffe-token-grant-demo/       (Demo)
+Known Limitations:
+  - Requires SPIFFE Workload API socket mounted in sandbox
+  - SPIFFE socket hidden from agent child processes via private mount namespace
+
+--------------------------------------------------------------------------------
+12. AWS SIGV4 REQUEST SIGNING
+--------------------------------------------------------------------------------
+Category:         Security / Credentials
+Maturity:         DEVELOPING
+Description:      For AWS endpoints requiring request-level signing, the proxy
+                  supports SigV4 re-signing. When credential_signing: sigv4 is
+                  set, the proxy strips client placeholder-based auth headers,
+                  re-signs with real credentials from the provider. Supports
+                  signed body, streaming unsigned, and unsigned payload modes.
+                  AWS region extracted from hostname or explicit signing_region.
+Key Files:
+  - crates/openshell-sandbox/               (SigV4 signing implementation)
+  - proto/sandbox.proto                     (credential_signing fields)
+Known Limitations:
+  - Chunk-signed streaming modes rejected
+  - Mutually exclusive with request_body_credential_rewrite
+  - Direct AWS Bedrock with SigV4 is a separate follow-up
+
+--------------------------------------------------------------------------------
+13. CREDENTIAL REFRESH AND ROTATION
+--------------------------------------------------------------------------------
+Category:         Security / Credentials
+Maturity:         DEVELOPING
+Description:      Gateway-owned credential refresh for providers. Supports
+                  multiple strategies: static, external, OAuth2 refresh token,
+                  OAuth2 client credentials, and Google service account JWT.
+                  ConfigureProviderRefresh stores refresh material; RotateProvider-
+                  Credential mints fresh tokens. ADC-backed providers auto-rotate.
+                  Refresh state persisted as scoped objects alongside providers.
+Key Files:
+  - proto/openshell.proto                   (Refresh messages)
+  - crates/openshell-server/                (Refresh implementation)
+Known Limitations:
+  - Refresh material stored alongside provider records
+
+--------------------------------------------------------------------------------
+14. DOCKER COMPUTE DRIVER
+--------------------------------------------------------------------------------
+Category:         Compute / Drivers
+Maturity:         MATURE
+Description:      In-process ComputeDriver backend for local Docker sandbox
+                  containers. Uses host networking so loopback gateway endpoints
+                  work from the supervisor. Supports bind-mounted supervisor
+                  binary or supervisor image extraction. GPU passthrough with
+                  CDI auto-detection and fallback to --gpus all. Per-sandbox
+                  CPU/memory resource limits. Named volume mounts and tmpfs.
+Key Files:
+  - crates/openshell-driver-docker/         (Docker driver crate)
+Known Limitations:
+  - Host bind mounts unsafe; require explicit opt-in
+  - macOS uses Docker Desktop host-gateway callback alias
+
+--------------------------------------------------------------------------------
+15. PODMAN COMPUTE DRIVER
+--------------------------------------------------------------------------------
+Category:         Compute / Drivers
+Maturity:         MATURE
+Description:      In-process ComputeDriver backend for rootless Podman
+                  deployments. Uses Podman REST API, OCI image volumes, and
+                  CDI GPU devices. Supports named volumes, image mounts,
+                  and tmpfs. macOS uses gvproxy host-loopback IP.
+Key Files:
+  - crates/openshell-driver-podman/         (Podman driver crate)
+Known Limitations:
+  - image_pull_policy uses lowercase enum (always|missing|never|newer)
+  - macOS needs gvproxy workaround for host-loopback
+
+--------------------------------------------------------------------------------
+16. KUBERNETES COMPUTE DRIVER
+--------------------------------------------------------------------------------
+Category:         Compute / Drivers
+Maturity:         DEVELOPING
+Description:      In-process ComputeDriver backend for Kubernetes sandbox pods.
+                  Uses K8s API objects, service accounts, secrets, PVC-backed
+                  workspace storage, and GPU resources. Supports AppArmor profile
+                  configuration. Sandbox pod image or pod template configuration.
+                  Projected ServiceAccount token bootstrap for sandbox JWT exchange.
+                  User namespace isolation (hostUsers: false) for K8s 1.33+.
+Key Files:
+  - crates/openshell-driver-kubernetes/     (Kubernetes driver crate)
+  - deploy/helm/openshell/                  (Helm chart)
+  - deploy/kube/                            (K8s manifests)
+Known Limitations:
+  - Experimental — under active development
+  - HA requires external Postgres database
+
+--------------------------------------------------------------------------------
+17. MICROVM COMPUTE DRIVER (LIBKRUN)
+--------------------------------------------------------------------------------
+Category:         Compute / Drivers
+Maturity:         BASIC
+Description:      Standalone libkrun-backed ComputeDriver subprocess providing
+                  per-sandbox microVM isolation. Embeds its own rootfs and
+                  runtime. Boots a cached bootstrap rootfs.ext4, prepares OCI
+                  images inside a bootstrap VM with umoci, attaches prepared
+                  image disk read-only, and gives each sandbox a writable
+                  overlay.ext4 for merged-root changes. Driver persists launch
+                  requests and restarts VMs on driver startup.
+Key Files:
+  - crates/openshell-driver-vm/             (VM driver crate)
+  - crates/openshell-vfio/                  (VFIO GPU passthrough)
+Known Limitations:
+  - Experimental
+  - Per-sandbox CPU/memory fields accepted but currently ignored
+  - Requires host virtualization support
+
+--------------------------------------------------------------------------------
+18. EXTENSION COMPUTE DRIVER (OUT-OF-TREE)
+--------------------------------------------------------------------------------
+Category:         Compute / Drivers
+Maturity:         BASIC
+Description:      Out-of-tree drivers operated alongside the gateway via Unix
+                  domain socket. Selected by custom compute_drivers entry with
+                  socket_path. Gateway connects to UDS, runs GetCapabilities,
+                  and dispatches sandbox lifecycle through compute_driver.proto.
+                  Driver process and socket lifecycle are operator-owned.
+Key Files:
+  - proto/compute_driver.proto              (Driver contract)
+  - architecture/compute-runtimes.md        (Docs)
+Known Limitations:
+  - Gateway does not spawn, supervise, or remove unmanaged drivers
+  - Trust boundary is socket filesystem permissions
+
+--------------------------------------------------------------------------------
+19. CLI (COMMAND-LINE INTERFACE)
+--------------------------------------------------------------------------------
+Category:         UI / CLI
+Maturity:         MATURE
+Description:      User-facing command-line interface built with Clap. Commands:
+                  sandbox create/connect/list/delete/exec, provider create/list/
+                  delete, policy set/get, inference set/get, logs, term (TUI),
+                  gateway manage/register/remove, service expose/list/delete.
+                  Auto-discovers providers from environment. Supports --from
+                  for community sandboxes, local directories, or container images.
+                  Shell completions via clap_complete.
+Key Files:
+  - crates/openshell-cli/                   (CLI binary crate)
+Known Limitations:
+  - None significant
+
+--------------------------------------------------------------------------------
+20. TERMINAL UI (TUI DASHBOARD)
+--------------------------------------------------------------------------------
+Category:         UI / Dashboard
+Maturity:         DEVELOPING
+Description:      Real-time terminal dashboard for monitoring gateways, sandboxes,
+                  and providers. Built with ratatui. Keyboard-driven: Tab to
+                  switch panels, j/k to navigate, Enter to select, : for command
+                  mode. Auto-refresh every 2 seconds. Inspired by k9s.
+Key Files:
+  - crates/openshell-tui/                   (TUI crate)
+Known Limitations:
+  - Under active development
+
+--------------------------------------------------------------------------------
+21. PYTHON SDK
+--------------------------------------------------------------------------------
+Category:         SDK / API
+Maturity:         DEVELOPING
+Description:      Python bindings for the OpenShell gRPC API. Provides
+                  OpenShellClient class with methods for sandbox lifecycle,
+                  provider management, exec, and inference. Supports mTLS
+                  and bearer token authentication. gRPC channel with TLS
+                  configuration. Published to PyPI as openshell package.
+                  Also used for CLI packaging (wraps Rust binary).
+Key Files:
+  - python/openshell/sandbox.py             (SDK implementation)
+  - python/openshell/__init__.py            (Package init)
+  - pyproject.toml                          (Package config)
+Known Limitations:
+  - Limited API coverage compared to CLI
+  - Some methods may lag behind Rust API changes
+
+--------------------------------------------------------------------------------
+22. GRPC API SERVICE
+--------------------------------------------------------------------------------
+Category:         Core / API
+Maturity:         MATURE
+Description:      Full gRPC API with 50+ RPCs organized around platform objects:
+                  sandbox lifecycle (Create, Get, List, Delete, Watch, Exec,
+                  ForwardTcp, ExecInteractive), providers (Create, Get, List,
+                  Update, Delete, profiles, refresh), policy (UpdateConfig,
+                  GetSandboxPolicyStatus, ListSandboxPolicies, ReportPolicyStatus),
+                  inference (SetClusterInference, GetClusterInference,
+                  GetInferenceBundle), observability (PushSandboxLogs,
+                  GetSandboxLogs, WatchSandbox), relay (ConnectSupervisor,
+                  RelayStream), policy advisor (Submit/Get/Approve/Reject/Edit/
+                  Undo/Clear draft chunks), sandbox services (Expose/Get/List/
+                  Delete), token bootstrap (IssueSandboxToken, RefreshSandboxToken).
+Key Files:
+  - proto/openshell.proto                   (Main service definition)
+  - proto/sandbox.proto                     (Sandbox policy messages)
+  - proto/inference.proto                   (Inference service)
+  - proto/compute_driver.proto              (Compute driver contract)
+  - proto/datamodel.proto                   (Shared data model)
+Known Limitations:
+  - Delete operations not CAS-protected
+  - Alpha API; breaking changes expected
+
+--------------------------------------------------------------------------------
+23. MTLS AND PKI BOOTSTRAP
+--------------------------------------------------------------------------------
+Category:         Security / Authentication
+Maturity:         MATURE
+Description:      mTLS user authentication for local single-user deployments.
+                  Clients present certificates signed by deployment CA. PKI
+                  bootstrap via `openshell-gateway generate-certs` creates
+                  CA, server/client TLS certs, and sandbox JWT signing material.
+                  Supports output to Kubernetes Secrets or filesystem. Idempotent
+                  bootstrap (all present → skip, partial → fail, nothing → generate).
+                  Helm hook runs certgen as pre-install/pre-upgrade Job.
+                  cert-manager integration supported.
+Key Files:
+  - crates/openshell-bootstrap/             (Bootstrap metadata, auth tokens)
+  - crates/openshell-server/                (PKI generation)
+  - deploy/helm/openshell/templates/certgen.yaml
+Known Limitations:
+  - JWT signing-key rotation is offline operator action
+  - No online rotation with multiple verification keys yet
+
+--------------------------------------------------------------------------------
+24. OIDC AUTHENTICATION
+--------------------------------------------------------------------------------
+Category:         Security / Authentication
+Maturity:         DEVELOPING
+Description:      Bearer-token auth for users via OpenID Connect. Supports
+                  browser PKCE login flow and client credentials. Kubernetes
+                  deployments can use OIDC or trusted access proxy for user
+                  authentication. Cloudflare JWT edge-authenticated deployments
+                  supported. User-facing mutations authorized by role policy
+                  when OIDC or edge identity is enabled.
+Key Files:
+  - crates/openshell-server/                (OIDC implementation)
+  - deploy/helm/openshell/ci/values-keycloak.yaml
+Known Limitations:
+  - Role policy authorization still being developed
+
+--------------------------------------------------------------------------------
+25. SANDBOX JWT AUTHENTICATION
+--------------------------------------------------------------------------------
+Category:         Security / Authentication
+Maturity:         MATURE
+Description:      Gateway-signed JWTs bound to single sandbox IDs authenticate
+                  supervisor RPCs. Docker/Podman/VM drivers deliver tokens via
+                  bind-mounted files. K8s supervisors exchange projected
+                  ServiceAccount tokens through IssueSandboxToken RPC (validated
+                  via K8s TokenReview). Sandbox JWTs are not user credentials;
+                  only accepted on supervisor-to-gateway RPC allowlist.
+                  Supports both v1alpha1 and v1beta1 Agent Sandbox ownerReferences.
+Key Files:
+  - proto/openshell.proto                   (IssueSandboxToken, RefreshSandboxToken)
+  - crates/openshell-server/                (JWT minting/validation)
+Known Limitations:
+  - Older tokens not server-revoked; bound by short TTL
+  - Default TTL=0 for local gateways (non-expiring)
+
+--------------------------------------------------------------------------------
+26. GATEWAY PERSISTENCE (SQLITE / POSTGRES)
+--------------------------------------------------------------------------------
+Category:         Core / Storage
+Maturity:         MATURE
+Description:      Protobuf object store with SQLite (local default) or Postgres
+                  (shared deployments). Generic schema with id, object_type,
+                  name, scope, version, status, payload columns. Optimistic
+                  concurrency control (CAS) with resource_version. Compile-time
+                  enforcement: unconditional writes gated behind #[cfg(test)].
+                  All creates use MustCreate, updates use update_message_cas.
+                  SQLite files tightened to mode 0o600 for credential protection.
+Key Files:
+  - crates/openshell-server/src/persistence/ (Store implementation)
+  - crates/openshell-server/migrations/      (SQL migrations)
+Known Limitations:
+  - SQLite for single-replica only; Postgres needed for HA
+  - Global settings use Mutex + CAS (insufficient for multi-replica)
+
+--------------------------------------------------------------------------------
+27. SUPERVISOR RELAY SYSTEM
+--------------------------------------------------------------------------------
+Category:         Core / Networking
+Maturity:         MATURE
+Description:      Sandbox workloads maintain outbound supervisor sessions to the
+                  gateway. Enables per-request byte relays without requiring
+                  inbound network access to sandbox. Backs SSH, command execution,
+                  file sync, and service forwarding. Uses ConnectSupervisor
+                  bidirectional stream + RelayStream separate HTTP/2 streams.
+                  Server-side HTTP/2 keepalive and SSH keepalive for liveness.
+Key Files:
+  - proto/openshell.proto                   (ConnectSupervisor, RelayStream)
+  - crates/openshell-server/                (Relay coordination)
+  - crates/openshell-sandbox/               (Supervisor relay client)
+Known Limitations:
+  - Gateway restarts require supervisor re-establishment
+  - Live relay streams lost on supervisor disconnect
+
+--------------------------------------------------------------------------------
+28. SSH SERVER AND SESSION MANAGEMENT
+--------------------------------------------------------------------------------
+Category:         Core / Access
+Maturity:         MATURE
+Description:      Each sandbox runs an SSH server on a Unix socket. Gateway
+                  reaches it through outbound supervisor relay. Supports
+                  interactive shell sessions, command execution (ExecSandbox,
+                  ExecSandboxInteractive), tar-based file sync. SSH sessions
+                  are short-lived with tokens and expiry. Sessions can be
+                  revoked. OCSF logging for SSH authentication events.
+Key Files:
+  - proto/openshell.proto                   (CreateSshSession, ForwardTcp, Exec)
+  - crates/openshell-sandbox/               (SSH server)
+Known Limitations:
+  - SSH nonce replay detection (OCSF finding on replay)
+
+--------------------------------------------------------------------------------
+29. SANDBOX SERVICE FORWARDING
+--------------------------------------------------------------------------------
+Category:         Networking / Access
+Maturity:         DEVELOPING
+Description:      Expose HTTP services running inside sandboxes for browser
+                  access. Services registered via ExposeService RPC with
+                  sandbox name, service name, and target port. Browser URLs
+                  use sandbox--service.<service-routing-domain> with host-based
+                  routing via supervisor relay. Supports loopback plaintext HTTP
+                  for local browser access. Wildcard DNS SANs for service
+                  routing domains.
+Key Files:
+  - proto/openshell.proto                   (ExposeService, GetService, etc.)
+  - crates/openshell-server/                (Service routing)
+Known Limitations:
+  - Only loopback destinations (localhost, 127.0.0.0/8, ::1) accepted
+  - Cross-origin/sibling-subdomain request protection
+
+--------------------------------------------------------------------------------
+30. SANDBOX WATCH AND LOG STREAMING
+--------------------------------------------------------------------------------
+Category:         Observability / Monitoring
+Maturity:         MATURE
+Description:      WatchSandbox RPC streams sandbox status snapshots, server logs,
+                  platform events, and draft policy updates. Supports follow_status,
+                  follow_logs, follow_events, log tail replay, time filtering,
+                  source filtering, and level filtering. PushSandboxLogs for
+                  supervisor-to-gateway log push. GetSandboxLogs for one-shot
+                  log fetch. Sandbox logs can be streamed to CLI via
+                  `openshell logs --tail`.
+Key Files:
+  - proto/openshell.proto                   (WatchSandbox, log messages)
+  - crates/openshell-server/                (Watch/log implementation)
+Known Limitations:
+  - Log buffer has finite size (default 2000 lines)
+
+--------------------------------------------------------------------------------
+31. POLICY ADVISOR PIPELINE
+--------------------------------------------------------------------------------
+Category:         Security / Policy
+Maturity:         DEVELOPING
+Description:      Turns observed denials into draft policy recommendations.
+                  Two proposers: sandbox-side mechanistic mapper (L4 denials →
+                  rules) and agent-authored via policy.local API. Gateway is
+                  single referee. Pipeline: Submit → Validate (prover) →
+                  Auto-approval gate (opt-in, requires prover delta empty) →
+                  Implicit supersede (newer proposals auto-reject older matching
+                  chunks) → Escalation to human review. Supports approve, reject,
+                  edit, undo, clear operations. Draft history tracking.
+Key Files:
+  - proto/openshell.proto                   (Draft policy RPCs)
+  - crates/openshell-server/                (Advisor implementation)
+  - examples/policy-advisor/                (Demo)
+  - examples/agent-driven-policy-management/ (Agent-driven demo)
+  - rfc/0002-agent-driven-policy-management/ (RFC)
+Known Limitations:
+  - L7 denials excluded from mechanistic mapping (by design)
+  - LLM-based contextual reviewer planned but not implemented
+
+--------------------------------------------------------------------------------
+32. FORMAL POLICY PROVER (Z3)
+--------------------------------------------------------------------------------
+Category:         Security / Verification
+Maturity:         DEVELOPING
+Description:      Z3-based formal verification of policy proposals. Builds Z3
+                  model from merged policy plus sandbox credential set, computes
+                  delta of findings between baseline and proposed policy. Detects:
+                  link_local_reach (cloud metadata), l7_bypass_credentialed
+                  (non-HTTP wire protocols), credential_reach_expansion (new
+                  authenticated reach), capability_expansion (new HTTP methods).
+                  Any finding blocks auto-approval.
+Key Files:
+  - crates/openshell-prover/                (Z3 prover crate)
+  - architecture/security-policy.md         (Prover docs)
+Known Limitations:
+  - v1 does not model credential scopes (read-only vs write)
+  - Credential presence is sandbox-coarse, not binary-fine
+
+--------------------------------------------------------------------------------
+33. OCSF STRUCTURED SECURITY LOGGING
+--------------------------------------------------------------------------------
+Category:         Observability / Security
+Maturity:         MATURE
+Description:      OCSF v1.7.0 event types for structured security logging.
+                  Builders for NetworkActivity, HttpActivity, SshActivity,
+                  ProcessActivity, DetectionFinding, ConfigStateChange,
+                  AppLifecycle. Shorthand and JSONL formatters. Non-blocking
+                  ocsf_emit!() macro. Security findings dual-emitted with
+                  domain events. Never logs secrets or credentials.
+Key Files:
+  - crates/openshell-ocsf/                  (OCSF crate)
+  - AGENTS.md                              (OCSF guidelines)
+Known Limitations:
+  - OCSF JSONL may be shipped to external systems (never include secrets)
+
+--------------------------------------------------------------------------------
+34. TELEMETRY SYSTEM
+--------------------------------------------------------------------------------
+Category:         Observability / Analytics
+Maturity:         DEVELOPING
+Description:      Anonymous telemetry for aggregate usage patterns. Covers
+                  sandbox lifecycle outcomes, provider profile buckets, policy
+                  decision counts, aggregate network denial categories. Does NOT
+                  collect sandbox names/IDs, hostnames, file paths, prompts,
+                  credentials, or user content. Opt-out via
+                  OPENSHELL_TELEMETRY_ENABLED=false. Can be compiled out entirely
+                  with --no-default-features Cargo flag.
+Key Files:
+  - crates/openshell-server/                (Telemetry implementation)
+  - crates/openshell-sandbox/               (Sandbox-side telemetry)
+Known Limitations:
+  - Third-party service telemetry not controlled by OpenShell
+
+--------------------------------------------------------------------------------
+35. MCP PROTOCOL POLICY SUPPORT
+--------------------------------------------------------------------------------
+Category:         Security / Protocol
+Maturity:         DEVELOPING
+Description:      Policy enforcement for Model Context Protocol (MCP) over HTTP.
+                  Supports MCP method, tool name, and supported params matchers.
+                  MCP tools/call tool names checked against spec-recommended
+                  syntax by default (strict_tool_names opt-out). Body buffering
+                  up to configurable max_body_bytes. JSON-RPC responses and
+                  server-to-client messages relayed but not parsed for policy.
+Key Files:
+  - proto/sandbox.proto                     (McpOptions message)
+  - crates/openshell-policy/                (MCP policy rules)
+  - e2e/mcp-conformance/                    (MCP conformance tests)
+Known Limitations:
+  - Server-to-client MCP messages not policy-enforced
+  - Response streams relayed without parsing
+
+--------------------------------------------------------------------------------
+36. GRAPHQL PROTOCOL POLICY SUPPORT
+--------------------------------------------------------------------------------
+Category:         Security / Protocol
+Maturity:         DEVELOPING
+Description:      Policy enforcement for GraphQL operations. Supports operation
+                  type (query, mutation, subscription) and operation name matchers.
+                  Persisted query handling: deny by default or allow_registered
+                  with trusted query registry. Configurable max body bytes for
+                  inspection. Path-scoped endpoints for shared host:port APIs.
+Key Files:
+  - proto/sandbox.proto                     (GraphQL fields in NetworkEndpoint)
+  - crates/openshell-policy/                (GraphQL policy rules)
+Known Limitations:
+  - persisted_queries default is "deny"
+
+--------------------------------------------------------------------------------
+37. WEBSOCKET POLICY SUPPORT
+--------------------------------------------------------------------------------
+Category:         Security / Protocol
+Maturity:         DEVELOPING
+Description:      REST endpoints can opt in to websocket_credential_rewrite for
+                  client-to-server WebSocket text messages after allowed HTTP 101
+                  upgrade. Server-to-client traffic and non-text protocols remain
+                  raw passthrough. WebSocket upgrade and text-message rules
+                  supported in L7 policy.
+Key Files:
+  - proto/sandbox.proto                     (websocket_credential_rewrite)
+  - crates/openshell-sandbox/               (WebSocket handling)
+Known Limitations:
+  - Server-to-client WebSocket traffic is raw passthrough
+  - Only text messages inspected; binary frames pass through
+
+--------------------------------------------------------------------------------
+38. JSON-RPC PROTOCOL POLICY SUPPORT
+--------------------------------------------------------------------------------
+Category:         Security / Protocol
+Maturity:         BASIC
+Description:      Generic JSON-RPC method matching for non-MCP endpoints.
+                  Body buffering up to configurable json_rpc_max_body_bytes.
+                  Matches only the method field; params matchers not supported
+                  for generic JSON-RPC. JSON-RPC responses not parsed.
+Key Files:
+  - proto/sandbox.proto                     (json_rpc_max_body_bytes)
+  - crates/openshell-policy/                (JSON-RPC rules)
+Known Limitations:
+  - No params matchers (method-only matching)
+  - Responses not parsed for enforcement
+
+--------------------------------------------------------------------------------
+39. GPU PASSTHROUGH
+--------------------------------------------------------------------------------
+Category:         Hardware / Acceleration
+Maturity:         BASIC
+Description:      Pass host GPUs into sandboxes for local inference, fine-tuning,
+                  or GPU workloads. Docker auto-selects CDI when available,
+                  falls back to --gpus all. Podman uses CDI device specification.
+                  Kubernetes uses GPU resource requests. VM supports VFIO
+                  passthrough. Filesystem policy auto-enriched with GPU device
+                  paths when GPU present. Specific GPU count or driver default.
+Key Files:
+  - crates/openshell-vfio/                  (VFIO GPU passthrough)
+  - proto/openshell.proto                   (GpuResourceRequirements)
+  - e2e/gpu/                                (GPU E2E tests)
+Known Limitations:
+  - Experimental — under active development
+  - Requires NVIDIA drivers and Container Toolkit on host
+  - Default base image does not include GPU drivers
+
+--------------------------------------------------------------------------------
+40. HELM CHART DEPLOYMENT
+--------------------------------------------------------------------------------
+Category:         Deployment / Kubernetes
+Maturity:         DEVELOPING
+Description:      Helm chart for Kubernetes deployment published to GHCR as OCI.
+                  Deploys gateway StatefulSet (SQLite default) or Deployment
+                  (external DB). Templates: certgen hook, gateway config,
+                  RBAC (ClusterRole, Role, RoleBinding), NetworkPolicy, Service,
+                  ServiceAccount, GRPCRoute. Supports cert-manager integration,
+                  SPIRE integration, Keycloak OIDC. High availability mode with
+                  external Postgres. OpenShift support.
+Key Files:
+  - deploy/helm/openshell/                  (Helm chart)
+  - deploy/helm/openshell/Chart.yaml
+  - deploy/helm/openshell/values.yaml
+  - deploy/helm/openshell/templates/
+  - deploy/helm/openshell/ci/              (CI value variants)
+Known Limitations:
+  - Experimental — expect breaking changes
+  - HA requires external Postgres
+
+--------------------------------------------------------------------------------
+41. BYOC (BRING YOUR OWN CONTAINER)
+--------------------------------------------------------------------------------
+Category:         Extensibility / Images
+Maturity:         MATURE
+Description:      Create sandboxes from community catalog, local directory
+                  (Dockerfile), or existing container image. Custom images must
+                  include agent runtime and system dependencies but not the
+                  gateway. GPU-capable images must include user-space GPU
+                  libraries. The runtime owns GPU device injection.
+Key Files:
+  - examples/bring-your-own-container/      (BYOC example)
+Known Limitations:
+  - Custom images responsible for GPU library inclusion
+
+--------------------------------------------------------------------------------
+42. AGENT SKILLS SYSTEM
+--------------------------------------------------------------------------------
+Category:         Developer Experience
+Maturity:         MATURE
+Description:      21 agent skills in .agents/skills/ for development automation.
+                  Categories: Getting Started (openshell-cli, debug-openshell-
+                  cluster, debug-inference), Contributing (create-spike, create-rfc,
+                  build-from-issue, create-github-issue, create-github-pr),
+                  Reviewing (review-github-pr, review-security-issue, watch-
+                  github-actions, test-release-canary), Triage (triage-issue),
+                  Platform (generate-sandbox-policy, helm-dev-environment,
+                  tui-development), Documentation (update-docs), Maintenance
+                  (sync-agent-infra, sbom). Workflow chains: Community inflow,
+                  Internal development, Security, Policy iteration.
+Key Files:
+  - .agents/skills/                         (All skill definitions)
+  - AGENTS.md                              (Workflow chain docs)
+  - CONTRIBUTING.md                         (Skills table)
+Known Limitations:
+  - Skills require compatible agent harness
+
+--------------------------------------------------------------------------------
+43. COMMUNITY SANDBOX CATALOG
+--------------------------------------------------------------------------------
+Category:         Ecosystem / Images
+Maturity:         DEVELOPING
+Description:      Community-maintained sandbox catalog at github.com/NVIDIA/
+                  OpenShell-Community. Includes base image with Claude, OpenCode,
+                  Codex, Copilot, Python 3.14, Node 22, developer tools.
+                  Specialized images for Gemini, Ollama, Pi, and others.
+                  Use --from flag to select community sandboxes.
+Key Files:
+  - External: github.com/NVIDIA/OpenShell-Community
+Known Limitations:
+  - Maintained in separate repository
+  - Limited catalog size
+
+--------------------------------------------------------------------------------
+44. E2E TESTING FRAMEWORK
+--------------------------------------------------------------------------------
+Category:         Testing / Quality
+Maturity:         MATURE
+Description:      End-to-end tests covering Rust integration tests, Python SDK
+                  tests, Kubernetes deployment tests, GPU tests, MCP conformance
+                  tests, and policy advisor tests. Tests run against live gateway.
+                  MCP conformance tests validate MCP protocol policy enforcement.
+Key Files:
+  - e2e/rust/                               (Rust E2E tests)
+  - e2e/python/                             (Python SDK tests)
+  - e2e/kubernetes/                         (K8s deployment tests)
+  - e2e/gpu/                                (GPU tests)
+  - e2e/mcp-conformance/                    (MCP conformance)
+  - e2e/policy-advisor/                     (Policy advisor tests)
+  - e2e/support/                            (Test support utilities)
+Known Limitations:
+  - E2E tests require running gateway instance
+
+--------------------------------------------------------------------------------
+45. GOOGLE VERTEX AI PROVIDER
+--------------------------------------------------------------------------------
+Category:         Integration / Inference
+Maturity:         DEVELOPING
+Description:      Full integration with Google Vertex AI platform. Supports
+                  OAuth2 bearer authentication with GCP access tokens. Model-
+                  family-dependent routing: Anthropic Claude via rawPredict
+                  surface, Gemini via OpenAI-compatible surface. Region-aware
+                  host selection (global, regional, per-region). ADC support
+                  via --from-gcloud-adc CLI flag. Gateway resolves endpoint
+                  URLs, protocols, credentials from provider config.
+Key Files:
+  - providers/google-vertex-ai.yaml         (Profile definition)
+  - architecture/google-vertex-ai-provider.md (Implementation reference)
+  - crates/openshell-server/                (Bundle resolution)
+  - crates/openshell-router/                (Request routing)
+Known Limitations:
+  - Anthropic base URL overrides rejected (cannot safely preserve shaping)
+  - anthropic-beta headers stripped for Vertex Claude routes
+
+--------------------------------------------------------------------------------
+46. SANDBOX RESOURCE REQUIREMENTS
+--------------------------------------------------------------------------------
+Category:         Core / Resources
+Maturity:         BASIC
+Description:      Portable resource requirements for sandbox provisioning.
+                  GPU requirements (optional count or driver default). CPU
+                  and memory via template resource limits. Docker and Podman
+                  apply as runtime limits. Kubernetes mirrors limits to requests.
+                  VM accepts but currently ignores. Driver-keyed opaque config
+                  for driver-specific settings.
+Key Files:
+  - proto/openshell.proto                   (ResourceRequirements)
+  - proto/compute_driver.proto              (DriverSandboxSpec)
+  - rfc/0004-sandbox-resource-requirements/ (RFC)
+Known Limitations:
+  - VM driver ignores CPU/memory values currently
+  - Driver-config schema validation is driver-owned
+
+--------------------------------------------------------------------------------
+47. HOT-RELOADABLE DYNAMIC POLICY
+--------------------------------------------------------------------------------
+Category:         Security / Policy
+Maturity:         MATURE
+Description:      Network and inference policy can be hot-reloaded on running
+                  sandboxes without restart. Gateway stores policy revisions
+                  with versioning. Supervisor polls for config revisions and
+                  loads new dynamic policy into in-process OPA. Invalid policy
+                  rejected; last-known-good retained. Gateway-global policy
+                  can override sandbox-scoped policy. Static controls (filesystem,
+                  process) require new sandbox.
+Key Files:
+  - proto/openshell.proto                   (UpdateConfig)
+  - crates/openshell-sandbox/               (Policy reload)
+  - crates/openshell-policy/                (Validation)
+Known Limitations:
+  - Existing raw byte streams connection-scoped; policy affects next connection
+  - Global policy changes all sandboxes (use sparingly)
+
+--------------------------------------------------------------------------------
+48. SSRF PROTECTION
+--------------------------------------------------------------------------------
+Category:         Security / Network
+Maturity:         MATURE
+Description:      Proxy rejects unsafe internal destinations including private
+                  IP ranges unless explicitly allowed via allowed_ips. Hard-
+                  blocked destinations win over allow rules. Link-local
+                  (169.254.0.0/16, fe80::/10) and metadata hosts always blocked.
+                  Loopback (127.0.0.0/8) always blocked. Advisor-proposed
+                  endpoints cannot satisfy exact-host SSRF trust. CIDR notation
+                  supported for allowed_ips. Prover detects link_local_reach.
+Key Files:
+  - crates/openshell-sandbox/               (SSRF classification)
+  - crates/openshell-policy/                (allowed_ips validation)
+  - crates/openshell-prover/                (link_local_reach detection)
+Known Limitations:
+  - Proposals omit allowed_ips by design (two-step flow)
+
+--------------------------------------------------------------------------------
+49. BINARY IDENTITY TRUST (TOFU)
+--------------------------------------------------------------------------------
+Category:         Security / Process
+Maturity:         MATURE
+Description:      Trust-on-first-use binary identity for network policy. Proxy
+                  identifies the calling binary and compares its trusted identity.
+                  Binary SHA-256 hash recorded for audit trail. Policy rules
+                  bind to specific binary paths. Network policy binaries define
+                  allowed executables. Detection findings for bypass attempts.
+Key Files:
+  - crates/openshell-sandbox/               (Binary identification)
+  - proto/sandbox.proto                     (NetworkBinary)
+Known Limitations:
+  - TOFU model; no pre-registered binary signing
+
+--------------------------------------------------------------------------------
+50. GATEWAY CONFIGURATION SYSTEM
+--------------------------------------------------------------------------------
+Category:         Core / Configuration
+Maturity:         MATURE
+Description:      Three-source configuration merge: CLI flags > env vars > TOML
+                  file > built-in defaults. Driver inheritance from gateway-level
+                  values to per-driver tables. Allowlist-controlled inheritance.
+                  Per-driver settings (Podman socket_path, VM vcpus). Package-
+                  managed gateway registry at /etc/openshell with system/user
+                  layering. Runtime settings delivered with policy to sandboxes.
+Key Files:
+  - rfc/0003-gateway-configuration/         (RFC)
+  - architecture/gateway.md                 (Config docs)
+  - crates/openshell-core/                  (Config types)
+Known Limitations:
+  - database_url is env-only (rejected in TOML file)
+  - image_pull_policy not inheritable (different driver enums)
+
+
+================================================================================
+FEATURE SUMMARY BY CATEGORY
+================================================================================
+
+CORE / CONTROL PLANE (5 features):
+  1.  Gateway Control Plane                              [MATURE]
+  2.  Sandbox Supervisor Runtime                          [MATURE]
+  22. gRPC API Service                                    [MATURE]
+  26. Gateway Persistence (SQLite / Postgres)              [MATURE]
+  50. Gateway Configuration System                         [MATURE]
+
+SECURITY / ISOLATION (5 features):
+  4.  Filesystem Isolation (Landlock)                      [MATURE]
+  5.  Process Isolation (Seccomp, Privilege Reduction)     [MATURE]
+  6.  Network Namespace and Proxy Routing                  [MATURE]
+  48. SSRF Protection                                      [MATURE]
+  49. Binary Identity Trust (TOFU)                         [MATURE]
+
+SECURITY / POLICY (3 features):
+  3.  Policy Engine (OPA-Based)                            [MATURE]
+  47. Hot-Reloadable Dynamic Policy                        [MATURE]
+  31. Policy Advisor Pipeline                              [DEVELOPING]
+
+SECURITY / PROTOCOL POLICIES (4 features):
+  35. MCP Protocol Policy Support                          [DEVELOPING]
+  36. GraphQL Protocol Policy Support                      [DEVELOPING]
+  37. WebSocket Policy Support                             [DEVELOPING]
+  38. JSON-RPC Protocol Policy Support                     [BASIC]
+
+SECURITY / PROXY (1 feature):
+  7.  L7 Policy Proxy (HTTP/TLS Inspection)                [MATURE]
+
+SECURITY / VERIFICATION (1 feature):
+  32. Formal Policy Prover (Z3)                            [DEVELOPING]
+
+SECURITY / AUTHENTICATION (3 features):
+  23. mTLS and PKI Bootstrap                               [MATURE]
+  24. OIDC Authentication                                  [DEVELOPING]
+  25. Sandbox JWT Authentication                           [MATURE]
+
+SECURITY / CREDENTIALS (4 features):
+  9.  Credential Provider System                           [MATURE]
+  11. Dynamic Token Grants (SPIFFE / OAuth2)               [DEVELOPING]
+  12. AWS SigV4 Request Signing                            [DEVELOPING]
+  13. Credential Refresh and Rotation                      [DEVELOPING]
+
+PRIVACY / INFERENCE (1 feature):
+  8.  Privacy Router (Inference Routing)                   [MATURE]
+
+COMPUTE / DRIVERS (5 features):
+  14. Docker Compute Driver                                [MATURE]
+  15. Podman Compute Driver                                [MATURE]
+  16. Kubernetes Compute Driver                            [DEVELOPING]
+  17. MicroVM Compute Driver (libkrun)                     [BASIC]
+  18. Extension Compute Driver (Out-of-Tree)               [BASIC]
+
+CORE / NETWORKING (2 features):
+  27. Supervisor Relay System                              [MATURE]
+  29. Sandbox Service Forwarding                           [DEVELOPING]
+
+CORE / ACCESS (1 feature):
+  28. SSH Server and Session Management                    [MATURE]
+
+UI / INTERFACES (3 features):
+  19. CLI (Command-Line Interface)                         [MATURE]
+  20. Terminal UI (TUI Dashboard)                          [DEVELOPING]
+  21. Python SDK                                           [DEVELOPING]
+
+SDK / CONFIGURATION (1 feature):
+  10. Provider Profile Framework                           [MATURE]
+
+OBSERVABILITY (3 features):
+  30. Sandbox Watch and Log Streaming                      [MATURE]
+  33. OCSF Structured Security Logging                     [MATURE]
+  34. Telemetry System                                     [DEVELOPING]
+
+HARDWARE (1 feature):
+  39. GPU Passthrough                                      [BASIC]
+
+DEPLOYMENT (1 feature):
+  40. Helm Chart Deployment                                [DEVELOPING]
+
+INTEGRATION (1 feature):
+  45. Google Vertex AI Provider                            [DEVELOPING]
+
+EXTENSIBILITY (1 feature):
+  41. BYOC (Bring Your Own Container)                      [MATURE]
+
+ECOSYSTEM (1 feature):
+  43. Community Sandbox Catalog                            [DEVELOPING]
+
+DEVELOPER EXPERIENCE (1 feature):
+  42. Agent Skills System                                  [MATURE]
+
+TESTING (1 feature):
+  44. E2E Testing Framework                                [MATURE]
+
+RESOURCES (1 feature):
+  46. Sandbox Resource Requirements                        [BASIC]
+
+
+================================================================================
+MATURITY DISTRIBUTION
+================================================================================
+
+MATURE (22 features):
+  1.  Gateway Control Plane
+  2.  Sandbox Supervisor Runtime
+  3.  Policy Engine (OPA-Based)
+  4.  Filesystem Isolation (Landlock)
+  5.  Process Isolation (Seccomp, Privilege Reduction)
+  6.  Network Namespace and Proxy Routing
+  7.  L7 Policy Proxy (HTTP/TLS Inspection)
+  8.  Privacy Router (Inference Routing)
+  9.  Credential Provider System
+  10. Provider Profile Framework
+  14. Docker Compute Driver
+  15. Podman Compute Driver
+  19. CLI (Command-Line Interface)
+  22. gRPC API Service
+  23. mTLS and PKI Bootstrap
+  25. Sandbox JWT Authentication
+  26. Gateway Persistence (SQLite / Postgres)
+  27. Supervisor Relay System
+  28. SSH Server and Session Management
+  30. Sandbox Watch and Log Streaming
+  33. OCSF Structured Security Logging
+  41. BYOC (Bring Your Own Container)
+  42. Agent Skills System
+  44. E2E Testing Framework
+  47. Hot-Reloadable Dynamic Policy
+  48. SSRF Protection
+  49. Binary Identity Trust (TOFU)
+  50. Gateway Configuration System
+
+DEVELOPING (16 features):
+  11. Dynamic Token Grants (SPIFFE / OAuth2)
+  12. AWS SigV4 Request Signing
+  13. Credential Refresh and Rotation
+  16. Kubernetes Compute Driver
+  20. Terminal UI (TUI Dashboard)
+  21. Python SDK
+  24. OIDC Authentication
+  29. Sandbox Service Forwarding
+  31. Policy Advisor Pipeline
+  32. Formal Policy Prover (Z3)
+  34. Telemetry System
+  35. MCP Protocol Policy Support
+  36. GraphQL Protocol Policy Support
+  37. WebSocket Policy Support
+  40. Helm Chart Deployment
+  43. Community Sandbox Catalog
+  45. Google Vertex AI Provider
+
+BASIC (5 features):
+  17. MicroVM Compute Driver (libkrun)
+  18. Extension Compute Driver (Out-of-Tree)
+  38. JSON-RPC Protocol Policy Support
+  39. GPU Passthrough
+  46. Sandbox Resource Requirements
+
+
+================================================================================
+FEATURES MISSING (COMPARED TO KAGENTI CAPABILITIES)
+================================================================================
+
+The following capabilities exist in Kagenti but are ABSENT or MISSING from
+OpenShell:
+
+1.  SPIFFE/SPIRE WORKLOAD IDENTITY (full integration)
+    Status: PARTIAL — SPIFFE JWT-SVID token grants exist in providers, but
+    OpenShell does not have integrated SPIRE server/agent deployment, CSI
+    driver, or automatic workload attestation. SPIFFE is consumed as an
+    external identity source, not natively managed.
+
+2.  OAUTH2/OIDC CENTRAL IDENTITY PROVIDER (Keycloak-equivalent)
+    Status: PARTIAL — OIDC auth exists for gateway users, but there is no
+    integrated identity provider deployment. Keycloak is external.
+
+3.  OAUTH2 TOKEN EXCHANGE (RFC 8693)
+    Status: MISSING — No token exchange flow for delegation chains between
+    agents and tools (user → agent → tool audience scoping).
+
+4.  IDENTITY & AUTH BRIDGE (SIDECAR PATTERN)
+    Status: MISSING — No transparent sidecar for inbound JWT validation
+    and outbound token exchange. The sandbox proxy handles credential
+    injection but not RFC 8693 token exchange chains.
+
+5.  FINE-GRAINED ZERO-TRUST ACCESS CONTROL (Multi-tier)
+    Status: PARTIAL — OpenShell has strong per-sandbox policy enforcement
+    but lacks the multi-tier (Cluster, Namespace, Component, Developer)
+    access control hierarchy with centralized PDP (OPA). Policy is
+    per-sandbox, not fleet-wide with hierarchical overrides.
+
+6.  MCP GATEWAY (ENVOY-BASED TOOL ROUTING)
+    Status: MISSING — No centralized MCP gateway for tool discovery,
+    routing, authentication, and load balancing across MCP servers.
+    MCP policy exists but not a routing gateway.
+
+7.  A2A (AGENT-TO-AGENT) PROTOCOL SUPPORT
+    Status: MISSING — No Agent-to-Agent protocol support. OpenShell
+    focuses on single-agent sandboxes, not multi-agent communication.
+
+8.  AGENT LIFECYCLE MANAGEMENT (K8s Operator)
+    Status: MISSING — No Kubernetes operator for agent workload lifecycle
+    management with CRDs like AgentRuntime. Uses sandbox CRDs but not
+    agent-level orchestration.
+
+9.  AGENT/TOOL DISCOVERY (Label-Based)
+    Status: MISSING — No label-based discovery mechanism for agents and
+    tools across namespaces. Discovery is local to the gateway.
+
+10. SKILLS SYSTEM (ConfigMap Registry)
+    Status: MISSING — No configurable skills/capability registry. The
+    .agents/skills/ are for development workflows, not runtime agent skills.
+
+11. LLM BUDGET PROXY (Token Tracking)
+    Status: MISSING — No per-session or per-agent token budget enforcement,
+    usage tracking, or cost control proxy.
+
+12. OBSERVABILITY: TRACING (OpenTelemetry)
+    Status: MISSING — No OpenTelemetry integration, no span injection,
+    no trace collection pipeline. Has OCSF logging and telemetry but not
+    distributed tracing.
+
+13. OBSERVABILITY: MLFLOW / PHOENIX INTEGRATION
+    Status: MISSING — No LLM observability platform integration.
+
+14. OBSERVABILITY: KIALI / MESH VISUALIZATION
+    Status: MISSING — No service mesh visualization.
+
+15. ISTIO SERVICE MESH
+    Status: MISSING — No Istio integration, no mTLS between services
+    (beyond PKI-level mTLS), no ambient mesh.
+
+16. CONTAINER BUILD SYSTEM (Shipwright)
+    Status: MISSING — No in-cluster container build system. Users must
+    bring pre-built images.
+
+17. WEB UI DASHBOARD
+    Status: MISSING — No web-based dashboard. Only CLI and TUI.
+
+18. SESSION MANAGEMENT / CONVERSATION PERSISTENCE
+    Status: MISSING — No session management for multi-turn conversations,
+    no conversation history persistence, no session trees.
+
+19. DYNAMIC AGENT MATERIALIZATION
+    Status: MISSING — No DynamicAgentRequest CRD for spawning task-scoped
+    child agents with delegation and capability admission.
+
+20. EVENT-DRIVEN TRIGGERS
+    Status: MISSING — No event-driven trigger system (cron, webhook, alert).
+
+21. MULTI-TENANT NAMESPACE ISOLATION
+    Status: PARTIAL — K8s driver supports sandbox_namespace, but no
+    per-tenant gateway isolation, RBAC per namespace, or multi-team
+    gateway-per-tenant architecture. Single-player mode.
+
+22. HUMAN-IN-THE-LOOP APPROVAL WORKFLOWS
+    Status: PARTIAL — Policy advisor has approve/reject/edit for policy
+    proposals, but no HITL workflow for agent execution decisions.
+
+23. FEATURE FLAG SYSTEM
+    Status: MISSING — No runtime feature flag system for gating capabilities.
+
+
+================================================================================
+ARCHITECTURE SUMMARY
+================================================================================
+
+OpenShell's architecture is organized around three stable runtime components:
+
+  CLI / SDK / TUI  →  Gateway (Control Plane)  →  Supervisor (Data Plane)
+
+The GATEWAY owns:
+  - Authenticated API access (gRPC + HTTP)
+  - Durable state (SQLite / Postgres)
+  - Policy and settings delivery
+  - Provider credential management
+  - Inference configuration
+  - Supervisor relay coordination
+  - Draft policy advisor pipeline
+
+The SUPERVISOR owns:
+  - Sandbox-local security boundary
+  - Filesystem, process, network isolation
+  - Policy proxy (L4/L7 enforcement)
+  - Inference interception and routing
+  - Credential injection (env vars + HTTP headers)
+  - SSH server for connect/exec
+  - OCSF security logging
+  - Gateway config polling
+
+Integration boundaries are driver/adapter-based:
+  - COMPUTE drivers: Docker, Podman, K8s, VM, Extension
+  - CREDENTIALS drivers: Provider profiles, token grants
+  - CONTROL-PLANE IDENTITY: mTLS, OIDC, Cloudflare JWT
+  - SANDBOX IDENTITY: Gateway JWT, SPIFFE (external)
+
+The POLICY MODEL uses overlapping controls:
+  - Landlock (filesystem) — locked at creation
+  - Seccomp (process) — locked at creation
+  - Network namespace — locked at creation
+  - OPA proxy (network, L7) — hot-reloadable
+  - Inference router — hot-reloadable
+
+================================================================================
+LANGUAGE AND TECHNOLOGY STACK
+================================================================================
+
+Rust:       Core platform (gateway, sandbox, proxy, policy, drivers, CLI, TUI)
+            tokio async runtime, tonic gRPC, axum HTTP, rustls TLS,
+            ratatui TUI, clap CLI, rcgen PKI
+
+Python:     SDK (gRPC bindings, CLI packaging via PyPI)
+
+Shell:      Install scripts, deployment scripts, CI scripts
+
+Protobuf:   gRPC service contracts (5 proto files)
+
+YAML:       Provider profiles, sandbox policies, Helm charts
+
+SQL:        SQLite + Postgres migrations
+
+Z3:         Formal policy verification (via openshell-prover)
+
+OPA/Rego:   Network policy evaluation (in-process)
+
+================================================================================
+END OF FEATURE ANALYSIS
+================================================================================

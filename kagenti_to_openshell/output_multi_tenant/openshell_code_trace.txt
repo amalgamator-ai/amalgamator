@@ -1,0 +1,778 @@
+================================================================================
+OPENSHELL CODE TRACE: Multi-Tenant Deployment Support
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Category: Security / Multi-Tenancy
+OpenShell Status: INADEQUATE (explicitly single-player mode)
+Date: 2026-07-03
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Executive Summary
+2. Architecture Overview (Current Single-Tenant Model)
+3. Component Analysis
+   3.1  Gateway Server (openshell-server)
+   3.2  Persistence Layer (Store, SQLite, Postgres)
+   3.3  Authentication & Authorization (auth/)
+   3.4  Sandbox Lifecycle (grpc/sandbox.rs)
+   3.5  Provider Management (grpc/provider.rs)
+   3.6  Kubernetes Driver (openshell-driver-kubernetes)
+   3.7  Docker Driver (openshell-driver-docker)
+   3.8  CLI & OIDC Auth (openshell-cli, openshell-bootstrap)
+   3.9  Helm Chart (deploy/helm/openshell/)
+   3.10 Protobuf Definitions (proto/)
+   3.11 Configuration (config_file.rs, config.rs)
+4. Multi-Tenancy Gap Analysis
+5. File Inventory
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+OpenShell is fundamentally single-tenant by design. There is:
+
+  - NO tenant/owner field on any persistent object (sandboxes, providers)
+  - NO per-user filtering on list/get operations
+  - NO tenant column in the database schema
+  - NO namespace-per-tenant in the Kubernetes driver
+  - NO audience-based tenant scoping (audience is a single global value)
+  - NO per-user provider isolation
+  - NO owner-label stamping on sandbox creation
+  - NO RBAC partitioning by tenant (roles are admin/user, not tenant-scoped)
+
+The existing infrastructure that COULD support multi-tenancy:
+
+  + Identity/Principal model (Identity.subject, Principal.User) — exists but unused for scoping
+  + OIDC JWT with roles/scopes extraction — exists, could add tenant claim extraction
+  + Label-based filtering (list_with_selector, labels column in DB) — exists
+  + Namespace-scoped Kubernetes operations — exists as single-namespace model
+  + ResourceQuota support — not present, would need to be added
+  + Sandbox-principal scope guards (guard.rs) — exist for cross-sandbox, not cross-tenant
+
+================================================================================
+2. ARCHITECTURE OVERVIEW (Current Single-Tenant Model)
+================================================================================
+
+Current Model:
+```
+                    CLI (any user)
+                        │
+                        ▼
+              ┌─────────────────┐
+              │  Gateway Server │ ← single instance or HA replicas
+              │  (gRPC + HTTP)  │   sharing one Postgres DB
+              └────────┬────────┘
+                       │
+          ┌────────────┼────────────────┐
+          ▼            ▼                ▼
+    ┌──────────┐  ┌──────────┐  ┌──────────────┐
+    │ Store    │  │ Compute  │  │ Auth Layer   │
+    │ (SQLite/ │  │ Runtime  │  │ (OIDC/mTLS)  │
+    │ Postgres)│  │ (K8s/    │  │ - role check │
+    │          │  │  Docker/ │  │ - scope check│
+    │ GLOBAL   │  │  Podman/ │  │ - NO tenant  │
+    │ objects  │  │  VM)     │  │   check      │
+    └──────────┘  └─────┬────┘  └──────────────┘
+                        │
+                   Single K8s
+                   Namespace
+                   (default: "openshell")
+```
+
+ALL users share:
+  - The same persistence store (no per-user filtering)
+  - The same compute namespace
+  - The same providers (admin-created, globally visible)
+  - The same sandbox list (any user sees all sandboxes)
+
+================================================================================
+3. COMPONENT ANALYSIS
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+3.1 Gateway Server (openshell-server)
+────────────────────────────────────────────────────────────────────────────────
+
+File: crates/openshell-server/src/lib.rs
+
+ServerState struct (the core shared state):
+  config: Config              ← single global config, no per-tenant config
+  store: Arc<Store>           ← single shared persistence store
+  compute: ComputeRuntime     ← single compute driver targeting one namespace
+  sandbox_index: SandboxIndex ← global in-memory index (no tenant partitioning)
+  sandbox_watch_bus: SandboxWatchBus  ← global event bus
+  oidc_cache: Option<Arc<JwksCache>>  ← single OIDC provider
+  sandbox_jwt_issuer/authenticator    ← single JWT signing key
+
+MULTI-TENANCY GAPS:
+  - ServerState has no tenant context or per-tenant state
+  - No per-request tenant resolution from JWT claims
+  - No tenant-scoped store queries
+  - SandboxIndex is global (no tenant partitioning)
+  - SandboxWatchBus broadcasts to all subscribers (no tenant filtering)
+
+────────────────────────────────────────────────────────────────────────────────
+3.2 Persistence Layer (Store, SQLite, Postgres)
+────────────────────────────────────────────────────────────────────────────────
+
+Files:
+  crates/openshell-server/src/persistence/mod.rs (637 lines)
+  crates/openshell-server/src/persistence/sqlite.rs
+  crates/openshell-server/src/persistence/postgres.rs
+  crates/openshell-server/migrations/sqlite/001_create_objects.sql
+  crates/openshell-server/migrations/postgres/001_create_objects.sql
+
+Database Schema (both backends):
+  CREATE TABLE objects (
+      id            TEXT PRIMARY KEY,
+      object_type   TEXT NOT NULL,       ← "sandbox", "provider", "sandbox_policy" etc.
+      name          TEXT,                ← human-readable name (unique per type)
+      scope         TEXT,                ← application-owned scope (NOT tenant scope)
+      version       INTEGER,
+      status        TEXT,
+      dedup_key     TEXT,
+      hit_count     INTEGER DEFAULT 0,
+      payload       BLOB NOT NULL,       ← serialized protobuf
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      labels        TEXT,                ← JSON-serialized label map
+      resource_version INTEGER DEFAULT 1 ← optimistic concurrency
+  );
+
+  Unique indexes:
+    objects_name_uq ON (object_type, name) WHERE name IS NOT NULL
+    objects_version_uq ON (object_type, scope, version)
+    objects_dedup_uq ON (object_type, scope, dedup_key)
+
+  NOTE: name uniqueness is global within object_type.
+  There is NO tenant column. No per-user partition.
+
+ObjectRecord struct:
+  pub struct ObjectRecord {
+      pub object_type: String,
+      pub id: String,
+      pub name: String,
+      pub payload: Vec<u8>,
+      pub created_at_ms: i64,
+      pub updated_at_ms: i64,
+      pub labels: Option<String>,     ← JSON labels (could carry owner label)
+      pub resource_version: u64,
+  }
+
+Store API (key methods):
+  pub async fn put_if(&self, object_type, id, name, payload, labels, condition)
+  pub async fn get(&self, object_type, id) -> Option<ObjectRecord>
+  pub async fn get_by_name(&self, object_type, name) -> Option<ObjectRecord>
+  pub async fn list(&self, object_type, limit, offset) -> Vec<ObjectRecord>
+  pub async fn list_with_selector(&self, object_type, label_selector, limit, offset)
+  pub async fn delete(&self, object_type, id) -> bool
+  pub async fn put_scoped(&self, object_type, id, name, scope, payload, labels)
+  pub async fn list_by_scope(&self, object_type, scope, limit, offset)
+
+MULTI-TENANCY GAPS:
+  - list() returns ALL objects of a type — no per-user filtering
+  - get_by_name() looks up globally — two tenants cannot have same-named sandbox
+  - No "owner" or "tenant" column for partitioning
+  - The "scope" column is used for policy revisions scoped to sandbox_id, NOT tenancy
+  - list_with_selector() EXISTS and could be used for owner-label filtering
+  - Labels are stored as JSON — could carry openshell.ai/owner but don't today
+  - Name uniqueness is global — would need (object_type, name, owner) for multi-tenant
+
+EXISTING HOOKS THAT COULD BE LEVERAGED:
+  - labels column: can store {"openshell.ai/owner": "<sub>"} on every object
+  - list_with_selector(): can filter by openshell.ai/owner=<caller>
+  - put_if() with labels: can stamp owner at creation time
+  - Postgres JSONB @> operator: already used for efficient label filtering
+
+────────────────────────────────────────────────────────────────────────────────
+3.3 Authentication & Authorization (auth/)
+────────────────────────────────────────────────────────────────────────────────
+
+Files:
+  crates/openshell-server/src/auth/mod.rs
+  crates/openshell-server/src/auth/identity.rs (44 lines)
+  crates/openshell-server/src/auth/principal.rs (77 lines)
+  crates/openshell-server/src/auth/authenticator.rs
+  crates/openshell-server/src/auth/authz.rs (551 lines)
+  crates/openshell-server/src/auth/guard.rs (178 lines)
+  crates/openshell-server/src/auth/oidc.rs (514 lines)
+  crates/openshell-server/src/auth/sandbox_jwt.rs
+  crates/openshell-server/src/auth/k8s_sa.rs
+  crates/openshell-server/src/auth/method_authz.rs
+  crates/openshell-server/src/auth/sandbox_methods.rs
+
+Identity struct:
+  pub struct Identity {
+      pub subject: String,                ← OIDC sub (UUID)
+      pub display_name: Option<String>,   ← preferred_username
+      pub roles: Vec<String>,             ← realm_access.roles, etc.
+      pub scopes: Vec<String>,            ← OAuth2 scopes
+      pub provider: IdentityProvider,     ← Oidc | Mtls | CloudflareAccess | LocalDev
+  }
+  NOTE: NO tenant field, NO group membership, NO organization
+
+Principal enum:
+  pub enum Principal {
+      User(UserPrincipal),      ← wraps Identity
+      Sandbox(SandboxPrincipal),← sandbox_id + source + trust_domain
+      Anonymous,                ← health probes
+  }
+  NOTE: NO tenant field on any variant
+
+AuthzPolicy:
+  pub struct AuthzPolicy {
+      pub admin_role: String,    ← "openshell-admin"
+      pub user_role: String,     ← "openshell-user"
+      pub scopes_enabled: bool,
+  }
+
+  check(identity, method):
+    - Looks up required role for method (Admin or User)
+    - Admin role implicitly satisfies User role requirement
+    - If scopes_enabled, also checks required scope (sandbox:read, etc.)
+    - NO tenant-level authorization
+
+OIDC JWT Validation (oidc.rs):
+  - Validates issuer, audience (single global value), signature
+  - Extracts roles from configurable claim path
+  - Extracts scopes from configurable claim
+  - OidcClaims struct: sub, preferred_username, email, roles, extra (raw claims)
+  - Audience is validated as: validation.set_audience(&[&self.config.audience])
+    This is a SINGLE audience string — no per-tenant audience scoping
+
+  OidcConfig:
+    pub struct OidcConfig {
+        pub issuer: String,         ← single OIDC issuer
+        pub audience: String,       ← single audience (e.g. "openshell-cli")
+        pub jwks_ttl: u64,
+        pub roles_claim: String,    ← "realm_access.roles" for Keycloak
+        pub scopes_claim: String,
+        pub admin_role: String,     ← "openshell-admin"
+        pub user_role: String,      ← "openshell-user"
+        pub ca_cert_path: Option<String>,
+    }
+
+Sandbox Scope Guards (guard.rs):
+  ensure_sandbox_scope(principal, claimed_sandbox_id):
+    - Principal::User → passes through (RBAC was the gate)
+    - Principal::Sandbox → must match sandbox_id exactly
+    - Principal::Anonymous → rejected
+  NOTE: User principals bypass sandbox scope checks entirely.
+  There is NO owner check — any user with the right role can access any sandbox.
+
+MULTI-TENANCY GAPS:
+  - Identity has no tenant/group field
+  - No tenant claim extraction from JWT
+  - Audience is single-valued — can't scope per-tenant
+  - AuthzPolicy has no tenant dimension — only admin/user roles
+  - Sandbox scope guards only apply to sandbox principals, not users
+  - No user-to-sandbox ownership enforcement on any API
+
+────────────────────────────────────────────────────────────────────────────────
+3.4 Sandbox Lifecycle (grpc/sandbox.rs)
+────────────────────────────────────────────────────────────────────────────────
+
+File: crates/openshell-server/src/grpc/sandbox.rs
+
+handle_create_sandbox_inner():
+  1. Validates spec and labels
+  2. Validates provider names exist (globally — no per-user filter)
+  3. Generates UUID + petname for sandbox
+  4. Creates Sandbox protobuf with metadata.labels from request
+  5. Validates via compute driver
+  6. Mints sandbox JWT (if configured)
+  7. Calls compute.create_sandbox()
+  NOTE: NO owner stamping. request.labels are passed through as-is.
+  The caller's identity (Principal::User) is NOT consulted or recorded.
+
+handle_list_sandboxes():
+  - Calls store.list_messages::<Sandbox>(limit, offset)
+  - Or store.list_messages_with_selector if label_selector is provided
+  NOTE: Returns ALL sandboxes. No per-user filtering.
+
+handle_get_sandbox():
+  - Calls store.get_message_by_name::<Sandbox>(name)
+  NOTE: Any authenticated user can get any sandbox by name.
+
+handle_delete_sandbox():
+  - Looks up sandbox by name, calls compute.delete_sandbox()
+  NOTE: Any authenticated user can delete any sandbox.
+
+SandboxIndex (sandbox_index.rs):
+  In-memory HashMap mapping:
+    sandbox_name → sandbox_id
+    agent_pod → sandbox_id
+  NOTE: Global index. No tenant partitioning.
+
+MULTI-TENANCY GAPS:
+  - CreateSandbox does not stamp owner from Principal::User.identity.subject
+  - ListSandboxes returns all sandboxes regardless of caller identity
+  - GetSandbox/DeleteSandbox has no ownership check for user principals
+  - Client-supplied openshell.ai/owner labels are NOT stripped
+  - SandboxIndex is global — would need per-tenant partitioning
+
+────────────────────────────────────────────────────────────────────────────────
+3.5 Provider Management (grpc/provider.rs)
+────────────────────────────────────────────────────────────────────────────────
+
+File: crates/openshell-server/src/grpc/provider.rs
+
+Provider CRUD:
+  - CreateProvider: admin-only role, stores globally
+  - GetProvider: user role, no ownership check
+  - ListProviders: user role, returns ALL providers
+  - UpdateProvider: admin role, no ownership check
+  - DeleteProvider: admin role, no ownership check
+
+NOTE: Providers are admin-managed global resources. There is no per-user
+provider ownership, no shared/user-owned distinction, and no per-user
+credential isolation.
+
+MULTI-TENANCY GAPS:
+  - No per-user provider ownership (owner label not stamped)
+  - No user-owned vs shared provider distinction
+  - Provider name uniqueness is global (not scoped to owner)
+  - ListProviders returns all providers to any authenticated user
+
+────────────────────────────────────────────────────────────────────────────────
+3.6 Kubernetes Driver (openshell-driver-kubernetes)
+────────────────────────────────────────────────────────────────────────────────
+
+Files:
+  crates/openshell-driver-kubernetes/src/config.rs (794 lines)
+  crates/openshell-driver-kubernetes/src/driver.rs (3846 lines)
+  crates/openshell-driver-kubernetes/src/grpc.rs (173 lines)
+  crates/openshell-driver-kubernetes/src/main.rs (165 lines)
+
+KubernetesComputeConfig:
+  pub struct KubernetesComputeConfig {
+      pub namespace: String,  ← DEFAULT_K8S_NAMESPACE = "openshell" — SINGLE namespace
+      pub default_image: String,
+      pub supervisor_image: String,
+      pub enable_user_namespaces: bool,
+      pub sandbox_uid: Option<u32>,
+      pub sandbox_gid: Option<u32>,
+      ...
+  }
+
+Namespace Handling:
+  - All sandbox operations use self.config.namespace (single value)
+  - Api::namespaced_with(client, &self.config.namespace) everywhere
+  - sandbox_from_object() extracts namespace from K8s metadata, falls back to config
+  - No per-tenant or per-user namespace
+  - No namespace provisioning logic
+
+Labels Applied to Sandbox Pods:
+  LABEL_SANDBOX_ID = "openshell.ai/sandbox-id"
+  LABEL_SANDBOX_NAME = "openshell.ai/sandbox-name"
+  LABEL_SANDBOX_NAMESPACE = "openshell.ai/sandbox-namespace"  ← from config, not tenant
+  LABEL_MANAGED_BY = "app.kubernetes.io/managed-by"
+  NOTE: No openshell.ai/owner or openshell.ai/tenant label
+
+MULTI-TENANCY GAPS:
+  - Single namespace model (all sandboxes in one K8s namespace)
+  - No namespace-per-tenant provisioning
+  - No owner/tenant labels on created sandbox pods
+  - No ResourceQuota or LimitRange per tenant
+  - RBAC is deployed once via Helm (single Role/RoleBinding in one namespace)
+
+────────────────────────────────────────────────────────────────────────────────
+3.7 Docker Driver (openshell-driver-docker)
+────────────────────────────────────────────────────────────────────────────────
+
+File: crates/openshell-driver-docker/src/lib.rs
+
+DockerConfig has sandbox_namespace field used as a Docker label for filtering:
+  sandbox_namespace: String  (default: "default")
+
+Uses LABEL_SANDBOX_NAMESPACE to tag Docker containers and filter list/get:
+  managed_container_label_filters(sandbox_namespace, extra_filters)
+  → filters by LABEL_SANDBOX_NAMESPACE=<namespace>
+
+This is used for driver-level container isolation (multiple gateway instances
+on the same Docker host), NOT for tenant isolation. A single gateway uses
+one sandbox_namespace value for all its containers.
+
+────────────────────────────────────────────────────────────────────────────────
+3.8 CLI & OIDC Auth (openshell-cli, openshell-bootstrap)
+────────────────────────────────────────────────────────────────────────────────
+
+Files:
+  crates/openshell-cli/src/main.rs (4909 lines)
+  crates/openshell-cli/src/auth.rs (883 lines)
+  crates/openshell-cli/src/oidc_auth.rs (534 lines)
+  crates/openshell-bootstrap/src/oidc_token.rs (133 lines)
+  crates/openshell-bootstrap/src/jwt.rs (113 lines)
+  crates/openshell-bootstrap/src/metadata.rs
+
+CLI Gateway Registration:
+  openshell gateway add <name> --url <endpoint>
+    --oidc-issuer <url>
+    --oidc-client-id <client_id>   (default: "openshell-cli")
+    --oidc-audience <audience>     (optional: for API resource server)
+    --oidc-scopes <scopes>         (optional: space-separated)
+
+GatewayMetadata (stored per-gateway on disk):
+  pub struct GatewayMetadata {
+      pub name: String,
+      pub url: String,
+      pub auth_mode: Option<String>,
+      pub oidc_issuer: Option<String>,
+      pub oidc_client_id: Option<String>,
+      pub oidc_audience: Option<String>,   ← single audience per gateway
+      pub oidc_scopes: Option<String>,
+      ...
+  }
+
+OidcTokenBundle (persisted to disk):
+  pub struct OidcTokenBundle {
+      pub access_token: String,
+      pub refresh_token: Option<String>,
+      pub expires_at: Option<u64>,
+      pub issuer: String,
+      pub client_id: String,
+  }
+  NOTE: No tenant, role, or admin fields in the bundle.
+
+OIDC Auth Flows:
+  - Authorization Code + PKCE (browser-based login)
+  - Client Credentials (CI/automation)
+  - Refresh Token flow
+  - audience parameter passed to Keycloak as URL query param
+
+MULTI-TENANCY GAPS:
+  - CLI stores one OIDC token per gateway — no multi-audience support
+  - No concept of "which tenant am I accessing" in the CLI
+  - audience is a single string, not a list (can't include per-tenant audiences)
+
+────────────────────────────────────────────────────────────────────────────────
+3.9 Helm Chart (deploy/helm/openshell/)
+────────────────────────────────────────────────────────────────────────────────
+
+Files:
+  deploy/helm/openshell/Chart.yaml
+  deploy/helm/openshell/values.yaml
+  deploy/helm/openshell/templates/role.yaml
+  deploy/helm/openshell/templates/rolebinding.yaml
+  deploy/helm/openshell/templates/serviceaccount.yaml
+  deploy/helm/openshell/templates/statefulset.yaml
+  deploy/helm/openshell/templates/deployment.yaml
+  deploy/helm/openshell/templates/service.yaml
+  deploy/helm/openshell/templates/gateway-config.yaml
+  deploy/helm/openshell/templates/certgen.yaml
+  deploy/helm/openshell/templates/networkpolicy.yaml
+  deploy/helm/openshell/templates/clusterrole.yaml
+  deploy/helm/openshell/templates/clusterrolebinding.yaml
+
+Key values.yaml Settings:
+  server.sandboxNamespace: ""  ← defaults to .Release.Namespace
+  server.dbUrl: "sqlite:/var/openshell/openshell.db"
+  server.oidc.issuer: ""
+  server.oidc.audience: "openshell-cli"  ← single global audience
+  server.oidc.adminRole: ""
+  server.oidc.userRole: ""
+  workload.kind: statefulset  ← single replica with SQLite
+  replicaCount: 1
+
+RBAC (role.yaml):
+  Single Role in sandboxNamespace:
+    - agents.x-k8s.io/sandboxes: full CRUD
+    - events: get/list/watch
+    - pods: get (for TokenReview resolution)
+  NOTE: Single Role, single namespace. No per-tenant RBAC.
+
+MULTI-TENANCY GAPS:
+  - Chart deploys a single gateway into a single namespace
+  - No per-tenant namespace provisioning
+  - No per-tenant RBAC (Role/RoleBinding)
+  - No per-tenant ResourceQuota or LimitRange
+  - No per-tenant database (single DB for the gateway)
+  - No per-tenant TLS certificates
+  - No per-tenant audience configuration
+
+────────────────────────────────────────────────────────────────────────────────
+3.10 Protobuf Definitions (proto/)
+────────────────────────────────────────────────────────────────────────────────
+
+Files:
+  proto/openshell.proto
+  proto/sandbox.proto
+  proto/datamodel.proto
+  proto/compute_driver.proto
+
+ObjectMeta (datamodel.proto):
+  message ObjectMeta {
+      string id = 1;
+      string name = 2;
+      int64 created_at_ms = 3;
+      map<string, string> labels = 4;
+      uint64 resource_version = 5;
+  }
+  NOTE: No owner field. Labels map exists (could carry owner).
+
+Sandbox (sandbox.proto):
+  message Sandbox {
+      ObjectMeta metadata = 1;
+      SandboxSpec spec = 2;
+      SandboxStatus status = 3;
+  }
+  NOTE: No owner field in metadata or spec.
+
+CreateSandboxRequest:
+  message CreateSandboxRequest {
+      string name = 1;
+      SandboxSpec spec = 2;
+      map<string, string> labels = 3;
+  }
+  NOTE: Labels field exists — owner could be injected here server-side.
+
+ListSandboxesRequest:
+  message ListSandboxesRequest {
+      uint32 limit = 1;
+      uint32 offset = 2;
+      string label_selector = 3;
+  }
+  NOTE: label_selector exists — could be used for owner filtering.
+
+Provider (openshell.proto):
+  message Provider {
+      ObjectMeta metadata = 1;
+      ...
+  }
+  NOTE: Same pattern — no owner, but labels available.
+
+────────────────────────────────────────────────────────────────────────────────
+3.11 Configuration (config_file.rs, config.rs)
+────────────────────────────────────────────────────────────────────────────────
+
+Files:
+  crates/openshell-server/src/config_file.rs (663 lines)
+  crates/openshell-core/src/config.rs (1068 lines)
+
+Gateway TOML Config File:
+  [openshell.gateway]
+  sandbox_namespace = "agents"     ← single namespace
+  bind_address = "0.0.0.0:8080"
+  [openshell.gateway.oidc]
+  issuer = "https://idp.example.com/realms/openshell"
+  audience = "openshell-cli"       ← single audience
+  [openshell.drivers.kubernetes]
+  namespace = "agents"             ← single namespace, inherited from gateway
+
+Config struct (openshell-core):
+  pub struct Config {
+      pub bind_address: SocketAddr,
+      pub tls: Option<TlsConfig>,
+      pub oidc: Option<OidcConfig>,    ← single OIDC config
+      pub auth: GatewayAuthConfig,
+      pub mtls_auth: MtlsAuthConfig,
+      pub gateway_jwt: Option<GatewayJwtConfig>,
+      pub db_url: String,              ← single database
+      pub compute_drivers: Vec<String>,
+      pub service_routing: ServiceRoutingConfig,
+      ...
+  }
+  NOTE: No per-tenant anything. Single OIDC issuer, single DB, single compute.
+
+================================================================================
+4. MULTI-TENANCY GAP ANALYSIS
+================================================================================
+
+DIMENSION                   CURRENT STATE            NEEDED FOR MULTI-TENANCY
+─────────────────────────── ──────────────────────── ──────────────────────────
+Persistence partitioning    Global objects table     Per-owner label filtering
+                            No owner column          or dedicated owner column
+
+Sandbox creation            No owner stamping        Server-side owner stamp
+                            Labels passed through    from Principal.identity.subject
+                                                     Strip client openshell.ai/*
+
+Sandbox listing             Returns all sandboxes    AND owner=<caller> into query
+                            No per-user filter       Admin bypass for openshell-admin
+
+Sandbox get/delete          Any user can access      PermissionDenied if owner!=caller
+                            any sandbox              Admin bypass
+
+Provider ownership          Admin-created, global    Per-user + shared providers
+                            No ownership concept     Resolution: user > shared
+
+Provider listing            Returns all providers    Filter by owner + shared
+
+Namespace isolation         Single K8s namespace     Namespace-per-tenant or
+                            for all sandboxes        owner-label on pods
+
+OIDC audience scoping       Single global audience   Per-tenant audience validation
+                            (e.g. "openshell-cli")   (aud=team1, aud=team2)
+
+RBAC                        admin/user roles only    No change needed if using
+                            No tenant dimension      owner-label approach
+
+DB name uniqueness          Global (type, name)      Scoped (type, name, owner)
+                                                     or namespace-scoped
+
+Helm chart                  Single gateway deploy    Gateway-per-tenant pattern
+                            Single namespace         or shared gateway + owner labels
+
+ResourceQuota               None                     Per-tenant quotas
+
+Certificate management      Single TLS cert set      Per-tenant leaf certs
+                                                     (if gateway-per-tenant)
+
+KEY FILES THAT MUST CHANGE FOR MULTI-TENANCY:
+
+  CRITICAL (data model / persistence):
+    crates/openshell-server/src/persistence/mod.rs     - Add owner-aware queries
+    crates/openshell-server/src/grpc/sandbox.rs        - Stamp owner, filter by owner
+    crates/openshell-server/src/grpc/provider.rs       - Owner labeling + filtering
+    crates/openshell-server/src/auth/identity.rs       - Add tenant/owner extraction
+    crates/openshell-server/src/auth/guard.rs          - Add user ownership checks
+    proto/datamodel.proto                              - Optionally add owner field
+
+  IMPORTANT (infrastructure):
+    crates/openshell-server/src/auth/oidc.rs           - Extract tenant from claims
+    crates/openshell-server/src/auth/authz.rs          - Tenant-scoped authorization
+    crates/openshell-server/src/sandbox_index.rs       - Per-tenant partitioning
+    crates/openshell-server/src/config_file.rs         - Per-tenant config support
+    crates/openshell-driver-kubernetes/src/config.rs   - Namespace-per-tenant
+    crates/openshell-driver-kubernetes/src/driver.rs   - Owner labels on pods
+
+  DEPLOYMENT:
+    deploy/helm/openshell/values.yaml                  - Per-tenant values
+    deploy/helm/openshell/templates/role.yaml           - Per-tenant RBAC
+    deploy/helm/openshell/templates/gateway-config.yaml - Per-tenant config
+
+  MIGRATIONS:
+    migrations/sqlite/006_add_owner.sql (new)          - Add owner column or index
+    migrations/postgres/006_add_owner.sql (new)        - Add owner column or index
+
+================================================================================
+5. FILE INVENTORY
+================================================================================
+
+GATEWAY SERVER (crates/openshell-server/src/):
+  lib.rs                    Server entry point, ServerState struct
+  main.rs                   CLI entry
+  config_file.rs            (663 lines) TOML config loader
+  persistence/mod.rs        (637 lines) Store enum, ObjectRecord, generic queries
+  persistence/sqlite.rs     SQLite backend
+  persistence/postgres.rs   Postgres backend
+  persistence/tests.rs      Persistence test suite
+  auth/identity.rs          (44 lines)  Identity struct (no tenant field)
+  auth/principal.rs         (77 lines)  Principal enum (no tenant field)
+  auth/authenticator.rs     Authenticator chain
+  auth/authz.rs             (551 lines) RBAC authorization (admin/user only)
+  auth/guard.rs             (178 lines) Sandbox scope guards (no user-ownership)
+  auth/oidc.rs              (514 lines) OIDC JWT validation (single audience)
+  auth/sandbox_jwt.rs       Gateway-minted sandbox JWTs
+  auth/k8s_sa.rs            K8s ServiceAccount bootstrap
+  auth/method_authz.rs      Per-method auth metadata
+  auth/sandbox_methods.rs   Sandbox-callable methods allowlist
+  auth/http.rs              Edge proxy browser login
+  auth/mod.rs               Auth module declarations
+  grpc/sandbox.rs           Sandbox lifecycle handlers (no owner stamping)
+  grpc/provider.rs          Provider CRUD handlers (global, admin-only)
+  grpc/service.rs           gRPC service dispatch
+  grpc/validation.rs        Request validation
+  grpc/policy.rs            Policy revision handlers
+  grpc/auth_rpc.rs          IssueSandboxToken RPC
+  grpc/mod.rs               gRPC module
+  sandbox_index.rs          (65 lines) In-memory sandbox index (global)
+  sandbox_watch.rs          Sandbox event bus
+  compute/mod.rs            Compute runtime abstraction
+  compute/driver_config.rs  Driver configuration
+  compute/lease.rs          HA lease management
+  compute/vm.rs             VM driver management
+  policy_store.rs           Policy revision store
+  provider_refresh.rs       Provider credential refresh
+  ssh_sessions.rs           SSH session management
+  supervisor_session.rs     Supervisor session registry
+  service_routing.rs        Sandbox service URL routing
+  inference.rs              Inference routing
+  http.rs                   Health/metrics HTTP handlers
+  multiplex.rs              gRPC/HTTP multiplexer
+  tls.rs                    TLS acceptor
+  certgen.rs                Certificate generation
+  telemetry.rs              Anonymous telemetry
+  readiness.rs              Health/readiness probes
+  tracing_bus.rs            Log bus
+  ws_tunnel.rs              WebSocket tunnel
+
+CORE LIBRARY (crates/openshell-core/src/):
+  config.rs                 (1068 lines) Config struct (single-tenant)
+  auth.rs                   EdgeAuthInterceptor
+  error.rs                  Error types
+  sandbox_env.rs            Sandbox env var constants
+  driver_utils.rs           Label constants (LABEL_SANDBOX_ID, etc.)
+  provider_credentials.rs   Provider credential management
+  settings.rs               Gateway/sandbox settings
+  paths.rs                  File permission utilities
+  grpc_client.rs            gRPC client with TLS
+  metadata.rs               Protobuf metadata accessors
+  plus 16 other modules
+
+KUBERNETES DRIVER (crates/openshell-driver-kubernetes/src/):
+  config.rs                 (794 lines) K8s config (single namespace)
+  driver.rs                 (3846 lines) K8s driver (single namespace ops)
+  grpc.rs                   gRPC service for remote driver
+  main.rs                   Driver CLI entry
+  lib.rs                    Module exports
+
+DOCKER DRIVER (crates/openshell-driver-docker/src/):
+  lib.rs                    Docker driver (sandbox_namespace label filtering)
+  tests.rs                  Tests
+
+CLI (crates/openshell-cli/src/):
+  main.rs                   (4909 lines) CLI with clap parsing
+  auth.rs                   Cloudflare Access browser auth
+  oidc_auth.rs              (534 lines) OIDC auth flows
+  run.rs                    Command execution handlers
+  ssh.rs                    SSH proxy/config
+  tls.rs                    TLS client setup
+  output.rs                 Output formatting
+
+BOOTSTRAP (crates/openshell-bootstrap/src/):
+  metadata.rs               Gateway metadata storage
+  oidc_token.rs             OIDC token persistence
+  jwt.rs                    JWT key generation
+  mtls.rs                   mTLS material storage
+  pki.rs                    PKI generation
+  edge_token.rs             Edge token storage
+
+PROTOBUF (proto/):
+  openshell.proto           Main gRPC service definition
+  sandbox.proto             Sandbox/Provider message types
+  datamodel.proto           ObjectMeta, shared types
+  compute_driver.proto      Compute driver gRPC interface
+
+HELM CHART (deploy/helm/openshell/):
+  Chart.yaml                Chart metadata
+  values.yaml               Default values (single-tenant)
+  templates/role.yaml       RBAC Role (single namespace)
+  templates/rolebinding.yaml
+  templates/serviceaccount.yaml
+  templates/statefulset.yaml
+  templates/deployment.yaml
+  templates/service.yaml
+  templates/gateway-config.yaml
+  templates/certgen.yaml
+  templates/networkpolicy.yaml
+  templates/clusterrole.yaml
+  templates/clusterrolebinding.yaml
+  templates/_helpers.tpl
+  templates/_gateway-workload.tpl
+  templates/gateway.yaml
+  templates/grpcroute.yaml
+  templates/cert-manager-pki.yaml
+
+MIGRATIONS:
+  migrations/sqlite/001_create_objects.sql    Base schema (no owner column)
+  migrations/sqlite/004_add_object_metadata.sql
+  migrations/sqlite/005_add_resource_version.sql
+  migrations/postgres/001_create_objects.sql   Base schema (no owner column)
+  migrations/postgres/004_add_object_metadata.sql
+  migrations/postgres/005_add_resource_version.sql
+
+================================================================================
+END OF CODE TRACE
+================================================================================

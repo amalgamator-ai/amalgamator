@@ -1,0 +1,2477 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — CODE PORTING PLAN V4
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Source: Kagenti (Python/Shell/YAML)
+Target: OpenShell (Rust)
+Porting Complexity: HIGH
+Date: 2026-07-03
+Iteration: V4 (built from scratch with all V1-V3 learnings + fresh verification)
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Executive Summary
+2. Architectural Decision
+3. Prerequisites & Assumptions
+4. Learnings Incorporated from Previous Iterations (V1-V3)
+5. Verified Codebase State (V4 Fresh Verification)
+6. Step-by-Step Implementation Plan
+   Step 1:  Add groups Field to Identity Struct
+   Step 2:  Add groups_claim to OidcConfig & Extract Groups from JWT
+   Step 3:  Define Owner/Tenant Label Constants in openshell-core
+   Step 4:  Create Ownership Module (auth/ownership.rs)
+   Step 5:  Add OwnershipConfig to Configuration
+   Step 6:  Add ownership_config() Helper to ServerState
+   Step 7:  Modify Sandbox Create Handler (Owner Stamping)
+   Step 8:  Modify Sandbox List Handler (Owner Filtering)
+   Step 9:  Modify Sandbox Get/Delete Handlers (Ownership Enforcement)
+   Step 10: Modify Sandbox Watch/Exec/SSH Handlers (Ownership Enforcement)
+   Step 11: Modify Provider CRUD for Per-User Ownership
+   Step 12: Add Owner Labels to Kubernetes Driver (Sandbox CRD Labels)
+   Step 13: Verify Docker Driver Label Propagation (No Code Change)
+   Step 14: Update SandboxIndex for Owner Tracking (Optional)
+   Step 15: Update Helm Chart for Gateway-Per-Tenant Deployment
+   Step 16: Add Per-Tenant RBAC Templates
+   Step 17: Add ResourceQuota and LimitRange Templates
+   Step 18: Update Certificate Generation for Tenant SANs
+   Step 19: Update CLI for Multi-Tenant Gateway Display
+   Step 20: Add Unit and Integration Tests
+7. Dependency Summary
+8. Risk Analysis
+9. Breaking Change Assessment
+10. Implementation Order & Milestones
+11. Complete Label Flow Diagram
+12. Name Uniqueness & Known Limitations
+13. Cargo Dependency Summary
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+This plan ports Kagenti's multi-tenant deployment support to OpenShell.
+OpenShell is currently single-tenant by design: all users share the same
+sandbox list, provider list, K8s namespace, and persistence store. There
+is no per-user ownership, no tenant scoping, and no namespace isolation.
+
+The port introduces two complementary layers:
+
+  Layer 1 — Per-User Ownership (gateway-level, Steps 1-14):
+    Within a single shared gateway, enforce that each user's sandboxes
+    and providers are isolated from other users. Uses openshell.ai/owner
+    labels stored in the persistence layer and on K8s pods/CRDs.
+
+  Layer 2 — Gateway-Per-Tenant Deployment (Helm-level, Steps 15-18):
+    For hard multi-tenancy, deploy one gateway per tenant via Helm into
+    isolated K8s namespaces. Each gateway has its own database, OIDC
+    audience, RBAC, TLS certificates, and resource quotas.
+
+The approach mirrors Kagenti's architecture while translating to
+idiomatic Rust and integrating with OpenShell's existing patterns.
+
+Estimated effort: 16-21 developer-days.
+
+================================================================================
+2. ARCHITECTURAL DECISION
+================================================================================
+
+Kagenti uses a hybrid approach:
+  1. Gateway-per-tenant: Hard isolation via separate K8s namespaces
+  2. Per-user ownership within tenant: Soft isolation via owner labels
+
+OpenShell will adopt the same hybrid:
+  - Layer 1 (per-user ownership) is implemented as Rust code changes
+    in the gateway server, requiring no external dependencies.
+  - Layer 2 (gateway-per-tenant) is implemented as Helm chart changes,
+    deployment scripts, and OIDC audience configuration.
+
+WHY THIS APPROACH:
+  - Matches Kagenti's proven architecture (tested in CI with E2E)
+  - Layer 1 is useful standalone (soft multi-tenancy for simple deployments)
+  - Layer 2 provides hard isolation (K8s namespace + RBAC boundary)
+  - Both layers are backward-compatible (disabled by default)
+
+================================================================================
+3. PREREQUISITES & ASSUMPTIONS
+================================================================================
+
+The plan assumes:
+  1. OpenShell HEAD as the target (verified 2026-07-03)
+  2. OIDC authentication is configured (ownership is skipped for Anonymous)
+  3. Keycloak or compatible OIDC provider with group claims
+  4. cert-manager deployed for per-tenant TLS (Layer 2 only)
+  5. Kubernetes 1.28+ with Gateway API CRDs (Layer 2 only)
+
+Identity Construction Sites (VERIFIED):
+  The ONLY place Identity is constructed is oidc.rs, lines 342-348:
+
+    Ok(Identity {
+        subject: claims.sub,
+        display_name: claims.preferred_username,
+        roles: claims.roles,
+        scopes,
+        provider: IdentityProvider::Oidc,
+    })
+
+  Other auth providers:
+    - k8s_sa.rs: Constructs SandboxPrincipal (lines 127-134), NOT Identity
+    - http.rs: Serves HTML for Cloudflare Access login, does NOT construct Identity
+    - mTLS authenticator: Constructs Identity (if auth code exists) — needs groups: vec![]
+    - LocalDev authenticator: Constructs Identity — needs groups: vec![]
+
+================================================================================
+4. LEARNINGS INCORPORATED FROM PREVIOUS ITERATIONS (V1-V3)
+================================================================================
+
+This plan pre-fixes ALL 25 issues found across 3 prior iterations:
+
+V1-R1 ISSUES (11 total):
+  1.  AuthzPolicy enforces admin bypass before owner check
+  2.  Label-value sanitization for K8s charset rules
+  3.  Admin group checking with configurable group names
+  4.  Anti-spoofing: strip client-supplied openshell.ai/* labels
+  5.  Namespace-scoped RBAC (Role, not ClusterRole)
+  6.  cert SANs include tenant hostname
+  7.  Backward compatibility (disabled by default)
+  8.  SandboxIndex uses gateway Sandbox type (HAS metadata.labels)
+  9.  Watch/Exec/SSH handlers need ownership enforcement
+  10. Provider ownership with user>shared resolution order
+  11. Config struct has no Serialize/Deserialize derive
+
+V2-R1 ISSUES (6 total):
+  12. Provider runtime guard must handle empty admin_role when ownership disabled
+  13. OidcConfig HAS deny_unknown_fields — new fields need serde(default)
+  14. provider:write scope required for provider mutations (documented)
+  15. Pod labels must go in pod template, not Sandbox CR
+  16. ClusterRole name includes "node-reader" suffix
+  17. Dead helper functions removed
+
+V3-R1 ISSUES (8 total):
+  18. R3-1: request.into_inner() CONSUMES tonic::Request — extract Principal BEFORE
+  19. R3-2: DriverSandbox has NO metadata.labels — use spec.template.labels
+  20. R3-3: Sanitized subject vs raw subject comparison mismatch
+  21. R3-4: Method auth is #[rpc_auth] in grpc/mod.rs, NOT method_authz.rs
+  22. R3-5: Config construction mapping is in cli.rs, NOT config_file.rs
+  23. R3-6: http.rs does NOT construct Identity
+  24. R3-7: k8s_sa.rs constructs SandboxPrincipal, NOT Identity
+  25. R3-8: sanitize_label_value must enforce K8s start/end alphanumeric rules
+
+================================================================================
+5. VERIFIED CODEBASE STATE (V4 FRESH VERIFICATION)
+================================================================================
+
+All structural claims in this plan were verified against OpenShell HEAD
+on 2026-07-03 using 4 parallel verification agents. The following is
+the verified state that the plan's code modifications are grounded on.
+
+5.1 Auth Layer State
+--------------------
+  Identity struct (identity.rs, lines 15-31):
+    5 fields: subject, display_name, roles, scopes, provider
+    Derives: #[derive(Debug, Clone)]
+    NO groups field (must add in Step 1)
+
+  Principal enum (principal.rs, lines 23-35):
+    3 variants: User(UserPrincipal), Sandbox(SandboxPrincipal), Anonymous
+    NO tenant field on any variant
+
+  OidcClaims struct (oidc.rs, lines 94-108):
+    Fields: sub, preferred_username, email, roles, extra (serde flatten)
+    NO groups field (must add in Step 2)
+
+  OidcConfig struct (config.rs, lines 461-493):
+    7 fields: issuer, audience, jwks_ttl_secs, roles_claim, admin_role,
+              user_role, scopes_claim
+    HAS #[serde(deny_unknown_fields)] — new fields MUST use serde(default)
+    NO groups_claim field (must add in Step 2)
+
+  auth/mod.rs (lines 11-23):
+    11 module declarations, NO ownership module (must add in Step 4)
+
+  AuthzPolicy struct (authz.rs, lines 30-38):
+    3 fields: admin_role, user_role, scopes_enabled
+    check() method (line 66): takes (&Identity, &str) -> Result<(), Status>
+
+5.2 Handler Request Flow
+------------------------
+  ALL handlers call request.into_inner() as their FIRST operation:
+
+    Sandbox handlers (grpc/sandbox.rs):
+      handle_create_sandbox_inner:  line 123
+      handle_get_sandbox:           line 239
+      handle_list_sandboxes:        line 260
+      handle_delete_sandbox_inner:  line 500
+      handle_watch_sandbox:         line 579
+      handle_exec_sandbox:          line 809
+      handle_create_ssh_session:    line 1334
+
+    Provider handlers (grpc/provider.rs):
+      handle_create_provider:       line 1154
+      handle_list_providers:        line 1203
+      handle_update_provider:       line 1894
+      handle_delete_provider:       line 2265
+
+  Principal injection: multiplex.rs, line 623
+    req.extensions_mut().insert(principal);
+    This happens BEFORE the request reaches any handler.
+
+  KEY RULE: For ALL handler modifications in Steps 7-11:
+    Principal MUST be extracted from request.extensions() BEFORE
+    request.into_inner(). The into_inner() call CONSUMES the
+    tonic::Request wrapper, making extensions inaccessible.
+
+5.3 Configuration
+-----------------
+  Config struct (config.rs, lines 328-403):
+    16 fields, #[derive(Debug, Clone)], NO Serialize/Deserialize
+    Constructor: Config::new(tls) at line 569 (initializes all 16 fields)
+    Builder methods: .with_bind_address(), .with_oidc(), .with_log_level(),
+                     .with_database_url(), .with_compute_drivers(),
+                     .with_ssh_session_ttl_secs(), etc.
+    NO ownership or tenant fields (must add in Step 5)
+
+  GatewayFileSection (config_file.rs, lines 73-161):
+    29 fields (all Option<T>), #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    HAS #[serde(deny_unknown_fields)] — new fields MUST use serde(default)
+    NO ownership or tenant fields (must add in Step 5)
+
+  Config construction (cli.rs, function prepare_server_config):
+    Line 310: let mut config = openshell_core::Config::new(tls)
+    Lines 311-406: Builder methods + direct assignment
+    OIDC config: lines 396-406 — struct literal OidcConfig { ... }
+    Pattern: if let Some(field) = file...and_then(|f| f.openshell.gateway.field) {
+                 config = config.with_field(value);
+             }
+
+5.4 Persistence
+---------------
+  Store enum (persistence/mod.rs, lines 114-118):
+    Postgres(PostgresStore), Sqlite(SqliteStore)
+
+  ObjectRecord struct (persistence/mod.rs, lines 78-92):
+    Fields: object_type, id, name, payload, created_at_ms, updated_at_ms,
+            labels (Option<String> — JSON), resource_version
+
+  list_with_selector (persistence/mod.rs, lines 328-336):
+    Signature: (&self, object_type, label_selector, limit, offset)
+    Label selector format: "key1=value1,key2=value2"
+    Can be used for owner filtering.
+
+5.5 Label Constants & Driver State
+----------------------------------
+  driver_utils.rs label constants (lines 10-28):
+    LABEL_MANAGED_BY, LABEL_MANAGED_BY_VALUE, LABEL_SANDBOX_ID,
+    LABEL_SANDBOX_NAME, LABEL_SANDBOX_NAMESPACE
+    NO owner or tenant constants (must add in Step 3)
+
+  K8s driver sandbox_labels() (driver.rs, lines 857-865):
+    Only adds 2 labels: LABEL_SANDBOX_ID, LABEL_MANAGED_BY
+    NO owner or tenant labels (must add in Step 12)
+
+  K8s driver pod template labels (driver.rs, lines 1517-1535):
+    Uses template.labels from DriverSandboxTemplate
+    Owner labels in template.labels propagate to pods automatically
+
+  Docker driver container labels (lib.rs, line 2337):
+    Starts with: let mut labels = template.labels.clone();
+    Owner labels in template.labels propagate to containers automatically
+
+  Label translation (compute/mod.rs, line 1598):
+    labels: template.labels.clone()
+    Direct pass-through from public SandboxTemplate to DriverSandboxTemplate
+
+5.6 Proto Type Hierarchy
+-------------------------
+  Gateway-level Sandbox (sandbox.proto):
+    Sandbox { metadata: ObjectMeta, spec: SandboxSpec, status: SandboxStatus }
+    ObjectMeta { id, name, created_at_ms, labels: map<string,string>, resource_version }
+    CreateSandboxRequest { name, spec, labels }
+
+  Driver-level DriverSandbox (compute_driver.proto, lines 64-76):
+    DriverSandbox { id, name, namespace, spec, status }
+    NO metadata field. NO labels field.
+    DriverSandboxSpec { ..., template: DriverSandboxTemplate }
+    DriverSandboxTemplate { image, agent_socket_path, labels, environment, ... }
+
+  Labels live in DriverSandboxTemplate.labels (proto line 125), NOT in
+  DriverSandbox directly.
+
+5.7 Helm Chart State
+--------------------
+  deploy/helm/openshell/:
+    values.yaml: No tenant/ownership config
+    _helpers.tpl: Standard Helm labels (no tenant labels)
+    _gateway-workload.tpl: Pod labels from openshell.labels + podLabels
+    gateway-config.yaml: OIDC section (issuer, audience, roles)
+    role.yaml: Namespace-scoped Role for sandboxes, pods, events, secrets
+    No ResourceQuota or LimitRange templates
+
+5.8 ServerState
+---------------
+  ServerState struct (lib.rs, lines 87-150):
+    config field is public: pub config: Config (line 90)
+    Constructor: ServerState::new() at line 169
+    NO ownership or tenant state
+
+================================================================================
+6. STEP-BY-STEP IMPLEMENTATION PLAN
+================================================================================
+
+DEPENDENCY GRAPH:
+  Step 1 → Step 2 → Step 4 → Steps 7-11 (parallel)
+  Step 3 → Step 4
+  Step 4 → Step 5 → Step 6 → Steps 7-11
+  Steps 7-11 → Step 12
+  Step 12 → Step 13
+  Steps 7-11 → Step 14 (optional)
+  Steps 15-18 (independent of Steps 1-14, Helm-level)
+  Step 19 (after Steps 15-18)
+  Step 20 (after all)
+
+==============================================================================
+STEP 1: Add groups Field to Identity Struct
+==============================================================================
+
+Purpose: Extend Identity to carry OIDC group membership, enabling
+  group-based admin determination (e.g., admin group bypasses ownership).
+
+File: crates/openshell-server/src/auth/identity.rs
+
+CURRENT (lines 15-31):
+  #[derive(Debug, Clone)]
+  pub struct Identity {
+      pub subject: String,
+      pub display_name: Option<String>,
+      pub roles: Vec<String>,
+      pub scopes: Vec<String>,
+      pub provider: IdentityProvider,
+  }
+
+MODIFIED:
+  #[derive(Debug, Clone)]
+  pub struct Identity {
+      pub subject: String,
+      pub display_name: Option<String>,
+      pub roles: Vec<String>,
+      pub scopes: Vec<String>,
+      pub provider: IdentityProvider,
+      /// OIDC group claims (e.g., ["team1", "openshell-admins"]).
+      /// Empty for providers that do not supply group information.
+      pub groups: Vec<String>,
+  }
+
+DOWNSTREAM IMPACT:
+  Every place that constructs Identity must now include groups.
+
+  VERIFIED construction sites:
+    1. oidc.rs, lines 342-348 (OIDC JWT validation)
+       -> Add groups: claims.groups (extracted in Step 2)
+    2. Any mTLS or LocalDev Identity builders
+       -> Add groups: vec![]
+    3. Any dev/test Identity builders
+       -> Add groups: vec![]
+
+  NON-construction sites (DO NOT modify for groups):
+    - k8s_sa.rs: Constructs SandboxPrincipal, NOT Identity
+    - http.rs: Does NOT construct Identity (serves HTML)
+
+Dependencies: None
+Breaking: YES (compile-time, all Identity construction sites)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 2: Add groups_claim to OidcConfig & Extract Groups from JWT
+==============================================================================
+
+Purpose: Extract group membership from JWT claims during OIDC validation.
+
+--- Step 2A: Add groups field to OidcClaims ---
+
+File: crates/openshell-server/src/auth/oidc.rs
+
+CURRENT OidcClaims (lines 94-108):
+  #[derive(Debug, Deserialize)]
+  pub(crate) struct OidcClaims {
+      pub sub: String,
+      pub preferred_username: Option<String>,
+      #[allow(dead_code)]
+      pub email: Option<String>,
+      #[serde(skip)]
+      pub roles: Vec<String>,
+      #[serde(flatten)]
+      extra: serde_json::Value,
+  }
+
+MODIFIED OidcClaims:
+  #[derive(Debug, Deserialize)]
+  pub(crate) struct OidcClaims {
+      pub sub: String,
+      pub preferred_username: Option<String>,
+      #[allow(dead_code)]
+      pub email: Option<String>,
+      #[serde(skip)]
+      pub roles: Vec<String>,
+      /// Group memberships extracted from the JWT after deserialization.
+      /// Populated by extract_groups() from the groups_claim path.
+      #[serde(skip)]
+      pub groups: Vec<String>,
+      #[serde(flatten)]
+      extra: serde_json::Value,
+  }
+
+--- Step 2B: Add extract_groups method ---
+
+File: crates/openshell-server/src/auth/oidc.rs
+
+Add method to OidcClaims impl block (after extract_roles at line 133):
+
+  /// Extract group claims from the JWT using the configured claim path.
+  /// Groups are extracted from the JSON at `groups_claim` (e.g., "groups",
+  /// "cognito:groups", "https://example.com/groups"). If the path is empty
+  /// or the claim is missing, self.groups remains empty.
+  pub(crate) fn extract_groups(&mut self, groups_claim: &str) {
+      if groups_claim.is_empty() {
+          return;
+      }
+      // Navigate the dot-separated path in the extra JSON
+      let mut current = &self.extra;
+      for segment in groups_claim.split('.') {
+          match current.get(segment) {
+              Some(v) => current = v,
+              None => return,
+          }
+      }
+      // Parse as array of strings
+      if let Some(arr) = current.as_array() {
+          self.groups = arr
+              .iter()
+              .filter_map(|v| v.as_str().map(|s| s.to_string()))
+              .collect();
+      }
+  }
+
+PATTERN NOTE: This follows the exact same pattern as the existing
+extract_roles() method (oidc.rs, lines 119-133), which navigates a
+dot-separated claim path in self.extra and collects string values.
+
+--- Step 2C: Add groups_claim to OidcConfig ---
+
+File: crates/openshell-core/src/config.rs
+
+CURRENT OidcConfig (lines 461-493):
+  #[derive(Debug, Clone, Serialize, Deserialize)]
+  #[serde(deny_unknown_fields)]
+  pub struct OidcConfig {
+      pub issuer: String,
+      pub audience: String,
+      #[serde(default = "default_jwks_ttl_secs")]
+      pub jwks_ttl_secs: u64,
+      #[serde(default = "default_roles_claim")]
+      pub roles_claim: String,
+      #[serde(default = "default_admin_role")]
+      pub admin_role: String,
+      #[serde(default = "default_user_role")]
+      pub user_role: String,
+      #[serde(default)]
+      pub scopes_claim: String,
+  }
+
+ADD after scopes_claim (before the closing brace):
+
+      /// Dot-separated path to the groups array in the JWT claims.
+      /// Defaults to empty (disabled). Keycloak: "groups". Okta: "groups".
+      /// Azure AD: "groups". Cognito: "cognito:groups".
+      #[serde(default)]
+      pub groups_claim: String,
+
+IMPORTANT: OidcConfig has #[serde(deny_unknown_fields)]. The new field
+MUST have #[serde(default)] to avoid breaking existing config files that
+do not include groups_claim. With serde(default), missing fields
+deserialize to String::default() (empty string), which is the correct
+disabled state.
+
+--- Step 2D: Call extract_groups in validate_token ---
+
+File: crates/openshell-server/src/auth/oidc.rs
+
+In validate_token() (around line 335), after the existing
+claims.extract_roles(&self.config.roles_claim) call:
+
+  CURRENT (around line 335):
+    claims.extract_roles(&self.config.roles_claim);
+
+  ADD AFTER:
+    claims.extract_groups(&self.config.groups_claim);
+
+--- Step 2E: Pass groups to Identity construction ---
+
+File: crates/openshell-server/src/auth/oidc.rs
+
+CURRENT Identity construction (lines 342-348):
+  Ok(Identity {
+      subject: claims.sub,
+      display_name: claims.preferred_username,
+      roles: claims.roles,
+      scopes,
+      provider: IdentityProvider::Oidc,
+  })
+
+MODIFIED:
+  Ok(Identity {
+      subject: claims.sub,
+      display_name: claims.preferred_username,
+      roles: claims.roles,
+      scopes,
+      provider: IdentityProvider::Oidc,
+      groups: claims.groups,
+  })
+
+--- Step 2F: Update OidcConfig literal in cli.rs ---
+
+File: crates/openshell-server/src/cli.rs
+
+CURRENT OidcConfig construction (lines 396-406):
+  if let Some(issuer) = args.oidc_issuer.clone() {
+      config = config.with_oidc(openshell_core::OidcConfig {
+          issuer,
+          audience: args.oidc_audience.clone(),
+          jwks_ttl_secs: args.oidc_jwks_ttl,
+          roles_claim: args.oidc_roles_claim.clone(),
+          admin_role: args.oidc_admin_role.clone(),
+          user_role: args.oidc_user_role.clone(),
+          scopes_claim: args.oidc_scopes_claim.clone(),
+      });
+  }
+
+MODIFIED (add groups_claim field):
+  if let Some(issuer) = args.oidc_issuer.clone() {
+      config = config.with_oidc(openshell_core::OidcConfig {
+          issuer,
+          audience: args.oidc_audience.clone(),
+          jwks_ttl_secs: args.oidc_jwks_ttl,
+          roles_claim: args.oidc_roles_claim.clone(),
+          admin_role: args.oidc_admin_role.clone(),
+          user_role: args.oidc_user_role.clone(),
+          scopes_claim: args.oidc_scopes_claim.clone(),
+          groups_claim: args.oidc_groups_claim.clone(),
+      });
+  }
+
+Also add the CLI arg definition in RunArgs struct:
+  #[arg(long, default_value = "", env = "OPENSHELL_OIDC_GROUPS_CLAIM")]
+  pub oidc_groups_claim: String,
+
+Dependencies: Step 1
+Breaking: NO (new field has serde(default), CLI arg has default_value)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 3: Define Owner/Tenant Label Constants in openshell-core
+==============================================================================
+
+Purpose: Centralize label keys used across gateway, drivers, and Helm.
+
+File: crates/openshell-core/src/driver_utils.rs
+
+CURRENT constants (lines 10-28):
+  pub const LABEL_MANAGED_BY: &str = "openshell.ai/managed-by";
+  pub const LABEL_MANAGED_BY_VALUE: &str = "openshell";
+  pub const LABEL_SANDBOX_ID: &str = "openshell.ai/sandbox-id";
+  pub const LABEL_SANDBOX_NAME: &str = "openshell.ai/sandbox-name";
+  pub const LABEL_SANDBOX_NAMESPACE: &str = "openshell.ai/sandbox-namespace";
+
+ADD after line 28:
+
+  /// Owner identity label — carries the sanitized OIDC subject (sub claim)
+  /// of the user who created the resource. Used for per-user isolation.
+  pub const LABEL_OWNER: &str = "openshell.ai/owner";
+
+  /// Tenant identity label — carries the tenant name when the gateway is
+  /// deployed in gateway-per-tenant mode. Used for cross-tenant visibility.
+  pub const LABEL_TENANT: &str = "openshell.ai/tenant";
+
+  /// Prefix for openshell.ai/ labels. Used to strip client-supplied
+  /// system labels (anti-spoofing).
+  pub const LABEL_PREFIX: &str = "openshell.ai/";
+
+Dependencies: None
+Breaking: NO (additive)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 4: Create Ownership Module (auth/ownership.rs)
+==============================================================================
+
+Purpose: Centralized ownership enforcement logic, reused by all handlers.
+  This is a NEW file.
+
+--- Step 4A: Register module in auth/mod.rs ---
+
+File: crates/openshell-server/src/auth/mod.rs
+
+ADD after line 21 (after sandbox_methods):
+  pub mod ownership;
+
+--- Step 4B: OwnershipEnforcement config struct ---
+
+File: crates/openshell-server/src/auth/ownership.rs (NEW FILE)
+
+  use std::collections::HashMap;
+  use tonic::Status;
+  use crate::auth::principal::Principal;
+  use openshell_core::driver_utils::{LABEL_OWNER, LABEL_TENANT, LABEL_PREFIX};
+
+  /// Runtime ownership enforcement configuration, derived from
+  /// OwnershipConfig and the gateway's OIDC admin_role.
+  #[derive(Debug, Clone)]
+  pub struct OwnershipEnforcement {
+      /// Whether ownership enforcement is enabled.
+      pub enabled: bool,
+      /// Admin role that bypasses ownership checks.
+      /// Sourced from OidcConfig.admin_role (e.g., "openshell-admin").
+      pub admin_role: String,
+      /// Optional tenant label to stamp on all resources.
+      pub tenant_id: Option<String>,
+  }
+
+  impl OwnershipEnforcement {
+      /// Returns true if the principal has admin privileges and should
+      /// bypass ownership checks.
+      pub fn is_admin(&self, principal: &Principal) -> bool {
+          match principal {
+              Principal::User(user) => {
+                  user.identity.roles.contains(&self.admin_role)
+              }
+              _ => false,
+          }
+      }
+  }
+
+--- Step 4C: stamp_owner_labels function ---
+
+  /// Stamp ownership labels on a resource at creation time.
+  /// - Strips any client-supplied openshell.ai/* labels (anti-spoofing)
+  /// - Adds openshell.ai/owner = sanitized subject
+  /// - Adds openshell.ai/tenant = tenant_id (if configured)
+  pub fn stamp_owner_labels(
+      principal: &Principal,
+      config: &OwnershipEnforcement,
+      mut labels: HashMap<String, String>,
+  ) -> HashMap<String, String> {
+      // Anti-spoofing: remove client-supplied openshell.ai/* labels
+      labels.retain(|k, _| !k.starts_with(LABEL_PREFIX));
+
+      if !config.enabled {
+          // Still strip openshell.ai/* even when ownership is disabled
+          return labels;
+      }
+
+      // Stamp owner from principal
+      if let Principal::User(user) = principal {
+          let owner = sanitize_label_value(&user.identity.subject);
+          labels.insert(LABEL_OWNER.to_string(), owner);
+      }
+
+      // Stamp tenant if configured
+      if let Some(ref tenant) = config.tenant_id {
+          labels.insert(LABEL_TENANT.to_string(), tenant.clone());
+      }
+
+      labels
+  }
+
+--- Step 4D: check_ownership function ---
+
+  /// Verify that the caller owns the resource, or is an admin.
+  /// Returns Ok(()) if access is allowed, Err(Status) otherwise.
+  ///
+  /// CRITICAL: Uses sanitize_label_value() on the subject before
+  /// comparison, because stamp_owner_labels() stores the SANITIZED
+  /// value. Without this, subjects containing non-label characters
+  /// (e.g., "user@example.com") would never match their stored labels.
+  pub fn check_ownership(
+      principal: &Principal,
+      config: &OwnershipEnforcement,
+      resource_labels: &HashMap<String, String>,
+      resource_kind: &str,
+      resource_id: &str,
+  ) -> Result<(), Status> {
+      if !config.enabled {
+          return Ok(());
+      }
+
+      match principal {
+          Principal::User(user) => {
+              // Admin bypass: check BEFORE ownership comparison
+              if config.is_admin(principal) {
+                  return Ok(());
+              }
+
+              // CRITICAL: Sanitize subject to match stored label value
+              let sanitized_subject = sanitize_label_value(&user.identity.subject);
+
+              match resource_labels.get(LABEL_OWNER) {
+                  Some(owner) if owner == &sanitized_subject => Ok(()),
+                  Some(_) => Err(Status::permission_denied(format!(
+                      "{resource_kind} '{resource_id}' is owned by another user"
+                  ))),
+                  None => Err(Status::permission_denied(format!(
+                      "{resource_kind} '{resource_id}' has no owner label \
+                       and requires admin access"
+                  ))),
+              }
+          }
+          // Anonymous principals bypass ownership (backward-compatible)
+          Principal::Anonymous => Ok(()),
+          // Sandbox principals bypass ownership (sandbox-to-sandbox comms)
+          Principal::Sandbox(_) => Ok(()),
+      }
+  }
+
+--- Step 4E: owner_label_selector function ---
+
+  /// Build a label selector string for owner-scoped queries.
+  /// Returns None if ownership is disabled or the caller is an admin.
+  ///
+  /// CRITICAL: Uses sanitize_label_value() on the subject to match
+  /// the stored label value set by stamp_owner_labels().
+  pub fn owner_label_selector(
+      principal: &Principal,
+      config: &OwnershipEnforcement,
+  ) -> Option<String> {
+      if !config.enabled {
+          return None;
+      }
+
+      match principal {
+          Principal::User(user) => {
+              if config.is_admin(principal) {
+                  return None; // Admins see all resources
+              }
+              // CRITICAL: Sanitize subject to match stored label value
+              let sanitized = sanitize_label_value(&user.identity.subject);
+              Some(format!("{}={}", LABEL_OWNER, sanitized))
+          }
+          _ => None,
+      }
+  }
+
+--- Step 4F: sanitize_label_value function ---
+
+  /// Sanitize a string for use as a Kubernetes label value.
+  /// K8s label values: alphanumeric, -, _, . only; max 63 chars;
+  /// MUST begin and end with an alphanumeric character.
+  pub fn sanitize_label_value(value: &str) -> String {
+      let filtered: String = value
+          .chars()
+          .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+          .take(63)
+          .collect();
+
+      // K8s labels must begin and end with alphanumeric characters
+      let trimmed = filtered
+          .trim_start_matches(|c: char| !c.is_alphanumeric())
+          .trim_end_matches(|c: char| !c.is_alphanumeric());
+
+      if trimmed.is_empty() {
+          "unknown".to_string()
+      } else {
+          trimmed.to_string()
+      }
+  }
+
+--- Step 4G: labels_from_json helper ---
+
+  /// Parse JSON-serialized labels from an ObjectRecord back to HashMap.
+  /// Used to extract owner labels from persisted objects for ownership checks.
+  pub fn labels_from_json(json: &Option<String>) -> HashMap<String, String> {
+      json.as_ref()
+          .and_then(|s| serde_json::from_str(s).ok())
+          .unwrap_or_default()
+  }
+
+Dependencies: Steps 1, 3
+Breaking: NO (new module)
+New Cargo dependencies: None (serde_json already in tree)
+
+==============================================================================
+STEP 5: Add OwnershipConfig to Configuration
+==============================================================================
+
+Purpose: Add configurable ownership settings to the gateway config.
+
+--- Step 5A: Define OwnershipConfig struct ---
+
+File: crates/openshell-core/src/config.rs
+
+ADD after OidcConfig (after line 493):
+
+  /// Per-user ownership enforcement configuration.
+  ///
+  /// When enabled, the gateway stamps `openshell.ai/owner` labels on
+  /// created sandboxes and providers and enforces visibility/access
+  /// based on the caller's OIDC subject.
+  #[derive(Debug, Clone, Serialize, Deserialize)]
+  #[serde(deny_unknown_fields)]
+  pub struct OwnershipConfig {
+      /// Enable per-user ownership enforcement. Default: false.
+      #[serde(default)]
+      pub enabled: bool,
+  }
+
+  impl Default for OwnershipConfig {
+      fn default() -> Self {
+          Self { enabled: false }
+      }
+  }
+
+NOTE: OwnershipConfig is intentionally minimal. The admin_role for
+admin bypass is sourced from OidcConfig.admin_role at runtime, not
+duplicated here. This prevents the V2-R1 bug where an empty admin_role
+in a standalone OwnershipConfig would break admin provider creation.
+
+--- Step 5B: Add ownership field to Config ---
+
+File: crates/openshell-core/src/config.rs
+
+ADD to Config struct (after service_routing, before closing brace at line 403):
+
+      /// Per-user ownership enforcement. When enabled, sandboxes and
+      /// providers are scoped to their creator.
+      pub ownership: Option<OwnershipConfig>,
+
+      /// Tenant identifier for gateway-per-tenant deployments. When set,
+      /// all created resources are labeled with openshell.ai/tenant.
+      pub tenant_id: Option<String>,
+
+ADD to Config::new() (lines 569-588, before closing brace at line 587):
+
+          ownership: None,
+          tenant_id: None,
+
+ADD builder method (after with_loopback_service_http at line 707):
+
+      /// Set the ownership enforcement configuration.
+      #[must_use]
+      pub fn with_ownership(mut self, ownership: OwnershipConfig) -> Self {
+          self.ownership = Some(ownership);
+          self
+      }
+
+      /// Set the tenant identifier for multi-tenant deployments.
+      #[must_use]
+      pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+          self.tenant_id = Some(tenant_id.into());
+          self
+      }
+
+--- Step 5C: Add ownership and tenant_id to GatewayFileSection ---
+
+File: crates/openshell-server/src/config_file.rs
+
+ADD to GatewayFileSection (in the "Nested tables" section, after line 152):
+
+      /// Per-user ownership enforcement.
+      #[serde(default)]
+      pub ownership: Option<OwnershipConfig>,
+
+      /// Tenant identifier for gateway-per-tenant deployments.
+      #[serde(default)]
+      pub tenant_id: Option<String>,
+
+IMPORTANT: GatewayFileSection has #[serde(deny_unknown_fields)]. Both
+fields MUST have #[serde(default)] to avoid breaking existing config
+files. The import for OwnershipConfig must be added at the top of the
+file (it comes from openshell_core).
+
+--- Step 5D: Map ownership/tenant_id from file to Config in cli.rs ---
+
+File: crates/openshell-server/src/cli.rs
+
+In prepare_server_config(), after the gateway_jwt block (after line 419),
+add:
+
+      // Map ownership config from file
+      if let Some(ownership) = file
+          .as_ref()
+          .and_then(|f| f.openshell.gateway.ownership.clone())
+      {
+          config = config.with_ownership(ownership);
+      }
+
+      // Map tenant_id from file
+      if let Some(tenant_id) = file
+          .as_ref()
+          .and_then(|f| f.openshell.gateway.tenant_id.clone())
+      {
+          config = config.with_tenant_id(tenant_id);
+      }
+
+This follows the exact pattern used for other file-to-Config mappings
+(e.g., ssh_session_ttl_secs at lines 389-394, gateway_jwt at lines
+412-419).
+
+Dependencies: None
+Breaking: NO (new optional fields with defaults)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 6: Add ownership_config() Helper to ServerState
+==============================================================================
+
+Purpose: Provide an ergonomic, safe way to access ownership enforcement
+  config from handler code. Resolves admin_role from OidcConfig.
+
+File: crates/openshell-server/src/lib.rs
+
+ADD impl block for ServerState (after the existing impl block):
+
+  use crate::auth::ownership::OwnershipEnforcement;
+
+  impl ServerState {
+      /// Build the runtime ownership enforcement configuration.
+      ///
+      /// The admin_role is sourced from OidcConfig to avoid duplication.
+      /// When ownership is disabled OR no OidcConfig exists, returns a
+      /// disabled OwnershipEnforcement (ownership checks are no-ops).
+      pub fn ownership_config(&self) -> OwnershipEnforcement {
+          let enabled = self.config.ownership
+              .as_ref()
+              .map(|o| o.enabled)
+              .unwrap_or(false);
+
+          let admin_role = self.config.oidc
+              .as_ref()
+              .map(|o| o.admin_role.clone())
+              .unwrap_or_default();
+
+          OwnershipEnforcement {
+              enabled,
+              admin_role,
+              tenant_id: self.config.tenant_id.clone(),
+          }
+      }
+  }
+
+WHY THIS DESIGN:
+  1. admin_role comes from OidcConfig, not a separate ownership field.
+     This prevents the V2-R1 bug where admin_role could be empty when
+     ownership was enabled without separate admin_role configuration.
+  2. When OIDC is not configured, admin_role defaults to "" which means
+     no user can match admin_role, but ownership is typically disabled
+     in that case (enabled = false), so all checks short-circuit to Ok().
+  3. When ownership is None (not configured at all), enabled defaults to
+     false, making all ownership checks no-ops (backward-compatible).
+
+Dependencies: Steps 4, 5
+Breaking: NO (additive method)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 7: Modify Sandbox Create Handler (Owner Stamping)
+==============================================================================
+
+Purpose: Stamp openshell.ai/owner on created sandboxes from the JWT sub claim.
+
+File: crates/openshell-server/src/grpc/sandbox.rs
+
+CURRENT handle_create_sandbox_inner (lines 119-123):
+  async fn handle_create_sandbox_inner(
+      state: &Arc<ServerState>,
+      request: Request<CreateSandboxRequest>,
+  ) -> Result<Response<SandboxResponse>, Status> {
+      let request = request.into_inner();  // <-- line 123: CONSUMES request
+
+MODIFIED — insert principal extraction BEFORE into_inner():
+
+  async fn handle_create_sandbox_inner(
+      state: &Arc<ServerState>,
+      request: Request<CreateSandboxRequest>,
+  ) -> Result<Response<SandboxResponse>, Status> {
+      // === OWNERSHIP: Extract principal BEFORE into_inner() ===
+      // into_inner() consumes the tonic::Request, making extensions
+      // inaccessible. Principal was set by AuthGrpcRouter in multiplex.rs.
+      let principal = request.extensions()
+          .get::<Principal>()
+          .cloned()
+          .unwrap_or(Principal::Anonymous);
+      let ownership_config = state.ownership_config();
+
+      // Existing into_inner() — PRESERVED, moved after extraction
+      let request = request.into_inner();
+
+After the existing label validation (lines 131-135), stamp owner labels:
+
+      // Existing label validation (UNCHANGED)
+      for (key, value) in &request.labels {
+          crate::grpc::validation::validate_label_key(key)?;
+          crate::grpc::validation::validate_label_value(value)?;
+      }
+
+      // === OWNERSHIP: Stamp owner labels (NEW) ===
+      // Strips client-supplied openshell.ai/* labels (anti-spoofing)
+      // and adds openshell.ai/owner from the caller's identity.
+      let labels = crate::auth::ownership::stamp_owner_labels(
+          &principal,
+          &ownership_config,
+          request.labels.clone(),
+      );
+      // Use `labels` instead of `request.labels` for sandbox creation below
+
+The `labels` variable replaces `request.labels` in the downstream code
+that creates the Sandbox protobuf metadata. Find where request.labels
+is used to build ObjectMeta.labels and replace with `labels`.
+
+Dependencies: Steps 1-6
+Breaking: NO (behavior unchanged when ownership disabled)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 8: Modify Sandbox List Handler (Owner Filtering)
+==============================================================================
+
+Purpose: Filter sandbox list to show only the caller's sandboxes.
+
+File: crates/openshell-server/src/grpc/sandbox.rs
+
+CURRENT handle_list_sandboxes (lines 256-260):
+  async fn handle_list_sandboxes(
+      state: &Arc<ServerState>,
+      request: Request<ListSandboxesRequest>,
+  ) -> Result<Response<ListSandboxesResponse>, Status> {
+      let request = request.into_inner();  // <-- line 260
+
+MODIFIED:
+  async fn handle_list_sandboxes(
+      state: &Arc<ServerState>,
+      request: Request<ListSandboxesRequest>,
+  ) -> Result<Response<ListSandboxesResponse>, Status> {
+      // === OWNERSHIP: Extract principal BEFORE into_inner() ===
+      let principal = request.extensions()
+          .get::<Principal>()
+          .cloned()
+          .unwrap_or(Principal::Anonymous);
+      let ownership_config = state.ownership_config();
+
+      // Existing into_inner() preserved
+      let request = request.into_inner();
+
+After extracting the label_selector from the request, augment it:
+
+      // === OWNERSHIP: Build owner-scoped label selector ===
+      let owner_selector = crate::auth::ownership::owner_label_selector(
+          &principal,
+          &ownership_config,
+      );
+
+      // Combine user-provided selector with owner selector
+      let effective_selector = match (request.label_selector.as_str(), owner_selector) {
+          ("", Some(owner)) => owner,
+          (user, Some(owner)) => format!("{},{}", user, owner),
+          (user, None) => user.to_string(),
+      };
+
+      // Use effective_selector instead of request.label_selector
+      // for store.list_messages_with_selector()
+
+The existing code at lines 261-276 checks if label_selector is empty
+and branches between list_messages and list_messages_with_selector.
+With ownership, the code should ALWAYS use list_messages_with_selector
+when effective_selector is non-empty.
+
+Dependencies: Steps 4-6
+Breaking: NO (no filtering when ownership disabled)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 9: Modify Sandbox Get/Delete Handlers (Ownership Enforcement)
+==============================================================================
+
+Purpose: Block unauthorized access to sandboxes owned by other users.
+
+--- Step 9A: handle_get_sandbox ---
+
+File: crates/openshell-server/src/grpc/sandbox.rs
+
+CURRENT (lines 235-239):
+  async fn handle_get_sandbox(
+      state: &Arc<ServerState>,
+      request: Request<GetSandboxRequest>,
+  ) -> Result<Response<SandboxResponse>, Status> {
+      let name = request.into_inner().name;  // <-- line 239
+
+MODIFIED:
+  async fn handle_get_sandbox(
+      state: &Arc<ServerState>,
+      request: Request<GetSandboxRequest>,
+  ) -> Result<Response<SandboxResponse>, Status> {
+      // === OWNERSHIP: Extract principal BEFORE into_inner() ===
+      let principal = request.extensions()
+          .get::<Principal>()
+          .cloned()
+          .unwrap_or(Principal::Anonymous);
+      let ownership_config = state.ownership_config();
+
+      let name = request.into_inner().name;
+
+After fetching the sandbox from the store, add ownership check:
+
+      // ... existing sandbox fetch by name ...
+      let sandbox = state.store.get_message_by_name::<Sandbox>(&name).await...;
+
+      // === OWNERSHIP: Check caller owns the sandbox ===
+      let labels = sandbox.metadata.as_ref()
+          .map(|m| m.labels.clone())
+          .unwrap_or_default();
+
+      crate::auth::ownership::check_ownership(
+          &principal,
+          &ownership_config,
+          &labels,
+          "sandbox",
+          &name,
+      )?;
+
+--- Step 9B: handle_delete_sandbox_inner ---
+
+File: crates/openshell-server/src/grpc/sandbox.rs
+
+CURRENT (lines 496-500):
+  async fn handle_delete_sandbox_inner(
+      state: &Arc<ServerState>,
+      request: Request<DeleteSandboxRequest>,
+  ) -> Result<Response<DeleteSandboxResponse>, Status> {
+      let name = request.into_inner().name;  // <-- line 500
+
+MODIFIED:
+  async fn handle_delete_sandbox_inner(
+      state: &Arc<ServerState>,
+      request: Request<DeleteSandboxRequest>,
+  ) -> Result<Response<DeleteSandboxResponse>, Status> {
+      // === OWNERSHIP: Extract principal BEFORE into_inner() ===
+      let principal = request.extensions()
+          .get::<Principal>()
+          .cloned()
+          .unwrap_or(Principal::Anonymous);
+      let ownership_config = state.ownership_config();
+
+      let name = request.into_inner().name;
+
+      // ... existing sandbox fetch ...
+      // === OWNERSHIP: Check caller owns the sandbox ===
+      // (same pattern as Step 9A)
+
+Dependencies: Steps 4-6
+Breaking: NO (no enforcement when ownership disabled)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 10: Modify Sandbox Watch/Exec/SSH Handlers (Ownership Enforcement)
+==============================================================================
+
+Purpose: Enforce ownership on streaming and session handlers.
+
+--- Step 10A: handle_watch_sandbox ---
+
+File: crates/openshell-server/src/grpc/sandbox.rs
+
+CURRENT (lines 575-579):
+  async fn handle_watch_sandbox(
+      state: &Arc<ServerState>,
+      request: Request<WatchSandboxRequest>,
+  ) -> Result<Response<ReceiverStream<Result<SandboxStreamEvent, Status>>>, Status> {
+      let req = request.into_inner();  // <-- line 579
+
+MODIFIED:
+  async fn handle_watch_sandbox(
+      state: &Arc<ServerState>,
+      request: Request<WatchSandboxRequest>,
+  ) -> Result<Response<ReceiverStream<Result<SandboxStreamEvent, Status>>>, Status> {
+      // === OWNERSHIP: Extract principal BEFORE into_inner() ===
+      let principal = request.extensions()
+          .get::<Principal>()
+          .cloned()
+          .unwrap_or(Principal::Anonymous);
+      let ownership_config = state.ownership_config();
+
+      let req = request.into_inner();
+
+After sandbox fetch, add ownership check (same pattern as Step 9).
+
+--- Step 10B: handle_exec_sandbox ---
+
+File: crates/openshell-server/src/grpc/sandbox.rs
+
+CURRENT (lines 803-809):
+  async fn handle_exec_sandbox(
+      state: &Arc<ServerState>,
+      request: Request<ExecSandboxRequest>,
+  ) -> Result<Response<ReceiverStream<Result<ExecSandboxEvent, Status>>>, Status> {
+      ...
+      let req = request.into_inner();  // <-- line 809
+
+MODIFIED — same pattern: extract principal before into_inner(),
+then check ownership after sandbox fetch.
+
+--- Step 10C: handle_create_ssh_session ---
+
+File: crates/openshell-server/src/grpc/sandbox.rs
+
+CURRENT (lines 1330-1334):
+  pub(super) async fn handle_create_ssh_session(
+      state: &Arc<ServerState>,
+      request: Request<CreateSshSessionRequest>,
+  ) -> Result<Response<CreateSshSessionResponse>, Status> {
+      let req = request.into_inner();  // <-- line 1334
+
+MODIFIED:
+  pub(super) async fn handle_create_ssh_session(
+      state: &Arc<ServerState>,
+      request: Request<CreateSshSessionRequest>,
+  ) -> Result<Response<CreateSshSessionResponse>, Status> {
+      // === OWNERSHIP: Extract principal BEFORE into_inner() ===
+      let principal = request.extensions()
+          .get::<Principal>()
+          .cloned()
+          .unwrap_or(Principal::Anonymous);
+      let ownership_config = state.ownership_config();
+
+      let req = request.into_inner();
+
+After sandbox fetch (lines 1339-1344), add ownership check:
+
+      let sandbox = state
+          .store
+          .get_message::<Sandbox>(&req.sandbox_id)
+          .await
+          .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
+          .ok_or_else(|| Status::not_found("sandbox not found"))?;
+
+      // === OWNERSHIP: Check caller owns the sandbox ===
+      let labels = sandbox.metadata.as_ref()
+          .map(|m| m.labels.clone())
+          .unwrap_or_default();
+      crate::auth::ownership::check_ownership(
+          &principal,
+          &ownership_config,
+          &labels,
+          "sandbox",
+          &req.sandbox_id,
+      )?;
+
+NOTE: handle_create_ssh_session was not explicitly listed in V3 Step 10.
+This step corrects that omission. The SSH handler fetches a sandbox by ID
+(not name) and must also enforce ownership.
+
+Dependencies: Steps 4-6
+Breaking: NO (no enforcement when ownership disabled)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 11: Modify Provider CRUD for Per-User Ownership
+==============================================================================
+
+Purpose: Enable per-user provider ownership. Users can create their own
+  providers; admin-created providers serve as shared fallbacks.
+
+--- Step 11A: Stamp owner on provider creation ---
+
+File: crates/openshell-server/src/grpc/provider.rs
+
+CURRENT handle_create_provider (lines 1150-1154):
+  async fn handle_create_provider(
+      state: &Arc<ServerState>,
+      request: Request<CreateProviderRequest>,
+  ) -> Result<Response<ProviderResponse>, Status> {
+      let req = request.into_inner();  // <-- line 1154
+
+MODIFIED:
+  async fn handle_create_provider(
+      state: &Arc<ServerState>,
+      request: Request<CreateProviderRequest>,
+  ) -> Result<Response<ProviderResponse>, Status> {
+      // === OWNERSHIP: Extract principal BEFORE into_inner() ===
+      let principal = request.extensions()
+          .get::<Principal>()
+          .cloned()
+          .unwrap_or(Principal::Anonymous);
+      let ownership_config = state.ownership_config();
+
+      let req = request.into_inner();
+
+After parsing the provider from the request, stamp owner labels on
+the provider's metadata.labels:
+
+      let mut provider = req.provider
+          .ok_or_else(|| Status::invalid_argument("provider is required"))?;
+
+      // === OWNERSHIP: Stamp owner labels on provider ===
+      if let Some(ref mut metadata) = provider.metadata {
+          let labels = crate::auth::ownership::stamp_owner_labels(
+              &principal,
+              &ownership_config,
+              metadata.labels.clone(),
+          );
+          metadata.labels = labels;
+      }
+
+--- Step 11B: Filter provider list by owner ---
+
+File: crates/openshell-server/src/grpc/provider.rs
+
+CURRENT handle_list_providers (lines 1199-1203):
+  async fn handle_list_providers(
+      state: &Arc<ServerState>,
+      request: Request<ListProvidersRequest>,
+  ) -> Result<Response<ListProvidersResponse>, Status> {
+      let request = request.into_inner();  // <-- line 1203
+
+MODIFIED — same pattern as Step 8:
+
+  Extract principal BEFORE into_inner(), build owner label selector,
+  use list_messages_with_selector instead of list_messages.
+
+  For provider listing, the behavior differs from sandbox listing:
+  - Non-admin users see: their own providers + shared (no-owner) providers
+  - Admin users see: all providers
+
+  The owner_label_selector from Step 4E handles admin bypass (returns None).
+  For non-admin users, the selector "openshell.ai/owner=<sanitized_subject>"
+  filters to owned providers. To also show shared (no-owner) providers, the
+  handler must make TWO queries or use a more complex selector:
+
+  // Query 1: User's own providers
+  let owned = store.list_messages_with_selector::<Provider>(
+      &owner_selector, limit, offset
+  ).await?;
+
+  // Query 2: Shared providers (no owner label)
+  // This requires a "label absent" query which may not be supported
+  // by the current label selector parser. ALTERNATIVE: query all and
+  // filter in-memory (acceptable for provider counts < 1000).
+
+  PRACTICAL APPROACH: Query all providers via list_messages, then filter
+  in memory:
+    let all_providers = store.list_messages::<Provider>(limit, offset).await?;
+    let visible: Vec<_> = all_providers.into_iter().filter(|p| {
+        let labels = p.metadata.as_ref()
+            .map(|m| m.labels.clone())
+            .unwrap_or_default();
+        // Show if: no owner label (shared) OR owner matches caller
+        !labels.contains_key(LABEL_OWNER)
+            || crate::auth::ownership::check_ownership(
+                &principal, &ownership_config, &labels, "provider", "list"
+            ).is_ok()
+    }).collect();
+
+  NOTE: This is acceptable because provider counts are typically
+  small (< 100 per gateway).
+
+--- Step 11C: Ownership check on provider get/update/delete ---
+
+File: crates/openshell-server/src/grpc/provider.rs
+
+For handle_update_provider (line 1894) and handle_delete_provider (line 2265):
+  Same pattern as Steps 9A/9B:
+  1. Extract principal BEFORE into_inner()
+  2. Fetch provider from store
+  3. Call check_ownership with provider's metadata.labels
+  4. Return PermissionDenied if not owner and not admin
+
+--- Step 11D: Change provider RBAC from admin to user ---
+
+File: crates/openshell-server/src/grpc/mod.rs
+
+CURRENT #[rpc_auth] annotations:
+  Line 360: #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+            async fn create_provider(...)
+  Line 424: #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+            async fn update_provider(...)
+  Line 464: #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+            async fn delete_provider(...)
+
+MODIFIED:
+  Line 360: #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
+  Line 424: #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
+  Line 464: #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
+
+WHY: Per-user ownership requires non-admin users to create/modify their
+own providers. The runtime ownership check (Step 11C) ensures they can
+only access their own providers. Admin bypass in check_ownership allows
+admins to manage any provider.
+
+NOTE: method_authz.rs is NOT directly modified. It contains lookup
+infrastructure that reads from the #[rpc_authz] macro-generated const
+tables. Changing the #[rpc_auth] annotation in grpc/mod.rs automatically
+regenerates the tables at compile time.
+
+WARNING: This changes provider role requirements for ALL deployments,
+even those without ownership enabled. The runtime ownership check
+(check_ownership) mitigates this: when ownership is disabled, the check
+short-circuits to Ok(), so any user with provider:write scope can still
+manage providers. This matches the original admin-only behavior for
+non-OIDC deployments since provider:write scope is typically granted
+only to admin tokens.
+
+--- Step 11E: Runtime guard for disabled ownership ---
+
+If ownership is disabled, provider CRUD must still work as before
+(admin-only semantics). The check_ownership function returns Ok()
+when config.enabled == false, preserving this behavior. But the
+#[rpc_auth] role change from "admin" to "user" means any authenticated
+user with provider:write scope can now attempt provider operations.
+
+For deployments where this is undesirable (e.g., shared gateway without
+ownership enabled), add a runtime guard:
+
+  // In handle_create_provider, after ownership_config:
+  if !ownership_config.enabled {
+      // Legacy mode: require admin role for provider mutations
+      if let Principal::User(user) = &principal {
+          if !user.identity.roles.contains(&ownership_config.admin_role) {
+              return Err(Status::permission_denied(
+                  "provider creation requires admin role"
+              ));
+          }
+      }
+  }
+
+This preserves backward compatibility: ownership disabled = admin-only providers.
+
+Dependencies: Steps 4-6
+Breaking: PARTIAL (provider role change affects non-ownership deployments;
+  mitigated by runtime guard in Step 11E)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 12: Add Owner Labels to Kubernetes Driver (Sandbox CRD Labels)
+==============================================================================
+
+Purpose: Propagate owner/tenant labels to the Kubernetes Sandbox CRD
+  object metadata for visibility and kubectl filtering.
+
+File: crates/openshell-driver-kubernetes/src/driver.rs
+
+--- Step 12A: Understand the label flow ---
+
+Labels flow through TWO paths in the K8s driver:
+
+  PATH 1: Sandbox CRD metadata.labels (sandbox_labels function)
+    These labels appear on the Sandbox custom resource object itself.
+    Used by kubectl label selectors, K8s controllers, and operators.
+    CURRENT: Only LABEL_SANDBOX_ID and LABEL_MANAGED_BY (lines 857-865).
+    NEEDS: Owner and tenant labels for CRD-level filtering.
+
+  PATH 2: Pod template labels (via DriverSandboxTemplate.labels)
+    These labels appear on the pods created by the sandbox controller.
+    Populated by driver_sandbox_template_from_public() at line 1598.
+    ALREADY WORKS: Owner labels stamped in Step 7 flow automatically
+    through SandboxTemplate.labels → DriverSandboxTemplate.labels → pod.
+
+  Only PATH 1 needs modification (sandbox_labels function).
+
+--- Step 12B: Modify sandbox_labels function ---
+
+CURRENT sandbox_labels (lines 857-865):
+  fn sandbox_labels(sandbox: &Sandbox) -> BTreeMap<String, String> {
+      let mut labels = BTreeMap::new();
+      labels.insert(LABEL_SANDBOX_ID.to_string(), sandbox.id.clone());
+      labels.insert(
+          LABEL_MANAGED_BY.to_string(),
+          LABEL_MANAGED_BY_VALUE.to_string(),
+      );
+      labels
+  }
+
+MODIFIED — propagate owner/tenant labels from the sandbox template:
+
+  fn sandbox_labels(sandbox: &Sandbox) -> BTreeMap<String, String> {
+      let mut labels = BTreeMap::new();
+      labels.insert(LABEL_SANDBOX_ID.to_string(), sandbox.id.clone());
+      labels.insert(
+          LABEL_MANAGED_BY.to_string(),
+          LABEL_MANAGED_BY_VALUE.to_string(),
+      );
+
+      // Propagate owner and tenant labels from the sandbox template.
+      // The gateway stamps these via stamp_owner_labels() (Step 7).
+      // They flow through: gateway Sandbox metadata.labels
+      //   → SandboxTemplate.labels → DriverSandboxTemplate.labels
+      //   → sandbox.spec.template.labels.
+      if let Some(ref spec) = sandbox.spec {
+          if let Some(ref template) = spec.template {
+              if let Some(owner) = template.labels.get(LABEL_OWNER) {
+                  labels.insert(LABEL_OWNER.to_string(), owner.clone());
+              }
+              if let Some(tenant) = template.labels.get(LABEL_TENANT) {
+                  labels.insert(LABEL_TENANT.to_string(), tenant.clone());
+              }
+          }
+      }
+
+      labels
+  }
+
+WHY spec.template.labels (not sandbox.metadata.labels):
+  The K8s driver uses DriverSandbox (aliased as Sandbox at line 28):
+    use openshell_core::proto::compute::v1::{ DriverSandbox as Sandbox, ... };
+  DriverSandbox has NO metadata field (proto lines 64-76).
+  Labels are available through: sandbox.spec.template.labels
+  (DriverSandboxSpec.template -> DriverSandboxTemplate.labels).
+
+LABEL FLOW VERIFICATION:
+  1. handle_create_sandbox_inner stamps owner in request.labels (Step 7)
+  2. Gateway creates Sandbox proto with metadata.labels from request.labels
+  3. compute/mod.rs maps Sandbox to DriverSandbox via driver_sandbox_from_public()
+  4. driver_sandbox_template_from_public() copies template.labels (line 1598)
+  5. K8s driver receives DriverSandbox with spec.template.labels containing owner
+  6. sandbox_labels() (MODIFIED) reads from spec.template.labels → CRD labels
+
+ADD import at top of driver.rs:
+  use openshell_core::driver_utils::{LABEL_OWNER, LABEL_TENANT};
+
+Dependencies: Step 7
+Breaking: NO (additive labels on K8s resources)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 13: Verify Docker Driver Label Propagation (No Code Change)
+==============================================================================
+
+Purpose: Confirm that Docker containers automatically receive owner labels.
+
+File: crates/openshell-driver-docker/src/lib.rs
+
+VERIFIED: The Docker driver already propagates template.labels:
+
+  Line 2337: let mut labels = template.labels.clone();
+  Lines 2338-2351: Adds system labels (MANAGED_BY, SANDBOX_ID, etc.)
+
+Because the Docker driver starts with template.labels as the base,
+owner labels set in DriverSandboxTemplate.labels by the gateway (via
+stamp_owner_labels in Step 7 → driver_sandbox_template_from_public at
+line 1598) automatically appear on Docker containers.
+
+NO CODE CHANGE NEEDED for Docker driver label propagation.
+
+VERIFICATION: After implementing Steps 7 and 12, create a sandbox with
+ownership enabled. Inspect the Docker container labels:
+  docker inspect <container> --format '{{ .Config.Labels }}'
+  Expected: includes "openshell.ai/owner": "<sanitized_subject>"
+
+Dependencies: Step 7
+Breaking: NO
+New Cargo dependencies: None
+
+==============================================================================
+STEP 14: Update SandboxIndex for Owner Tracking (Optional)
+==============================================================================
+
+Purpose: Add owner-based lookup to the in-memory sandbox index.
+  This enables fast ownership-based queries without store round-trips.
+
+File: crates/openshell-server/src/sandbox_index.rs
+
+CURRENT Inner struct (lines 16-20):
+  struct Inner {
+      sandbox_name_to_id: HashMap<String, String>,
+      agent_pod_to_id: HashMap<String, String>,
+  }
+
+OPTIONAL ADDITION:
+  struct Inner {
+      sandbox_name_to_id: HashMap<String, String>,
+      agent_pod_to_id: HashMap<String, String>,
+      /// Owner → set of sandbox IDs. Optional optimization for
+      /// fast per-user sandbox enumeration.
+      owner_to_sandbox_ids: HashMap<String, HashSet<String>>,
+  }
+
+Update update_from_sandbox (lines 28-45) to populate the owner map:
+
+  pub fn update_from_sandbox(&self, sandbox: &Sandbox) {
+      let mut inner = self.inner.write().unwrap();
+      // ... existing logic ...
+
+      // Track owner if label present
+      if let Some(ref metadata) = sandbox.metadata {
+          if let Some(owner) = metadata.labels.get(LABEL_OWNER) {
+              inner.owner_to_sandbox_ids
+                  .entry(owner.clone())
+                  .or_default()
+                  .insert(sandbox_id.clone());
+          }
+      }
+  }
+
+NOTE: SandboxIndex uses the GATEWAY's Sandbox type (NOT DriverSandbox).
+The gateway Sandbox proto has metadata: ObjectMeta with labels. So
+sandbox.metadata.labels IS correct here (unlike in the K8s driver where
+DriverSandbox has no metadata).
+
+This step is OPTIONAL. The label-selector-based filtering in Step 8
+already provides correct per-user listing via the persistence layer.
+The SandboxIndex optimization is only needed if per-user listing becomes
+a performance bottleneck.
+
+Dependencies: Steps 7, 3
+Breaking: NO
+New Cargo dependencies: None
+
+==============================================================================
+STEP 15: Update Helm Chart for Gateway-Per-Tenant Deployment
+==============================================================================
+
+Purpose: Enable deploying one gateway per tenant via Helm.
+
+--- Step 15A: Add tenant to values.yaml ---
+
+File: deploy/helm/openshell/values.yaml
+
+ADD at the top level:
+  ## Multi-tenancy
+  # When set, the gateway is deployed in tenant mode with per-user
+  # ownership enforcement and tenant-scoped OIDC audience.
+  tenant: ""
+
+  ## Per-user ownership enforcement
+  ownership:
+    enabled: false
+
+--- Step 15B: Update _helpers.tpl ---
+
+File: deploy/helm/openshell/templates/_helpers.tpl
+
+Add tenant label to openshell.labels:
+  {{- define "openshell.labels" -}}
+  helm.sh/chart: {{ include "openshell.chart" . }}
+  {{ include "openshell.selectorLabels" . }}
+  {{- if .Chart.AppVersion }}
+  app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+  {{- end }}
+  app.kubernetes.io/managed-by: {{ .Release.Service }}
+  {{- if .Values.tenant }}
+  openshell.ai/tenant: {{ .Values.tenant | quote }}
+  {{- end }}
+  {{- end }}
+
+Add helpers:
+  {{- define "openshell.driverNamespace" -}}
+  {{- .Values.server.sandboxNamespace | default .Values.tenant | default .Release.Namespace -}}
+  {{- end }}
+
+  {{- define "openshell.oidcAudience" -}}
+  {{- .Values.server.oidc.audience | default .Values.tenant | default "openshell-cli" -}}
+  {{- end }}
+
+  {{- define "openshell.validateValues" -}}
+  {{- if and .Values.tenant (not .Values.server.oidc.issuer) -}}
+  {{- fail "tenant mode requires server.oidc.issuer to be set" -}}
+  {{- end -}}
+  {{- end }}
+
+--- Step 15C: Update gateway-config.yaml ---
+
+File: deploy/helm/openshell/templates/gateway-config.yaml
+
+In the OIDC section, add audience defaulting to tenant:
+
+  {{- if .Values.server.oidc.issuer }}
+  [openshell.gateway.oidc]
+  issuer = {{ .Values.server.oidc.issuer | quote }}
+  audience = {{ include "openshell.oidcAudience" . | quote }}
+  {{- end }}
+
+Add ownership section:
+
+  {{- if .Values.ownership.enabled }}
+  [openshell.gateway.ownership]
+  enabled = true
+  {{- end }}
+
+  {{- if .Values.tenant }}
+  [openshell.gateway]
+  tenant_id = {{ .Values.tenant | quote }}
+  {{- end }}
+
+Dependencies: None (Helm-level, independent of Rust code)
+Breaking: NO (new optional values)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 16: Add Per-Tenant RBAC Templates
+==============================================================================
+
+Purpose: Provide namespace-scoped RBAC for gateway-per-tenant deployments.
+
+File: deploy/helm/openshell/templates/role.yaml
+
+The existing role.yaml already creates a namespace-scoped Role (not
+ClusterRole) in the sandbox namespace. This is correct for multi-tenancy.
+
+VERIFY that the existing Role binds to the gateway ServiceAccount
+within the tenant namespace. If the Role is in the sandbox namespace
+(which defaults to the Release namespace), then the gateway SA in
+the tenant namespace has access only to its own namespace's sandboxes.
+
+When tenant mode is enabled, the sandbox namespace should default to
+the tenant name (via openshell.driverNamespace helper from Step 15B).
+
+For the ClusterRole (node-reader or tokenreview), ensure per-tenant
+naming:
+
+  metadata:
+    name: {{ include "openshell.fullname" . }}-tokenreview
+    {{- if .Values.tenant }}
+    # Per-tenant named to avoid ClusterRole collisions
+    name: {{ include "openshell.fullname" . }}-tokenreview-{{ .Values.tenant }}
+    {{- end }}
+
+Dependencies: Step 15
+Breaking: NO
+New Cargo dependencies: None
+
+==============================================================================
+STEP 17: Add ResourceQuota and LimitRange Templates
+==============================================================================
+
+Purpose: Limit resource consumption per tenant namespace.
+
+--- Step 17A: ResourceQuota ---
+
+File: deploy/helm/openshell/templates/resourcequota.yaml (NEW)
+
+  {{- if .Values.tenant }}
+  apiVersion: v1
+  kind: ResourceQuota
+  metadata:
+    name: {{ include "openshell.fullname" . }}-quota
+    namespace: {{ .Release.Namespace }}
+    labels:
+      {{- include "openshell.labels" . | nindent 4 }}
+  spec:
+    hard:
+      pods: {{ .Values.quota.pods | default "15" | quote }}
+      requests.cpu: {{ .Values.quota.requestsCpu | default "20" | quote }}
+      requests.memory: {{ .Values.quota.requestsMemory | default "40Gi" | quote }}
+      persistentvolumeclaims: {{ .Values.quota.pvcs | default "10" | quote }}
+  {{- end }}
+
+--- Step 17B: LimitRange ---
+
+File: deploy/helm/openshell/templates/limitrange.yaml (NEW)
+
+  {{- if .Values.tenant }}
+  apiVersion: v1
+  kind: LimitRange
+  metadata:
+    name: {{ include "openshell.fullname" . }}-limits
+    namespace: {{ .Release.Namespace }}
+    labels:
+      {{- include "openshell.labels" . | nindent 4 }}
+  spec:
+    limits:
+      - type: Container
+        defaultRequest:
+          cpu: "100m"
+          memory: "128Mi"
+  {{- end }}
+
+--- Step 17C: Add quota values ---
+
+File: deploy/helm/openshell/values.yaml
+
+ADD:
+  quota:
+    pods: "15"
+    requestsCpu: "20"
+    requestsMemory: "40Gi"
+    pvcs: "10"
+
+Dependencies: Step 15
+Breaking: NO (only created when tenant is set)
+New Cargo dependencies: None
+
+==============================================================================
+STEP 18: Update Certificate Generation for Tenant SANs
+==============================================================================
+
+Purpose: Include tenant-specific hostnames in gateway TLS certificates.
+
+File: deploy/helm/openshell/templates/certgen.yaml
+
+In the certgen Job args, ensure SANs include:
+  1. openshell-server (service name)
+  2. openshell-server.{{ .Release.Namespace }} (FQDN)
+  3. openshell-server.{{ .Release.Namespace }}.svc
+  4. openshell-server.{{ .Release.Namespace }}.svc.cluster.local
+  5. localhost
+  6. {{ .Values.ingress.host }} (if set — per-tenant ingress hostname)
+
+The existing certgen already includes service name and namespace.
+Ensure the ingress.host is included when set:
+
+  {{- if .Values.ingress.host }}
+  - "--server-san"
+  - {{ .Values.ingress.host | quote }}
+  {{- end }}
+
+For gateway-per-tenant, the hostname follows the pattern:
+  openshell-<tenant>.<domain>
+
+This is set in deploy-tenant.sh and passed via --set ingress.host.
+
+Dependencies: Step 15
+Breaking: NO
+New Cargo dependencies: None
+
+==============================================================================
+STEP 19: Update CLI for Multi-Tenant Gateway Display
+==============================================================================
+
+Purpose: Show tenant information in gateway list output.
+
+File: crates/openshell-cli/src/main.rs
+
+The CLI's `gateway list` command shows registered gateways. When a
+gateway has OIDC audience configured, display it as the tenant context.
+
+The GatewayMetadata struct (openshell-bootstrap/src/metadata.rs) already
+has oidc_audience: Option<String>. This can be shown in the table:
+
+  | NAME    | URL                              | TENANT  |
+  | team1   | https://openshell-team1.apps.com | team1   |
+  | team2   | https://openshell-team2.apps.com | team2   |
+
+The TENANT column is derived from oidc_audience if it differs from the
+default "openshell-cli".
+
+This is a display-only change with no functional impact.
+
+Dependencies: Steps 15-18
+Breaking: NO
+New Cargo dependencies: None
+
+==============================================================================
+STEP 20: Add Unit and Integration Tests
+==============================================================================
+
+Purpose: Comprehensive test coverage for ownership enforcement.
+
+--- Step 20A: Unit tests for ownership module ---
+
+File: crates/openshell-server/src/auth/ownership.rs (add #[cfg(test)] module)
+
+  #[cfg(test)]
+  mod tests {
+      use super::*;
+      use crate::auth::identity::{Identity, IdentityProvider};
+      use crate::auth::principal::{Principal, UserPrincipal};
+
+      fn make_user(subject: &str, roles: &[&str]) -> Principal {
+          Principal::User(UserPrincipal {
+              identity: Identity {
+                  subject: subject.to_string(),
+                  display_name: None,
+                  roles: roles.iter().map(|r| r.to_string()).collect(),
+                  scopes: vec![],
+                  provider: IdentityProvider::Oidc,
+                  groups: vec![],
+              },
+          })
+      }
+
+      fn make_config(enabled: bool) -> OwnershipEnforcement {
+          OwnershipEnforcement {
+              enabled,
+              admin_role: "openshell-admin".to_string(),
+              tenant_id: None,
+          }
+      }
+
+      // --- sanitize_label_value tests ---
+
+      #[test]
+      fn sanitize_uuid_passes_through() {
+          assert_eq!(
+              sanitize_label_value("550e8400-e29b-41d4-a716-446655440000"),
+              "550e8400-e29b-41d4-a716-446655440000"
+          );
+      }
+
+      #[test]
+      fn sanitize_email_strips_at_symbol() {
+          assert_eq!(
+              sanitize_label_value("user@example.com"),
+              "userexample.com"
+          );
+      }
+
+      #[test]
+      fn sanitize_trims_leading_trailing_non_alnum() {
+          assert_eq!(sanitize_label_value("-hello-"), "hello");
+          assert_eq!(sanitize_label_value("..test.."), "test");
+          assert_eq!(sanitize_label_value("---"), "unknown");
+      }
+
+      #[test]
+      fn sanitize_truncates_to_63_chars() {
+          let long = "a".repeat(100);
+          assert_eq!(sanitize_label_value(&long).len(), 63);
+      }
+
+      #[test]
+      fn sanitize_empty_returns_unknown() {
+          assert_eq!(sanitize_label_value(""), "unknown");
+          assert_eq!(sanitize_label_value("@@@"), "unknown");
+      }
+
+      // --- stamp_owner_labels tests ---
+
+      #[test]
+      fn stamp_adds_owner_label() {
+          let principal = make_user("user-uuid-123", &["openshell-user"]);
+          let config = make_config(true);
+          let labels = stamp_owner_labels(&principal, &config, HashMap::new());
+          assert_eq!(labels.get(LABEL_OWNER), Some(&"user-uuid-123".to_string()));
+      }
+
+      #[test]
+      fn stamp_strips_client_spoofed_labels() {
+          let principal = make_user("user-uuid-123", &["openshell-user"]);
+          let config = make_config(true);
+          let mut client_labels = HashMap::new();
+          client_labels.insert(
+              "openshell.ai/owner".to_string(),
+              "attacker".to_string(),
+          );
+          client_labels.insert(
+              "openshell.ai/tenant".to_string(),
+              "not-my-tenant".to_string(),
+          );
+          client_labels.insert("user-label".to_string(), "kept".to_string());
+
+          let labels = stamp_owner_labels(&principal, &config, client_labels);
+          assert_eq!(labels.get(LABEL_OWNER), Some(&"user-uuid-123".to_string()));
+          assert_eq!(labels.get("user-label"), Some(&"kept".to_string()));
+          assert_ne!(labels.get(LABEL_OWNER), Some(&"attacker".to_string()));
+      }
+
+      #[test]
+      fn stamp_adds_tenant_when_configured() {
+          let principal = make_user("user-uuid-123", &["openshell-user"]);
+          let mut config = make_config(true);
+          config.tenant_id = Some("team1".to_string());
+          let labels = stamp_owner_labels(&principal, &config, HashMap::new());
+          assert_eq!(labels.get(LABEL_TENANT), Some(&"team1".to_string()));
+      }
+
+      #[test]
+      fn stamp_skips_owner_when_disabled() {
+          let principal = make_user("user-uuid-123", &["openshell-user"]);
+          let config = make_config(false);
+          let labels = stamp_owner_labels(&principal, &config, HashMap::new());
+          assert!(!labels.contains_key(LABEL_OWNER));
+      }
+
+      #[test]
+      fn stamp_strips_spoofed_labels_even_when_disabled() {
+          let principal = make_user("user-uuid-123", &["openshell-user"]);
+          let config = make_config(false);
+          let mut client_labels = HashMap::new();
+          client_labels.insert(
+              "openshell.ai/owner".to_string(),
+              "attacker".to_string(),
+          );
+          let labels = stamp_owner_labels(&principal, &config, client_labels);
+          assert!(!labels.contains_key(LABEL_OWNER));
+      }
+
+      #[test]
+      fn stamp_anonymous_gets_no_owner() {
+          let config = make_config(true);
+          let labels = stamp_owner_labels(
+              &Principal::Anonymous,
+              &config,
+              HashMap::new(),
+          );
+          assert!(!labels.contains_key(LABEL_OWNER));
+      }
+
+      // --- check_ownership tests ---
+
+      #[test]
+      fn check_owner_matches_own_resource() {
+          let principal = make_user("user-uuid-123", &["openshell-user"]);
+          let config = make_config(true);
+          let mut labels = HashMap::new();
+          labels.insert(LABEL_OWNER.to_string(), "user-uuid-123".to_string());
+          assert!(check_ownership(&principal, &config, &labels, "sandbox", "s1").is_ok());
+      }
+
+      #[test]
+      fn check_owner_blocked_from_other_resource() {
+          let principal = make_user("user-A", &["openshell-user"]);
+          let config = make_config(true);
+          let mut labels = HashMap::new();
+          labels.insert(LABEL_OWNER.to_string(), "user-B".to_string());
+          assert!(check_ownership(&principal, &config, &labels, "sandbox", "s1").is_err());
+      }
+
+      #[test]
+      fn check_admin_bypasses_ownership() {
+          let principal = make_user("admin-uuid", &["openshell-admin"]);
+          let config = make_config(true);
+          let mut labels = HashMap::new();
+          labels.insert(LABEL_OWNER.to_string(), "other-user".to_string());
+          assert!(check_ownership(&principal, &config, &labels, "sandbox", "s1").is_ok());
+      }
+
+      #[test]
+      fn check_disabled_allows_all() {
+          let principal = make_user("user-A", &["openshell-user"]);
+          let config = make_config(false);
+          let mut labels = HashMap::new();
+          labels.insert(LABEL_OWNER.to_string(), "user-B".to_string());
+          assert!(check_ownership(&principal, &config, &labels, "sandbox", "s1").is_ok());
+      }
+
+      #[test]
+      fn check_anonymous_bypasses_ownership() {
+          let config = make_config(true);
+          let mut labels = HashMap::new();
+          labels.insert(LABEL_OWNER.to_string(), "some-user".to_string());
+          assert!(check_ownership(
+              &Principal::Anonymous, &config, &labels, "sandbox", "s1"
+          ).is_ok());
+      }
+
+      #[test]
+      fn check_no_owner_label_requires_admin() {
+          let principal = make_user("user-uuid", &["openshell-user"]);
+          let config = make_config(true);
+          let labels = HashMap::new(); // No owner label
+          assert!(check_ownership(&principal, &config, &labels, "sandbox", "s1").is_err());
+      }
+
+      // --- Sanitized subject comparison tests (V3-R1 Issue R3-3) ---
+
+      #[test]
+      fn check_ownership_with_email_subject() {
+          // Subject "user@example.com" → sanitizes to "userexample.com"
+          let principal = make_user("user@example.com", &["openshell-user"]);
+          let config = make_config(true);
+          let mut labels = HashMap::new();
+          // Label stores the SANITIZED value (as stamped by stamp_owner_labels)
+          labels.insert(
+              LABEL_OWNER.to_string(),
+              sanitize_label_value("user@example.com"),
+          );
+          assert!(
+              check_ownership(&principal, &config, &labels, "sandbox", "s1").is_ok(),
+              "User must access own sandbox even when subject requires sanitization"
+          );
+      }
+
+      #[test]
+      fn owner_selector_uses_sanitized_subject() {
+          let principal = make_user("user@example.com", &["openshell-user"]);
+          let config = make_config(true);
+          let selector = owner_label_selector(&principal, &config);
+          assert_eq!(
+              selector,
+              Some("openshell.ai/owner=userexample.com".to_string())
+          );
+      }
+
+      // --- owner_label_selector tests ---
+
+      #[test]
+      fn selector_none_when_disabled() {
+          let principal = make_user("user-uuid", &["openshell-user"]);
+          let config = make_config(false);
+          assert_eq!(owner_label_selector(&principal, &config), None);
+      }
+
+      #[test]
+      fn selector_none_for_admin() {
+          let principal = make_user("admin-uuid", &["openshell-admin"]);
+          let config = make_config(true);
+          assert_eq!(owner_label_selector(&principal, &config), None);
+      }
+
+      #[test]
+      fn selector_includes_owner_for_user() {
+          let principal = make_user("user-uuid", &["openshell-user"]);
+          let config = make_config(true);
+          let selector = owner_label_selector(&principal, &config);
+          assert_eq!(
+              selector,
+              Some("openshell.ai/owner=user-uuid".to_string())
+          );
+      }
+
+      // --- labels_from_json tests ---
+
+      #[test]
+      fn labels_from_valid_json() {
+          let json = Some(r#"{"key":"value","owner":"user-1"}"#.to_string());
+          let labels = labels_from_json(&json);
+          assert_eq!(labels.get("owner"), Some(&"user-1".to_string()));
+      }
+
+      #[test]
+      fn labels_from_none_returns_empty() {
+          let labels = labels_from_json(&None);
+          assert!(labels.is_empty());
+      }
+  }
+
+--- Step 20B: Integration tests ---
+
+Integration tests should exercise the ownership flow end-to-end:
+
+  1. Create sandbox with OIDC user A → verify openshell.ai/owner label
+  2. List sandboxes with user A → shows own sandboxes only
+  3. List sandboxes with user B → does not show user A's sandboxes
+  4. Get user A's sandbox with user B → PermissionDenied
+  5. Delete user A's sandbox with user B → PermissionDenied
+  6. Admin user can list, get, delete any sandbox
+  7. Create provider with user A → verify openshell.ai/owner label
+  8. User B cannot update/delete user A's provider
+  9. Disabled ownership → all users see everything
+  10. Anonymous principal → all resources visible (backward-compatible)
+  11. Client-supplied openshell.ai/owner is stripped (anti-spoofing)
+  12. Email-based subjects work correctly (sanitization consistency)
+
+These tests should be added to the existing test infrastructure in
+crates/openshell-server/src/ or as separate integration test files.
+
+Dependencies: All Steps 1-14
+Breaking: NO
+New Cargo dependencies: None
+
+================================================================================
+7. DEPENDENCY SUMMARY
+================================================================================
+
+  Step 1:  Identity groups field         → NONE
+  Step 2:  OidcConfig groups_claim       → Step 1
+  Step 3:  Label constants               → NONE
+  Step 4:  Ownership module              → Steps 1, 3
+  Step 5:  Config structures             → NONE
+  Step 6:  ServerState helper            → Steps 4, 5
+  Step 7:  Create handler                → Steps 1-6
+  Step 8:  List handler                  → Steps 4-6
+  Step 9:  Get/Delete handlers           → Steps 4-6
+  Step 10: Watch/Exec/SSH handlers       → Steps 4-6
+  Step 11: Provider CRUD                 → Steps 4-6
+  Step 12: K8s driver labels             → Step 7
+  Step 13: Docker driver verification    → Step 7
+  Step 14: SandboxIndex (optional)       → Steps 7, 3
+  Step 15: Helm chart (tenant values)    → NONE (Helm-level)
+  Step 16: Helm RBAC                     → Step 15
+  Step 17: Helm quota/limits             → Step 15
+  Step 18: Helm cert SANs                → Step 15
+  Step 19: CLI display                   → Steps 15-18
+  Step 20: Tests                         → All
+
+================================================================================
+8. RISK ANALYSIS
+================================================================================
+
+  1. Provider role change scope (MEDIUM)
+     Risk: Changing #[rpc_auth] role from "admin" to "user" for provider
+           mutations affects ALL deployments. Non-ownership deployments
+           may inadvertently allow user-level provider creation.
+     Mitigation: Runtime guard in Step 11E restores admin-only semantics
+           when ownership is disabled.
+     Validation: Test provider creation with and without ownership enabled.
+
+  2. into_inner() ordering consistency (LOW)
+     Risk: Every handler modification must extract Principal BEFORE
+           into_inner(). Missing this in one handler produces a
+           compile-time error (use-after-move), not a runtime bug.
+     Mitigation: Rust borrow checker catches all violations.
+     Validation: Compilation verifies correct ordering.
+
+  3. Label selector query limitations (MEDIUM)
+     Risk: The persistence layer's list_with_selector may not support
+           complex queries (e.g., "label absent" for shared providers).
+     Mitigation: Provider listing uses in-memory filtering (Step 11B).
+     Validation: Verify list_with_selector handles comma-separated selectors.
+
+  4. Name uniqueness across owners (MEDIUM)
+     Risk: Sandbox and provider names are globally unique per object_type
+           (objects_name_uq index on (object_type, name)). Two users
+           cannot create a sandbox with the same name.
+     Mitigation: Document as a known limitation. Users can use unique names
+           or UUID-based naming. A future migration could add owner to the
+           uniqueness constraint.
+     Validation: Test that name collision returns a clear error.
+
+  5. Sanitized subject identity collision (LOW)
+     Risk: Two different OIDC subjects could sanitize to the same K8s
+           label value (e.g., "user@a.com" and "user.a.com" both become
+           "usera.com").
+     Mitigation: UUIDs (common case) have no collisions. Email-based
+           collisions are theoretically possible but extremely unlikely.
+     Validation: Log a warning when sanitization changes the subject.
+
+  6. OIDC audience vs tenant mismatch (LOW)
+     Risk: If OIDC audience and tenant_id are configured inconsistently,
+           users may authenticate to the wrong gateway or see mismatched
+           tenant labels.
+     Mitigation: Helm chart defaults audience to tenant name (Step 15B).
+           The deploy script validates the mapping.
+     Validation: E2E test with two tenants and cross-gateway auth rejection.
+
+  7. Backward compatibility regression (LOW)
+     Risk: Existing single-tenant deployments might break if ownership
+           config parsing introduces issues.
+     Mitigation: All new fields have serde(default). Ownership is disabled
+           by default. Anonymous principal bypasses ownership. All tests
+           include disabled-ownership scenarios.
+     Validation: Verify existing test suite passes without config changes.
+
+  8. SandboxWatchBus tenant isolation (LOW)
+     Risk: SandboxWatchBus broadcasts events to all subscribers, regardless
+           of ownership. A user watching sandboxes could receive events
+           for sandboxes they don't own.
+     Mitigation: The watch handler enforces ownership on the INITIAL
+           sandbox fetch (Step 10A). The watch stream filters by the
+           specific sandbox requested. Cross-sandbox event leakage is
+           limited to the specific watched sandbox (which passed the
+           ownership check).
+     Validation: Test that watch requests for non-owned sandboxes are rejected.
+
+  9. Migration path for existing resources (LOW)
+     Risk: Sandboxes and providers created before ownership is enabled
+           have no openshell.ai/owner label. When ownership is turned on,
+           these resources require admin access (Step 4D: "has no owner
+           label and requires admin access").
+     Mitigation: Document the migration path: admin must delete or relabel
+           existing resources. Alternatively, provide a migration script.
+     Validation: Test behavior of pre-ownership resources under ownership.
+
+  10. spec.template.labels path dependency (LOW)
+      Risk: The K8s driver label fix (Step 12) depends on the exact proto
+            field hierarchy: sandbox.spec.template.labels.
+      Mitigation: Path is verified against proto definitions and import
+            statements. The same path is used by existing code in the
+            driver (e.g., template.labels is used for image, environment).
+      Validation: Compile-time verification via Rust type system.
+
+  11. Concurrent provider creation race (LOW)
+      Risk: Two users simultaneously creating a provider with the same name
+            could produce a uniqueness constraint violation.
+      Mitigation: The persistence layer's put_if() with the uniqueness
+            constraint returns an error. First writer wins.
+      Validation: Existing persistence tests cover uniqueness enforcement.
+
+================================================================================
+9. BREAKING CHANGE ASSESSMENT
+================================================================================
+
+  COMPILE-TIME BREAKING:
+    - Identity struct gains groups field → all construction sites must add it
+    - OidcConfig gains groups_claim → struct literal in cli.rs must add it
+    - Config gains ownership + tenant_id → Config::new() must add defaults
+
+  RUNTIME NON-BREAKING (backward-compatible):
+    - Ownership disabled by default → no behavior change
+    - New config fields have serde(default) → existing configs parse cleanly
+    - New labels are additive → no existing labels removed
+    - Provider role change is guarded → runtime check preserves admin-only semantics
+
+  HELM NON-BREAKING:
+    - New values have defaults → existing installs unaffected
+    - ResourceQuota/LimitRange only created when tenant is set
+    - No existing templates modified (only additions)
+
+================================================================================
+10. IMPLEMENTATION ORDER & MILESTONES
+================================================================================
+
+MILESTONE 1: Core Ownership Foundation (Steps 1-6)
+  Days 1-4
+  Deliverables:
+    - Identity with groups field
+    - OidcConfig with groups_claim
+    - Owner/tenant label constants
+    - Ownership module (stamp, check, sanitize, selector)
+    - OwnershipConfig in Config + GatewayFileSection
+    - ServerState.ownership_config() helper
+
+MILESTONE 2: Handler Enforcement (Steps 7-11)
+  Days 5-10
+  Deliverables:
+    - Sandbox create/list/get/delete/watch/exec/ssh ownership
+    - Provider create/list/get/update/delete ownership
+    - #[rpc_auth] role change + runtime guard
+
+MILESTONE 3: Driver & Index Integration (Steps 12-14)
+  Days 11-12
+  Deliverables:
+    - K8s driver owner labels on Sandbox CRD
+    - Docker driver verification (no code change)
+    - SandboxIndex owner tracking (optional)
+
+MILESTONE 4: Helm & Deployment (Steps 15-18)
+  Days 13-16
+  Deliverables:
+    - Gateway-per-tenant Helm chart
+    - Per-tenant RBAC, ResourceQuota, LimitRange
+    - Tenant-specific TLS cert SANs
+
+MILESTONE 5: CLI & Testing (Steps 19-20)
+  Days 17-21
+  Deliverables:
+    - CLI tenant display
+    - Unit tests (26+ test cases)
+    - Integration tests (12 scenarios)
+
+FILES MODIFIED (Rust — 16 files):
+  crates/openshell-server/src/auth/identity.rs        (groups field)
+  crates/openshell-server/src/auth/oidc.rs             (groups extraction)
+  crates/openshell-server/src/auth/mod.rs              (ownership module)
+  crates/openshell-server/src/auth/ownership.rs        (NEW)
+  crates/openshell-server/src/lib.rs                   (ownership_config)
+  crates/openshell-server/src/grpc/sandbox.rs          (owner stamping/filtering)
+  crates/openshell-server/src/grpc/provider.rs         (owner stamping/filtering)
+  crates/openshell-server/src/grpc/mod.rs              (provider role change)
+  crates/openshell-server/src/sandbox_index.rs         (optional owner tracking)
+  crates/openshell-server/src/ssh_sessions.rs          (ownership check)
+  crates/openshell-server/src/cli.rs                   (config mapping + CLI arg)
+  crates/openshell-core/src/config.rs                  (OwnershipConfig, groups_claim)
+  crates/openshell-core/src/driver_utils.rs            (label constants)
+  crates/openshell-server/src/config_file.rs           (GatewayFileSection fields)
+  crates/openshell-driver-kubernetes/src/driver.rs     (CRD labels)
+  crates/openshell-driver-docker/src/lib.rs            (verification only)
+
+FILES MODIFIED (Helm — up to 9 files):
+  deploy/helm/openshell/values.yaml                    (tenant, ownership, quota)
+  deploy/helm/openshell/templates/_helpers.tpl         (tenant label, helpers)
+  deploy/helm/openshell/templates/gateway-config.yaml  (ownership + tenant TOML)
+  deploy/helm/openshell/templates/role.yaml            (per-tenant ClusterRole name)
+  deploy/helm/openshell/templates/certgen.yaml         (ingress SAN)
+  deploy/helm/openshell/templates/resourcequota.yaml   (NEW)
+  deploy/helm/openshell/templates/limitrange.yaml      (NEW)
+  deploy/helm/openshell/templates/NOTES.txt            (optional tenant info)
+
+================================================================================
+11. COMPLETE LABEL FLOW DIAGRAM
+================================================================================
+
+This diagram traces how owner labels flow end-to-end from API request
+to persistent storage and K8s pods.
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ CLIENT: CreateSandboxRequest { name, spec, labels: {user_labels} } │
+  └────────────────────────────┬────────────────────────────────────────┘
+                               │
+                               ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ GATEWAY: handle_create_sandbox_inner (grpc/sandbox.rs)             │
+  │                                                                     │
+  │ 1. Extract Principal from request.extensions() (BEFORE into_inner)  │
+  │ 2. request.into_inner() — consumes tonic::Request                  │
+  │ 3. Validate labels                                                  │
+  │ 4. stamp_owner_labels(principal, config, request.labels)            │
+  │    ├── Strip client openshell.ai/* labels (anti-spoofing)           │
+  │    ├── Add openshell.ai/owner = sanitize(identity.subject)          │
+  │    └── Add openshell.ai/tenant = config.tenant_id (if set)          │
+  │ 5. Build Sandbox proto with metadata.labels = stamped labels        │
+  └────────────────────────────┬────────────────────────────────────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    ▼                      ▼
+  ┌─────────────────────────┐  ┌─────────────────────────────────────┐
+  │ PERSISTENCE (Store)     │  │ COMPUTE (compute/mod.rs)            │
+  │                         │  │                                     │
+  │ ObjectRecord {          │  │ driver_sandbox_from_public()        │
+  │   labels: JSON(         │  │ → driver_sandbox_template_from_    │
+  │     openshell.ai/owner  │  │     public() [line 1598]            │
+  │     openshell.ai/tenant │  │   labels: template.labels.clone()   │
+  │     user_labels         │  │   (direct pass-through)             │
+  │   )                     │  │                                     │
+  │ }                       │  │ Creates DriverSandbox with:         │
+  │                         │  │   spec.template.labels = stamped    │
+  │ Used for:               │  │                                     │
+  │ - check_ownership       │  └──────────────┬──────────────────────┘
+  │ - owner_label_selector  │                  │
+  │ - list_with_selector    │       ┌──────────┴──────────┐
+  └─────────────────────────┘       ▼                      ▼
+                          ┌──────────────┐    ┌──────────────────────┐
+                          │ K8S DRIVER   │    │ DOCKER DRIVER        │
+                          │              │    │                      │
+                          │ sandbox_     │    │ template.labels      │
+                          │  labels()    │    │  .clone() [line 2337]│
+                          │ reads from:  │    │ + system labels      │
+                          │ spec.template│    │                      │
+                          │  .labels     │    │ → Container labels   │
+                          │              │    │   include owner      │
+                          │ → CRD labels │    │                      │
+                          │   include    │    └──────────────────────┘
+                          │   owner      │
+                          │              │
+                          │ Pod template │
+                          │  labels get  │
+                          │  template.   │
+                          │  labels      │
+                          │  automatically│
+                          └──────────────┘
+
+================================================================================
+12. NAME UNIQUENESS & KNOWN LIMITATIONS
+================================================================================
+
+  1. SANDBOX NAME UNIQUENESS IS GLOBAL
+     The objects table has a unique index: (object_type, name).
+     Two users cannot create sandboxes with the same name, even when
+     ownership separates visibility. This is a known limitation of
+     the persistence schema.
+
+     WORKAROUND: Users can use unique names (e.g., prefix with username)
+     or rely on UUID-based auto-naming (petname generator).
+
+     FUTURE: A schema migration could add (object_type, name, owner)
+     uniqueness, but this requires careful handling of shared providers
+     and is out of scope for V4.
+
+  2. PROVIDER NAME RESOLUTION ORDER
+     When a user and an admin both create providers with the same name,
+     the current uniqueness constraint prevents this. For user-owned +
+     shared provider coexistence, names must be different.
+
+     FUTURE: A resolution order (user > shared) could be implemented with
+     a schema migration to allow duplicate names across owner scopes.
+
+  3. SANDBOX WATCH BUS EVENTS
+     The SandboxWatchBus does not filter by owner. A watch stream for a
+     specific sandbox passes the ownership check at connection time, but
+     the event bus itself is not owner-partitioned. This is acceptable
+     because the watch is scoped to a specific sandbox ID, not a list.
+
+  4. EXISTING RESOURCES ON OWNERSHIP ENABLE
+     Pre-existing sandboxes/providers created before ownership is enabled
+     have no openshell.ai/owner label. These resources become admin-only
+     when ownership is turned on. An admin must delete or relabel them.
+
+================================================================================
+13. CARGO DEPENDENCY SUMMARY
+================================================================================
+
+NO new Cargo dependencies are required. The implementation uses:
+  - serde / serde_json (already in tree for label serialization)
+  - tonic (already in tree for gRPC types and Status)
+  - tokio (already in tree for async runtime)
+  - uuid (already in tree for ID generation)
+  - thiserror (already in tree for error types)
+
+The ownership module uses only standard Rust types (HashMap, String, Vec)
+and existing OpenShell types (Principal, Identity, Status).
+
+================================================================================
+END OF CODE PORTING PLAN V4
+================================================================================

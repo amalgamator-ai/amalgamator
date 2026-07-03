@@ -1,0 +1,378 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — REVIEW SUMMARY V4
+================================================================================
+Date: 2026-07-03
+Review: V4-R1 (review of iteration 4)
+================================================================================
+
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+This review identified 8 issues in the V4 porting plan. All issues have
+been addressed in the corrected plan.
+
+HIGH ISSUES (2):
+
+  ISSUE R4-1: Owner labels do not flow from ObjectMeta.labels to compute
+              drivers — two separate label maps exist
+    Affected: Steps 7, 12, and Section 11 (Label Flow Diagram)
+    Problem: The V4 plan stamps owner labels on request.labels, which
+      flows into Sandbox.metadata.labels (ObjectMeta). But the compute
+      drivers receive labels through a COMPLETELY SEPARATE path:
+        SandboxSpec.template.labels → DriverSandboxTemplate.labels
+
+      These are independent label maps in the protobuf schema:
+        - Sandbox.metadata (ObjectMeta) has labels field 4
+        - SandboxSpec.template (SandboxTemplate) has labels field 4
+      They are NOT the same map and do NOT share data.
+
+      Verified data flow:
+        driver_sandbox_template_from_public() at compute/mod.rs line 1598:
+          labels: template.labels.clone()
+        This copies SandboxTemplate.labels, NOT ObjectMeta.labels.
+
+      The V4 plan's Label Flow Diagram (Section 11) incorrectly claims:
+        "labels: template.labels.clone() (direct pass-through)"
+      implying that owner labels in ObjectMeta flow through template.
+      They do NOT.
+
+      Result: Owner labels stamped on ObjectMeta would appear in the
+      persistence layer but NOT on K8s pods or Docker containers. The
+      K8s driver's sandbox_labels() (Step 12) reads from
+      spec.template.labels and would find NO owner labels.
+
+    Why it matters: This is a functional gap in the K8s and Docker driver
+      label propagation. kubectl filtering by openshell.ai/owner would
+      not work. The Label Flow Diagram would mislead implementers.
+
+    Fix: Step 7 must stamp owner labels on BOTH ObjectMeta.labels AND
+      SandboxTemplate.labels. After stamp_owner_labels generates the
+      labels, copy LABEL_OWNER and LABEL_TENANT to spec.template.labels:
+        if let Some(owner) = labels.get(LABEL_OWNER) {
+            template.labels.insert(LABEL_OWNER.to_string(), owner.clone());
+        }
+      Corrected Label Flow Diagram in Section 11 shows both paths.
+
+  ISSUE R4-8: Sandbox labels not persisted in DB labels column on creation
+    Affected: Steps 7, 8
+    Problem: compute/mod.rs create_sandbox() at line 499 calls
+      store.put_if() with labels: None:
+        self.store.put_if(
+            Sandbox::object_type(), &sandbox_id, ...,
+            &sandbox.encode_to_vec(),
+            None,                    // labels NOT in DB column
+            WriteCondition::MustCreate,
+        )
+
+      Owner labels ARE in the protobuf payload (sandbox.metadata.labels)
+      but are NOT stored in the database's labels column. The labels
+      column is used by list_with_selector for filtering.
+
+      The delete path at lines 682-702 DOES serialize labels to the DB
+      column. But initial creation does NOT.
+
+    Why it matters: Step 8 (sandbox list handler) adds owner-based
+      filtering via list_with_selector. Without labels in the DB column,
+      newly created sandboxes won't match the owner label selector.
+      A user creates a sandbox and immediately lists → sandbox is missing.
+
+    Fix: In create_sandbox(), serialize metadata.labels to the labels
+      parameter before calling put_if, using the same pattern as the
+      delete path (lines 682-702). This also fixes a pre-existing issue
+      where user-provided labels are not queryable after creation.
+
+MEDIUM ISSUES (3):
+
+  ISSUE R4-2: Provider label persistence path is incomplete
+    Affected: Step 11A
+    Problem: Provider creation (create_provider_record at provider.rs
+      line 119-127) passes labels: None to store.put_if(). Even when
+      Step 11A stamps owner labels on provider.metadata.labels, the
+      labels are NOT stored in the database's labels column.
+
+      Additionally, provider metadata is conditionally initialized at
+      lines 73-82. If the client sends a provider WITHOUT metadata
+      (metadata.is_none()), create_provider_record creates new metadata
+      with empty labels. The V4 plan's stamping code uses if-let on
+      provider.metadata, which would silently skip stamping when metadata
+      is None.
+
+    Why it matters: Provider owner labels won't be queryable via
+      list_with_selector. The in-memory filtering in Step 11B would
+      still work (it decodes protobuf payloads), but DB-level filtering
+      fails. The conditional metadata initialization could silently
+      skip label stamping.
+
+    Fix: (1) Ensure metadata exists before stamping by creating default
+      ObjectMeta if None. (2) Serialize labels to the put_if labels
+      parameter in create_provider_record, matching the sandbox fix.
+
+  ISSUE R4-3: Identity construction sites not fully enumerated
+    Affected: Step 1, Section 3
+    Problem: The V4 plan lists 3 vague categories of Identity
+      construction sites. Verification found at least 11 specific sites:
+
+      Production code (6 sites):
+        oidc.rs:342, multiplex.rs:520, multiplex.rs:770,
+        supervisor_session.rs:878, grpc/auth_rpc.rs:300,
+        inference.rs:1005
+
+      Test helpers (5 sites):
+        multiplex.rs:1419, auth/authenticator.rs:142,
+        auth/guard.rs:104, grpc/policy.rs:3924, grpc/policy.rs:4026
+
+    Why it matters: Every missed site produces a "missing field: groups"
+      compile error. While Rust catches these automatically, an implementer
+      would need to discover each one through trial-and-error. The plan
+      should enumerate them to save time and prevent confusion.
+
+    Fix: Replace the 3-category list with the complete 11-site
+      enumeration with exact file:line references.
+
+  ISSUE R4-4: Additional provider admin methods not addressed
+    Affected: Step 11D
+    Problem: The V4 plan changes #[rpc_auth] roles for create_provider,
+      update_provider, delete_provider. But there are 5 additional
+      admin-only provider methods:
+        - import_provider_profiles (line 400)
+        - update_provider_profiles (line 408)
+        - rotate_provider_credential (line 440)
+        - delete_provider_refresh (line 456)
+        - delete_provider_profile (line 472)
+
+      The plan does not address whether these should also get ownership
+      enforcement or remain admin-only.
+
+    Why it matters: Without explicit decisions, implementers may
+      inconsistently handle these methods. Some (like credential
+      rotation) affect provider runtime behavior for all sandboxes.
+
+    Fix: Explicitly document that these methods REMAIN admin-only
+      (profile and credential operations are infrastructure concerns).
+      However, when ownership is enabled, admin callers should still
+      pass the ownership check on the target provider.
+
+LOW ISSUES (3):
+
+  ISSUE R4-5: OidcClaims listing omits existing #[serde(default)] attributes
+    Affected: Step 2A
+    Problem: The V4 plan shows OidcClaims fields without the
+      #[serde(default)] attributes on preferred_username and email that
+      exist in the actual code. This is a cosmetic inaccuracy.
+    Why it matters: Minor — may confuse an implementer who sees different
+      attributes in the actual file vs the plan.
+    Fix: Update the OidcClaims listing to include #[serde(default)] on
+      preferred_username and email for accuracy.
+
+  ISSUE R4-6: certgen SAN configuration uses different pattern than plan
+    Affected: Step 18
+    Problem: The V4 plan shows adding SANs via a direct --server-san
+      flag, but the actual certgen.yaml uses openshell.defaultServerDnsNames
+      helper and iterates over pkiInitJob.serverDnsNames lists.
+    Why it matters: Minor — the V4 plan's approach works but is
+      inconsistent with existing template patterns.
+    Fix: Note that the existing certgen pattern should be extended
+      to include ingress.host, following the established iteration.
+
+  ISSUE R4-7: Provider metadata may not exist when stamping labels
+    Affected: Step 11A
+    Problem: The V4 plan's code uses:
+        if let Some(ref mut metadata) = provider.metadata { ...stamp... }
+      When metadata is None (client didn't send it), the if-let fails
+      and labels are never stamped. Then create_provider_record creates
+      metadata with empty labels.
+    Why it matters: Provider ownership silently fails for requests
+      without metadata. The provider is created without an owner label.
+    Fix: Ensure metadata exists before stamping (create default
+      ObjectMeta if None). Merged into Issue R4-2 fix.
+
+2. VERIFICATION METHODOLOGY
+================================================================================
+
+The review was performed using four parallel source code verification
+agents that examined the actual OpenShell codebase (HEAD) against every
+structural claim in the V4 plan:
+
+  Agent 1 — Auth Layer & Identity Construction:
+    Verified Identity struct (5 fields, lines 15-31)
+    Verified OidcClaims struct (exact serde attributes)
+    Verified extract_roles() implementation (dot-path navigation)
+    Verified validate_token() call sequence
+    CRITICAL FINDING: Found 11 Identity construction sites across:
+      auth/, multiplex.rs, supervisor_session.rs, grpc/, inference.rs
+
+  Agent 2 — Handler Flow & Provider Persistence:
+    Verified sandbox label flow: request.labels → ObjectMeta (line 183)
+    CRITICAL FINDING: Provider creation uses labels: None in put_if
+    CRITICAL FINDING: create_provider_record conditionally initializes
+      metadata — labels may be overwritten
+    Verified all #[rpc_auth] annotations for provider methods
+    Found 5 additional admin-only provider methods not in the plan
+
+  Agent 3 — Config & K8s Driver:
+    Verified Config struct (16 fields, lines 329-403)
+    Verified Config::new() (line 569, all 16 fields initialized)
+    Verified OidcConfig (7 fields, deny_unknown_fields)
+    Verified 12 builder methods ending at line 708
+    Verified sandbox_labels() (lines 857-865, 2 labels only)
+    Verified pod template labels (lines 1517-1535, serde_json::Map format)
+
+  Agent 4 — Helm Chart & Label Flow:
+    Verified values.yaml OIDC fields
+    Verified _helpers.tpl label definitions
+    Verified gateway-config.yaml OIDC section (lines 92-110)
+    Verified role.yaml is namespace-scoped Role
+    Verified certgen.yaml SAN configuration pattern
+    CRITICAL FINDING: driver_sandbox_template_from_public() copies
+      SandboxTemplate.labels, NOT ObjectMeta.labels (line 1598)
+    Verified Docker driver template.labels.clone() (line 2337)
+    Verified proto type hierarchy (Sandbox vs DriverSandbox)
+
+3. ITERATION EVOLUTION
+================================================================================
+
+V1 (initial plan):
+  - First comprehensive 18-step plan covering multi-tenancy
+  - 11 issues identified in V1-R1 review (3 critical, 3 high, 3 medium,
+    2 low)
+
+V1-R1 (review of V1):
+  - Fixed all 11 issues
+  - Added Step 8b for watch/exec/SSH ownership enforcement
+  - Updated effort estimate: 14-19 days
+
+V2 (rebuilt plan incorporating V1 + V1-R1 learnings):
+  - All 11 V1-R1 fixes integrated from the start
+  - 6 additional corrections from fresh source verification (V2-1..V2-6)
+  - Restructured to 20 steps with explicit dependency graph
+  - Updated effort estimate: 16-21 days
+
+V2-R1 (review of V2):
+  - Found 6 issues (0 critical, 1 high, 2 medium, 3 low)
+  - HIGH: Provider runtime guard uses empty admin_role when ownership
+    disabled — functional bug that would break admin provider creation
+  - MEDIUM: OidcConfig deny_unknown_fields incorrectly claimed absent;
+    provider:write scope requirement not documented
+  - LOW: Dead helper with wrong bounds; pod labels in wrong template;
+    ClusterRole name missing suffix
+  - All issues fixed in corrected plan
+
+V3 (rebuilt from scratch incorporating V1+V1-R1+V2+V2-R1):
+  - All 17 prior issues pre-fixed from the start
+  - Fresh codebase verification with 4 parallel agents
+  - Improved OwnershipEnforcement design preventing admin_role bug
+  - Added known limitations section
+  - Complete test plan with 26+ test cases
+
+V3-R1 (review of V3):
+  - Found 8 issues (0 critical, 3 high, 2 medium, 3 low)
+  - HIGH: into_inner() consumes request before extensions accessible
+    (Steps 7-11, all 10 handler functions affected)
+  - HIGH: DriverSandbox lacks metadata field — labels are in template
+    (Steps 12-13, proto type mismatch)
+  - HIGH: Sanitized subject vs raw subject comparison mismatch
+    (Steps 4C/4D, functional bug for email-based OIDC subjects)
+  - MEDIUM: Method auth is #[rpc_auth] in grpc/mod.rs, not method_authz.rs
+  - MEDIUM: Config construction in cli.rs, not config_file.rs
+  - LOW: http.rs doesn't construct Identity; k8s_sa.rs constructs
+    SandboxPrincipal not Identity; sanitize_label_value K8s compliance
+  - All issues fixed in corrected plan
+  - Added 3 test cases and 1 risk item
+
+V4 (rebuilt from scratch incorporating V1-V3 + all reviews):
+  - All 25 prior issues (V1-R1: 11, V2-R1: 6, V3-R1: 8) pre-fixed
+  - Fresh codebase verification with 4 parallel agents
+  - 10 new findings identified and addressed (V4-1 through V4-10)
+  - New Section 11: Complete Label Flow Diagram
+  - New Section 13: Cargo Dependency Summary
+  - Improved Step 11B with practical provider listing approach
+  - Explicit Step 10C for SSH session handler
+  - Verified line numbers for all code references
+
+V4-R1 (this review):
+  - Found 8 issues (2 high, 3 medium, 3 low)
+  - HIGH R4-1: ObjectMeta.labels and SandboxTemplate.labels are SEPARATE
+    label maps — owner labels must be stamped on BOTH for complete flow
+    to persistence AND compute drivers. The V4 Label Flow Diagram is
+    wrong. (Steps 7, 12, Section 11)
+  - HIGH R4-8: Sandbox creation persistence (compute/mod.rs:499) passes
+    labels: None to store.put_if — owner labels not in DB labels column,
+    breaking list_with_selector. (Steps 7, 8)
+  - MEDIUM R4-2: Provider creation also passes labels: None, AND
+    metadata may be None when stamping. (Step 11A)
+  - MEDIUM R4-3: Identity construction exists in 11 specific sites, not
+    the 3 vague categories listed. (Step 1)
+  - MEDIUM R4-4: 5 additional admin-only provider methods need explicit
+    ownership enforcement decisions. (Step 11D)
+  - LOW R4-5: OidcClaims listing omits existing serde attributes
+  - LOW R4-6: certgen SAN pattern differs from plan's approach
+  - LOW R4-7: Provider metadata may not exist when stamping (merged
+    into R4-2 fix)
+  - All issues fixed in corrected plan
+  - Added 2 risk items, corrected label flow diagram, expanded files list
+
+4. CONVERGENCE ASSESSMENT
+================================================================================
+
+The plan has continued to improve across iterations:
+
+  V1:    11 issues (3 critical, 3 high, 3 medium, 2 low)
+  V2:     6 issues (0 critical, 1 high, 2 medium, 3 low)
+  V3:     8 issues (0 critical, 3 high, 2 medium, 3 low)
+  V4:     8 issues (0 critical, 2 high, 3 medium, 3 low)
+
+  Severity has improved:
+    V1: 6 severe (3 critical + 3 high)
+    V2: 1 severe (1 high)
+    V3: 3 severe (3 high)
+    V4: 2 severe (2 high)
+
+  Issue character has evolved:
+    V1-V2: Fundamental architectural and API misunderstandings
+    V3: Implementation-level field access and ordering errors
+    V4: Data flow topology and persistence layer gaps
+
+  The V4 HIGH issues (R4-1, R4-8) are about the LABEL DATA FLOW
+  TOPOLOGY — understanding which protobuf field carries which data
+  to which consumer. This is a deeper level of verification than prior
+  iterations attempted. The V4 plan correctly identified the two label
+  paths (Section 12A) but incorrectly assumed they shared the same data.
+
+  The two V4 HIGH issues are concrete fixes:
+    R4-1: Add 4 lines to stamp labels on template (mechanical)
+    R4-8: Add 10 lines to serialize labels on creation (copy-paste
+           from existing delete path)
+
+  No architectural issues remain. The two-layer approach (per-user
+  ownership + gateway-per-tenant) is architecturally sound and has
+  been stable since V1.
+
+  KEY RISKS REMAINING:
+  - Provider role change (Step 11D) → mitigated by runtime guard (Step 11E)
+  - Global name uniqueness → documented as known limitation
+  - Pre-existing resources on ownership enable → documented migration path
+  - Labels column NULL on creation (pre-existing) → fixed by R4-8
+
+5. SUMMARY STATISTICS
+================================================================================
+
+  Issues found:         8 (2 high, 3 medium, 3 low)
+  Issues fixed:         8 (all resolved in corrected plan)
+  Steps modified:       5 (Steps 1, 7, 11, 12, 18)
+  Steps unchanged:      15 (Steps 2-6, 8-10, 13-17, 19-20)
+  New risk items:       2 (Risk #12: dual-label consistency,
+                            Risk #13: labels NULL on creation)
+  Files verified:       30+ source files checked against plan claims
+  Effort estimate:      UNCHANGED (16-21 days)
+
+  FILE LIST CORRECTIONS:
+    ADDED to Rust files:    compute/mod.rs (label serialization)
+    ADDED to Rust files:    multiplex.rs (3 Identity construction sites)
+    ADDED to Rust files:    supervisor_session.rs, inference.rs,
+                            auth_rpc.rs, policy.rs (Identity sites)
+    ADDED to Rust files:    authenticator.rs, guard.rs (test helpers)
+    Total Rust files:       22 (up from 16 in V4)
+
+================================================================================
+END OF REVIEW SUMMARY V4
+================================================================================

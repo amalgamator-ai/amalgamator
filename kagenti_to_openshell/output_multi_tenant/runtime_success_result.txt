@@ -1,0 +1,14 @@
+SUCCESS
+Feature: Multi-Tenant Deployment Support
+Date: 2026-07-03
+Build: PASS (all crates compile)
+Tests: PASS (3,072 passed, 0 failed, 10 ignored)
+Patch: code_gen_runtime_V1.patch (21 files, +825/-17 lines)
+
+Fix applied: Reverted incorrect RBAC role downgrade on 3 provider methods
+  (CreateProvider, UpdateProvider, DeleteProvider: admin -> user was wrong;
+   ownership enforcement supplements RBAC, does not replace it).
+
+Crates with multi-tenant code tested:
+  - openshell-core: 297 tests passed
+  - openshell-server: 936 tests passed (908 unit + 28 integration)

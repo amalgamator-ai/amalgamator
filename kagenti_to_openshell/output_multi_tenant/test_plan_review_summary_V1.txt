@@ -1,0 +1,244 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — TEST PLAN REVIEW SUMMARY V1
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Date: 2026-07-03
+Iteration: V1-R1 (review of iteration 1)
+================================================================================
+
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+12 issues were identified across 4 severity levels. All have been corrected
+in the reviewed test plan (test_plan_review_V1.txt).
+
+1.1 CRITICAL ISSUES (1)
+────────────────────────
+
+  R1-1: OidcConfig test helper uses wrong field names
+
+    PROBLEM: The test_server_state_with_ownership() helper constructs
+    OidcConfig with field names that don't exist in the actual struct:
+      - `jwks_ttl: 300` — actual field is `jwks_ttl_secs` (config.rs:472)
+      - `ca_cert_path: None` — field doesn't exist on OidcConfig at all
+        (it's on TlsConfig). OidcConfig has #[serde(deny_unknown_fields)]
+        which makes this a hard compilation error.
+
+    IMPACT: Every test using this helper would fail to compile. This
+    affects ~50+ integration tests across Sections 9, 10, 11, and 15.
+
+    FIX: Corrected field names to match the actual OidcConfig struct.
+    Removed the non-existent ca_cert_path field.
+
+    VERIFICATION METHOD: Compared test plan's struct literal against
+    the actual OidcConfig at crates/openshell-core/src/config.rs:463-493.
+
+1.2 HIGH ISSUES (3)
+────────────────────
+
+  R1-2: Provider shared access contradicts check_ownership semantics
+
+    PROBLEM: Section 3.3 tests that check_ownership returns
+    PermissionDenied for resources with no owner label. But Section 10.3
+    tests that shared providers (no owner label) are accessible to any
+    user. These are logically contradictory.
+
+    ROOT CAUSE: The port plan describes different access semantics for
+    sandboxes (no label = deny, migration safety) vs providers (no label
+    = shared, accessible to all).
+
+    FIX: Added `allow_unowned: bool` parameter to check_ownership().
+    Sandboxes pass false (strict), providers pass true (shared access).
+    Updated all tests to include the parameter.
+
+  R1-3: Integration test file can't call private/pub(super) handlers
+
+    PROBLEM: Section 15 proposed tests in tests/ownership_integration.rs
+    that call handle_create_sandbox_inner() (private, line 119) and
+    other pub(super) handlers. Integration test files in tests/ are a
+    separate crate and can only access pub items.
+
+    VERIFICATION: Confirmed handle_create_sandbox_inner has no pub
+    modifier at sandbox.rs:119. handle_delete_sandbox_inner is also
+    private at line 496. The pub(super) handlers are module-private.
+
+    FIX: Eliminated the separate tests/ownership_integration.rs file.
+    All handler tests are placed in the source files' #[cfg(test)]
+    modules where they can access private functions. Section 15 E2E
+    lifecycle tests are incorporated into sandbox.rs and provider.rs
+    test modules.
+
+  R1-4: Provider role change tests test the wrong gate mechanism
+
+    PROBLEM: Tests "create_provider_role_changed_to_user_when_ownership_enabled"
+    and "create_provider_still_admin_only_when_ownership_disabled" call
+    handle_create_provider directly. But the role check happens at the
+    gRPC service routing layer via #[rpc_auth] attribute, not in the
+    handler. Calling the handler directly ALWAYS bypasses role checks.
+
+    The port plan Step 11E adds a RUNTIME GUARD inside the handler for
+    the disabled case, which IS testable by direct call. But the enabled
+    case would always pass regardless of the #[rpc_auth] attribute value.
+
+    FIX: Tests renamed and reframed to explicitly test the runtime guard.
+    The #[rpc_auth] change is documented as verified by compilation and
+    existing auth integration tests, not by direct handler invocation.
+
+1.3 MEDIUM ISSUES (4)
+─────────────────────
+
+  R1-5: OIDC groups extraction tests assume wrong mechanism
+
+    PROBLEM: Section 5.1 tested direct JSON deserialization of groups.
+    But the port plan adds groups with #[serde(skip)], and the existing
+    roles field uses the same pattern (serde(skip) + extract_roles()
+    method walking the `extra` field). Groups will use extract_groups()
+    following the identical pattern.
+
+    VERIFICATION: Confirmed roles has #[serde(skip)] at oidc.rs:103-104
+    and extract_roles() at oidc.rs:119-133 walks self.extra via dot-path.
+
+    FIX: Section 5 tests rewritten to exercise extract_groups() method
+    with various claim structures (flat array, nested path, missing,
+    non-array, mixed types).
+
+  R1-6: K8s driver sandbox_labels() test describes wrong behavior
+
+    PROBLEM: Section 12 said "sandbox_labels() reads from
+    spec.template.labels." The CURRENT sandbox_labels() (driver.rs:857-865)
+    only inserts LABEL_SANDBOX_ID and LABEL_MANAGED_BY — it does NOT
+    read template.labels. Step 12 modifies it to include template labels.
+
+    FIX: Section 12 tests now explicitly state they test the MODIFIED
+    function and document what the modification IS. Also clarified that
+    the K8s driver aliases DriverSandbox as Sandbox (line 28).
+
+  R1-7: Streaming handler "allowed" tests need clarification
+
+    PROBLEM: Tests like watch_sandbox_allowed_for_owner need the handler
+    to proceed past the ownership check into streaming setup, which may
+    fail with NoopTestDriver if no sandbox is running.
+
+    FIX: "Allowed" streaming tests now assert "NOT PermissionDenied"
+    rather than full Ok, acknowledging that other errors may occur.
+
+  R1-8: Significant test overlap between Sections 9-10 and Section 15
+
+    PROBLEM: Many Section 15 tests duplicated Section 9-10 single-operation
+    tests with different framing.
+
+    FIX: Section 15 stripped of duplicates, retaining only multi-step
+    lifecycle scenarios that exercise inter-operation interactions not
+    covered by single-operation tests.
+
+1.4 LOW ISSUES (4)
+───────────────────
+
+  R1-9: labels_from_json() tests for non-existent function
+    FIX: Removed. Function not defined in port plan, not needed.
+
+  R1-10: Meta-tests not implementable as test functions
+    FIX: Reclassified as CI gate checks, not counted as test cases.
+
+  R1-11: Missing test for explicit ownership disabled (Some(false))
+    FIX: Added ownership_config_disabled_when_explicitly_false to Section 8.
+
+  R1-12: Missing label serialization roundtrip test
+    FIX: Enhanced Section 11 list_with_selector test to explicitly
+    document the roundtrip verification (was partially implicit before).
+
+================================================================================
+2. SUMMARY OF CHANGES
+================================================================================
+
+  QUANTITATIVE:
+    ┌────────────────────────┬──────────┬──────────┬──────────────────────┐
+    │ Metric                 │ V1       │ V1-R1    │ Change               │
+    ├────────────────────────┼──────────┼──────────┼──────────────────────┤
+    │ Total test cases       │ ~143     │ ~141     │ -2 (deduplication)   │
+    │ Test files             │ 14       │ 13       │ -1 (removed tests/)  │
+    │ Unit tests             │ ~77      │ ~74      │ -3 (removed labels_  │
+    │                        │          │          │   from_json, meta)   │
+    │ Integration tests      │ ~54      │ ~55      │ +1 (new streaming,   │
+    │                        │          │          │   removed overlaps)  │
+    │ Helm chart tests       │ 12       │ 12       │ unchanged            │
+    │ CI gate checks         │ 0        │ 2        │ +2 (from meta-tests) │
+    │ Issues found           │ N/A      │ 12       │                      │
+    │ Critical issues        │ N/A      │ 1        │                      │
+    │ High issues            │ N/A      │ 3        │                      │
+    │ Medium issues          │ N/A      │ 4        │                      │
+    │ Low issues             │ N/A      │ 4        │                      │
+    └────────────────────────┴──────────┴──────────┴──────────────────────┘
+
+  QUALITATIVE:
+    - Critical compilation error prevented (OidcConfig field names)
+    - Semantic bug exposed (shared provider access vs check_ownership)
+    - Test location corrected (private handlers inaccessible from tests/)
+    - Test mechanism corrected (runtime guard vs #[rpc_auth] attribute)
+    - OIDC groups tests aligned with actual extraction mechanism
+    - K8s driver test descriptions aligned with actual code behavior
+    - Streaming handler test expectations made realistic
+    - Test overlap eliminated (~4 duplicate tests removed)
+
+================================================================================
+3. ITERATION EVOLUTION SUMMARY
+================================================================================
+
+3.1 ITERATION 1 (V1) — Initial Test Plan
+─────────────────────────────────────────
+
+  Scope: First comprehensive test plan generation.
+  Output: test_plan_V1.txt — 143 tests across 14 files.
+
+  Key contributions:
+    - Mapped all 20 port plan steps to test cases
+    - Translated Kagenti E2E test dimensions to Rust
+    - Defined test helper patterns (make_user, make_config, etc.)
+    - Created traceability matrix
+
+  Weaknesses found by review:
+    - Test helper had compilation errors (wrong OidcConfig fields)
+    - Provider shared access logic was internally contradictory
+    - Integration tests used wrong file location (tests/ vs in-source)
+    - Provider role tests tested wrong mechanism (#[rpc_auth] vs runtime guard)
+    - OIDC groups tests assumed wrong extraction mechanism (serde vs extract_*)
+    - Some tests duplicated across sections
+
+3.2 ITERATION 1 REVIEW (V1-R1) — Current
+─────────────────────────────────────────
+
+  Scope: Critical review of V1 test plan against actual OpenShell code.
+
+  Verification methods:
+    - Read actual OidcConfig struct at config.rs:463-493
+    - Read actual handler signatures at sandbox.rs:61-496
+    - Read actual sandbox_labels() at driver.rs:857-865
+    - Read actual OidcClaims struct and extract_roles() at oidc.rs:93-133
+    - Verified handler visibility modifiers (private vs pub(super))
+    - Cross-referenced put_if signature in persistence/mod.rs:232
+    - Verified ServerState::new parameters at lib.rs:172-181
+
+  Output: test_plan_review_V1.txt — 141 tests across 13 files + 2 CI checks.
+
+  Key corrections:
+    - Fixed OidcConfig field names (jwks_ttl_secs, no ca_cert_path)
+    - Added allow_unowned parameter to check_ownership for providers
+    - Moved all handler tests to in-source #[cfg(test)] modules
+    - Reframed provider role tests to test runtime guard specifically
+    - Rewrote OIDC groups tests to use extract_groups() pattern
+    - Added explicit disabled ownership test (Some(false) vs None)
+    - Eliminated test overlap between sections
+
+  What iteration V2 could improve:
+    - Add wiremock-based OIDC JWT validation tests
+    - Add property-based tests for sanitize_label_value (proptest)
+    - Add a full gRPC-level integration test for #[rpc_auth] role change
+      (requires tonic::transport::Server setup with the OpenShell service)
+    - Add Helm tests for OpenShift-specific templates (route.yaml, scc.yaml)
+    - Add performance/stress tests for label selector queries at scale
+    - Consider adding a pub(crate) test harness for cross-module handler
+      testing (avoiding the private handler access limitation)
+
+================================================================================
+END OF TEST PLAN REVIEW SUMMARY V1
+================================================================================

@@ -1,0 +1,1050 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — REVIEWED TEST PLAN V1
+================================================================================
+Feature: Multi-Tenant Deployment Support
+Source: Kagenti (Python/Shell/YAML)
+Target: OpenShell (Rust)
+Port Plan: code_port_plan_review_V4.txt (20 steps)
+Review: V1-R1 (review of iteration 1)
+Date: 2026-07-03
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Issues Found and Corrections Applied
+2. Testing Conventions & Infrastructure (CORRECTED)
+3. Unit Tests — Ownership Module (auth/ownership.rs) (CORRECTED)
+4. Unit Tests — Identity Struct (auth/identity.rs) (UNCHANGED)
+5. Unit Tests — OIDC Groups Extraction (auth/oidc.rs) (CORRECTED)
+6. Unit Tests — Label Constants (openshell-core/driver_utils.rs) (UNCHANGED)
+7. Unit Tests — Configuration (openshell-core/config.rs) (UNCHANGED)
+8. Unit Tests — ServerState Helper (lib.rs) (CORRECTED)
+9. Integration Tests — Sandbox Ownership (grpc/sandbox.rs) (CORRECTED)
+10. Integration Tests — Provider Ownership (grpc/provider.rs) (CORRECTED)
+11. Integration Tests — Sandbox Label Persistence (compute/mod.rs) (CORRECTED)
+12. Integration Tests — Kubernetes Driver Labels (CORRECTED)
+13. Integration Tests — Docker Driver Verification (UNCHANGED)
+14. Unit Tests — SandboxIndex Owner Tracking (sandbox_index.rs) (UNCHANGED)
+15. Integration Tests — End-to-End Ownership Flows (CORRECTED)
+16. Helm Chart Tests — Template Rendering (UNCHANGED)
+17. Cross-Cutting Concerns (CORRECTED)
+18-20. Test Dependency Map / Fixtures / Traceability (CORRECTED)
+
+================================================================================
+1. ISSUES FOUND AND CORRECTIONS APPLIED
+================================================================================
+
+ISSUE R1-1 (CRITICAL): OidcConfig test helper uses wrong field names
+
+  PROBLEM: The test_server_state_with_ownership helper constructs OidcConfig
+  with incorrect field names that would cause compilation failures:
+    - Uses `jwks_ttl: 300` — actual field is `jwks_ttl_secs`
+    - Uses `ca_cert_path: None` — this field does NOT exist on OidcConfig
+      (it belongs to TlsConfig)
+    - Uses `groups_claim: "groups"` — this field does not exist yet
+      (being added by Step 2), but the name is correct
+
+  VERIFICATION: The actual OidcConfig struct at config.rs:463-493 has:
+    pub issuer: String,
+    pub audience: String,
+    pub jwks_ttl_secs: u64,       // <-- NOT jwks_ttl
+    pub roles_claim: String,
+    pub admin_role: String,
+    pub user_role: String,
+    pub scopes_claim: String,
+    // NO ca_cert_path field
+
+  Also: OidcConfig uses #[serde(deny_unknown_fields)], so any extra
+  fields in struct literals will cause compile errors.
+
+  FIX: Corrected field names in test helper. See Section 2.
+
+------------------------------------------------------------------------
+
+ISSUE R1-2 (HIGH): Provider shared access contradicts check_ownership
+
+  PROBLEM: Section 3.3 tests that check_ownership returns
+  PermissionDenied for resources with NO owner label (pre-ownership
+  migration scenario). But Section 10.3 tests that shared providers
+  (admin-created, no owner label) are accessible to ANY user.
+
+  These are contradictory. If check_ownership denies access for
+  unlabeled resources, then shared providers are inaccessible to
+  non-admin users.
+
+  ROOT CAUSE: The port plan (Step 4D) says "resources with no owner
+  label require admin access" for sandboxes. But for providers (Step 11B),
+  it says "users see own providers + shared (admin-created) providers."
+  Shared providers have no owner label and must be accessible to all.
+
+  FIX: check_ownership needs a parameter to differentiate behavior:
+    - Sandboxes: no owner label → PermissionDenied (migration safety)
+    - Providers: no owner label → Ok (shared provider access)
+
+  The solution is to add an `allow_unowned: bool` parameter to
+  check_ownership():
+    check_ownership(principal, config, labels, resource_type, name,
+                    allow_unowned: bool)
+    - For sandboxes: allow_unowned = false
+    - For providers: allow_unowned = true
+
+  Updated tests in Sections 3.3 and 10.3.
+
+------------------------------------------------------------------------
+
+ISSUE R1-3 (HIGH): Integration test file can't call private handlers
+
+  PROBLEM: Section 15 proposes tests in
+  `tests/ownership_integration.rs` that call handle_create_sandbox_inner()
+  and handle_list_sandboxes() directly. But:
+    - handle_create_sandbox_inner is PRIVATE (no pub modifier, line 119)
+    - handle_list_sandboxes is pub(super) (line 256)
+    - handle_get_sandbox is pub(super) (line 235)
+    - handle_delete_sandbox_inner is PRIVATE (line 496)
+
+  Tests in tests/ (integration test crate) can only access pub items
+  from the openshell-server crate. They CANNOT call private or
+  pub(super) functions.
+
+  VERIFICATION: Confirmed at sandbox.rs lines 61, 119, 235, 256, 496.
+
+  FIX: Section 15 E2E tests are redesigned to:
+    Option A: Place all handler-level tests INSIDE the source file
+              #[cfg(test)] modules (Sections 9-10), which CAN access
+              private functions.
+    Option B: Create pub(crate) test wrapper functions that expose
+              the create→list→get→delete workflow for integration tests.
+
+  Adopted Option A: All handler-invocation tests are consolidated into
+  Sections 9-10 (in-source test modules). Section 15 is restructured to
+  contain only multi-step LIFECYCLE tests that use pub(crate) helper
+  functions or exercise the Store layer directly, avoiding private
+  handler calls.
+
+------------------------------------------------------------------------
+
+ISSUE R1-4 (HIGH): Provider role change tests test the wrong gate
+
+  PROBLEM: The port plan changes #[rpc_auth] from role="admin" to
+  role="user" for provider create/update/delete. But #[rpc_auth] is
+  enforced at the gRPC service routing layer (in the tonic service
+  trait implementation), NOT in handle_create_provider(). Calling
+  handle_create_provider() directly BYPASSES the #[rpc_auth] check.
+
+  The port plan Step 11E adds a RUNTIME guard inside the handler:
+  "when ownership is disabled, check that the caller has admin role."
+  This IS testable by calling the handler directly.
+
+  But the "user can create when ownership enabled" test would ALWAYS
+  pass when calling the handler directly, regardless of whether
+  #[rpc_auth] was changed, because the handler has no role checking
+  of its own (only the runtime guard for the disabled case).
+
+  FIX: Tests that verify the #[rpc_auth] change must go through the
+  full gRPC service interface (tonic::transport::Server). Tests for the
+  runtime guard CAN call the handler directly. Updated Section 10.1 to:
+    - Test the runtime guard (handler-level, direct call)
+    - Document that #[rpc_auth] change is verified by compilation
+      and existing auth integration tests
+    - Add a note that full gRPC-level role testing requires the
+      service stack and is covered by Kagenti-style E2E tests
+
+------------------------------------------------------------------------
+
+ISSUE R1-5 (MEDIUM): OIDC groups extraction tests assume wrong mechanism
+
+  PROBLEM: Section 5.1 tests direct JSON deserialization of groups from
+  JWT claims. But the port plan adds `groups` to OidcClaims with
+  `#[serde(skip)]`, meaning groups are NOT deserialized by serde.
+
+  VERIFICATION: The existing roles field has #[serde(skip)] at
+  oidc.rs:103-104 and is extracted post-deserialization via
+  extract_roles() which walks the `extra` field (serde(flatten)).
+  Groups will use the identical pattern: extract_groups() walking
+  the extra field via the configurable groups_claim path.
+
+  FIX: Section 5 tests are rewritten to exercise the extract_groups()
+  method (following the extract_roles() pattern) instead of direct
+  JSON deserialization.
+
+------------------------------------------------------------------------
+
+ISSUE R1-6 (MEDIUM): K8s sandbox_labels() test describes wrong behavior
+
+  PROBLEM: Section 12 says "sandbox_labels() reads from
+  spec.template.labels." But the CURRENT sandbox_labels() at
+  driver.rs:857-865 only inserts LABEL_SANDBOX_ID and LABEL_MANAGED_BY.
+  It does NOT read template.labels at all.
+
+  VERIFICATION: Confirmed at driver.rs lines 857-865:
+    fn sandbox_labels(sandbox: &Sandbox) -> BTreeMap<String, String> {
+        let mut labels = BTreeMap::new();
+        labels.insert(LABEL_SANDBOX_ID.to_string(), sandbox.id.clone());
+        labels.insert(LABEL_MANAGED_BY.to_string(), ...);
+        labels
+    }
+
+  The Step 12 modification adds template label merging to this function.
+  The test is correct for post-modification behavior, but the description
+  was misleading about current behavior.
+
+  ALSO: The K8s driver aliases `DriverSandbox as Sandbox` (line 28).
+  Tests must use the driver's Sandbox alias, NOT the public Sandbox type.
+
+  FIX: Section 12 tests now explicitly state they test the MODIFIED
+  sandbox_labels() function. The Sandbox type is correctly identified
+  as the driver's DriverSandbox alias.
+
+------------------------------------------------------------------------
+
+ISSUE R1-7 (MEDIUM): Streaming handler "allowed" tests need clarification
+
+  PROBLEM: Section 9.5 tests like watch_sandbox_allowed_for_owner
+  assume the handler returns Ok on success. But for the "allowed" case,
+  the handler proceeds past the ownership check into streaming setup,
+  which requires a running sandbox in the compute runtime. With
+  NoopTestDriver, the handler may fail AFTER the ownership check
+  with a different error (e.g., sandbox not found in compute, status
+  not running).
+
+  FIX: "Allowed" tests for streaming handlers should verify the
+  response is NOT PermissionDenied (ownership check passed), rather
+  than asserting full Ok. Updated Section 9.5 test expectations.
+
+------------------------------------------------------------------------
+
+ISSUE R1-8 (MEDIUM): Test overlap between Sections 9-10 and Section 15
+
+  PROBLEM: Section 15 tests like "two_users_create_sandboxes_each_sees_own"
+  substantially overlap Section 9.2's "list_sandboxes_returns_only_own_sandboxes."
+  Both test the same code paths with slightly different framing.
+
+  FIX: Section 15 is restructured to contain ONLY multi-step lifecycle
+  scenarios that exercise interactions NOT covered by single-operation
+  tests. Duplicative single-operation tests are removed from Section 15.
+  Remaining Section 15 tests focus on: multi-step lifecycle, cross-
+  resource-type spoofing, migration scenarios, name collision behavior,
+  and sanitization roundtrip consistency.
+
+------------------------------------------------------------------------
+
+ISSUE R1-9 (LOW): labels_from_json() may not be needed
+
+  PROBLEM: Section 3.5 tests a labels_from_json() function in
+  ownership.rs. But the port plan doesn't define this function.
+  Handlers work with protobuf metadata.labels (HashMap), not raw
+  DB JSON. The persistence layer handles JSON parsing internally.
+
+  FIX: labels_from_json() tests are REMOVED. If the function is
+  needed during implementation, tests can be added at that time. The
+  label serialization/deserialization roundtrip is covered by the new
+  Section 11 label persistence tests.
+
+------------------------------------------------------------------------
+
+ISSUE R1-10 (LOW): Meta-tests are not implementable
+
+  PROBLEM: Section 17.1 tests "existing_test_suite_passes_with_no_config_changes"
+  and "existing_test_suite_passes_with_ownership_disabled_explicitly"
+  are CI validation steps, not individual test functions.
+
+  FIX: Reclassified as CI validation steps, not test cases. They are
+  documented as pre-merge gate checks. Test count adjusted.
+
+------------------------------------------------------------------------
+
+ISSUE R1-11 (LOW): Missing test for explicit ownership disabled
+
+  PROBLEM: Section 8 tests ownership=None and ownership=enabled, but
+  not ownership=Some(OwnershipConfig{enabled:false}). The explicit
+  disabled case should behave identically to None.
+
+  FIX: Added test ownership_config_disabled_when_explicitly_false
+  to Section 8.
+
+------------------------------------------------------------------------
+
+ISSUE R1-12 (LOW): Missing label serialization roundtrip test
+
+  PROBLEM: put_if takes labels as Option<&str> (JSON string).
+  list_with_selector parses the labels column using Postgres JSONB @>
+  or SQLite JSON_EXTRACT. No test verifies format compatibility between
+  the serialization in compute/mod.rs and the parsing in persistence.
+
+  FIX: Added test to Section 11 that creates a sandbox with labels,
+  then queries via list_with_selector to verify the roundtrip.
+  (This was already partially covered by list_with_selector_finds_labeled_sandbox
+  but is now explicitly documented as a roundtrip test.)
+
+================================================================================
+2. TESTING CONVENTIONS & INFRASTRUCTURE (CORRECTED)
+================================================================================
+
+  [UNCHANGED FROM V1 EXCEPT for the following corrections:]
+
+  REVIEW FIX: Corrected test_server_state_with_ownership helper
+  (Issue R1-1)
+
+  File: crates/openshell-server/src/grpc/mod.rs (extend test_support module)
+
+  pub async fn test_server_state_with_ownership(
+      enabled: bool,
+      tenant_id: Option<String>,
+  ) -> Arc<ServerState> {
+      let store = Arc::new(
+          Store::connect("sqlite::memory:?cache=shared")
+              .await
+              .unwrap(),
+      );
+      let compute = new_test_runtime(store.clone()).await;
+      let mut config = Config::new(None)
+          .with_database_url("sqlite::memory:?cache=shared");
+
+      // Configure ownership (NEW fields from Step 5)
+      config.ownership = Some(OwnershipConfig { enabled });
+      config.tenant_id = tenant_id;
+
+      // Configure OIDC (needed for admin_role resolution)
+      // CORRECTED: Uses actual OidcConfig field names
+      config.oidc = Some(OidcConfig {
+          issuer: "https://test-idp.example.com".to_string(),
+          audience: "test-audience".to_string(),
+          jwks_ttl_secs: 300,                                // FIXED: was jwks_ttl
+          roles_claim: "realm_access.roles".to_string(),
+          scopes_claim: "scope".to_string(),
+          admin_role: "openshell-admin".to_string(),
+          user_role: "openshell-user".to_string(),
+          // REMOVED: ca_cert_path — field doesn't exist on OidcConfig
+          groups_claim: "groups".to_string(),                 // NEW field from Step 2
+      });
+
+      Arc::new(ServerState::new(
+          config,
+          store,
+          compute,
+          SandboxIndex::new(),
+          SandboxWatchBus::new(),
+          TracingLogBus::new(),
+          Arc::new(SupervisorSessionRegistry::new()),
+          None,  // oidc_cache — not needed for ownership tests
+      ))
+  }
+
+  WHY THESE FIXES MATTER:
+    - `jwks_ttl` would cause a compilation error (field doesn't exist)
+    - `ca_cert_path` would cause a compilation error (field doesn't exist
+      on OidcConfig — it's on TlsConfig)
+    - OidcConfig has #[serde(deny_unknown_fields)] which means struct
+      literal construction must match exactly
+
+  [Rest of Section 2 UNCHANGED FROM V1]
+
+================================================================================
+3. UNIT TESTS — OWNERSHIP MODULE (auth/ownership.rs) (CORRECTED)
+================================================================================
+
+  [Section 3.1 sanitize_label_value() — UNCHANGED FROM V1]
+
+  [Section 3.2 stamp_owner_labels() — UNCHANGED FROM V1]
+
+  [Section 3.3 check_ownership() — CORRECTED for Issue R1-2:]
+
+  REVIEW FIX: Added allow_unowned parameter (Issue R1-2)
+
+  The check_ownership function needs to differentiate between sandboxes
+  (unlabeled = deny) and providers (unlabeled = allow, because shared).
+
+  CORRECTED SIGNATURE:
+    pub fn check_ownership(
+        principal: &Principal,
+        config: &OwnershipEnforcement,
+        labels: &HashMap<String, String>,
+        resource_type: &str,
+        name: &str,
+        allow_unowned: bool,    // NEW parameter
+    ) -> Result<(), Status>
+
+  UPDATED TESTS:
+
+  TEST: check_no_owner_label_denied_when_unowned_forbidden
+    Setup:  User "user-uuid" (non-admin), ownership enabled
+    Input:  labels {} (no owner label), allow_unowned = false
+    Expect: Err(Status::PermissionDenied)
+    Why:    Sandbox use case: unlabeled = deny (migration safety).
+
+  TEST: check_no_owner_label_allowed_when_unowned_permitted
+    Setup:  User "user-uuid" (non-admin), ownership enabled
+    Input:  labels {} (no owner label), allow_unowned = true
+    Expect: Ok(())
+    Why:    Provider use case: unlabeled = shared, accessible to all.
+
+  TEST: check_no_owner_label_admin_always_allowed
+    Setup:  Admin user, ownership enabled
+    Input:  labels {} (no owner label), allow_unowned = false
+    Expect: Ok(())
+    Why:    Admin can always access unlabeled resources.
+
+  [Tests check_owner_matches_own_resource through
+  check_ownership_permission_denied_code — UNCHANGED FROM V1,
+  except all add allow_unowned: false as the final parameter]
+
+  [Section 3.4 owner_label_selector() — UNCHANGED FROM V1]
+
+  [Section 3.5 labels_from_json() — REMOVED per Issue R1-9]
+
+  REVIEW FIX: Removed labels_from_json() tests (Issue R1-9)
+
+  labels_from_json() is not a function defined in the port plan. The
+  persistence layer handles JSON label parsing internally. If such a
+  helper is needed during implementation, tests will be added then.
+  The label serialization roundtrip is covered by Section 11 tests.
+
+  CORRECTED TOTAL UNIT TESTS IN SECTION 3: ~35 tests
+  (was ~37: removed 4 labels_from_json tests, added 1 check_ownership
+   variant for allow_unowned)
+
+================================================================================
+4. UNIT TESTS — IDENTITY STRUCT (auth/identity.rs)
+================================================================================
+
+  [UNCHANGED FROM V1]
+
+================================================================================
+5. UNIT TESTS — OIDC GROUPS EXTRACTION (auth/oidc.rs) (CORRECTED)
+================================================================================
+
+  REVIEW FIX: Groups use extract_groups() pattern, not direct
+  deserialization (Issue R1-5)
+
+  File: crates/openshell-server/src/auth/oidc.rs
+  Module: Extend existing #[cfg(test)] mod tests (starts at line 388)
+  Async: NO
+  Port Plan Steps: 2
+
+  The groups field in OidcClaims has #[serde(skip)], identical to the
+  roles field (oidc.rs:103). Groups are extracted from the JWT's raw
+  claims via a configurable dot-path, using the same pattern as
+  extract_roles() (oidc.rs:119-133).
+
+  NEW METHOD (added by Step 2):
+    impl OidcClaims {
+        fn extract_groups(&mut self, groups_claim: &str) {
+            // Same pattern as extract_roles: walk self.extra via dot-path
+        }
+    }
+
+  CORRECTED TESTS:
+
+5.1 extract_groups() Tests
+──────────────────────────
+
+  TEST: extract_groups_from_flat_array_claim
+    Setup:  OidcClaims deserialized from:
+            {"sub": "user-1", "groups": ["/team1", "/admins"]}
+    Action: claims.extract_groups("groups")
+    Expect: claims.groups == ["/team1", "/admins"]
+    Why:    Standard Keycloak groups claim path.
+
+  TEST: extract_groups_empty_when_claim_absent
+    Setup:  OidcClaims from: {"sub": "user-1"}
+    Action: claims.extract_groups("groups")
+    Expect: claims.groups == [] (empty, no error)
+    Why:    Missing claim gracefully yields empty.
+
+  TEST: extract_groups_from_nested_claim_path
+    Setup:  OidcClaims from:
+            {"sub": "user-1", "custom": {"team_groups": ["eng", "ops"]}}
+    Action: claims.extract_groups("custom.team_groups")
+    Expect: claims.groups == ["eng", "ops"]
+    Why:    Nested claim path support (like roles_claim).
+
+  TEST: extract_groups_empty_when_claim_is_not_array
+    Setup:  OidcClaims from: {"sub": "user-1", "groups": "single-group"}
+    Action: claims.extract_groups("groups")
+    Expect: claims.groups == [] (string is not an array)
+    Why:    extract_roles returns empty for non-array; extract_groups
+            should match this behavior.
+
+  TEST: extract_groups_skips_non_string_elements
+    Setup:  OidcClaims from:
+            {"sub": "user-1", "groups": ["/team1", 42, true, "/team2"]}
+    Action: claims.extract_groups("groups")
+    Expect: claims.groups == ["/team1", "/team2"]
+    Why:    Non-string elements filtered (same as extract_roles pattern).
+
+5.2 Identity Groups Population
+──────────────────────────────
+
+  TEST: identity_from_validated_jwt_includes_groups
+    Setup:  In JwksCache.validate_token(), after extract_roles(),
+            add claims.extract_groups(&self.config.groups_claim)
+    Input:  JWT with {"groups": ["/team1"]} and groups_claim = "groups"
+    Expect: Returned Identity.groups == ["/team1"]
+    Why:    Groups must flow from JWT claims → OidcClaims → Identity.
+
+  TEST: identity_from_jwt_without_groups_has_empty_vec
+    Setup:  JWT without groups claim
+    Expect: Identity.groups == []
+    Why:    Missing groups must not break Identity construction.
+
+5.3 OidcConfig groups_claim Field
+─────────────────────────────────
+
+  [UNCHANGED FROM V1]
+
+  CORRECTED TOTAL UNIT TESTS IN SECTION 5: 9 tests
+  (same count, but 5 tests rewritten to test extract_groups() instead
+  of direct deserialization)
+
+================================================================================
+6. UNIT TESTS — LABEL CONSTANTS (openshell-core/driver_utils.rs)
+================================================================================
+
+  [UNCHANGED FROM V1]
+
+================================================================================
+7. UNIT TESTS — CONFIGURATION (openshell-core/config.rs)
+================================================================================
+
+  [UNCHANGED FROM V1]
+
+  NOTE: The OidcConfig tests in 7.2 (TOML parsing) remain valid because
+  groups_claim uses #[serde(default)] and the TOML file may or may not
+  include it. But the field name in OidcConfig is groups_claim (correct),
+  and the TOML parsing tests use TOML strings, not struct literal
+  construction, so the jwks_ttl_secs issue doesn't apply here.
+
+================================================================================
+8. UNIT TESTS — SERVERSTATE HELPER (lib.rs) (CORRECTED)
+================================================================================
+
+  [MOSTLY UNCHANGED FROM V1, with one addition:]
+
+  REVIEW FIX: Added explicit disabled test (Issue R1-11)
+
+  TEST: ownership_config_disabled_when_explicitly_false    (NEW)
+    Setup:  ServerState with config.ownership = Some(OwnershipConfig { enabled: false }),
+            config.oidc = Some({ admin_role: "openshell-admin", ... })
+    Expect: ownership_config().enabled == false
+            ownership_config().admin_role == "openshell-admin"
+    Why:    Explicit false must behave identically to None/absent config.
+            This catches bugs where Some(disabled) is treated differently
+            from None.
+
+  CORRECTED TOTAL UNIT TESTS IN SECTION 8: 5 tests (was 4)
+
+================================================================================
+9. INTEGRATION TESTS — SANDBOX OWNERSHIP (grpc/sandbox.rs) (CORRECTED)
+================================================================================
+
+  REVIEW FIX: All tests MUST be in grpc/sandbox.rs's #[cfg(test)] module
+  (Issue R1-3)
+
+  IMPORTANT: handle_create_sandbox_inner is PRIVATE (async fn, no pub
+  modifier, line 119). handle_delete_sandbox_inner is also PRIVATE
+  (line 496). These functions are only accessible from within the same
+  file's #[cfg(test)] module.
+
+  The pub(super) handlers (handle_get_sandbox, handle_list_sandboxes,
+  handle_watch_sandbox, handle_exec_sandbox, handle_create_ssh_session)
+  are accessible from anywhere within the grpc module but NOT from
+  integration test files in tests/.
+
+  ALL sandbox ownership tests MUST be placed in:
+    crates/openshell-server/src/grpc/sandbox.rs  #[cfg(test)] mod tests
+
+  This is consistent with existing OpenShell patterns — sandbox.rs tests
+  are already in-source (line 2000+).
+
+9.1 Sandbox Create — Owner Stamping (Step 7)
+─────────────────────────────────────────────
+
+  [UNCHANGED FROM V1 — these tests call handle_create_sandbox_inner
+   which is accessible from the same file's test module]
+
+9.2 Sandbox List — Owner Filtering (Step 8)
+───────────────────────────────────────────
+
+  [UNCHANGED FROM V1 — handle_list_sandboxes is pub(super), accessible
+   from the grpc module's test code]
+
+9.3 Sandbox Get — Ownership Check (Step 9)
+──────────────────────────────────────────
+
+  REVIEW FIX: Updated check_ownership call to include allow_unowned
+  (Issue R1-2)
+
+  All get tests pass allow_unowned = false for sandboxes.
+
+  [Test list UNCHANGED FROM V1, but the underlying check_ownership call
+   now includes allow_unowned: false]
+
+9.4 Sandbox Delete — Ownership Check (Step 9)
+──────────────────────────────────────────────
+
+  [UNCHANGED FROM V1]
+
+9.5 Sandbox Watch/Exec/SSH — Ownership Check (Step 10)
+───────────────────────────────────────────────────────
+
+  REVIEW FIX: Corrected "allowed" test expectations (Issue R1-7)
+
+  TEST: watch_sandbox_allowed_for_owner                   (CORRECTED)
+    Setup:  Create sandbox owned by user-A
+    Action: Watch as user-A
+    Verify: Response is NOT Err with code PermissionDenied
+            (May return other errors due to NoopTestDriver not having
+            a running sandbox. The key assertion is: ownership check
+            passed, error if any is NOT PermissionDenied.)
+    Async:  Yes
+    Why:    Verify ownership check passes for the owner. The subsequent
+            streaming setup may fail with NoopTestDriver but that's
+            outside the scope of ownership testing.
+
+  TEST: watch_sandbox_admin_bypass                        (CORRECTED)
+    Setup:  Create sandbox owned by user-A
+    Action: Watch as admin
+    Verify: Response is NOT Err with code PermissionDenied
+    Async:  Yes
+    Why:    Admin bypass verified by absence of PermissionDenied.
+
+  TEST: exec_sandbox_allowed_for_owner                    (NEW)
+    Setup:  Create sandbox owned by user-A
+    Action: Exec as user-A
+    Verify: Response is NOT Err with code PermissionDenied
+    Async:  Yes
+    Why:    Mirrors watch test for exec handler.
+
+  [Denial tests (watch/exec/ssh_denied_for_non_owner) UNCHANGED FROM V1]
+
+  CORRECTED TOTAL INTEGRATION TESTS IN SECTION 9: ~32 tests (was ~30)
+
+================================================================================
+10. INTEGRATION TESTS — PROVIDER OWNERSHIP (grpc/provider.rs) (CORRECTED)
+================================================================================
+
+  File: crates/openshell-server/src/grpc/provider.rs (extend test module)
+  Module: #[cfg(test)] mod ownership_tests
+  Async: YES (#[tokio::test])
+  Port Plan Steps: 11 (11A through 11E)
+
+  IMPORTANT: Same as sandbox tests, provider handler tests MUST be in
+  provider.rs's #[cfg(test)] module since handle_create_provider is
+  pub(super), not pub.
+
+10.1 Provider Create — Owner Stamping (Step 11A)
+─────────────────────────────────────────────────
+
+  REVIEW FIX: Corrected provider role change test (Issue R1-4)
+
+  TEST: create_provider_stamps_owner_label                (UNCHANGED)
+  TEST: create_provider_without_metadata_gets_metadata_created (UNCHANGED)
+  TEST: create_provider_persists_labels_in_db_column      (UNCHANGED)
+
+  TEST: create_provider_runtime_guard_blocks_user_when_disabled (CORRECTED)
+    Setup:  ServerState with ownership DISABLED
+    Action: User with "openshell-user" role (no admin) calls
+            handle_create_provider directly
+    Verify: Err (PermissionDenied from the RUNTIME GUARD, not #[rpc_auth])
+    Async:  Yes
+    Why:    Step 11E runtime guard: when ownership is disabled, the handler
+            itself checks for admin role and rejects non-admin users.
+            This is testable by direct handler call.
+
+    NOTE: The #[rpc_auth] attribute change (admin→user) is enforced at the
+    gRPC service routing layer and is NOT testable by calling the handler
+    directly. The #[rpc_auth] change is verified by:
+      1. Compilation (attribute change checked at build time)
+      2. Existing auth integration tests (tests/auth_endpoint_integration.rs)
+      3. E2E tests (full gRPC stack)
+
+  TEST: create_provider_runtime_guard_allows_user_when_enabled (CORRECTED)
+    Setup:  ServerState with ownership ENABLED
+    Action: User with "openshell-user" role calls handle_create_provider
+    Verify: Ok (runtime guard allows user when ownership is enabled)
+    Async:  Yes
+    Why:    Runtime guard only blocks users when ownership is DISABLED.
+            When enabled, users can create their own providers.
+
+    NOTE: This test passes regardless of the #[rpc_auth] change because
+    calling the handler directly bypasses #[rpc_auth]. The test
+    validates the runtime guard logic, not the attribute.
+
+  [REMOVED: "create_provider_role_changed_to_user_when_ownership_enabled"
+   — this was testing the #[rpc_auth] attribute which can't be tested
+   via direct handler call]
+
+10.2 Provider List — Filtered by Owner (Step 11B)
+─────────────────────────────────────────────────
+
+  [UNCHANGED FROM V1]
+
+10.3 Provider Get/Update/Delete — Ownership (Steps 11C, 11D)
+────────────────────────────────────────────────────────────
+
+  REVIEW FIX: Corrected shared provider access (Issue R1-2)
+
+  TEST: get_shared_provider_allowed_for_any_user          (CORRECTED)
+    Setup:  Provider with no owner label (admin-created shared)
+    Action: Get as user-A (non-admin), ownership ENABLED
+    Verify: Ok
+    Async:  Yes
+    Why:    Shared providers use allow_unowned=true in check_ownership.
+            Users CAN access providers with no owner label.
+            This differs from sandboxes where allow_unowned=false.
+
+  [Other tests in 10.3 UNCHANGED FROM V1, all pass allow_unowned=true
+   for provider operations]
+
+10.4 Provider Admin-Only Methods (V4 Review Fix R4-4)
+─────────────────────────────────────────────────────
+
+  [UNCHANGED FROM V1]
+
+  CORRECTED TOTAL INTEGRATION TESTS IN SECTION 10: ~17 tests (was ~18)
+
+================================================================================
+11. INTEGRATION TESTS — SANDBOX LABEL PERSISTENCE (compute/mod.rs)
+    (CORRECTED)
+================================================================================
+
+  [MOSTLY UNCHANGED FROM V1, with explicit roundtrip verification:]
+
+  REVIEW FIX: Explicit label serialization roundtrip test (Issue R1-12)
+
+  TEST: list_with_selector_finds_labeled_sandbox          (ENHANCED)
+    Setup:  Create two sandboxes via ComputeRuntime.create_sandbox():
+            A with metadata.labels = {"openshell.ai/owner": "user-1"}
+            B with metadata.labels = {"openshell.ai/owner": "user-2"}
+    Action: store.list_messages_with_selector::<Sandbox>(
+                "openshell.ai/owner=user-1", 100, 0)
+    Verify: Returns only sandbox A
+    Async:  Yes
+    Why:    End-to-end roundtrip: labels serialized via serde_json →
+            stored in DB labels column → queried via list_with_selector
+            JSON matching. Verifies format compatibility between the
+            serialization (Step 7/R4-8 fix) and the persistence layer's
+            JSON parsing (SQLite JSON_EXTRACT / Postgres JSONB @>).
+
+  NOTE: The object_type parameter for list_with_selector is the string
+  returned by Sandbox::object_type(). Tests should use
+  Sandbox::object_type() rather than a hardcoded string.
+
+  [Other Section 11 tests UNCHANGED FROM V1]
+
+================================================================================
+12. INTEGRATION TESTS — KUBERNETES DRIVER LABELS (CORRECTED)
+================================================================================
+
+  REVIEW FIX: Corrected sandbox_labels() description (Issue R1-6)
+
+  File: crates/openshell-driver-kubernetes/src/driver.rs (extend test module)
+  Module: #[cfg(test)] mod ownership_label_tests
+  Async: NO
+  Port Plan Steps: 12
+
+  CRITICAL CONTEXT: In the K8s driver, `Sandbox` is an alias for
+  `DriverSandbox` (line 28: `use ... DriverSandbox as Sandbox`).
+  Tests must construct DriverSandbox objects, not the public Sandbox type.
+
+  The CURRENT sandbox_labels() function (lines 857-865) only returns
+  LABEL_SANDBOX_ID and LABEL_MANAGED_BY. Step 12 MODIFIES it to also
+  include labels from sandbox.spec.template.labels. The tests below
+  verify the MODIFIED function behavior.
+
+  TEST: sandbox_labels_includes_owner_from_template_after_step12
+    Setup:  DriverSandbox (aliased as Sandbox in driver) with
+            spec.template.labels = {"openshell.ai/owner": "user-1"}
+            spec.template.image = "test-image"
+    Action: Call MODIFIED sandbox_labels(&sandbox)
+    Verify: Returned BTreeMap contains:
+            "openshell.ai/owner" == "user-1"
+            "openshell.ai/sandbox-id" == sandbox.id  (existing)
+            "openshell.ai/managed-by" == "openshell"  (existing)
+    Why:    Step 12 modifies sandbox_labels() to merge template.labels
+            into the CRD labels. This test verifies the merge.
+
+  TEST: sandbox_labels_includes_tenant_from_template
+    Setup:  DriverSandbox with spec.template.labels containing
+            "openshell.ai/tenant": "team1"
+    Action: Call MODIFIED sandbox_labels(&sandbox)
+    Verify: BTreeMap contains "openshell.ai/tenant" == "team1"
+    Why:    Tenant labels also flow through template → CRD labels.
+
+  TEST: sandbox_labels_without_owner_still_has_standard_labels
+    Setup:  DriverSandbox with empty spec.template.labels
+    Action: Call MODIFIED sandbox_labels(&sandbox)
+    Verify: Contains LABEL_SANDBOX_ID and LABEL_MANAGED_BY
+            Does NOT contain "openshell.ai/owner"
+    Why:    Backward compatibility — no owner when not in template.
+
+  TEST: pod_template_labels_include_owner_from_template   (UNCHANGED)
+    Setup:  DriverSandboxTemplate with labels: {"openshell.ai/owner": "user-1"}
+    Action: Call sandbox_template_to_k8s() (test-only helper, line 1490)
+    Verify: Pod template's metadata.labels includes "openshell.ai/owner"
+    Why:    Owner labels in template flow to K8s pod metadata via the
+            existing sandbox_template_to_k8s() label copying (lines 1517-1521).
+            This path already works — the test verifies it doesn't regress.
+
+  TOTAL INTEGRATION TESTS IN SECTION 12: 4 tests (unchanged count)
+
+================================================================================
+13. INTEGRATION TESTS — DOCKER DRIVER VERIFICATION
+================================================================================
+
+  [UNCHANGED FROM V1]
+
+================================================================================
+14. UNIT TESTS — SANDBOXINDEX OWNER TRACKING (sandbox_index.rs)
+================================================================================
+
+  [UNCHANGED FROM V1]
+
+================================================================================
+15. INTEGRATION TESTS — END-TO-END OWNERSHIP FLOWS (CORRECTED)
+================================================================================
+
+  REVIEW FIX: Restructured to avoid private handler calls (Issue R1-3),
+  removed overlap with Sections 9-10 (Issue R1-8)
+
+  File: crates/openshell-server/src/grpc/sandbox.rs  #[cfg(test)] module
+    AND: crates/openshell-server/src/grpc/provider.rs  #[cfg(test)] module
+  Module: Within the existing test modules (NOT a separate test file)
+  Async: YES (#[tokio::test])
+  Port Plan Steps: 7-11 (all handler steps combined)
+
+  These tests exercise MULTI-STEP lifecycle scenarios that are NOT
+  covered by single-operation tests in Sections 9-10. Each test
+  involves multiple handler calls in sequence.
+
+15.1 Multi-User Sandbox Lifecycle (in sandbox.rs test module)
+─────────────────────────────────────────────────────────────
+
+  TEST: two_users_create_and_list_isolation
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: 1. handle_create_sandbox_inner(state, req_user_A("alice-sbx"))
+            2. handle_create_sandbox_inner(state, req_user_B("bob-sbx"))
+            3. handle_list_sandboxes(state, list_req_user_A)
+            4. handle_list_sandboxes(state, list_req_user_B)
+    Verify: Step 3 returns only "alice-sbx"
+            Step 4 returns only "bob-sbx"
+    Async:  Yes
+    Why:    Validates the full create→stamp→persist→filter roundtrip
+            across multiple users in sequence.
+
+  TEST: admin_lifecycle_across_users
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: 1. User-A creates "a-sbx"
+            2. User-B creates "b-sbx"
+            3. Admin lists → sees both
+            4. Admin gets "a-sbx" → Ok
+            5. Admin deletes "b-sbx" → Ok
+            6. Admin lists → only "a-sbx" remains
+    Verify: All admin operations succeed across user boundaries
+    Async:  Yes
+    Why:    Full admin lifecycle test.
+
+15.2 Cross-Cutting Scenarios (in sandbox.rs test module)
+────────────────────────────────────────────────────────
+
+  TEST: label_spoofing_rejected_end_to_end
+    Setup:  test_server_state_with_ownership(true, None)
+    Action: User-A creates sandbox with label {"openshell.ai/owner": "user-B"}
+            User-A gets the sandbox (should succeed — they're the real owner)
+            User-B lists sandboxes (should NOT see A's sandbox)
+    Verify: Owner label on created sandbox == "user-A" (not "user-B")
+    Async:  Yes
+    Why:    End-to-end anti-spoofing: spoofed label stripped, real owner
+            stamped, ownership enforced on subsequent operations.
+
+  TEST: name_collision_across_owners_returns_error
+    [UNCHANGED FROM V1]
+
+  TEST: email_subject_consistency_across_stamp_and_check
+    [UNCHANGED FROM V1]
+
+  [REMOVED: pre_ownership_resources_require_admin — already covered by
+   Section 9.3 get_sandbox_without_owner_label_requires_admin]
+
+  [REMOVED: ownership_disabled_all_visible_to_all — already covered by
+   Section 9.2 list_sandboxes_no_filter_when_disabled]
+
+  [REMOVED: anonymous_principal_no_ownership_enforcement — already
+   covered by Section 9.2 list_sandboxes_anonymous_sees_all]
+
+15.3 Multi-User Provider Lifecycle (in provider.rs test module)
+──────────────────────────────────────────────────────────────
+
+  TEST: user_creates_own_provider_and_accesses_it         (UNCHANGED)
+
+  TEST: shared_providers_visible_to_all_users
+    [UNCHANGED FROM V1, now consistent with corrected check_ownership
+     using allow_unowned=true for providers]
+
+  TEST: user_cannot_access_other_users_provider           (UNCHANGED)
+
+  CORRECTED TOTAL INTEGRATION TESTS IN SECTION 15: ~8 tests (was ~12)
+
+================================================================================
+16. HELM CHART TESTS — TEMPLATE RENDERING
+================================================================================
+
+  [UNCHANGED FROM V1]
+
+================================================================================
+17. CROSS-CUTTING CONCERNS (CORRECTED)
+================================================================================
+
+17.1 Backward Compatibility Validation
+──────────────────────────────────────
+
+  REVIEW FIX: Reclassified as CI steps (Issue R1-10)
+
+  The following are CI PRE-MERGE GATE CHECKS, not individual test functions:
+
+  CI CHECK: existing_test_suite_passes_with_no_config_changes
+    Action: Run `cargo test -p openshell-server` on the modified code
+            without any ownership configuration
+    Verify: All existing tests pass (groups: vec![] added to all Identity sites)
+    Gate:   Required for merge
+
+  CI CHECK: existing_test_suite_passes_with_ownership_disabled
+    Action: Run full test suite with ownership.enabled = false
+    Verify: No regressions
+    Gate:   Required for merge
+
+17.2 Concurrency Safety Tests
+─────────────────────────────
+
+  [UNCHANGED FROM V1]
+
+17.3 Regression Tests
+─────────────────────
+
+  [UNCHANGED FROM V1, except regression_into_inner_ordering is
+   reclassified as a COMPILE-TIME check, not a runtime test]
+
+17.4 Error Message Quality Tests
+────────────────────────────────
+
+  [UNCHANGED FROM V1]
+
+  CORRECTED TOTAL CROSS-CUTTING TESTS: ~6 tests (was ~8, removed 2 meta-tests)
+
+================================================================================
+18. TEST DEPENDENCY MAP (CORRECTED)
+================================================================================
+
+  [Same structure as V1, with corrected section references:]
+
+  CORRECTED NOTE: Section 15 tests are now IN the source file test
+  modules (sandbox.rs and provider.rs), not in a separate integration
+  test file. The test execution order is simplified:
+
+  RECOMMENDED TEST EXECUTION ORDER:
+    1. cargo test -p openshell-core  (Sections 6, 7)
+    2. cargo test -p openshell-server  (Sections 3-5, 8-11, 14-15, 17)
+    3. cargo test -p openshell-driver-kubernetes  (Section 12)
+    4. cargo test -p openshell-driver-docker  (Section 13)
+    5. ./scripts/test-helm-templates.sh  (Section 16)
+
+  NOTE: The separate `--test ownership_integration` command is no longer
+  needed since Section 15 tests are in-source, not in tests/.
+
+================================================================================
+19. TEST FIXTURES & MOCKS INVENTORY (CORRECTED)
+================================================================================
+
+  CORRECTED EXISTING FIXTURES:
+
+  The OidcConfig construction in test helpers uses the ACTUAL field names:
+    jwks_ttl_secs (NOT jwks_ttl)
+    No ca_cert_path field (it's NOT on OidcConfig)
+
+  [Rest of fixture inventory UNCHANGED FROM V1, except:]
+
+  REMOVED:
+    make_sandbox_request and make_provider_request are no longer needed
+    in a separate tests/ integration file. They are defined inline in
+    the sandbox.rs and provider.rs test modules.
+
+  NEW:
+    check_ownership() call sites now include allow_unowned parameter.
+
+================================================================================
+20. TRACEABILITY MATRIX: PORT PLAN STEPS ↔ TESTS (CORRECTED)
+================================================================================
+
+  ┌──────┬──────────────────────────────────────────┬────────────┬────────────┐
+  │ Step │ Description                              │ Test Sec.  │ Test Count │
+  ├──────┼──────────────────────────────────────────┼────────────┼────────────┤
+  │  1   │ Identity groups field                    │ 4          │ 4          │
+  │  2   │ OidcConfig groups_claim + extraction     │ 5          │ 9          │
+  │  3   │ Label constants (LABEL_OWNER/TENANT)     │ 6          │ 4          │
+  │  4   │ Ownership module (auth/ownership.rs)     │ 3          │ 35         │
+  │  5   │ OwnershipConfig in Config                │ 7          │ 12         │
+  │  6   │ ServerState.ownership_config() helper    │ 8          │ 5          │
+  │  7   │ Sandbox create (owner stamping)          │ 9.1, 11    │ 10         │
+  │  8   │ Sandbox list (owner filtering)           │ 9.2        │ 6          │
+  │  9   │ Sandbox get/delete (ownership check)     │ 9.3, 9.4   │ 9          │
+  │ 10   │ Sandbox watch/exec/SSH (ownership check) │ 9.5        │ 7          │
+  │ 11   │ Provider CRUD ownership                  │ 10         │ 17         │
+  │ 12   │ K8s driver labels                        │ 12         │ 4          │
+  │ 13   │ Docker driver verification               │ 13         │ 2          │
+  │ 14   │ SandboxIndex owner tracking (optional)   │ 14         │ 3          │
+  │ 15   │ Helm chart tenant values                 │ 16.1       │ 4          │
+  │ 16   │ Helm per-tenant RBAC                     │ 16.2       │ 2          │
+  │ 17   │ Helm ResourceQuota/LimitRange            │ 16.3       │ 4          │
+  │ 18   │ Helm certificate SANs                    │ 16.4       │ 2          │
+  │ 19   │ CLI multi-tenant display                 │ (E2E)      │ 0 *        │
+  │ 20   │ Tests themselves                         │ ALL        │ N/A        │
+  ├──────┼──────────────────────────────────────────┼────────────┼────────────┤
+  │      │ E2E ownership lifecycle flows            │ 15         │ 8          │
+  │      │ Cross-cutting concerns                   │ 17         │ 6          │
+  ├──────┼──────────────────────────────────────────┼────────────┼────────────┤
+  │      │ TOTAL                                    │            │ ~141       │
+  └──────┴──────────────────────────────────────────┴────────────┴────────────┘
+
+  * Step 19 (CLI display) is display-only. Verified via E2E CLI smoke test.
+
+  CI GATE CHECKS (not counted as individual tests):
+    - Existing test suite passes without ownership config
+    - Existing test suite passes with ownership explicitly disabled
+
+================================================================================
+APPENDIX A: TEST FILE LAYOUT (CORRECTED)
+================================================================================
+
+  ALL HANDLER TESTS ARE IN-SOURCE (not in separate tests/ files):
+
+  MODIFIED FILES (add #[cfg(test)] blocks with ownership tests):
+    crates/openshell-server/src/auth/ownership.rs            (Sections 3, 15)
+    crates/openshell-server/src/auth/identity.rs             (Section 4)
+    crates/openshell-server/src/auth/oidc.rs                 (Section 5)
+    crates/openshell-core/src/driver_utils.rs                (Section 6)
+    crates/openshell-core/src/config.rs                      (Section 7)
+    crates/openshell-server/src/lib.rs                       (Section 8)
+    crates/openshell-server/src/grpc/sandbox.rs              (Sections 9, 15.1-15.2)
+    crates/openshell-server/src/grpc/provider.rs             (Sections 10, 15.3)
+    crates/openshell-server/src/compute/mod.rs               (Section 11)
+    crates/openshell-driver-kubernetes/src/driver.rs         (Section 12)
+    crates/openshell-driver-docker/src/lib.rs                (Section 13)
+    crates/openshell-server/src/sandbox_index.rs             (Section 14)
+    crates/openshell-server/src/grpc/mod.rs                  (test_support ext)
+
+  NEW SCRIPT (not Rust):
+    scripts/test-helm-templates.sh                           (Section 16)
+
+  REMOVED (was in V1, no longer needed):
+    crates/openshell-server/tests/ownership_integration.rs
+    (Handler tests moved to in-source modules per Issue R1-3)
+
+================================================================================
+APPENDIX B-C: UNCHANGED FROM V1
+================================================================================
+
+  [Feature flags, Cargo configuration, and Kagenti mapping unchanged]
+
+================================================================================
+END OF REVIEWED TEST PLAN V1
+================================================================================

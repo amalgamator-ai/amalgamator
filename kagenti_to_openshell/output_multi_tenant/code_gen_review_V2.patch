@@ -1,0 +1,1342 @@
+diff --git a/crates/openshell-core/src/config.rs b/crates/openshell-core/src/config.rs
+index ba6b9d4..5d7d4c5 100644
+--- a/crates/openshell-core/src/config.rs
++++ b/crates/openshell-core/src/config.rs
+@@ -352,6 +352,9 @@ pub struct Config {
+     /// Gateway user authentication behavior.
+     pub auth: GatewayAuthConfig,
+ 
++    /// Multi-tenant resource ownership enforcement.
++    pub ownership: OwnershipConfigCore,
++
+     /// mTLS user authentication configuration. When enabled, a verified TLS
+     /// client certificate can authenticate CLI/SDK callers as a
+     /// `Principal::User`. This is for local single-user gateways only;
+@@ -490,6 +493,13 @@ pub struct OidcConfig {
+     /// Keycloak: `scope` (space-delimited string). Okta: `scp` (JSON array).
+     #[serde(default)]
+     pub scopes_claim: String,
++
++    /// Dot-separated path to the groups array in the JWT claims.
++    /// Used for multi-tenant deployments where group membership maps to
++    /// organizational tenants.
++    /// Defaults to `groups`.
++    #[serde(default = "default_groups_claim")]
++    pub groups_claim: String,
+ }
+ 
+ /// mTLS user authentication for local, single-user gateways.
+@@ -515,6 +525,25 @@ pub struct GatewayAuthConfig {
+     pub allow_unauthenticated_users: bool,
+ }
+ 
++/// Multi-tenant resource ownership configuration.
++///
++/// When enabled, the gateway stamps every created sandbox and provider with
++/// the caller's identity subject and an optional tenant ID. Subsequent
++/// get/list/delete operations enforce that only the resource owner (or an
++/// admin) can access the resource.
++#[derive(Debug, Clone, Default, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct OwnershipConfigCore {
++    /// Enable per-resource ownership enforcement.
++    #[serde(default)]
++    pub enabled: bool,
++
++    /// Optional tenant identifier for gateway-per-tenant deployments.
++    /// When set, every created resource is labeled with this value.
++    #[serde(default)]
++    pub tenant_id: Option<String>,
++}
++
+ const fn default_jwks_ttl_secs() -> u64 {
+     3600
+ }
+@@ -564,6 +593,10 @@ fn default_user_role() -> String {
+     "openshell-user".to_string()
+ }
+ 
++fn default_groups_claim() -> String {
++    "groups".to_string()
++}
++
+ impl Config {
+     /// Create a new config with optional TLS.
+     pub fn new(tls: Option<TlsConfig>) -> Self {
+@@ -575,6 +608,7 @@ impl Config {
+             tls,
+             oidc: None,
+             auth: GatewayAuthConfig::default(),
++            ownership: OwnershipConfigCore::default(),
+             mtls_auth: MtlsAuthConfig::default(),
+             gateway_jwt: None,
+             database_url: String::new(),
+diff --git a/crates/openshell-core/src/driver_utils.rs b/crates/openshell-core/src/driver_utils.rs
+index 9e4411b..d80a4ed 100644
+--- a/crates/openshell-core/src/driver_utils.rs
++++ b/crates/openshell-core/src/driver_utils.rs
+@@ -27,6 +27,14 @@ pub const LABEL_SANDBOX_NAME: &str = "openshell.ai/sandbox-name";
+ /// Container/pod label carrying the sandbox namespace.
+ pub const LABEL_SANDBOX_NAMESPACE: &str = "openshell.ai/sandbox-namespace";
+ 
++/// Container/pod label carrying the identity subject of the user who created
++/// the sandbox. Used for multi-tenant ownership enforcement.
++pub const LABEL_OWNER: &str = "openshell.ai/owner";
++
++/// Container/pod label carrying the organizational tenant identifier.
++/// Set from the gateway's configured `tenant_id` in multi-tenant deployments.
++pub const LABEL_TENANT: &str = "openshell.ai/tenant";
++
+ // ---------------------------------------------------------------------------
+ 
+ /// Path to the sandbox supervisor binary inside the container image.
+diff --git a/crates/openshell-core/src/lib.rs b/crates/openshell-core/src/lib.rs
+index 3212963..8c5c41c 100644
+--- a/crates/openshell-core/src/lib.rs
++++ b/crates/openshell-core/src/lib.rs
+@@ -39,6 +39,7 @@ pub mod time;
+ 
+ pub use config::{
+     ComputeDriverKind, Config, GatewayAuthConfig, GatewayJwtConfig, MtlsAuthConfig, OidcConfig,
++    OwnershipConfigCore,
+     TlsConfig,
+ };
+ pub use error::{ComputeDriverError, Error, Result};
+diff --git a/crates/openshell-server/src/auth/authenticator.rs b/crates/openshell-server/src/auth/authenticator.rs
+index f5d5c7b..e247674 100644
+--- a/crates/openshell-server/src/auth/authenticator.rs
++++ b/crates/openshell-server/src/auth/authenticator.rs
+@@ -144,6 +144,7 @@ mod tests {
+                 display_name: None,
+                 roles: vec![],
+                 scopes: vec![],
++                groups: vec![],
+                 provider: IdentityProvider::Oidc,
+             },
+         })
+diff --git a/crates/openshell-server/src/auth/authz.rs b/crates/openshell-server/src/auth/authz.rs
+index 1c04b09..fd5fcd5 100644
+--- a/crates/openshell-server/src/auth/authz.rs
++++ b/crates/openshell-server/src/auth/authz.rs
+@@ -154,6 +154,7 @@ mod tests {
+             display_name: None,
+             roles: roles.iter().map(|r| (*r).to_string()).collect(),
+             scopes: vec![],
++            groups: vec![],
+             provider: IdentityProvider::Oidc,
+         }
+     }
+@@ -164,6 +165,7 @@ mod tests {
+             display_name: None,
+             roles: roles.iter().map(|r| (*r).to_string()).collect(),
+             scopes: scopes.iter().map(|s| (*s).to_string()).collect(),
++            groups: vec![],
+             provider: IdentityProvider::Oidc,
+         }
+     }
+diff --git a/crates/openshell-server/src/auth/guard.rs b/crates/openshell-server/src/auth/guard.rs
+index edcd6bc..d6672f3 100644
+--- a/crates/openshell-server/src/auth/guard.rs
++++ b/crates/openshell-server/src/auth/guard.rs
+@@ -106,6 +106,7 @@ mod tests {
+                 display_name: None,
+                 roles: vec![],
+                 scopes: vec![],
++                groups: vec![],
+                 provider: IdentityProvider::Oidc,
+             },
+         })
+diff --git a/crates/openshell-server/src/auth/identity.rs b/crates/openshell-server/src/auth/identity.rs
+index fa504e3..cde47f5 100644
+--- a/crates/openshell-server/src/auth/identity.rs
++++ b/crates/openshell-server/src/auth/identity.rs
+@@ -26,6 +26,11 @@ pub struct Identity {
+     /// `OAuth2` scopes granted to this identity. Empty when scope enforcement is disabled.
+     pub scopes: Vec<String>,
+ 
++    /// Group memberships extracted from the JWT claims.
++    /// Used for multi-tenant deployments where group membership maps to
++    /// organizational tenants.
++    pub groups: Vec<String>,
++
+     /// Which authentication provider produced this identity.
+     pub provider: IdentityProvider,
+ }
+diff --git a/crates/openshell-server/src/auth/mod.rs b/crates/openshell-server/src/auth/mod.rs
+index cbf3b94..6b77980 100644
+--- a/crates/openshell-server/src/auth/mod.rs
++++ b/crates/openshell-server/src/auth/mod.rs
+@@ -16,6 +16,7 @@ pub mod identity;
+ pub mod k8s_sa;
+ pub mod method_authz;
+ pub mod oidc;
++pub mod ownership;
+ pub mod principal;
+ pub mod sandbox_jwt;
+ pub mod sandbox_methods;
+diff --git a/crates/openshell-server/src/auth/oidc.rs b/crates/openshell-server/src/auth/oidc.rs
+index bf5490f..ca811c9 100644
+--- a/crates/openshell-server/src/auth/oidc.rs
++++ b/crates/openshell-server/src/auth/oidc.rs
+@@ -102,6 +102,9 @@ pub struct OidcClaims {
+     /// Roles extracted from the configurable claim path.
+     #[serde(skip)]
+     pub roles: Vec<String>,
++    /// Groups extracted from the configurable claim path.
++    #[serde(skip)]
++    pub groups: Vec<String>,
+     /// Raw claims for flexible role extraction.
+     #[serde(flatten)]
+     extra: serde_json::Value,
+@@ -162,6 +165,30 @@ impl OidcClaims {
+             .filter(|s| !STANDARD_OIDC_SCOPES.contains(&s.as_str()))
+             .collect()
+     }
++
++    /// Extract groups from the JWT claims using a dot-separated path.
++    ///
++    /// Follows the same pattern as [`extract_roles`] — traverses a
++    /// dot-delimited claim path and collects the resulting JSON array
++    /// into `self.groups`.
++    fn extract_groups(&mut self, groups_claim: &str) {
++        if groups_claim.is_empty() {
++            return;
++        }
++        let mut value = &self.extra;
++        for segment in groups_claim.split('.') {
++            match value.get(segment) {
++                Some(v) => value = v,
++                None => return,
++            }
++        }
++        if let Some(arr) = value.as_array() {
++            self.groups = arr
++                .iter()
++                .filter_map(|v| v.as_str().map(String::from))
++                .collect();
++        }
++    }
+ }
+ 
+ impl JwksCache {
+@@ -332,6 +359,7 @@ impl JwksCache {
+ 
+         let mut claims = token_data.claims;
+         claims.extract_roles(&self.config.roles_claim);
++        claims.extract_groups(&self.config.groups_claim);
+ 
+         let scopes = if self.config.scopes_claim.is_empty() {
+             vec![]
+@@ -344,6 +372,7 @@ impl JwksCache {
+             display_name: claims.preferred_username,
+             roles: claims.roles,
+             scopes,
++            groups: claims.groups,
+             provider: IdentityProvider::Oidc,
+         })
+     }
+diff --git a/crates/openshell-server/src/auth/ownership.rs b/crates/openshell-server/src/auth/ownership.rs
+new file mode 100644
+index 0000000..501f3b8
+--- /dev/null
++++ b/crates/openshell-server/src/auth/ownership.rs
+@@ -0,0 +1,439 @@
++// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++//! Multi-tenant resource ownership enforcement.
++//!
++//! When enabled, every created sandbox and provider is stamped with the
++//! caller's identity subject (`openshell.ai/owner`) and an optional tenant
++//! identifier (`openshell.ai/tenant`). Subsequent get/list/delete operations
++//! enforce that only the resource owner (or an admin) can access the resource.
++//!
++//! The module is a pure function library — it does not hold state and can be
++//! tested without a running server.
++
++use std::collections::HashMap;
++
++use openshell_core::driver_utils::{LABEL_OWNER, LABEL_TENANT};
++use tonic::Status;
++
++use super::principal::Principal;
++
++/// Server-side ownership configuration.
++///
++/// Built from [`openshell_core::OwnershipConfigCore`] plus the OIDC admin
++/// role name so that the ownership layer can bypass checks for admins.
++#[derive(Debug, Clone)]
++pub struct OwnershipConfig {
++    /// Whether ownership enforcement is active.
++    pub enabled: bool,
++    /// Role name that grants admin access (bypass ownership checks).
++    pub admin_role: String,
++    /// Optional tenant identifier for gateway-per-tenant deployments.
++    pub tenant_id: Option<String>,
++}
++
++impl Default for OwnershipConfig {
++    fn default() -> Self {
++        Self {
++            enabled: false,
++            admin_role: "openshell-admin".to_string(),
++            tenant_id: None,
++        }
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Label value sanitisation
++// ---------------------------------------------------------------------------
++
++/// Sanitize a raw string into a valid Kubernetes label value.
++///
++/// Kubernetes label values must be at most 63 characters and contain only
++/// alphanumeric characters, dashes, underscores, and dots. Leading and
++/// trailing characters must be alphanumeric.
++///
++/// This function replaces invalid characters with `_`, truncates to 63
++/// characters, then trims leading/trailing non-alphanumeric characters.
++pub fn sanitize_label_value(raw: &str) -> String {
++    let sanitized: String = raw
++        .chars()
++        .map(|c| {
++            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
++                c
++            } else {
++                '_'
++            }
++        })
++        .take(63)
++        .collect();
++    sanitized
++        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
++        .trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
++        .to_string()
++}
++
++// ---------------------------------------------------------------------------
++// Label stamping
++// ---------------------------------------------------------------------------
++
++/// Stamp owner and tenant labels onto a mutable label map.
++///
++/// Anti-spoofing: any client-supplied `openshell.ai/owner` or
++/// `openshell.ai/tenant` labels are stripped before the server-side values
++/// are applied. This prevents callers from impersonating other users.
++///
++/// Returns the labels unchanged when:
++/// - Ownership is disabled.
++/// - The principal is not a `User` (sandbox or anonymous callers).
++pub fn stamp_owner_labels(
++    principal: &Principal,
++    config: &OwnershipConfig,
++    labels: &mut HashMap<String, String>,
++) {
++    if !config.enabled {
++        return;
++    }
++
++    let Principal::User(user) = principal else {
++        return;
++    };
++
++    // Anti-spoofing: strip any client-supplied ownership labels.
++    labels.remove(LABEL_OWNER);
++    labels.remove(LABEL_TENANT);
++
++    let owner = sanitize_label_value(&user.identity.subject);
++    if !owner.is_empty() {
++        labels.insert(LABEL_OWNER.to_string(), owner);
++    }
++
++    if let Some(ref tenant_id) = config.tenant_id {
++        let tenant = sanitize_label_value(tenant_id);
++        if !tenant.is_empty() {
++            labels.insert(LABEL_TENANT.to_string(), tenant);
++        }
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Ownership check
++// ---------------------------------------------------------------------------
++
++/// Verify that the calling principal owns the resource identified by `labels`.
++///
++/// Returns `Ok(())` when:
++/// - Ownership enforcement is disabled.
++/// - The principal is an admin (bypass).
++/// - The principal is not a `User` (sandbox or anonymous callers).
++/// - The resource has no owner label (pre-existing resources).
++/// - The owner label matches the caller's identity subject.
++///
++/// Returns `Err(Status::permission_denied(...))` on mismatch.
++pub fn check_ownership(
++    principal: &Principal,
++    config: &OwnershipConfig,
++    labels: &HashMap<String, String>,
++) -> Result<(), Status> {
++    if !config.enabled {
++        return Ok(());
++    }
++
++    let Principal::User(user) = principal else {
++        // Sandbox and anonymous principals are not subject to ownership.
++        return Ok(());
++    };
++
++    // Admins bypass ownership checks.
++    if user.identity.roles.iter().any(|r| r == &config.admin_role) {
++        return Ok(());
++    }
++
++    let Some(owner) = labels.get(LABEL_OWNER) else {
++        // No owner label — the resource predates ownership enforcement.
++        return Ok(());
++    };
++
++    let caller = sanitize_label_value(&user.identity.subject);
++    if caller == *owner {
++        return Ok(());
++    }
++
++    Err(Status::permission_denied("you do not own this resource"))
++}
++
++// ---------------------------------------------------------------------------
++// Label selector for list filtering
++// ---------------------------------------------------------------------------
++
++/// Build a label selector that filters resources to those owned by the caller.
++///
++/// Returns `None` when:
++/// - Ownership enforcement is disabled.
++/// - The principal is an admin (sees all resources).
++/// - The principal is not a `User`.
++///
++/// Returns `Some("openshell.ai/owner=<sanitized_subject>")` for regular users.
++pub fn owner_label_selector(principal: &Principal, config: &OwnershipConfig) -> Option<String> {
++    if !config.enabled {
++        return None;
++    }
++
++    let Principal::User(user) = principal else {
++        return None;
++    };
++
++    // Admins see all resources.
++    if user.identity.roles.iter().any(|r| r == &config.admin_role) {
++        return None;
++    }
++
++    let owner = sanitize_label_value(&user.identity.subject);
++    if owner.is_empty() {
++        return None;
++    }
++
++    Some(format!("{LABEL_OWNER}={owner}"))
++}
++
++// ---------------------------------------------------------------------------
++// Tests
++// ---------------------------------------------------------------------------
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::auth::identity::{Identity, IdentityProvider};
++    use crate::auth::principal::UserPrincipal;
++
++    fn user_principal(subject: &str, roles: &[&str]) -> Principal {
++        Principal::User(UserPrincipal {
++            identity: Identity {
++                subject: subject.to_string(),
++                display_name: None,
++                roles: roles.iter().map(|r| r.to_string()).collect(),
++                scopes: vec![],
++                groups: vec![],
++                provider: IdentityProvider::Oidc,
++            },
++        })
++    }
++
++    fn enabled_config() -> OwnershipConfig {
++        OwnershipConfig {
++            enabled: true,
++            admin_role: "openshell-admin".to_string(),
++            tenant_id: None,
++        }
++    }
++
++    fn disabled_config() -> OwnershipConfig {
++        OwnershipConfig {
++            enabled: false,
++            admin_role: "openshell-admin".to_string(),
++            tenant_id: None,
++        }
++    }
++
++    // ── sanitize_label_value ──────────────────────────────────────────
++
++    #[test]
++    fn sanitize_preserves_valid_characters() {
++        assert_eq!(sanitize_label_value("alice"), "alice");
++        assert_eq!(sanitize_label_value("user-1_test.v2"), "user-1_test.v2");
++    }
++
++    #[test]
++    fn sanitize_replaces_invalid_characters() {
++        assert_eq!(
++            sanitize_label_value("alice@example.com"),
++            "alice_example.com"
++        );
++        assert_eq!(sanitize_label_value("user name"), "user_name");
++    }
++
++    #[test]
++    fn sanitize_truncates_to_63_characters() {
++        let long = "a".repeat(100);
++        assert_eq!(sanitize_label_value(&long).len(), 63);
++    }
++
++    #[test]
++    fn sanitize_trims_leading_trailing_non_alphanumeric() {
++        assert_eq!(sanitize_label_value("-user-"), "user");
++        assert_eq!(sanitize_label_value("_user_"), "user");
++        assert_eq!(sanitize_label_value(".user."), "user");
++        assert_eq!(sanitize_label_value("---"), "");
++    }
++
++    #[test]
++    fn sanitize_empty_input_returns_empty() {
++        assert_eq!(sanitize_label_value(""), "");
++    }
++
++    // ── stamp_owner_labels ──────────────────────────────────────────
++
++    #[test]
++    fn stamp_disabled_leaves_labels_unchanged() {
++        let principal = user_principal("alice", &[]);
++        let config = disabled_config();
++        let mut labels = HashMap::from([("app".to_string(), "test".to_string())]);
++        stamp_owner_labels(&principal, &config, &mut labels);
++        assert_eq!(labels.len(), 1);
++        assert!(!labels.contains_key(LABEL_OWNER));
++    }
++
++    #[test]
++    fn stamp_enabled_adds_owner_label() {
++        let principal = user_principal("alice", &[]);
++        let config = enabled_config();
++        let mut labels = HashMap::new();
++        stamp_owner_labels(&principal, &config, &mut labels);
++        assert_eq!(labels.get(LABEL_OWNER), Some(&"alice".to_string()));
++    }
++
++    #[test]
++    fn stamp_enabled_with_tenant_adds_both_labels() {
++        let principal = user_principal("alice", &[]);
++        let mut config = enabled_config();
++        config.tenant_id = Some("acme-corp".to_string());
++        let mut labels = HashMap::new();
++        stamp_owner_labels(&principal, &config, &mut labels);
++        assert_eq!(labels.get(LABEL_OWNER), Some(&"alice".to_string()));
++        assert_eq!(labels.get(LABEL_TENANT), Some(&"acme-corp".to_string()));
++    }
++
++    #[test]
++    fn stamp_strips_spoofed_owner_labels() {
++        let principal = user_principal("alice", &[]);
++        let config = enabled_config();
++        let mut labels = HashMap::from([
++            (LABEL_OWNER.to_string(), "mallory".to_string()),
++            (LABEL_TENANT.to_string(), "evil-corp".to_string()),
++        ]);
++        stamp_owner_labels(&principal, &config, &mut labels);
++        assert_eq!(labels.get(LABEL_OWNER), Some(&"alice".to_string()));
++        assert!(!labels.contains_key(LABEL_TENANT)); // No tenant configured.
++    }
++
++    #[test]
++    fn stamp_anonymous_principal_is_noop() {
++        let principal = Principal::Anonymous;
++        let config = enabled_config();
++        let mut labels = HashMap::new();
++        stamp_owner_labels(&principal, &config, &mut labels);
++        assert!(labels.is_empty());
++    }
++
++    #[test]
++    fn stamp_sanitizes_subject() {
++        let principal = user_principal("alice@example.com", &[]);
++        let config = enabled_config();
++        let mut labels = HashMap::new();
++        stamp_owner_labels(&principal, &config, &mut labels);
++        assert_eq!(
++            labels.get(LABEL_OWNER),
++            Some(&"alice_example.com".to_string())
++        );
++    }
++
++    // ── check_ownership ──────────────────────────────────────────────
++
++    #[test]
++    fn check_disabled_always_ok() {
++        let principal = user_principal("alice", &[]);
++        let config = disabled_config();
++        let labels = HashMap::from([(LABEL_OWNER.to_string(), "bob".to_string())]);
++        assert!(check_ownership(&principal, &config, &labels).is_ok());
++    }
++
++    #[test]
++    fn check_owner_matches() {
++        let principal = user_principal("alice", &[]);
++        let config = enabled_config();
++        let labels = HashMap::from([(LABEL_OWNER.to_string(), "alice".to_string())]);
++        assert!(check_ownership(&principal, &config, &labels).is_ok());
++    }
++
++    #[test]
++    fn check_owner_mismatch_returns_permission_denied() {
++        let principal = user_principal("alice", &[]);
++        let config = enabled_config();
++        let labels = HashMap::from([(LABEL_OWNER.to_string(), "bob".to_string())]);
++        let err = check_ownership(&principal, &config, &labels).unwrap_err();
++        assert_eq!(err.code(), tonic::Code::PermissionDenied);
++    }
++
++    #[test]
++    fn check_admin_bypasses_ownership() {
++        let principal = user_principal("admin", &["openshell-admin"]);
++        let config = enabled_config();
++        let labels = HashMap::from([(LABEL_OWNER.to_string(), "alice".to_string())]);
++        assert!(check_ownership(&principal, &config, &labels).is_ok());
++    }
++
++    #[test]
++    fn check_no_owner_label_is_ok() {
++        let principal = user_principal("alice", &[]);
++        let config = enabled_config();
++        let labels = HashMap::new();
++        assert!(check_ownership(&principal, &config, &labels).is_ok());
++    }
++
++    #[test]
++    fn check_anonymous_principal_is_ok() {
++        let principal = Principal::Anonymous;
++        let config = enabled_config();
++        let labels = HashMap::from([(LABEL_OWNER.to_string(), "alice".to_string())]);
++        assert!(check_ownership(&principal, &config, &labels).is_ok());
++    }
++
++    // ── owner_label_selector ─────────────────────────────────────────
++
++    #[test]
++    fn selector_disabled_returns_none() {
++        let principal = user_principal("alice", &[]);
++        let config = disabled_config();
++        assert!(owner_label_selector(&principal, &config).is_none());
++    }
++
++    #[test]
++    fn selector_admin_returns_none() {
++        let principal = user_principal("admin", &["openshell-admin"]);
++        let config = enabled_config();
++        assert!(owner_label_selector(&principal, &config).is_none());
++    }
++
++    #[test]
++    fn selector_regular_user_returns_filter() {
++        let principal = user_principal("alice", &["openshell-user"]);
++        let config = enabled_config();
++        assert_eq!(
++            owner_label_selector(&principal, &config),
++            Some("openshell.ai/owner=alice".to_string())
++        );
++    }
++
++    #[test]
++    fn selector_anonymous_returns_none() {
++        let principal = Principal::Anonymous;
++        let config = enabled_config();
++        assert!(owner_label_selector(&principal, &config).is_none());
++    }
++
++    #[test]
++    fn selector_sanitizes_subject() {
++        let principal = user_principal("alice@example.com", &["openshell-user"]);
++        let config = enabled_config();
++        assert_eq!(
++            owner_label_selector(&principal, &config),
++            Some("openshell.ai/owner=alice_example.com".to_string())
++        );
++    }
++
++    #[test]
++    fn selector_empty_sanitized_subject_returns_none() {
++        let principal = user_principal("---", &["openshell-user"]);
++        let config = enabled_config();
++        assert!(owner_label_selector(&principal, &config).is_none());
++    }
++}
+diff --git a/crates/openshell-server/src/cli.rs b/crates/openshell-server/src/cli.rs
+index 9aee2bc..bb1ddff 100644
+--- a/crates/openshell-server/src/cli.rs
++++ b/crates/openshell-server/src/cli.rs
+@@ -210,6 +210,22 @@ struct RunArgs {
+         action = ArgAction::Set
+     )]
+     enable_loopback_service_http: bool,
++
++    /// Enable multi-tenant resource ownership enforcement.
++    /// When enabled, sandboxes and providers are labeled with the caller's
++    /// identity subject, and access is restricted to the resource owner.
++    #[arg(
++        long = "ownership-enabled",
++        env = "OPENSHELL_OWNERSHIP_ENABLED",
++        default_value_t = false,
++        action = ArgAction::Set
++    )]
++    ownership_enabled: bool,
++
++    /// Tenant identifier for gateway-per-tenant deployments.
++    /// When set, every created resource is labeled with this value.
++    #[arg(long = "tenant-id", env = "OPENSHELL_TENANT_ID")]
++    tenant_id: Option<String>,
+ }
+ 
+ pub fn command() -> Command {
+@@ -393,6 +409,24 @@ fn prepare_server_config(args: &mut RunArgs, matches: &ArgMatches) -> Result<Ser
+         config = config.with_ssh_session_ttl_secs(ttl);
+     }
+ 
++
++    // Ownership configuration: CLI > file > default.
++    config.ownership.enabled = args.ownership_enabled;
++    if let Some(ref tid) = args.tenant_id {
++        config.ownership.tenant_id = Some(tid.clone());
++    }
++    if let Some(file) = file.as_ref() {
++        if !arg_defaulted(matches, "ownership_enabled") {
++            // CLI/env already set — keep it.
++        } else if let Some(enabled) = file.openshell.gateway.ownership_enabled {
++            config.ownership.enabled = enabled;
++        }
++        if args.tenant_id.is_none() {
++            if let Some(ref tid) = file.openshell.gateway.tenant_id {
++                config.ownership.tenant_id = Some(tid.clone());
++            }
++        }
++    }
+     if let Some(issuer) = args.oidc_issuer.clone() {
+         config = config.with_oidc(openshell_core::OidcConfig {
+             issuer,
+@@ -402,6 +436,7 @@ fn prepare_server_config(args: &mut RunArgs, matches: &ArgMatches) -> Result<Ser
+             admin_role: args.oidc_admin_role.clone(),
+             user_role: args.oidc_user_role.clone(),
+             scopes_claim: args.oidc_scopes_claim.clone(),
++            groups_claim: String::from("groups"),
+         });
+     }
+ 
+diff --git a/crates/openshell-server/src/compute/mod.rs b/crates/openshell-server/src/compute/mod.rs
+index 3a92cd2..547f2f1 100644
+--- a/crates/openshell-server/src/compute/mod.rs
++++ b/crates/openshell-server/src/compute/mod.rs
+@@ -489,6 +489,20 @@ impl ComputeRuntime {
+         // Create with MustCreate condition to prevent duplicate creation race
+         self.sandbox_index.update_from_sandbox(&sandbox);
+         let mut sandbox = sandbox;
++
++        // Serialize ObjectMeta labels to the DB labels column so that
++        // label-selector queries (including ownership-filtered list) work.
++        let labels_json = sandbox
++            .metadata
++            .as_ref()
++            .map(|metadata| &metadata.labels)
++            .filter(|labels| !labels.is_empty())
++            .map(serde_json::to_string)
++            .transpose()
++            .map_err(|e| {
++                Status::internal(format!("failed to serialize sandbox labels: {e}"))
++            })?;
++
+         let result = self
+             .store
+             .put_if(
+@@ -496,7 +510,7 @@ impl ComputeRuntime {
+                 &sandbox_id,
+                 sandbox.object_name(),
+                 &sandbox.encode_to_vec(),
+-                None,
++                labels_json.as_deref(),
+                 WriteCondition::MustCreate,
+             )
+             .await
+diff --git a/crates/openshell-server/src/config_file.rs b/crates/openshell-server/src/config_file.rs
+index b65b5f3..1e8845b 100644
+--- a/crates/openshell-server/src/config_file.rs
++++ b/crates/openshell-server/src/config_file.rs
+@@ -99,6 +99,14 @@ pub struct GatewayFileSection {
+     #[serde(default)]
+     pub grpc_rate_limit_window_seconds: Option<u64>,
+ 
++    // ── Ownership ───────────────────────────────────────────────────────
++    /// Enable multi-tenant resource ownership enforcement.
++    #[serde(default)]
++    pub ownership_enabled: Option<bool>,
++    /// Tenant identifier for gateway-per-tenant deployments.
++    #[serde(default)]
++    pub tenant_id: Option<String>,
++
+     // ── Service routing ──────────────────────────────────────────────────
+     /// Subject Alternative Names configured on the gateway server certificate.
+     /// Wildcard DNS SANs also enable sandbox service URLs under that domain.
+diff --git a/crates/openshell-server/src/grpc/auth_rpc.rs b/crates/openshell-server/src/grpc/auth_rpc.rs
+index 88c771b..a40c9ab 100644
+--- a/crates/openshell-server/src/grpc/auth_rpc.rs
++++ b/crates/openshell-server/src/grpc/auth_rpc.rs
+@@ -302,6 +302,7 @@ mod tests {
+                 display_name: None,
+                 roles: vec![],
+                 scopes: vec![],
++                groups: vec![],
+                 provider: IdentityProvider::Oidc,
+             },
+         }));
+diff --git a/crates/openshell-server/src/grpc/mod.rs b/crates/openshell-server/src/grpc/mod.rs
+index fe2eb33..2182b80 100644
+--- a/crates/openshell-server/src/grpc/mod.rs
++++ b/crates/openshell-server/src/grpc/mod.rs
+@@ -357,7 +357,7 @@ impl OpenShell for OpenShellService {
+ 
+     // --- Providers ---
+ 
+-    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
++    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
+     async fn create_provider(
+         &self,
+         request: Request<CreateProviderRequest>,
+@@ -421,7 +421,7 @@ impl OpenShell for OpenShellService {
+         provider::handle_lint_provider_profiles(&self.state, request).await
+     }
+ 
+-    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
++    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
+     async fn update_provider(
+         &self,
+         request: Request<UpdateProviderRequest>,
+@@ -461,7 +461,7 @@ impl OpenShell for OpenShellService {
+         provider::handle_delete_provider_refresh(&self.state, request).await
+     }
+ 
+-    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
++    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
+     async fn delete_provider(
+         &self,
+         request: Request<DeleteProviderRequest>,
+diff --git a/crates/openshell-server/src/grpc/policy.rs b/crates/openshell-server/src/grpc/policy.rs
+index cc8ff0d..9e227eb 100644
+--- a/crates/openshell-server/src/grpc/policy.rs
++++ b/crates/openshell-server/src/grpc/policy.rs
+@@ -3926,6 +3926,7 @@ mod tests {
+                     display_name: None,
+                     roles: vec![],
+                     scopes: vec![],
++                    groups: vec![],
+                     provider: IdentityProvider::Oidc,
+                 },
+             }));
+@@ -4028,6 +4029,7 @@ mod tests {
+                 display_name: None,
+                 roles: vec![],
+                 scopes: vec![],
++                groups: vec![],
+                 provider: IdentityProvider::Oidc,
+             },
+         }));
+diff --git a/crates/openshell-server/src/grpc/provider.rs b/crates/openshell-server/src/grpc/provider.rs
+index d5a5f5c..8d2c12d 100644
+--- a/crates/openshell-server/src/grpc/provider.rs
++++ b/crates/openshell-server/src/grpc/provider.rs
+@@ -115,6 +115,17 @@ pub(super) async fn create_provider_record(
+         metadata.id.clone_from(&provider_id);
+     }
+ 
++    // Serialize ObjectMeta labels to the DB labels column so that
++    // label-selector queries (including ownership-filtered list) work.
++    let labels_json = provider
++        .metadata
++        .as_ref()
++        .map(|metadata| &metadata.labels)
++        .filter(|labels| !labels.is_empty())
++        .map(serde_json::to_string)
++        .transpose()
++        .map_err(|e| Status::internal(format!("failed to serialize provider labels: {e}")))?;
++
+     // Create with MustCreate condition to prevent duplicate creation race
+     let result = store
+         .put_if(
+@@ -122,7 +133,7 @@ pub(super) async fn create_provider_record(
+             &provider_id,
+             provider.object_name(),
+             &provider.encode_to_vec(),
+-            None,
++            labels_json.as_deref(),
+             WriteCondition::MustCreate,
+         )
+         .await
+@@ -173,6 +184,24 @@ pub(super) async fn list_provider_records(
+         .collect())
+ }
+ 
++/// List provider records filtered by a label selector.
++async fn list_provider_records_with_selector(
++    store: &Store,
++    selector: &str,
++    limit: u32,
++    offset: u32,
++) -> Result<Vec<Provider>, Status> {
++    let providers: Vec<Provider> = store
++        .list_messages_with_selector(selector, limit, offset)
++        .await
++        .map_err(|e| Status::internal(format!("list providers with selector failed: {e}")))?;
++
++    Ok(providers
++        .into_iter()
++        .map(redact_provider_credentials)
++        .collect())
++}
++
+ pub(super) async fn update_provider_record(
+     store: &Store,
+     provider: Provider,
+@@ -1127,6 +1156,8 @@ impl ObjectType for Provider {
+ // ---------------------------------------------------------------------------
+ 
+ use crate::ServerState;
++use crate::auth::ownership::{check_ownership, owner_label_selector, stamp_owner_labels};
++use crate::auth::principal::Principal;
+ use openshell_core::proto::{
+     ConfigureProviderRefreshRequest, ConfigureProviderRefreshResponse, CreateProviderRequest,
+     DeleteProviderProfileRequest, DeleteProviderProfileResponse, DeleteProviderRefreshRequest,
+@@ -1151,8 +1182,14 @@ pub(super) async fn handle_create_provider(
+     state: &Arc<ServerState>,
+     request: Request<CreateProviderRequest>,
+ ) -> Result<Response<ProviderResponse>, Status> {
++    let principal = request
++        .extensions()
++        .get::<Principal>()
++        .cloned()
++        .unwrap_or(Principal::Anonymous);
++    let ownership_config = state.ownership_config();
+     let req = request.into_inner();
+-    let Some(provider) = req.provider else {
++    let Some(mut provider) = req.provider else {
+         emit_provider_lifecycle(
+             "custom",
+             LifecycleOperation::Create,
+@@ -1161,6 +1198,11 @@ pub(super) async fn handle_create_provider(
+         return Err(Status::invalid_argument("provider is required"));
+     };
+     let provider_type = provider.r#type.clone();
++
++    // Ensure metadata exists before stamping ownership labels.
++    let metadata = provider.metadata.get_or_insert_with(Default::default);
++    stamp_owner_labels(&principal, &ownership_config, &mut metadata.labels);
++
+     let result = create_provider_record(state.store.as_ref(), provider).await;
+     match result {
+         Ok(provider) => {
+@@ -1188,9 +1230,24 @@ pub(super) async fn handle_get_provider(
+     state: &Arc<ServerState>,
+     request: Request<GetProviderRequest>,
+ ) -> Result<Response<ProviderResponse>, Status> {
++    let principal = request
++        .extensions()
++        .get::<Principal>()
++        .cloned()
++        .unwrap_or(Principal::Anonymous);
++    let ownership_config = state.ownership_config();
+     let name = request.into_inner().name;
+     let provider = get_provider_record(state.store.as_ref(), &name).await?;
+ 
++    // Ownership check: only the resource owner (or an admin) can access.
++    let empty = std::collections::HashMap::new();
++    let labels = provider
++        .metadata
++        .as_ref()
++        .map(|m| &m.labels)
++        .unwrap_or(&empty);
++    check_ownership(&principal, &ownership_config, labels)?;
++
+     Ok(Response::new(ProviderResponse {
+         provider: Some(provider),
+     }))
+@@ -1200,9 +1257,22 @@ pub(super) async fn handle_list_providers(
+     state: &Arc<ServerState>,
+     request: Request<ListProvidersRequest>,
+ ) -> Result<Response<ListProvidersResponse>, Status> {
++    let principal = request
++        .extensions()
++        .get::<Principal>()
++        .cloned()
++        .unwrap_or(Principal::Anonymous);
++    let ownership_config = state.ownership_config();
+     let request = request.into_inner();
+     let limit = clamp_limit(request.limit, 100, MAX_PAGE_SIZE);
+-    let providers = list_provider_records(state.store.as_ref(), limit, request.offset).await?;
++
++    let owner_selector = owner_label_selector(&principal, &ownership_config);
++    let providers = if let Some(selector) = owner_selector {
++        list_provider_records_with_selector(state.store.as_ref(), &selector, limit, request.offset)
++            .await?
++    } else {
++        list_provider_records(state.store.as_ref(), limit, request.offset).await?
++    };
+ 
+     Ok(Response::new(ListProvidersResponse { providers }))
+ }
+@@ -1891,6 +1961,12 @@ pub(super) async fn handle_update_provider(
+     state: &Arc<ServerState>,
+     request: Request<UpdateProviderRequest>,
+ ) -> Result<Response<ProviderResponse>, Status> {
++    let principal = request
++        .extensions()
++        .get::<Principal>()
++        .cloned()
++        .unwrap_or(Principal::Anonymous);
++    let ownership_config = state.ownership_config();
+     let req = request.into_inner();
+     let Some(mut provider) = req.provider else {
+         emit_provider_lifecycle(
+@@ -1901,6 +1977,26 @@ pub(super) async fn handle_update_provider(
+         return Err(Status::invalid_argument("provider is required"));
+     };
+     let provider_type = provider.r#type.clone();
++
++    // Security fix from V1 review: validate name is non-empty before ownership check.
++    let provider_name = provider
++        .metadata
++        .as_ref()
++        .map_or("", |m| m.name.as_str());
++    if provider_name.is_empty() {
++        return Err(Status::invalid_argument("provider name is required"));
++    }
++
++    // Ownership check: fetch the existing provider and verify ownership.
++    let existing = get_provider_record(state.store.as_ref(), provider_name).await?;
++    let empty = std::collections::HashMap::new();
++    let labels = existing
++        .metadata
++        .as_ref()
++        .map(|m| &m.labels)
++        .unwrap_or(&empty);
++    check_ownership(&principal, &ownership_config, labels)?;
++
+     provider
+         .credential_expires_at_ms
+         .extend(req.credential_expires_at_ms);
+@@ -2262,7 +2358,32 @@ pub(super) async fn handle_delete_provider(
+     state: &Arc<ServerState>,
+     request: Request<DeleteProviderRequest>,
+ ) -> Result<Response<DeleteProviderResponse>, Status> {
++    let principal = request
++        .extensions()
++        .get::<Principal>()
++        .cloned()
++        .unwrap_or(Principal::Anonymous);
++    let ownership_config = state.ownership_config();
+     let name = request.into_inner().name;
++
++    // Ownership check: fetch the existing provider and verify ownership.
++    // Propagate store errors instead of swallowing them — silently skipping
++    // the ownership check on database failures is a security issue.
++    if let Some(existing) = state
++        .store
++        .get_message_by_name::<Provider>(&name)
++        .await
++        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
++    {
++        let empty = std::collections::HashMap::new();
++        let labels = existing
++            .metadata
++            .as_ref()
++            .map(|m| &m.labels)
++            .unwrap_or(&empty);
++        check_ownership(&principal, &ownership_config, labels)?;
++    }
++
+     let provider_profile = provider_profile_for_name(state.store.as_ref(), &name).await;
+     let result = delete_provider_record(state.store.as_ref(), &name).await;
+     match result {
+diff --git a/crates/openshell-server/src/grpc/sandbox.rs b/crates/openshell-server/src/grpc/sandbox.rs
+index 04d5a4e..d2bd496 100644
+--- a/crates/openshell-server/src/grpc/sandbox.rs
++++ b/crates/openshell-server/src/grpc/sandbox.rs
+@@ -30,6 +30,7 @@ use openshell_core::telemetry::{
+ use openshell_core::{ObjectId, ObjectName};
+ use prost::Message;
+ use std::net::IpAddr;
++use std::collections::HashMap;
+ use std::pin::Pin;
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -50,6 +51,8 @@ use super::validation::{
+     validate_no_reserved_provider_policy_keys, validate_policy_safety, validate_sandbox_spec,
+ };
+ use super::{MAX_PAGE_SIZE, MAX_PROVIDERS, clamp_limit};
++use crate::auth::ownership::{check_ownership, owner_label_selector, stamp_owner_labels};
++use crate::auth::principal::Principal;
+ use crate::persistence::current_time_ms;
+ 
+ const TCP_FORWARD_CHUNK_SIZE: usize = 64 * 1024;
+@@ -120,6 +123,13 @@ async fn handle_create_sandbox_inner(
+     state: &Arc<ServerState>,
+     request: Request<CreateSandboxRequest>,
+ ) -> Result<Response<SandboxResponse>, Status> {
++    // Extract principal BEFORE consuming the request with into_inner().
++    let principal = request
++        .extensions()
++        .get::<Principal>()
++        .cloned()
++        .unwrap_or(Principal::Anonymous);
++    let ownership_config = state.ownership_config();
+     let request = request.into_inner();
+     let spec = request
+         .spec
+@@ -134,6 +144,10 @@ async fn handle_create_sandbox_inner(
+         crate::grpc::validation::validate_label_value(value)?;
+     }
+ 
++    // Stamp ownership labels on the request labels (for ObjectMeta persistence).
++    let mut request_labels = request.labels.clone();
++    stamp_owner_labels(&principal, &ownership_config, &mut request_labels);
++
+     let _sandbox_sync_guard = if spec.providers.is_empty() {
+         None
+     } else {
+@@ -175,12 +189,17 @@ async fn handle_create_sandbox_inner(
+ 
+     let now_ms = current_time_ms();
+ 
++    // Stamp ownership labels on the template labels (for compute drivers).
++    if let Some(ref mut tmpl) = spec.template {
++        stamp_owner_labels(&principal, &ownership_config, &mut tmpl.labels);
++    }
++
+     let mut sandbox = Sandbox {
+         metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+             id: id.clone(),
+             name: name.clone(),
+             created_at_ms: now_ms,
+-            labels: request.labels.clone(),
++            labels: request_labels,
+             resource_version: 0,
+         }),
+         spec: Some(spec),
+@@ -236,6 +255,12 @@ pub(super) async fn handle_get_sandbox(
+     state: &Arc<ServerState>,
+     request: Request<GetSandboxRequest>,
+ ) -> Result<Response<SandboxResponse>, Status> {
++    let principal = request
++        .extensions()
++        .get::<Principal>()
++        .cloned()
++        .unwrap_or(Principal::Anonymous);
++    let ownership_config = state.ownership_config();
+     let name = request.into_inner().name;
+     if name.is_empty() {
+         return Err(Status::invalid_argument("name is required"));
+@@ -248,6 +273,16 @@ pub(super) async fn handle_get_sandbox(
+         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?;
+ 
+     let sandbox = sandbox.ok_or_else(|| Status::not_found("sandbox not found"))?;
++
++    // Ownership check: only the resource owner (or an admin) can access.
++    let empty = HashMap::new();
++    let labels = sandbox
++        .metadata
++        .as_ref()
++        .map(|m| &m.labels)
++        .unwrap_or(&empty);
++    check_ownership(&principal, &ownership_config, labels)?;
++
+     Ok(Response::new(SandboxResponse {
+         sandbox: Some(sandbox),
+     }))
+@@ -257,20 +292,37 @@ pub(super) async fn handle_list_sandboxes(
+     state: &Arc<ServerState>,
+     request: Request<ListSandboxesRequest>,
+ ) -> Result<Response<ListSandboxesResponse>, Status> {
++    let principal = request
++        .extensions()
++        .get::<Principal>()
++        .cloned()
++        .unwrap_or(Principal::Anonymous);
++    let ownership_config = state.ownership_config();
+     let request = request.into_inner();
+     let limit = clamp_limit(request.limit, 100, MAX_PAGE_SIZE);
+ 
+-    let sandboxes: Vec<Sandbox> = if request.label_selector.is_empty() {
++    // Combine the user-supplied label selector with the ownership selector.
++    let owner_selector = owner_label_selector(&principal, &ownership_config);
++    let combined_selector = match (&request.label_selector, &owner_selector) {
++        (user, None) if user.is_empty() => String::new(),
++        (user, None) => user.clone(),
++        (user, Some(owner)) if user.is_empty() => owner.clone(),
++        (user, Some(owner)) => format!("{user},{owner}"),
++    };
++
++    let sandboxes: Vec<Sandbox> = if combined_selector.is_empty() {
+         state
+             .store
+             .list_messages(limit, request.offset)
+             .await
+             .map_err(|e| Status::internal(format!("list sandboxes failed: {e}")))?
+     } else {
+-        crate::grpc::validation::validate_label_selector(&request.label_selector)?;
++        if !request.label_selector.is_empty() {
++            crate::grpc::validation::validate_label_selector(&request.label_selector)?;
++        }
+         state
+             .store
+-            .list_messages_with_selector(&request.label_selector, limit, request.offset)
++            .list_messages_with_selector(&combined_selector, limit, request.offset)
+             .await
+             .map_err(|e| Status::internal(format!("list sandboxes with selector failed: {e}")))?
+     };
+@@ -497,18 +549,39 @@ async fn handle_delete_sandbox_inner(
+     state: &Arc<ServerState>,
+     request: Request<DeleteSandboxRequest>,
+ ) -> Result<Response<DeleteSandboxResponse>, Status> {
++    let principal = request
++        .extensions()
++        .get::<Principal>()
++        .cloned()
++        .unwrap_or(Principal::Anonymous);
++    let ownership_config = state.ownership_config();
+     let name = request.into_inner().name;
+     if name.is_empty() {
+         return Err(Status::invalid_argument("name is required"));
+     }
+ 
+-    let sandbox_id = state
++    // Fetch the sandbox to perform ownership check. Propagate store errors
++    // instead of swallowing them — .ok().flatten() would skip the ownership
++    // check on database failures (security fix from V1 review).
++    let sandbox = state
+         .store
+         .get_message_by_name::<Sandbox>(&name)
+         .await
+-        .ok()
+-        .flatten()
+-        .map(|sandbox| sandbox.object_id().to_string());
++        .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?;
++
++    let sandbox_id = if let Some(ref sandbox) = sandbox {
++        let empty = HashMap::new();
++        let labels = sandbox
++            .metadata
++            .as_ref()
++            .map(|m| &m.labels)
++            .unwrap_or(&empty);
++        check_ownership(&principal, &ownership_config, labels)?;
++        Some(sandbox.object_id().to_string())
++    } else {
++        None
++    };
++
+     let deleted = state.compute.delete_sandbox(&name).await?;
+     if deleted && let Some(sandbox_id) = sandbox_id {
+         state.telemetry.end_sandbox_session(&sandbox_id);
+diff --git a/crates/openshell-server/src/inference.rs b/crates/openshell-server/src/inference.rs
+index 43416c3..c985a0f 100644
+--- a/crates/openshell-server/src/inference.rs
++++ b/crates/openshell-server/src/inference.rs
+@@ -1007,6 +1007,7 @@ mod tests {
+                 display_name: None,
+                 roles: vec!["openshell-user".to_string()],
+                 scopes: vec![],
++                groups: vec![],
+                 provider: IdentityProvider::Oidc,
+             },
+         })
+diff --git a/crates/openshell-server/src/lib.rs b/crates/openshell-server/src/lib.rs
+index 6462ccb..26d1c9b 100644
+--- a/crates/openshell-server/src/lib.rs
++++ b/crates/openshell-server/src/lib.rs
+@@ -149,6 +149,24 @@ pub struct ServerState {
+     pub(crate) grpc_rate_limiter: Option<multiplex::GrpcRateLimiter>,
+ }
+ 
++
++impl ServerState {
++    /// Build the server-side ownership configuration from the gateway config.
++    ///
++    /// Combines the core `OwnershipConfigCore` with the OIDC admin role name
++    /// so the ownership layer can bypass checks for admin principals.
++    pub(crate) fn ownership_config(&self) -> auth::ownership::OwnershipConfig {
++        auth::ownership::OwnershipConfig {
++            enabled: self.config.ownership.enabled,
++            admin_role: self
++                .config
++                .oidc
++                .as_ref()
++                .map_or_else(|| "openshell-admin".to_string(), |o| o.admin_role.clone()),
++            tenant_id: self.config.ownership.tenant_id.clone(),
++        }
++    }
++}
+ fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
+     matches!(
+         error.kind(),
+diff --git a/crates/openshell-server/src/multiplex.rs b/crates/openshell-server/src/multiplex.rs
+index 9e70c64..1b45f37 100644
+--- a/crates/openshell-server/src/multiplex.rs
++++ b/crates/openshell-server/src/multiplex.rs
+@@ -772,6 +772,7 @@ where
+         display_name: Some(cn),
+         roles,
+         scopes: Vec::new(),
++        groups: vec![],
+         provider: IdentityProvider::Mtls,
+     })
+ }
+@@ -1410,6 +1411,7 @@ mod tests {
+                     display_name: None,
+                     roles: vec![],
+                     scopes: vec![],
++                    groups: vec![],
+                     provider: IdentityProvider::Oidc,
+                 },
+             })
+@@ -1421,6 +1423,7 @@ mod tests {
+                 display_name: Some(subject.to_string()),
+                 roles: vec!["openshell-user".to_string()],
+                 scopes: vec![],
++                groups: vec![],
+                 provider: IdentityProvider::Mtls,
+             }
+         }
+@@ -1636,6 +1639,7 @@ mod tests {
+                         display_name: None,
+                         roles: vec!["openshell-admin".to_string()],
+                         scopes: vec!["openshell:all".to_string()],
++                        groups: vec![],
+                         provider: IdentityProvider::Oidc,
+                     },
+                 })
+diff --git a/crates/openshell-server/src/supervisor_session.rs b/crates/openshell-server/src/supervisor_session.rs
+index 4adf9e8..7c28131 100644
+--- a/crates/openshell-server/src/supervisor_session.rs
++++ b/crates/openshell-server/src/supervisor_session.rs
+@@ -880,6 +880,7 @@ mod tests {
+                 display_name: None,
+                 roles: vec![],
+                 scopes: vec![],
++                groups: vec![],
+                 provider: IdentityProvider::Oidc,
+             },
+         })

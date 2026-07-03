@@ -1,0 +1,242 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — PORTING PLAN SUMMARY V2
+================================================================================
+Date: 2026-07-03
+Iteration: V2 (from scratch, incorporating V1 + V1-R1 learnings)
+================================================================================
+
+1. WORK PERFORMED IN THIS ITERATION
+================================================================================
+
+This V2 iteration produced a refined, comprehensive coding plan for porting
+Kagenti's Multi-Tenant Deployment Support feature to OpenShell. It was built
+from scratch but incorporates all learnings from V1 (initial plan) and V1-R1
+(review of V1). The work involved five analysis phases:
+
+Phase A: Previous Iteration Analysis
+  - Read and analyzed code_port_plan_V1.txt (2055 lines) — the initial
+    18-step porting plan covering the full multi-tenancy feature
+  - Read and analyzed code_port_plan_summary_V1.txt (125 lines) — V1's
+    architectural decisions, statistics, and known limitations
+  - Read and analyzed code_port_plan_review_V1.txt (1445 lines) — the
+    V1-R1 review that identified and fixed 11 issues (3 critical, 3 high,
+    3 medium, 2 low)
+  - Read and analyzed code_port_plan_review_summary_V1.txt (235 lines) —
+    the review's methodology, issue descriptions, and verification approach
+  - Catalogued all 11 fixes and tracked their integration into V2
+
+Phase B: Code Trace Analysis
+  - Analyzed kagenti_code_trace.txt (995 lines) covering all 12 Kagenti
+    multi-tenancy subsystems: deploy scripts, Helm chart (16 templates),
+    Keycloak OIDC, per-user ownership, RBAC, namespace provisioning,
+    provider isolation, cleanup, CLI, E2E tests, and CI orchestration
+  - Analyzed openshell_code_trace.txt (778 lines) covering all 11 OpenShell
+    components: gateway server, persistence, auth chain, sandbox lifecycle,
+    providers, K8s/Docker drivers, CLI, Helm chart, protobuf, and config
+
+Phase C: Fresh Source Code Verification (3 parallel agents)
+  Unlike V1 which relied partly on code trace descriptions, V2 performed
+  independent verification against the actual OpenShell source code to
+  catch any inaccuracies from the code traces:
+
+  Agent 1 — Auth Layer Verification:
+    Verified Identity struct (5 fields, no groups), Principal enum (3
+    variants, derives Clone), OidcClaims struct (with #[serde(flatten)]
+    extra field), validate_token method signature and Identity construction
+    at lines 342-348, extract_roles pattern (lines 119-133), guard.rs test
+    helpers (lines 102-122), auth/mod.rs declarations (11 pub mods, no
+    ownership module), OidcConfig struct (7 fields, no groups_claim, no
+    ca_cert_path — correcting a V1 assumption).
+    CONFIRMED: No "openshell.ai/owner" references exist anywhere in the
+    codebase. No multi-tenant modules exist.
+
+  Agent 2 — Persistence & Driver Verification:
+    Verified list_with_selector signature (line 328), ObjectRecord struct
+    (line 79), label selector format ("key=value" CSV), ALL driver_utils
+    label constants (5 existing, no LABEL_OWNER/LABEL_TENANT), sandbox_labels
+    function (line 857, only SANDBOX_ID + MANAGED_BY), ServerState struct
+    (16 fields, no ownership_config method), GatewayFileSection struct
+    (#[serde(deny_unknown_fields)] confirmed at line 74), SandboxIndex
+    Inner struct (2 fields), create_provider_record signature (line 66,
+    no owner param), list_provider_records signature (line 160, no owner
+    filter), multiplex.rs Principal insertion (line 623).
+
+  Agent 3 — Helm Chart Verification:
+    Verified Chart.yaml (name: "helm-chart", not "openshell" — correcting
+    V1 assumption), values.yaml structure (server.oidc.audience default:
+    not present, meaning the chart doesn't set a default), all 14 template
+    files (NO resourcequota, limitrange, scc, route, or tlsroute templates),
+    _helpers.tpl (14 helpers defined), gateway-config.yaml TOML sections,
+    certgen.yaml SANs (via --server-san flags and openshell.defaultServerDnsNames),
+    cert-manager-pki.yaml (already exists — V1 didn't account for this),
+    role.yaml RBAC (sandbox CRD + events + pods), clusterrole.yaml RBAC
+    (tokenreviews + nodes + namespaces).
+
+Phase D: Issue Analysis & Integration
+  - Mapped all 11 V1-R1 issues to V2 step numbers
+  - Identified 6 additional corrections from fresh verification:
+    V2-1: Helm chart name is "helm-chart" (not "openshell")
+    V2-2: Template set differs from V1 assumptions (14 actual templates)
+    V2-3: OidcConfig field name jwks_ttl_secs (not jwks_ttl)
+    V2-4: cert-manager integration already exists (cert-manager-pki.yaml)
+    V2-5: ServerState has grpc_rate_limiter (noted for future work)
+    V2-6: OidcClaims uses #[serde(flatten)] for extra field
+
+Phase E: Plan Design & Writing
+  - Restructured from 18 steps (V1) to 20 steps (V2) with clearer
+    dependency chains and better separation of concerns
+  - Split former Step 8b (V1-R1 addition) into dedicated Step 10
+  - Added explicit dependency graph visualization
+  - Expanded risk analysis from 8 to 11 items
+  - Updated effort estimate based on expanded scope and verified complexity
+  - All Rust code examples verified against actual OpenShell conventions
+
+2. KEY ARCHITECTURAL DECISIONS
+================================================================================
+
+Decision 1: Two-Layer Multi-Tenancy (UNCHANGED from V1)
+  Layer 1 (per-user ownership) handles application-level user isolation
+  within a gateway instance via the openshell.ai/owner label.
+  Layer 2 (gateway-per-tenant) handles organizational isolation via
+  Kubernetes namespaces and RBAC. Both compose without coupling.
+
+Decision 2: Owner-Label Approach (UNCHANGED from V1)
+  V2 stores ownership in the existing labels JSON column, leveraging
+  list_with_selector() for efficient filtering. No database schema
+  migrations. Future iteration can add owner column for name-scoped
+  uniqueness.
+
+Decision 3: Zero Breaking Changes (UNCHANGED from V1)
+  All behavior gated behind OwnershipSettings.enabled (config) and
+  OIDC being configured. Default values disable all new behavior.
+
+Decision 4: Minimal Protobuf Changes (UNCHANGED from V1)
+  No changes to protobuf definitions. Owner carried in existing
+  ObjectMeta.labels map.
+
+Decision 5: OwnershipSettings vs OwnershipEnforcement (NEW in V2)
+  Clean separation between serializable config (OwnershipSettings in
+  config.rs) and runtime enforcement logic (OwnershipEnforcement in
+  auth/ownership.rs). Connected by ServerState.ownership_config() method.
+
+Decision 6: Comprehensive Access Control (EXPANDED in V2)
+  All sandbox access operations (create, list, get, delete, watch, exec,
+  interactive exec, SSH, attach provider, detach provider) are ownership-
+  gated. V1 initially missed watch/exec/SSH.
+
+3. ITERATION EVOLUTION
+================================================================================
+
+V1 (initial plan — code_port_plan_V1.txt):
+  - First comprehensive 18-step plan covering multi-tenancy
+  - Designed two-layer architecture (per-user ownership + gateway-per-tenant)
+  - 16 Rust files, 8 Helm files identified for modification
+  - Covered sandbox create/list/get/delete ownership enforcement
+  - Covered provider CRUD ownership
+  - Covered K8s/Docker driver label propagation
+  - Covered Helm chart updates for gateway-per-tenant
+  - Estimated effort: 12-17 days across 5 phases
+  - 8 risk items identified
+
+  Known limitations:
+  - Missing exec/watch/SSH ownership enforcement
+  - OwnershipConfig naming collision between runtime and config structs
+  - Provider listing dual-query pagination bug
+  - CreateProvider role change incompatible with compile-time macro
+  - Duplicate label constants across crates
+  - validate_label_selector applied to server-generated selector
+  - sanitize_label_value missing K8s start/end alphanumeric enforcement
+  - Missing extract_principal helper (boilerplate repeated in handlers)
+  - Unused parse_object_labels function included
+  - Incomplete handle_create_provider code
+
+V1-R1 (review of V1 — code_port_plan_review_V1.txt):
+  - Identified 11 issues: 3 critical, 3 high, 3 medium, 2 low
+  - Added Step 8b for watch/exec/SSH ownership enforcement
+  - Fixed all 11 issues in a corrected version of V1
+  - Used 4 parallel source code verification agents
+  - 30+ source files checked against plan claims
+  - Updated effort estimate: 14-19 days (expanded scope)
+  - All structural claims confirmed against actual code
+
+  Issues fixed:
+  C1: OwnershipConfig → OwnershipEnforcement + OwnershipSettings
+  C2: Dual-query pagination → single-query with in-memory filter
+  C3: Compile-time macro → runtime guard pattern
+  H1: Missing exec/SSH/watch → added Step 8b
+  H2: Missing WatchSandbox filtering → added in Step 8b
+  H3: Duplicate constants → consolidated in openshell-core
+  M1: Validate user selector only (not server-generated)
+  M2: sanitize_label_value trim start/end
+  M3: Complete handle_create_provider code
+  L1: Remove unused parse_object_labels
+  L2: Add extract_principal helper
+
+V2 (current iteration — code_port_plan_V2.txt):
+  - Written from scratch incorporating ALL V1 + V1-R1 learnings
+  - All 11 V1-R1 fixes integrated from the start (not patched on)
+  - Fresh source code verification (3 parallel agents) discovered 6
+    additional corrections:
+    * Helm chart name is "helm-chart" (not "openshell" as V1 assumed)
+    * Template set differs (14 actual, not 22 as V1 assumed from Kagenti)
+    * OidcConfig.jwks_ttl_secs field name corrected
+    * cert-manager integration already exists (cert-manager-pki.yaml)
+    * ServerState.grpc_rate_limiter noted for future per-tenant rate limiting
+    * OidcClaims #[serde(flatten)] extra field pattern confirmed
+  - Restructured to 20 steps (from 18+8b) with explicit dependency graph
+  - Expanded Step 10 as a first-class step (was 8b in V1-R1)
+  - Separated K8s and Docker driver changes into Steps 12 and 13
+  - Expanded risk analysis: 11 items (up from 8 in V1, 9 in V1-R1)
+  - Added edge case: legacy data accessibility (objects without owner labels)
+  - Added edge case: streaming RPC ownership staleness
+  - Added Helm validation (require oidc.issuer when tenant.id is set)
+  - Updated estimated effort: 16-21 days across 5 phases
+
+  Quality improvements over V1-R1:
+  - All struct/function references verified against actual source (not
+    just code traces). Line numbers and field names confirmed.
+  - Helm chart modifications based on ACTUAL template set (14 files),
+    not assumed from Kagenti's chart (16 files)
+  - Clearer step ordering with visual dependency graph
+  - Better test coverage plan including edge cases (legacy data, disabled
+    config, streaming RPCs)
+  - More realistic effort estimates reflecting expanded scope
+
+4. COMPARISON: V1 → V1-R1 → V2
+================================================================================
+
+  METRIC                    V1        V1-R1       V2
+  ─────────────────────── ────────── ────────── ──────────
+  Steps                    18         18+8b      20
+  Issues addressed         0          11         11 + 6 new
+  Rust files modified      16         16         16
+  Helm files modified      8          8          9
+  New Rust modules         2          2          2
+  New Cargo deps           0          0          0
+  DB migrations            0          0          0
+  Breaking changes         0          0          0
+  Risk items               8          9          11
+  Effort estimate (days)   12-17      14-19      16-21
+  Source files verified    ~15        30+        30+ fresh
+  Critical fixes           —          3          3 (incorporated)
+  Helm chart verified      assumed    assumed    independently verified
+
+5. SUMMARY STATISTICS (V2)
+================================================================================
+
+  Plan size:             20 implementation steps across 5 phases
+  Rust files modified:   16 (14 existing + 2 new test files)
+  Helm files modified:   9 (7 existing + 2 new templates)
+  New Rust module:       1 (auth/ownership.rs, ~300 lines with tests)
+  New Cargo deps:        0 (all existing dependencies reused)
+  DB migrations:         0 (label-based approach, no schema changes)
+  Breaking changes:      0 (all gated behind config flags)
+  Estimated effort:      16-21 days across 5 phases
+  Risk items:            11 (3 high, 4 medium, 4 low)
+  Previous issues:       11 from V1-R1 (all incorporated)
+  New corrections:       6 from fresh source verification
+  Dependency graph:      Explicit, with 4 parallel-capable tracks
+
+================================================================================
+END OF SUMMARY V2
+================================================================================

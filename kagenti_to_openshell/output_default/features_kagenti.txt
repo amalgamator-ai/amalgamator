@@ -1,0 +1,1588 @@
+================================================================================
+COMPREHENSIVE FEATURE ANALYSIS: KAGENTI (Cloud-Native Agentic Platform)
+================================================================================
+Generated: 2026-07-02
+Source: https://github.com/kagenti/kagenti
+Languages: Python (51%), TypeScript (31%), Go (5%), Shell (10%)
+================================================================================
+
+This document provides an exhaustive analysis of all major features and
+capabilities in the Kagenti project, organized as a numbered list with
+detailed metadata for each feature.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+  1.  SPIFFE/SPIRE Workload Identity
+  2.  OAuth2/OIDC Integration (Keycloak)
+  3.  OAuth2 Token Exchange (RFC 8693)
+  4.  Identity & Auth Bridge (AuthBridge/Cortex Sidecar)
+  5.  Fine-Grained Zero-Trust Access Control (Cortex/OPA)
+  6.  Keycloak Client Registration (Operator-Managed)
+  7.  MCP Gateway (Envoy-Based Tool Routing)
+  8.  Plugins Adapter for Envoy (ext_proc)
+  9.  Agent Lifecycle Management (Kubernetes Workloads)
+ 10.  Agent/Tool Discovery via Labels and CRDs
+ 11.  AgentRuntime CRD and Kagenti Operator
+ 12.  A2A (Agent-to-Agent) Protocol Support
+ 13.  MCP (Model Context Protocol) Support
+ 14.  Container Build System (Shipwright)
+ 15.  Skills System (ConfigMap-Based Skill Registry)
+ 16.  Skillberry Store (External Skill Registry)
+ 17.  LLM Budget Proxy (Token Tracking and Cost Control)
+ 18.  Observability: Phoenix/Langfuse Tracing (OpenTelemetry)
+ 19.  Observability: MLflow Integration
+ 20.  Observability: Kiali Network Visualization
+ 21.  Istio Ambient Service Mesh (mTLS)
+ 22.  Ingress Gateway (Kubernetes Gateway API)
+ 23.  Kagenti Web UI (React Dashboard)
+ 24.  Kagenti TUI (Go Terminal UI)
+ 25.  Kagenti Backend API (FastAPI)
+ 26.  Session Management and Conversation Persistence
+ 27.  Agent Sandbox Integration (OpenShell)
+ 28.  Multi-Tenant Namespace Isolation
+ 29.  Dynamic Agent and Subagent Materialization
+ 30.  Event-Driven Trigger System
+ 31.  Integration Management (Webhooks, Schedules)
+ 32.  LLM Model Backend Flexibility (Ollama, OpenAI, LiteLLM)
+ 33.  Feature Flag System
+ 34.  Helm Chart Packaging and Deployment
+ 35.  Kind/OpenShift Multi-Platform Deployment Scripts
+ 36.  Terraform Infrastructure Management
+ 37.  E2E Testing Framework
+ 38.  Human-in-the-Loop (HITL) Approval Workflows
+ 39.  Session Graph Visualization (Delegation DAGs)
+ 40.  Workspace File Browsing and Persistence
+ 41.  Agent API Authentication (Bearer Token)
+ 42.  Keycloak Demo Configuration System
+ 43.  Claude Code Skills (AI-Ops Automation)
+
+================================================================================
+DETAILED FEATURE ANALYSIS
+================================================================================
+
+--------------------------------------------------------------------------------
+1. SPIFFE/SPIRE WORKLOAD IDENTITY
+--------------------------------------------------------------------------------
+Category:         Security / Identity
+Type:             Core
+Description:      Kagenti integrates SPIFFE/SPIRE to provide cryptographic
+                  workload identities for all agents and tools. Each workload
+                  receives a SPIFFE Verifiable Identity Document (SVID) in both
+                  X.509 (for mTLS) and JWT (for API auth) formats. Identity
+                  format: spiffe://<trust-domain>/ns/<namespace>/sa/<service-account>.
+                  SPIRE Server issues SVIDs, SPIRE Agent performs node-level
+                  attestation, and CSI Driver mounts certificates into pods.
+Key Files:
+  - kagenti/auth/spiffe-idp-setup/          (SPIFFE IDP configuration)
+  - charts/kagenti-deps/                    (SPIRE Helm deployment)
+  - docs/identity-guide.md                  (SPIFFE/SPIRE documentation)
+  - scripts/kind/setup-kagenti.sh           (--with-spire flag)
+Architecture:
+  - SPIRE Server (Deployment in spire-system ns) issues SVIDs
+  - SPIRE Agent (DaemonSet) attests workloads via Kubernetes SAT
+  - SPIRE CSI Driver mounts SVIDs into pods at /opt/
+  - Tornjak UI for SPIRE management
+  - JWT SVIDs used as client identifiers for Keycloak registration
+  - OIDC discovery endpoint exposes JWKS for JWT validation
+Dependencies:     Kubernetes, cert-manager
+Complexity:       HIGH (SPIRE server/agent infrastructure, attestation policies,
+                  CSI driver, OIDC integration with Keycloak)
+Languages:        Shell (setup scripts), YAML (Helm charts/CRDs)
+
+--------------------------------------------------------------------------------
+2. OAuth2/OIDC INTEGRATION (KEYCLOAK)
+--------------------------------------------------------------------------------
+Category:         Security / Identity
+Type:             Core
+Description:      Keycloak serves as the central identity provider for the entire
+                  Kagenti platform. It manages user authentication, OAuth2/OIDC
+                  token issuance, role-based access control, SSO, and client
+                  registration. Supports multiple client types: public (UI),
+                  confidential (backend services), and SPIFFE (workload identity).
+                  Configured with per-demo realms, users, roles, and scopes.
+Key Files:
+  - kagenti/keycloak/                       (Keycloak SPI/plugins, Java)
+  - kagenti/keycloak/src/main/              (Custom Keycloak extensions)
+  - kagenti/auth/ui-oauth-secret/           (UI OAuth client setup)
+  - kagenti/auth/api-oauth-secret/          (API OAuth client setup)
+  - kagenti/auth/agent-oauth-secret/        (Agent OAuth client setup)
+  - kagenti/auth/mlflow-oauth-secret/       (MLflow OAuth client setup)
+  - kagenti/demo-setup/keycloak-config/     (Demo user/role configuration)
+  - charts/kagenti-deps/                    (Keycloak Helm templates)
+  - docs/identity-guide.md                  (Keycloak architecture docs)
+Architecture:
+  - Keycloak deployed in keycloak namespace (StatefulSet + PostgreSQL)
+  - Master realm with demo users (slack-full-access, github-partial-access, etc.)
+  - Client types: public (kagenti-ui), confidential (agents/tools), SPIFFE
+  - Role-based scopes: slack-full-access, github-partial-access, etc.
+  - OAuth2 authorization code flow for UI login
+  - Client credentials flow for service-to-service auth
+  - PKCE flow for OpenShell CLI auth
+  - Each agent/tool registered as Keycloak client
+Dependencies:     PostgreSQL, cert-manager, Kubernetes
+Complexity:       HIGH (realm configuration, client registration automation,
+                  role mapping, token exchange setup, multi-tenant isolation)
+Languages:        Java (Keycloak SPI), Python (setup scripts), YAML (Helm)
+
+--------------------------------------------------------------------------------
+3. OAuth2 TOKEN EXCHANGE (RFC 8693)
+--------------------------------------------------------------------------------
+Category:         Security / Identity
+Type:             Core
+Description:      Implements OAuth2 Token Exchange per RFC 8693 to enable secure
+                  token delegation across the agent-tool call chain. When an agent
+                  needs to call a tool, the user's token is exchanged for a
+                  narrowly-scoped token with the correct audience for the target
+                  service. This ensures least-privilege access and prevents token
+                  reuse across services.
+Key Files:
+  - kagenti/examples/identity/keycloak_token_exchange/ (Examples/tests)
+  - kagenti/examples/identity/token_exchange.md        (Deep dive docs)
+  - kagenti/tests/e2e/token_exchange/                  (E2E tests)
+  - docs/identity-guide.md                             (Flow documentation)
+  - docs/diagrams/04-agent-token-exchange-flow.mmd     (Sequence diagram)
+Architecture:
+  - User authenticates with Keycloak, gets access token (aud: kagenti-ui)
+  - Agent receives user token via delegated bearer
+  - Agent exchanges token via Keycloak token endpoint with:
+    grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+    subject_token=<user-token>
+    audience=<target-service>
+    client_id=<spiffe-id>
+  - Result: audience-scoped token with act.sub = agent's SPIFFE ID
+  - Token lifetime: short (5-15 minutes), must be refreshed
+Dependencies:     Keycloak, SPIFFE/SPIRE, AuthBridge
+Complexity:       HIGH (RFC 8693 protocol implementation, Keycloak configuration
+                  for exchange policies, audience scoping, delegation chains)
+Languages:        Python (examples/tests), Shell (scripts)
+
+--------------------------------------------------------------------------------
+4. IDENTITY & AUTH BRIDGE (AUTHBRIDGE/CORTEX SIDECAR)
+--------------------------------------------------------------------------------
+Category:         Security / Identity
+Type:             Core
+Description:      AuthBridge (evolved into Cortex) is an Envoy-based sidecar
+                  pattern that transparently handles both inbound JWT validation
+                  and outbound token exchange for every agent and tool pod. It
+                  uses Envoy with an ext-proc (external processor) Go service for
+                  token operations. Traffic is intercepted via iptables, making it
+                  completely transparent to application code.
+Key Files:
+  - docs/authbridge/                        (AuthBridge documentation)
+  - docs/authbridge/README.md               (Overview)
+  - docs/authbridge/security-model.md       (Security model)
+  - docs/authbridge/deployment-guide.md     (Deployment guide)
+  - docs/authbridge/tls-bridge.md           (TLS bridge pattern)
+  - docs/access-control/README.md           (Cortex FGA architecture)
+  - docs/access-control/zero-trust.md       (Centralized zero-trust)
+  External repo: github.com/kagenti/kagenti-extensions/tree/main/authbridge
+Architecture:
+  - Envoy sidecar proxy in each agent/tool pod
+  - Go ext-proc processor for token operations
+  - proxy-init container installs iptables rules for transparent interception
+  - INBOUND: Validates JWT signature, expiration, issuer via JWKS
+  - OUTBOUND: Exchanges token for target audience via Keycloak (RFC 8693)
+  - HTTPS passthrough for non-authenticated traffic
+  - Four traffic directions: inbound req/resp, outbound req/resp
+  - Webhook-based automatic injection (operator-managed via AgentRuntime CR)
+  - Configurable modes: proxy-sidecar, envoy-sidecar, lite, waypoint
+Dependencies:     Keycloak, Envoy, Kagenti Operator, SPIFFE/SPIRE (optional)
+Complexity:       VERY HIGH (Envoy configuration, ext-proc Go service,
+                  iptables interception, token exchange logic, webhook injection,
+                  multiple modes, network namespace compatibility)
+Languages:        Go (ext-proc), YAML (Envoy config), Shell (proxy-init)
+
+--------------------------------------------------------------------------------
+5. FINE-GRAINED ZERO-TRUST ACCESS CONTROL (CORTEX/OPA)
+--------------------------------------------------------------------------------
+Category:         Security / Policy
+Type:             Extension
+Description:      Cortex (evolved AuthBridge) implements fine-grained
+                  authorization (FGA) at every runtime boundary. Decisions take
+                  into account the user, task, agent identities, tools, content,
+                  and behaviors. Uses a multi-tiered access control model (Cluster,
+                  Namespace, Component, Developer) with AND-gate enforcement.
+                  Plugins enrich context; a centralized Access Control Engine
+                  (OPA) makes final allow/deny decisions.
+Key Files:
+  - docs/access-control/README.md           (Architecture overview)
+  - docs/access-control/zero-trust.md       (Centralized decision design)
+Architecture:
+  - Four-tier access control: Cluster, Namespace, Component, Developer
+  - Plugin architecture: PIPs (context providers) → PDP (OPA) → PEP (enforce)
+  - Cortex sidecar controls 4 traffic directions per agent
+  - Authentication (fail-fast): mTLS validation, token presence
+  - Authorization (deferred): claims, audiences, content analysis → OPA
+  - Structured context contracts between plugins and OPA engine
+  - Input/output guardrails, data leak prevention, behavioral anomaly detection
+  - XACML-aligned: PIPs (plugins), PDP (OPA engine), PEP (gateway boundary)
+Dependencies:     OPA (Open Policy Agent), AuthBridge/Cortex, Keycloak
+Complexity:       VERY HIGH (distributed policy enforcement, plugin architecture,
+                  multi-tiered rule hierarchy, XACML alignment, context schema)
+Languages:        Go (plugins), Rego (OPA policies), YAML (configuration)
+
+--------------------------------------------------------------------------------
+6. KEYCLOAK CLIENT REGISTRATION (OPERATOR-MANAGED)
+--------------------------------------------------------------------------------
+Category:         Security / Identity
+Type:             Core
+Description:      Automated Keycloak client registration handled by the
+                  kagenti-operator's ClientRegistrationReconciler. When an
+                  AgentRuntime CR is created, the operator automatically registers
+                  the workload as a Keycloak client using its SPIFFE ID, creates
+                  client credentials, and stores them as a Secret in the agent's
+                  namespace. Eliminates manual client setup.
+Key Files:
+  - External: github.com/kagenti/kagenti-extensions/kagenti-webhook
+  - docs/identity-guide.md (Client registration section)
+  - docs/components.md     (Operator-managed registration docs)
+Architecture:
+  - ClientRegistrationReconciler controller in kagenti-operator
+  - Watches AgentRuntime CRs → applies kagenti.io/type label
+  - Reads Keycloak admin credentials from operator namespace (kagenti-system)
+  - Client ID: SPIFFE ID (if SPIRE enabled) or namespace/workload-name
+  - Creates Secret with client_id + client_secret in agent namespace
+  - Triggers AuthBridge sidecar injection via webhook
+Dependencies:     Keycloak, Kagenti Operator, SPIFFE/SPIRE (optional)
+Complexity:       MEDIUM (controller logic, Keycloak admin API, secret management)
+Languages:        Go (operator controller)
+
+--------------------------------------------------------------------------------
+7. MCP GATEWAY (ENVOY-BASED TOOL ROUTING)
+--------------------------------------------------------------------------------
+Category:         Networking / Gateway
+Type:             Core
+Description:      Unified gateway for MCP (Model Context Protocol) servers and
+                  tools. Acts as the entry point for all MCP-based tool
+                  interactions, providing tool discovery, request routing, load
+                  balancing, and authentication. Built on Envoy proxy with
+                  Kubernetes Gateway API resources (HTTPRoute) for routing
+                  configuration. MCPServerRegistration CRD for tool registration.
+Key Files:
+  - docs/gateway.md                         (Gateway instructions)
+  - docs/components.md                      (Gateway section)
+  - charts/kagenti-deps/                    (Gateway Helm templates)
+  External: github.com/Kuadrant/mcp-gateway
+Architecture:
+  - mcp-gateway-istio (Envoy proxy) in gateway-system namespace
+  - mcp-controller in mcp-system namespace (manages MCPServerRegistration CRs)
+  - mcp-broker-router in mcp-system namespace (routes to registered servers)
+  - Tool registration via HTTPRoute + MCPServerRegistration CRDs
+  - Credential-based registration via credentialRef for authenticated tools
+  - Agents connect via MCP_URL env var pointing to gateway
+  - Gateway discovers tools and routes tools/list and tools/call requests
+  - Supports both authenticated (OAuth token) and unauthenticated tools
+Dependencies:     Envoy, Kubernetes Gateway API, Istio, Keycloak (optional)
+Complexity:       HIGH (Envoy configuration, custom CRDs, controller logic,
+                  tool discovery, credential management, broker routing)
+Languages:        Go (controller), YAML (CRDs/HTTPRoutes)
+
+--------------------------------------------------------------------------------
+8. PLUGINS ADAPTER FOR ENVOY (ext_proc)
+--------------------------------------------------------------------------------
+Category:         Networking / Security
+Type:             Extension
+Description:      Enables dynamic plugin loading and execution within Envoy-based
+                  gateways (including MCP Gateway) via Envoy's External Processing
+                  API (ext_proc). Allows runtime extension of gateway capabilities
+                  without recompiling or redeploying. Supports request/response
+                  inspection, modification, and blocking. Used for guardrails
+                  enforcement, content filtering, and compliance checks.
+Key Files:
+  External: github.com/kagenti/plugins-adapter
+Architecture:
+  - Envoy ext_proc gRPC server
+  - Dynamic plugin loading (any language)
+  - Request/response control: inspect, modify, block
+  - Bring-Your-Own (BYO) plugin logic
+  - Guardrails: security policies, content filtering, compliance
+  - Integrates with MCP Gateway for tool-level policy enforcement
+Dependencies:     Envoy, MCP Gateway
+Complexity:       HIGH (ext_proc gRPC interface, plugin lifecycle management,
+                  request/response stream processing, guardrail logic)
+Languages:        Go (ext_proc server), any language (plugins)
+
+--------------------------------------------------------------------------------
+9. AGENT LIFECYCLE MANAGEMENT (KUBERNETES WORKLOADS)
+--------------------------------------------------------------------------------
+Category:         Orchestration / Lifecycle
+Type:             Core
+Description:      Deploys agents as standard Kubernetes workloads (Deployments,
+                  StatefulSets, Jobs, Sandboxes) with Services for networking.
+                  Supports multiple deployment methods: from pre-built container
+                  images or from source code (via Shipwright builds). Provides
+                  rolling updates, rollbacks, scaling, multi-namespace deployment,
+                  and standard Kubernetes lifecycle management.
+Key Files:
+  - kagenti/backend/app/routers/agents.py   (Agent CRUD API)
+  - kagenti/backend/app/services/           (Agent service logic)
+  - kagenti/backend/app/models/             (Agent data models)
+  - kagenti/ui-v2/src/pages/AgentCatalogPage.tsx
+  - kagenti/ui-v2/src/pages/ImportAgentPage.tsx
+  - docs/new-agent.md                       (Import agent guide)
+  - docs/components.md                      (Deployment architecture)
+Architecture:
+  - Backend creates Deployment + Service via K8s API
+  - Consistent labeling: kagenti.io/type, protocol.kagenti.io/*, kagenti.io/framework
+  - Support for 4 workload types: deployment, statefulset, job, sandbox
+  - Support for 2 deployment methods: image (direct) and source (Shipwright)
+  - AgentRuntime CRD created for operator reconciliation
+  - Environment variable management (direct, secretKeyRef, configMapKeyRef)
+  - Multi-namespace support (team1, team2, etc.)
+  - UI wizard for guided agent import
+Dependencies:     Kubernetes API, Shipwright (for source builds), Kagenti Operator
+Complexity:       MEDIUM (K8s resource creation, multi-workload support,
+                  label conventions, environment management)
+Languages:        Python (backend), TypeScript (UI), YAML (K8s manifests)
+
+--------------------------------------------------------------------------------
+10. AGENT/TOOL DISCOVERY VIA LABELS AND CRDs
+--------------------------------------------------------------------------------
+Category:         Discovery / Orchestration
+Type:             Core
+Description:      Agents and tools are discovered dynamically using Kubernetes
+                  labels and custom resources. The platform uses a standardized
+                  label scheme to identify resource type (agent/tool), protocol
+                  support (A2A, MCP), framework (LangGraph, CrewAI), and
+                  management ownership. The backend API queries the Kubernetes
+                  API to list, filter, and discover agents and tools.
+Key Files:
+  - kagenti/backend/app/routers/agents.py   (Discovery API)
+  - kagenti/backend/app/routers/tools.py    (Tool discovery API)
+  - docs/components.md                      (Label standards)
+Architecture:
+  - Label-based discovery:
+    * kagenti.io/type = agent | tool
+    * protocol.kagenti.io/a2a = "" (A2A support)
+    * protocol.kagenti.io/mcp = "" (MCP support)
+    * kagenti.io/framework = LangGraph | CrewAI | AG2 | etc.
+    * kagenti.io/transport = streamable_http | sse | stdio
+    * app.kubernetes.io/managed-by = kagenti-ui
+  - Backend lists Deployments/Services filtered by labels
+  - A2A Agent Card discovery via GET /.well-known/agent-card.json
+  - MCP tool discovery via MCPServerRegistration CRD
+  - Namespace-scoped queries for multi-tenant isolation
+Dependencies:     Kubernetes API
+Complexity:       LOW (label queries, list/watch)
+Languages:        Python (backend API), TypeScript (UI)
+
+--------------------------------------------------------------------------------
+11. AGENTRUNTIME CRD AND KAGENTI OPERATOR
+--------------------------------------------------------------------------------
+Category:         Orchestration / Lifecycle
+Type:             Core
+Description:      Custom Resource Definition (AgentRuntime) that enrolls workloads
+                  with the Kagenti operator. The operator reconciles AgentRuntime
+                  CRs to apply kagenti.io/type labels, trigger AuthBridge sidecar
+                  injection, register clients with Keycloak, and coordinate
+                  platform services. Serves as the bridge between plain K8s
+                  workloads and the Kagenti platform.
+Key Files:
+  - External: github.com/kagenti/kagenti-extensions/kagenti-webhook
+  - docs/components.md (AgentRuntime CR examples)
+  - kagenti/backend/app/routers/agents.py (creates AgentRuntime CRs)
+Architecture:
+  - CRD: agent.kagenti.dev/v1alpha1/AgentRuntime
+  - spec.type: agent | tool
+  - spec.targetRef: points to Deployment/StatefulSet
+  - Operator controllers:
+    * AgentRuntimeReconciler: applies labels, triggers injection
+    * ClientRegistrationReconciler: registers with Keycloak
+  - Admission webhook for sidecar injection
+  - Creates AgentRuntime automatically when agents are deployed via UI/API
+Dependencies:     Kubernetes, Keycloak, SPIFFE/SPIRE (optional)
+Complexity:       MEDIUM (CRD definition, controller logic, webhook)
+Languages:        Go (operator), YAML (CRDs)
+
+--------------------------------------------------------------------------------
+12. A2A (AGENT-TO-AGENT) PROTOCOL SUPPORT
+--------------------------------------------------------------------------------
+Category:         Protocols / Communication
+Type:             Core
+Description:      Full support for Google's Agent-to-Agent (A2A) protocol for
+                  standardized agent communication. Agents expose Agent Cards
+                  for discovery, accept tasks via JSON-RPC 2.0, support streaming
+                  for long-running tasks, and provide task status queries.
+                  Framework-neutral — works with LangGraph, CrewAI, AG2, Llama
+                  Stack, BeeAI, and any framework that implements A2A.
+Key Files:
+  - kagenti/backend/app/routers/agents.py   (A2A proxy/chat)
+  - kagenti/backend/app/services/           (A2A client logic)
+  - kagenti/examples/agents/                (Example A2A agents)
+  - docs/components.md                      (A2A protocol section)
+Architecture:
+  - Agent Card: GET /.well-known/agent-card.json (discovery)
+  - Task submission: POST / (JSON-RPC message/send)
+  - Task status: GET /tasks/{id}
+  - Streaming: SSE for long-running tasks
+  - Backend proxies A2A calls to agent Services
+  - Backend stores conversation history in PostgreSQL
+  - Multi-framework support via protocol standardization
+Dependencies:     None (protocol-level, framework-neutral)
+Complexity:       LOW (well-defined protocol, standard HTTP/JSON-RPC)
+Languages:        Python (backend proxy), various (agent implementations)
+
+--------------------------------------------------------------------------------
+13. MCP (MODEL CONTEXT PROTOCOL) SUPPORT
+--------------------------------------------------------------------------------
+Category:         Protocols / Communication
+Type:             Core
+Description:      Full support for Anthropic's Model Context Protocol (MCP) for
+                  tool integration. MCP tools are deployed as servers that expose
+                  tool discovery, invocation, resource access, and prompt
+                  templates via JSON-RPC. Tools register with the MCP Gateway
+                  for centralized routing and discovery.
+Key Files:
+  - kagenti/backend/app/routers/tools.py    (Tool management API)
+  - kagenti/examples/mcpservers/            (Example MCP servers)
+  - kagenti/examples/tools/                 (Example MCP tools)
+  - docs/gateway.md                         (MCP Gateway integration)
+  - docs/new-tool.md                        (Tool import guide)
+Architecture:
+  - MCP endpoint: POST /mcp (JSON-RPC messages)
+  - Tool discovery: tools/list method
+  - Tool invocation: tools/call method
+  - Transport: Streamable HTTP (primary), SSE (legacy)
+  - Labels: protocol.kagenti.io/mcp, kagenti.io/transport
+  - MCPServerRegistration CRD for gateway registration
+  - HTTPRoute for gateway routing
+Dependencies:     MCP Gateway (for centralized routing)
+Complexity:       LOW (well-defined protocol, standard JSON-RPC)
+Languages:        Python (tools/servers), TypeScript (UI)
+
+--------------------------------------------------------------------------------
+14. CONTAINER BUILD SYSTEM (SHIPWRIGHT)
+--------------------------------------------------------------------------------
+Category:         Deployment / CI-CD
+Type:             Extension
+Description:      In-cluster container image builds using Shipwright with Buildah.
+                  Enables building both agent and MCP tool images from source code
+                  (Git repositories) directly within the Kubernetes cluster.
+                  Supports two build strategies: buildah-insecure-push (for
+                  internal registries without TLS) and buildah (for external
+                  registries with TLS). Build progress tracked via UI.
+Key Files:
+  - kagenti/backend/app/routers/agents.py   (Build API endpoints)
+  - kagenti/backend/app/routers/tools.py    (Tool build endpoints)
+  - kagenti/ui-v2/src/pages/BuildProgressPage.tsx
+  - kagenti/ui-v2/src/pages/ToolBuildProgressPage.tsx
+  - charts/kagenti/                         (Shipwright Helm templates)
+  - docs/components.md                      (Build system docs)
+Architecture:
+  - ClusterBuildStrategy CRs for build strategies
+  - Build CR with source (Git URL, ref, contextDir) and output (image)
+  - BuildRun CR triggers actual build
+  - UI polls BuildRun status until completion
+  - On success, creates Deployment + Service from built image
+  - Internal registry: registry.cr-system.svc.cluster.local:5000
+  - Feature-flagged (featureFlags.builds)
+Dependencies:     Shipwright, Buildah, container registry
+Complexity:       MEDIUM (CRD management, build orchestration, status polling)
+Languages:        Python (backend), TypeScript (UI), YAML (CRDs)
+
+--------------------------------------------------------------------------------
+15. SKILLS SYSTEM (CONFIGMAP-BASED SKILL REGISTRY)
+--------------------------------------------------------------------------------
+Category:         Knowledge / Extension
+Type:             Extension
+Description:      Reusable capabilities stored as Kubernetes ConfigMaps with the
+                  label kagenti.io/type=skill. Skills encapsulate domain expertise,
+                  workflows, code, and documentation that agents can access
+                  on-demand. Managed through REST API and UI. Supports creating,
+                  listing, searching, and deleting skills. Skills can include
+                  multiple files (SKILL.md required + scripts, configs).
+Key Files:
+  - kagenti/backend/app/routers/skills.py   (Skills REST API)
+  - kagenti/ui-v2/src/pages/SkillCatalogPage.tsx
+  - kagenti/ui-v2/src/pages/SkillDetailPage.tsx
+  - kagenti/ui-v2/src/pages/ImportSkillPage.tsx
+  - docs/skills.md                          (Skills guide)
+Architecture:
+  - Skills stored as ConfigMaps with kagenti.io/type=skill label
+  - REST API: GET/POST/DELETE /api/skills
+  - Skills contain multiple files (code, docs, config)
+  - SKILL.md is mandatory (defines skill behavior)
+  - Namespace-scoped (kagenti-system or team namespaces)
+  - Feature-flagged (featureFlags.skills)
+  - Searchable by keyword
+  - Skills can be linked to agents
+Dependencies:     Kubernetes API
+Complexity:       LOW (ConfigMap CRUD, label-based discovery)
+Languages:        Python (backend), TypeScript (UI)
+
+--------------------------------------------------------------------------------
+16. SKILLBERRY STORE (EXTERNAL SKILL REGISTRY)
+--------------------------------------------------------------------------------
+Category:         Knowledge / Extension
+Type:             Integration
+Description:      In-cluster skill registry using Skillberry Store
+                  (github.com/skillberry-ai/skillberry-store). Provides a REST API
+                  and web UI for managing skills externally. Supports auto-sync
+                  between the store and Kagenti's ConfigMap-based skills. Includes
+                  LLM-powered plugins for skill evaluation, optimization,
+                  deduplication, security scanning, and documentation generation.
+Key Files:
+  - charts/kagenti/templates/               (Skillberry store deployment)
+  - docs/skills.md                          (Skillberry Store section)
+  - docs/components.md                      (Skillberry Store section)
+Architecture:
+  - Single-replica Deployment (REST API port 8000, Web UI port 8002)
+  - PVC at /data for filesystem storage
+  - Auto-sync via kagenti-skill-autosync-config ConfigMap
+  - Backend polls store periodically for new/updated skills
+  - Web UI at http://skillberry-store.<domain>:8080
+  - Configurable LLM plugins (LiteLLM, Anthropic, OpenAI)
+  - extraEnv for injecting LLM provider config and secrets
+  - Feature-flagged (featureFlags.externalSkills)
+  - Requires featureFlags.skills to also be true
+Dependencies:     Kubernetes, LLM provider (for plugins)
+Complexity:       MEDIUM (deployment, auto-sync, LLM plugin configuration)
+Languages:        Python (store), YAML (Helm), TypeScript (UI links)
+
+--------------------------------------------------------------------------------
+17. LLM BUDGET PROXY (TOKEN TRACKING AND COST CONTROL)
+--------------------------------------------------------------------------------
+Category:         Observability / Cost Control
+Type:             Extension
+Description:      FastAPI proxy that sits between agents and LiteLLM to enforce
+                  per-session and per-agent token budgets. Checks budget before
+                  forwarding requests, records token usage in PostgreSQL, and
+                  returns HTTP 402 when budget is exceeded. Supports streaming
+                  and non-streaming LLM calls. Provides session usage summary
+                  API with per-model breakdown.
+Key Files:
+  - kagenti/llm-budget-proxy/app/main.py    (Complete proxy implementation)
+  - kagenti/llm-budget-proxy/Dockerfile     (Container image)
+  - kagenti/llm-budget-proxy/pyproject.toml (Dependencies)
+Architecture:
+  - FastAPI app proxying /v1/chat/completions, /v1/completions, /v1/embeddings
+  - PostgreSQL tables: llm_calls (usage records), budget_limits (policies)
+  - Budget scopes: session, agent_daily, agent_monthly
+  - Default limits: 1M tokens/session, 5M/agent/day, 50M/agent/month
+  - In-memory cache (5s TTL) for session token lookups
+  - Streaming support with token accumulation from final chunk
+  - Internal API: GET /internal/usage/{session_id} for UI budget display
+  - Metadata extraction from request body (session_id, agent_name, user_id)
+  - Health endpoint at /health with DB connectivity check
+  - SSRF mitigation: validates backend URL scheme
+  - Log injection prevention: sanitizes user values (CWE-117)
+Dependencies:     PostgreSQL, LiteLLM, asyncpg, httpx
+Complexity:       MEDIUM (proxy logic, streaming, DB tracking, budget enforcement)
+Languages:        Python (FastAPI)
+
+--------------------------------------------------------------------------------
+18. OBSERVABILITY: PHOENIX/LANGFUSE TRACING (OPENTELEMETRY)
+--------------------------------------------------------------------------------
+Category:         Observability / Tracing
+Type:             Integration
+Description:      LLM observability and tracing using Phoenix (Arize) with
+                  OpenTelemetry. Agents are instrumented with OpenInference spans
+                  and GenAI semantic conventions. OTEL Collector receives spans
+                  and routes them to Phoenix. Phoenix provides a web UI for
+                  trace inspection, span analysis, and LLM call debugging.
+                  Optional component (disabled by default).
+Key Files:
+  - charts/kagenti-deps/templates/          (Phoenix Helm templates)
+  - charts/kagenti-deps/templates/          (OTEL Collector config)
+  - kagenti/ui-v2/src/pages/ObservabilityPage.tsx (Dashboard links)
+  - docs/agents/otel-instrumentation.md     (Instrumentation guide)
+Architecture:
+  - Phoenix deployed in kagenti-system namespace
+  - PostgreSQL backend (shared with MLflow)
+  - OTEL Collector receives spans on port 8335
+  - Filter processor routes OpenInference spans to Phoenix
+  - Agents instrumented with openinference-instrumentation-langchain
+  - GenAI semantic conventions via opentelemetry-instrumentation-openai
+  - OAuth2 authentication via phoenix-oauth-auth plugin
+  - UI exposed via HTTPRoute at http://phoenix.<domain>:8080
+  - Feature-flagged (components.phoenix.enabled + components.otel.enabled)
+Dependencies:     PostgreSQL, OTEL Collector, Keycloak (for OAuth)
+Complexity:       MEDIUM (OTEL pipeline, span routing, auth integration)
+Languages:        Python (instrumentation), YAML (Helm/OTEL config)
+
+--------------------------------------------------------------------------------
+19. OBSERVABILITY: MLFLOW INTEGRATION
+--------------------------------------------------------------------------------
+Category:         Observability / Tracing
+Type:             Integration
+Description:      MLflow Tracing for LLM observability alongside Phoenix. MLflow
+                  receives OTLP traces via OTEL Collector with GenAI-to-
+                  OpenInference span transformation. Provides UI for trace
+                  visualization, model tracking, and experiment management.
+                  OAuth2 authentication via mlflow-oidc-auth plugin.
+Key Files:
+  - charts/kagenti-deps/templates/mlflow.yaml    (MLflow deployment)
+  - charts/kagenti/templates/mlflow-oauth-secret-job.yaml
+  - kagenti/auth/mlflow-oauth-secret/            (OAuth client registration)
+  - kagenti/tests/e2e/common/test_mlflow_auth.py (E2E tests)
+  - docs/mlflow-integration.md                   (Integration docs)
+Architecture:
+  - MLflow tracking server with PostgreSQL backend
+  - OTLP receiver endpoint for span ingestion
+  - OTEL Collector transform processor: GenAI → OpenInference format
+  - mlflow-oidc-auth plugin for Keycloak integration
+  - Job-based OAuth secret creation (Keycloak client registration)
+  - UI exposed via HTTPRoute/Route
+  - Dual instrumentation: OpenInference + GenAI semantic conventions
+Dependencies:     PostgreSQL, OTEL Collector, Keycloak
+Complexity:       MEDIUM (MLflow deployment, span transformation, OAuth)
+Languages:        Python (MLflow, auth scripts), YAML (Helm)
+
+--------------------------------------------------------------------------------
+20. OBSERVABILITY: KIALI NETWORK VISUALIZATION
+--------------------------------------------------------------------------------
+Category:         Observability / Network
+Type:             Integration
+Description:      Kiali provides visualization of the Istio service mesh topology
+                  and traffic flows between agents, tools, and platform services.
+                  Shows real-time traffic patterns, service dependencies, and
+                  mesh health. Deployed in kagenti-system namespace.
+Key Files:
+  - charts/kagenti-deps/                    (Kiali Helm deployment)
+  - docs/kiali/README.md                    (Kiali documentation)
+  - kagenti/ui-v2/src/pages/ObservabilityPage.tsx (Dashboard link)
+Architecture:
+  - Kiali deployed via Helm chart
+  - Connects to Istio control plane for topology data
+  - Web UI for service graph visualization
+  - Traffic animation and metrics display
+  - Exposed via HTTPRoute
+Dependencies:     Istio, Prometheus (for metrics)
+Complexity:       LOW (standard Kiali deployment)
+Languages:        YAML (Helm configuration)
+
+--------------------------------------------------------------------------------
+21. ISTIO AMBIENT SERVICE MESH (mTLS)
+--------------------------------------------------------------------------------
+Category:         Networking / Security
+Type:             Core
+Description:      Istio Ambient mode provides service mesh capabilities without
+                  sidecar proxies. Uses Ztunnel (node-local proxy) for automatic
+                  mTLS between all services and Waypoint proxies for L7 traffic
+                  policies. Provides zero-config mutual TLS, traffic interception,
+                  and egress gateway for external tool calls.
+Key Files:
+  - charts/kagenti-deps/                    (Istio Helm deployment)
+  - docs/tech-details.md                    (Istio architecture)
+  - scripts/kind/setup-kagenti.sh           (Istio setup)
+Architecture:
+  - Ztunnel: node-local proxy using HBONE protocol for mTLS
+  - No sidecar proxies (zero resource overhead)
+  - Waypoint proxy: optional L7 for advanced policies
+  - Waypoint Egress Gateway: manages outbound traffic to external APIs
+  - Transparent to applications
+  - Namespace labeling for mesh enrollment
+Dependencies:     Kubernetes
+Complexity:       MEDIUM (Istio installation, ambient mode configuration,
+                  waypoint policies)
+Languages:        YAML (Helm, Istio configuration)
+
+--------------------------------------------------------------------------------
+22. INGRESS GATEWAY (KUBERNETES GATEWAY API)
+--------------------------------------------------------------------------------
+Category:         Networking / Routing
+Type:             Core
+Description:      Routes external HTTP requests to internal services using the
+                  Kubernetes Gateway API standard. Provides HTTPRoute-based
+                  routing for agents, tools, UI, and observability dashboards.
+                  Deployed in kagenti-system namespace using Istio Gateway
+                  implementation. Supports host-based routing for Kind
+                  (*.localtest.me) and path-based routing for OpenShift.
+Key Files:
+  - charts/kagenti/templates/               (HTTPRoute templates)
+  - charts/kagenti-deps/                    (Gateway deployment)
+  - docs/tech-details.md                    (Gateway architecture)
+Architecture:
+  - Istio Gateway implementation of Kubernetes Gateway API
+  - HTTPRoute resources for each service
+  - Host-based routing: kagenti-ui.localtest.me, keycloak.localtest.me, etc.
+  - TLS termination at gateway level
+  - Multi-namespace reference support
+Dependencies:     Istio, Kubernetes Gateway API CRDs
+Complexity:       LOW (standard Gateway API usage)
+Languages:        YAML (HTTPRoute definitions)
+
+--------------------------------------------------------------------------------
+23. KAGENTI WEB UI (REACT DASHBOARD)
+--------------------------------------------------------------------------------
+Category:         UI / Dashboard
+Type:             Core
+Description:      Modern web dashboard built with React and PatternFly for
+                  managing the entire Kagenti platform. Provides agent/tool/skill
+                  catalog management, interactive agent chat testing, sandbox
+                  creation wizards, session management, build progress tracking,
+                  observability dashboards, and admin configuration. Served by
+                  nginx with Keycloak OAuth2 authentication.
+Key Files:
+  - kagenti/ui-v2/src/                      (Complete UI source)
+  - kagenti/ui-v2/src/pages/               (25+ page components)
+  - kagenti/ui-v2/src/components/          (35+ reusable components)
+  - kagenti/ui-v2/src/services/api.ts      (API client with 30+ endpoints)
+  - kagenti/ui-v2/src/contexts/            (Auth, Theme contexts)
+  - kagenti/ui-v2/src/hooks/               (Feature flags, session loading)
+  - kagenti/ui-v2/src/types/               (TypeScript type definitions)
+Architecture:
+  - React SPA with PatternFly component library
+  - Keycloak OIDC authentication (AuthContext)
+  - Feature-flag-gated UI sections
+  - Pages: Home, AgentCatalog, ToolCatalog, SkillCatalog, Import pages,
+    SandboxPage, SessionsTable, SessionGraph, MCPGateway, Observability,
+    IntegrationsPage, TriggerManagement, Admin, BuildProgress
+  - Components: AgentChat, SandboxWizard (6-step), FileBrowser, PodStatusPanel,
+    LlmUsagePanel, SessionStatsPanel, HitlApprovalCard, DelegationCard,
+    TopologyGraphView, StepGraphView, ModelSwitcher, PromptInspector,
+    SidecarTab, EventsPanel, BuildProgressView
+  - Real-time streaming chat via SSE
+  - Session graph DAG visualization (React Flow + dagre)
+Dependencies:     React, PatternFly, React Flow, nginx, Keycloak
+Complexity:       HIGH (25+ pages, 35+ components, complex state management,
+                  streaming, visualization, feature flags)
+Languages:        TypeScript (React)
+
+--------------------------------------------------------------------------------
+24. KAGENTI TUI (GO TERMINAL UI)
+--------------------------------------------------------------------------------
+Category:         UI / CLI
+Type:             Extension
+Description:      Terminal-based UI written in Go using Bubble Tea framework.
+                  Provides CLI interface for agent management, tool management,
+                  chat, deployment, and authentication. Supports LLM preset
+                  selection (ollama, openai) for agent deployment.
+Key Files:
+  - kagenti/tui/main.go                    (Entry point)
+  - kagenti/tui/internal/api/              (API client: agents, auth, chat,
+                                            namespaces, tools)
+  - kagenti/tui/internal/cli/              (CLI commands: agents, auth, chat,
+                                            delete, deploy, status, tools)
+  - kagenti/tui/internal/ui/               (TUI views: home, agents, chat,
+                                            deploy, login, tools)
+  - kagenti/tui/internal/config/           (Configuration)
+  - kagenti/tui/internal/theme/            (Theme)
+Architecture:
+  - Go application using Bubble Tea TUI framework
+  - CLI commands: agents list, deploy, delete, chat, tools list, auth login
+  - API client connects to Kagenti backend REST API
+  - Views: home, agent list, agent detail, deploy agent, deploy tool,
+    tool list, tool detail, chat, login
+  - LLM preset support (ollama/openai) for env var injection
+  - Namespace selection
+Dependencies:     Kagenti Backend API, Bubble Tea (Go)
+Complexity:       MEDIUM (Go TUI framework, API integration, views)
+Languages:        Go
+
+--------------------------------------------------------------------------------
+25. KAGENTI BACKEND API (FASTAPI)
+--------------------------------------------------------------------------------
+Category:         Backend / API
+Type:             Core
+Description:      FastAPI-based REST API backend that provides all platform
+                  management capabilities. Handles agent/tool/skill CRUD,
+                  Kubernetes API interactions, chat/session management, build
+                  orchestration, file browsing, observability integration,
+                  authentication, and sandbox management. Serves as the bridge
+                  between the UI/TUI and Kubernetes.
+Key Files:
+  - kagenti/backend/app/main.py             (App entry point, router mounting)
+  - kagenti/backend/app/core/config.py      (Configuration, feature flags)
+  - kagenti/backend/app/routers/            (API route modules)
+    - agents.py, tools.py, skills.py, chat.py, sessions.py,
+      config.py, namespaces.py, builds.py, sandbox.py, etc.
+  - kagenti/backend/app/services/           (Business logic services)
+  - kagenti/backend/app/models/             (Pydantic data models)
+  - kagenti/backend/app/utils/              (Utility functions)
+  - kagenti/backend/proto/openshell/        (gRPC proto for OpenShell)
+Architecture:
+  - FastAPI with async support
+  - Kubernetes client for cluster operations
+  - Feature-flag-gated routers (conditional import in main.py)
+  - Bearer token authentication (Keycloak JWT validation)
+  - Session storage in PostgreSQL
+  - gRPC client for OpenShell gateway communication
+  - Streaming SSE endpoint for chat
+  - CORS configuration for UI access
+  - Feature flags in config.py: sandbox, integrations, triggers, admin,
+    skills, externalSkills, agentSandbox, builds, authbridgeAPI
+Dependencies:     FastAPI, Kubernetes client, asyncpg, httpx, gRPC
+Complexity:       HIGH (many routers, K8s API integration, session management,
+                  streaming, feature flags, authentication)
+Languages:        Python (FastAPI)
+
+--------------------------------------------------------------------------------
+26. SESSION MANAGEMENT AND CONVERSATION PERSISTENCE
+--------------------------------------------------------------------------------
+Category:         State / Persistence
+Type:             Core
+Description:      Manages conversation sessions between users and agents with
+                  full persistence in PostgreSQL. Sessions include message
+                  history, metadata, parent/child delegation relationships,
+                  LLM usage tracking, and agent context. Supports session
+                  renaming, visibility control, pagination, and session trees
+                  for delegation tracking.
+Key Files:
+  - kagenti/backend/app/routers/sessions.py (Session API)
+  - kagenti/backend/app/routers/chat.py     (Chat API with sessions)
+  - kagenti/ui-v2/src/pages/SessionsTablePage.tsx
+  - kagenti/ui-v2/src/pages/SessionGraphPage.tsx
+  - kagenti/ui-v2/src/components/SessionSidebar.tsx
+  - kagenti/ui-v2/src/components/SessionStatsPanel.tsx
+Architecture:
+  - PostgreSQL for session and message storage
+  - Session types: root, child (delegated), passover
+  - Session tree (DAG) for delegation visualization
+  - Pagination for message history
+  - Session metadata: agent, namespace, model, token usage
+  - Context persistence survives pod restarts
+  - LLM usage tracking per session
+  - Session graph visualization with React Flow
+Dependencies:     PostgreSQL, Kagenti Backend
+Complexity:       MEDIUM (session CRUD, delegation trees, persistence)
+Languages:        Python (backend), TypeScript (UI)
+
+--------------------------------------------------------------------------------
+27. AGENT SANDBOX INTEGRATION (OPENSHELL)
+--------------------------------------------------------------------------------
+Category:         Security / Isolation
+Type:             Integration
+Description:      Integration with NVIDIA OpenShell for kernel-level agent
+                  sandboxing. Provides Landlock filesystem isolation, seccomp
+                  syscall filtering, network namespace isolation, and OPA/Rego
+                  egress policy enforcement. Zero-secret credential isolation
+                  via supervisor proxy. Supports three deployment tiers:
+                  Tier 3 (plain K8s), Tier 2 (supervisor+port bridge),
+                  Tier 1 (full sandbox via gateway).
+Key Files:
+  - charts/openshell/                       (OpenShell Helm chart)
+  - deployments/openshell/                  (OpenShell deployment configs)
+  - scripts/openshell/                      (Deploy/cleanup/configure scripts)
+  - kagenti/backend/proto/openshell/        (gRPC proto definitions)
+  - kagenti/tests/e2e/openshell/            (E2E tests)
+  - docs/sandbox-guide.md                   (User guide)
+  - docs/agentic-runtime/openshell-integration.md (Architecture)
+  - docs/agentic-runtime/sandboxing-layers.md     (Security layers)
+  - docs/agentic-runtime/sandboxing-models.md     (Deployment tiers)
+  - docs/architecture/agent-sandbox.md            (Sandbox architecture)
+Architecture:
+  - OpenShell Gateway (StatefulSet) per tenant namespace
+  - K8s Compute Driver (sidecar) creates sandbox pods
+  - Credentials Driver (Keycloak OAuth2 client_credentials)
+  - Supervisor as container entrypoint:
+    1. Connects to gateway via gRPC
+    2. Applies Landlock (filesystem), seccomp (syscalls)
+    3. Creates network namespace (veth pair)
+    4. OPA/Rego egress policy enforcement
+    5. Execs agent as restricted child
+  - Credential isolation: placeholder tokens resolved at proxy layer
+  - Inference routing: strips auth headers, injects real API keys
+  - Per-user sandbox ownership (OIDC sub claim)
+  - Network policy enforcement (YAML-based policy files)
+  - Dynamic policy updates (hot-reload)
+  - Multi-tenant: gateway-per-tenant isolation
+  - Keycloak OIDC PKCE authentication
+  - cert-manager mTLS certificates
+Dependencies:     OpenShell, Keycloak, cert-manager, Kubernetes, OPA
+Complexity:       VERY HIGH (kernel isolation, network namespaces, credential
+                  proxy, gRPC, multi-tenant gateways, policy engine)
+Languages:        Rust (OpenShell core), Go (drivers), Python (backend/tests),
+                  Shell (scripts), Rego (OPA policies)
+
+--------------------------------------------------------------------------------
+28. MULTI-TENANT NAMESPACE ISOLATION
+--------------------------------------------------------------------------------
+Category:         Security / Multi-Tenancy
+Type:             Core
+Description:      Kubernetes namespace-based tenant isolation with per-tenant
+                  agent/tool deployments, network policies, RBAC, and gateway
+                  isolation. Each team gets its own namespace with isolated
+                  workloads, service accounts, secrets, and optional OpenShell
+                  gateway. Labels and RBAC ensure cross-tenant isolation.
+Key Files:
+  - charts/kagenti/                         (Namespace configuration)
+  - scripts/openshell/deploy-tenant.sh      (Per-tenant deployment)
+  - docs/sandbox-guide.md                   (Multi-tenant setup)
+Architecture:
+  - Namespaces: kagenti-system (platform), keycloak, team1, team2, etc.
+  - Per-namespace: agents, tools, services, secrets, PVCs
+  - RBAC: ServiceAccounts per agent, RoleBindings per namespace
+  - Network Policies: namespace-scoped traffic isolation
+  - OpenShell: gateway-per-tenant pattern (full process isolation)
+  - Keycloak: audience-scoped tokens per namespace
+  - Istio: namespace-level mesh enrollment
+Dependencies:     Kubernetes RBAC, Istio, OpenShell (optional)
+Complexity:       MEDIUM (namespace management, RBAC, network policies)
+Languages:        Shell (scripts), YAML (K8s manifests)
+
+--------------------------------------------------------------------------------
+29. DYNAMIC AGENT AND SUBAGENT MATERIALIZATION
+--------------------------------------------------------------------------------
+Category:         Orchestration / Advanced
+Type:             Extension (Design Proposal)
+Description:      Kubernetes-native mechanism for dynamically creating agents
+                  from an explicit bill-of-materials. Supports two modes:
+                  standalone (create and expose agent) and subagent (create
+                  agent, invoke with task, return result). Uses DynamicAgentRequest
+                  CRD with delegation, capability admission, and cleanup policies.
+                  Enables parent agents to spawn task-scoped child agents.
+Key Files:
+  - docs/design-proposals/dynamic-agent-and-subagent-materialization.md
+  - docs/design-proposals/consolidated-compositional-agent-platform-design.md
+  - docs/research/dynamic-agent-composition.md
+  - docs/research/composable-agents-design.md
+Architecture:
+  - DynamicAgentRequest CRD (agent.kagenti.dev/v1alpha1)
+  - Controller in kagenti-operator
+  - Modes: standalone (create only) and subagent (create + invoke + result)
+  - Bill-of-materials: workloadType, deploymentMethod, image, protocol, skills
+  - Delegation: requestedCapabilities, credentials, egress, workspaceAccess
+  - Security: admitted scope = intersection(requested, parent, namespace, platform)
+  - Platform MCP tools: spawn_subagent, get_subagent_status, cancel_subagent
+  - Status: phase, materialization, execution, result, artifactRef
+  - Cleanup policies: retain, deleteOnCompletion, deleteOnFailure
+  - Reusable materialization layer (shared with Teleport workflows)
+Dependencies:     Kagenti Operator, Kubernetes, Keycloak, SPIFFE/SPIRE
+Complexity:       VERY HIGH (CRD design, controller, delegation security,
+                  materialization, invocation, result capture, cleanup)
+Languages:        Go (operator), Python (tool wrapper), YAML (CRDs)
+
+--------------------------------------------------------------------------------
+30. EVENT-DRIVEN TRIGGER SYSTEM
+--------------------------------------------------------------------------------
+Category:         Automation / Events
+Type:             Extension
+Description:      System for creating automated triggers that invoke agent
+                  actions based on events. Supports three trigger types: cron
+                  (scheduled), webhook (HTTP-triggered), and alert (monitoring-
+                  triggered). Feature-flagged capability for automation workflows.
+Key Files:
+  - kagenti/backend/app/routers/            (Trigger API routes)
+  - kagenti/ui-v2/src/pages/TriggerManagementPage.tsx
+  - docs/use-case-types.md                  (Event-driven use cases)
+Architecture:
+  - Trigger types: cron, webhook, alert
+  - Backend API for trigger CRUD
+  - UI page for trigger management
+  - Feature-flagged (kagenti_feature_flag_triggers)
+  - Supports event-driven automation workflows
+Dependencies:     Kagenti Backend
+Complexity:       MEDIUM (trigger scheduling, webhook handling)
+Languages:        Python (backend), TypeScript (UI)
+
+--------------------------------------------------------------------------------
+31. INTEGRATION MANAGEMENT (WEBHOOKS, SCHEDULES)
+--------------------------------------------------------------------------------
+Category:         Integration / External
+Type:             Extension
+Description:      Management of repository integrations including webhooks,
+                  schedules, and alerts for connecting to external systems like
+                  GitHub, GitLab, and CI/CD pipelines. Supports integration
+                  creation, configuration, testing, and lifecycle management.
+Key Files:
+  - kagenti/ui-v2/src/pages/IntegrationsPage.tsx
+  - kagenti/ui-v2/src/pages/IntegrationDetailPage.tsx
+  - kagenti/ui-v2/src/pages/AddIntegrationPage.tsx
+  - kagenti/backend/app/routers/            (Integration API)
+Architecture:
+  - Integration CRUD API
+  - Connection testing
+  - Repository webhook management
+  - Schedule configuration
+  - Alert-based integration
+  - Feature-flagged (kagenti_feature_flag_integrations)
+Dependencies:     External services (GitHub, GitLab, etc.)
+Complexity:       MEDIUM (webhook management, external API integration)
+Languages:        Python (backend), TypeScript (UI)
+
+--------------------------------------------------------------------------------
+32. LLM MODEL BACKEND FLEXIBILITY (OLLAMA, OPENAI, LITELLM)
+--------------------------------------------------------------------------------
+Category:         LLM / Integration
+Type:             Core
+Description:      Framework-neutral LLM backend support via three environment
+                  variables (LLM_API_BASE, LLM_API_KEY, LLM_MODEL). Supports
+                  any OpenAI-compatible model backend including Ollama (local),
+                  OpenAI API, LiteLLM proxy, vLLM, llama.cpp, and LocalAI.
+                  LLM presets (ollama, openai) for easy switching. LiteLLM
+                  deployed as in-cluster model routing proxy.
+Key Files:
+  - docs/local-models.md                    (Local model guide)
+  - deployments/litellm/                    (LiteLLM deployment)
+  - kagenti/ui-v2/src/components/ModelSwitcher.tsx
+  - kagenti/tui/internal/cli/deploy.go      (LLM preset selection)
+Architecture:
+  - Three env vars: LLM_API_BASE, LLM_API_KEY, LLM_MODEL
+  - Presets: ollama (host.docker.internal:11434), openai (api.openai.com)
+  - LiteLLM proxy for model routing (deployed in kagenti-system)
+  - Budget Proxy sits between agents and LiteLLM
+  - UI ModelSwitcher for runtime model selection
+  - TUI preset selection during deployment
+  - Env file import (.env.ollama, .env.openai)
+  - Tested models: qwen2.5:3b, granite3.3:8b, gpt-4o-mini, etc.
+Dependencies:     LiteLLM (optional), Ollama (optional)
+Complexity:       LOW (environment variable configuration)
+Languages:        Python (backend), TypeScript (UI), Go (TUI)
+
+--------------------------------------------------------------------------------
+33. FEATURE FLAG SYSTEM
+--------------------------------------------------------------------------------
+Category:         Platform / Configuration
+Type:             Core
+Description:      All new features are gated behind feature flags, disabled by
+                  default. Flags live in backend config.py and are exposed to
+                  the frontend via GET /api/v1/config/features endpoint. Feature-
+                  flagged modules are conditionally imported in app/main.py.
+                  Helm values control flag state at deployment time.
+Key Files:
+  - kagenti/backend/app/core/config.py      (Flag definitions)
+  - kagenti/backend/app/routers/config.py   (Flag API endpoint)
+  - kagenti/backend/app/main.py             (Conditional router imports)
+  - kagenti/ui-v2/src/hooks/useFeatureFlags.ts (Frontend flag consumption)
+  - charts/kagenti/values.yaml              (Helm flag values)
+Architecture:
+  - Flags defined as kagenti_feature_flag_<name>: bool = False
+  - Current flags: sandbox, integrations, triggers, admin, skills,
+    externalSkills, agentSandbox, builds, authbridgeAPI
+  - Backend: conditional import in main.py (try/except with warning)
+  - Frontend: useFeatureFlags() hook with caching
+  - Helm: featureFlags.* values control deployment-time state
+  - Environment variable override: KAGENTI_FEATURE_FLAG_<NAME>
+Dependencies:     None (built-in)
+Complexity:       LOW (boolean flags, conditional imports)
+Languages:        Python (backend), TypeScript (frontend), YAML (Helm)
+
+--------------------------------------------------------------------------------
+34. HELM CHART PACKAGING AND DEPLOYMENT
+--------------------------------------------------------------------------------
+Category:         Deployment / Packaging
+Type:             Core
+Description:      Complete Helm chart packaging for the entire Kagenti platform.
+                  Three charts: kagenti (main platform), kagenti-deps
+                  (dependencies like Keycloak, SPIRE, Istio, Phoenix, MLflow),
+                  and openshell (sandbox infrastructure). Supports extensive
+                  configuration via values.yaml including component toggles,
+                  feature flags, secrets, and multi-platform settings.
+Key Files:
+  - charts/kagenti/                         (Main platform chart)
+  - charts/kagenti/Chart.yaml              (Chart metadata)
+  - charts/kagenti/values.yaml             (Default values)
+  - charts/kagenti/templates/              (K8s resource templates)
+  - charts/kagenti-deps/                   (Dependencies chart)
+  - charts/kagenti-deps/Chart.yaml
+  - charts/kagenti-deps/values.yaml
+  - charts/kagenti-deps/templates/
+  - charts/openshell/                      (OpenShell chart)
+Architecture:
+  - kagenti chart: Backend, UI, HTTPRoutes, RBAC, feature flags, secrets
+  - kagenti-deps chart: Keycloak, SPIRE, Istio, cert-manager, Shipwright,
+    Phoenix, MLflow, OTEL Collector, Kiali, container registry, PostgreSQL
+  - openshell chart: Gateway, compute driver, credentials driver, mTLS
+  - Component toggles: components.<name>.enabled
+  - Secrets template: .secrets_template.yaml → .secrets.yaml
+  - Environment-specific values in deployments/envs/
+Dependencies:     Helm 3, Kubernetes
+Complexity:       HIGH (many templates, cross-chart dependencies, conditional
+                  rendering, multi-platform support)
+Languages:        YAML (Helm templates), Shell (helper scripts)
+
+--------------------------------------------------------------------------------
+35. KIND/OPENSHIFT MULTI-PLATFORM DEPLOYMENT SCRIPTS
+--------------------------------------------------------------------------------
+Category:         Deployment / Scripts
+Type:             Core
+Description:      Comprehensive shell scripts for deploying Kagenti on Kind
+                  (local development) and OpenShift (production). The Kind setup
+                  script supports modular deployment with flags for each component
+                  (--with-ui, --with-spire, --with-agent-sandbox, --with-builds,
+                  --with-skills). Includes Ollama setup, cluster lifecycle
+                  management, and E2E test execution.
+Key Files:
+  - scripts/kind/setup-kagenti.sh           (Kind deployment script)
+  - scripts/ocp/setup-kagenti.sh            (OpenShift deployment script)
+  - scripts/openshell/deploy-shared.sh      (OpenShell shared infra)
+  - scripts/openshell/deploy-tenant.sh      (Per-tenant deployment)
+  - scripts/openshell/configure-cli.sh      (CLI configuration)
+  - scripts/openshell/cleanup-*.sh          (Cleanup scripts)
+  - scripts/k8s/                            (K8s utility scripts)
+  - scripts/lib/                            (Shared library scripts)
+  - .github/scripts/local-setup/            (CI/local setup scripts)
+Architecture:
+  - Modular flag-based deployment: --with-ui, --with-spire, --with-builds,
+    --with-agent-sandbox, --with-skills, --with-all
+  - Component skip flags: --skip-install <component>
+  - Image building: --build-images (local image builds)
+  - Custom values: --kagenti-values <file>
+  - Layered OpenShell scripts: deploy-shared → deploy-tenant → configure-cli
+  - Platform auto-detection (Kind vs OpenShift)
+  - Cleanup with --dry-run support
+Dependencies:     Kind/kubectl/Helm, Docker/Podman
+Complexity:       MEDIUM (bash scripting, platform detection, modular deployment)
+Languages:        Shell (Bash)
+
+--------------------------------------------------------------------------------
+36. TERRAFORM INFRASTRUCTURE MANAGEMENT
+--------------------------------------------------------------------------------
+Category:         Deployment / IaC
+Type:             Extension
+Description:      Terraform configurations for managing underlying infrastructure
+                  (management clusters). Provides infrastructure-as-code for
+                  cloud environments hosting Kagenti Kubernetes clusters.
+Key Files:
+  - terraform/management-cluster/           (Management cluster Terraform)
+Architecture:
+  - Terraform modules for cluster provisioning
+  - Management cluster configuration
+Dependencies:     Terraform, cloud provider
+Complexity:       MEDIUM (Terraform modules, cloud provider integration)
+Languages:        HCL (Terraform)
+
+--------------------------------------------------------------------------------
+37. E2E TESTING FRAMEWORK
+--------------------------------------------------------------------------------
+Category:         Testing / Quality
+Type:             Core
+Description:      Comprehensive end-to-end testing framework using pytest for
+                  validating the entire Kagenti platform. Includes tests for
+                  agents, tools, operator, token exchange, OpenShell integration,
+                  and platform health. Tests run on both Kind and OpenShift
+                  (HyperShift) CI environments.
+Key Files:
+  - kagenti/tests/e2e/                      (E2E test directory)
+  - kagenti/tests/e2e/common/              (Common test utilities)
+  - kagenti/tests/e2e/kagenti_operator/    (Operator tests)
+  - kagenti/tests/e2e/openshell/           (OpenShell integration tests)
+  - kagenti/tests/e2e/token_exchange/      (Token exchange tests)
+  - .github/workflows/e2e-kind.yaml        (Kind CI workflow)
+  - .github/workflows/e2e-hypershift.yaml  (HyperShift CI workflow)
+Architecture:
+  - pytest-based test framework with uv
+  - Test categories: platform health, credential isolation, A2A conversations,
+    multi-turn conversations, restart persistence, workspace persistence,
+    sandbox observability, service persistence, supervisor enforcement,
+    skill discovery, skill execution, sandbox lifecycle
+  - 117+ tests per platform
+  - Common fixtures for Keycloak tokens, agent URLs, etc.
+  - CI: GitHub Actions with Kind and HyperShift
+Dependencies:     pytest, uv, Kubernetes cluster
+Complexity:       MEDIUM (test organization, fixtures, CI integration)
+Languages:        Python (pytest)
+
+--------------------------------------------------------------------------------
+38. HUMAN-IN-THE-LOOP (HITL) APPROVAL WORKFLOWS
+--------------------------------------------------------------------------------
+Category:         Safety / Governance
+Type:             Extension
+Description:      Enables human approval gates in agent execution flows.
+                  When an agent reaches a decision point requiring human judgment,
+                  the UI presents an approval card allowing the user to approve
+                  or deny the action. Supports sidecar-based observation and
+                  approval workflows.
+Key Files:
+  - kagenti/ui-v2/src/components/HitlApprovalCard.tsx
+  - kagenti/ui-v2/src/components/SidecarTab.tsx
+  - kagenti/ui-v2/src/services/api.ts       (Approval/denial API calls)
+Architecture:
+  - HitlApprovalCard component for approval UI
+  - SidecarTab for HITL sidecar management
+  - Backend API: approve/deny session actions
+  - SSE observation stream for real-time updates
+  - Sidecar configuration: enable/disable, config update, state reset
+Dependencies:     Kagenti Backend, UI
+Complexity:       MEDIUM (approval workflows, real-time updates)
+Languages:        TypeScript (UI), Python (backend API)
+
+--------------------------------------------------------------------------------
+39. SESSION GRAPH VISUALIZATION (DELEGATION DAGs)
+--------------------------------------------------------------------------------
+Category:         Visualization / Observability
+Type:             Extension
+Description:      Directed acyclic graph (DAG) visualization of session
+                  delegation trees showing parent-child relationships between
+                  agent sessions. Uses React Flow with dagre layout for
+                  interactive graph exploration. Shows delegation mode, agent
+                  relationships, and session metadata.
+Key Files:
+  - kagenti/ui-v2/src/pages/SessionGraphPage.tsx
+  - kagenti/ui-v2/src/components/TopologyGraphView.tsx
+  - kagenti/ui-v2/src/components/StepGraphView.tsx
+  - kagenti/ui-v2/src/components/GraphDetailPanel.tsx
+  - kagenti/ui-v2/src/components/GraphLoopView.tsx
+Architecture:
+  - Session graph API returns nodes and edges with delegation modes
+  - React Flow rendering with dagre layout algorithm
+  - Multiple graph views: topology, step, loop, event subtype
+  - Graph detail panel for node inspection
+  - Interactive zoom, pan, and node selection
+Dependencies:     React Flow, dagre, Kagenti Backend
+Complexity:       MEDIUM (graph algorithms, interactive visualization)
+Languages:        TypeScript (React)
+
+--------------------------------------------------------------------------------
+40. WORKSPACE FILE BROWSING AND PERSISTENCE
+--------------------------------------------------------------------------------
+Category:         Storage / Agent State
+Type:             Extension
+Description:      File browsing and persistent workspace storage for agent
+                  sandboxes. Provides directory browsing, file preview, and
+                  persistent volume claims (PVCs) for workspace state that
+                  survives pod restarts. Used for sandbox agents that produce
+                  or consume files.
+Key Files:
+  - kagenti/ui-v2/src/components/FileBrowser.tsx
+  - kagenti/ui-v2/src/components/FilePreview.tsx
+  - kagenti/ui-v2/src/components/FilePreviewModal.tsx
+  - kagenti/backend/app/routers/            (File browsing API)
+Architecture:
+  - Backend API: browse directories, get file contents, storage stats
+  - Context-scoped browsing (per session/workspace)
+  - PVC mounted at /workspace for persistent storage
+  - File preview with syntax support
+  - Storage statistics (used/available space)
+Dependencies:     Kubernetes PVCs, Kagenti Backend
+Complexity:       LOW (file API, directory listing)
+Languages:        Python (backend), TypeScript (UI)
+
+--------------------------------------------------------------------------------
+41. AGENT API AUTHENTICATION (BEARER TOKEN)
+--------------------------------------------------------------------------------
+Category:         Security / API
+Type:             Core
+Description:      Bearer token authentication for the Kagenti backend API.
+                  All API endpoints require valid JWT tokens issued by Keycloak.
+                  Token validation checks signature, expiration, and issuer.
+                  Supports role-based access (ROLE_OPERATOR for write, ROLE_VIEWER
+                  for read operations).
+Key Files:
+  - kagenti/backend/app/core/               (Auth middleware)
+  - kagenti/backend/app/utils/              (Token validation)
+  - docs/api-authentication.md              (Auth documentation)
+Architecture:
+  - JWT Bearer token in Authorization header
+  - Token validation against Keycloak JWKS endpoint
+  - Role extraction from JWT claims
+  - Role-based access control: ROLE_OPERATOR (create/delete), ROLE_VIEWER (read)
+  - OAuth2 authorization code flow for token acquisition
+Dependencies:     Keycloak, JWKS
+Complexity:       LOW (standard JWT validation)
+Languages:        Python (FastAPI middleware)
+
+--------------------------------------------------------------------------------
+42. KEYCLOAK DEMO CONFIGURATION SYSTEM
+--------------------------------------------------------------------------------
+Category:         Demo / Setup
+Type:             Extension
+Description:      Automated Keycloak configuration scripts for demo scenarios.
+                  Creates users, roles, clients, and permissions specific to
+                  demo use cases (Slack research, GitHub issue management).
+                  Provides realistic multi-user, multi-permission setups for
+                  showcasing zero-trust authorization patterns.
+Key Files:
+  - kagenti/demo-setup/keycloak-config/             (Demo configuration)
+  - kagenti/demo-setup/keycloak-config/github/      (GitHub demo config)
+  - kagenti/demo-setup/keycloak-config/slack/       (Slack demo config)
+Architecture:
+  - Python scripts to configure Keycloak via admin API
+  - Creates demo users: slack-full-access-user, github-partial-access-user, etc.
+  - Creates demo roles: slack-full-access, github-partial-access
+  - Creates demo clients: SPIFFE-identified agent clients
+  - Sets up token exchange permissions between clients
+Dependencies:     Keycloak, python-keycloak library
+Complexity:       LOW (API scripting)
+Languages:        Python
+
+--------------------------------------------------------------------------------
+43. CLAUDE CODE SKILLS (AI-OPS AUTOMATION)
+--------------------------------------------------------------------------------
+Category:         Developer Experience / Automation
+Type:             Extension
+Description:      Claude Code skills (.claude/skills/) that provide guided
+                  AI-assisted workflows for platform operations. Skills include
+                  Kubernetes health checks, cluster management, auth configuration,
+                  Istio operations, OpenShift debugging, TDD workflows, and
+                  git worktree management. Enables AI-assisted DevOps/SRE tasks.
+Key Files:
+  - .claude/skills/                         (Skill definitions)
+  - .claude/commands/                       (Custom commands)
+  - .claude/scripts/                        (Automation scripts)
+  - docs/developer/claude-code-skills.md    (Skills documentation)
+Architecture:
+  - Skills: k8s:health, k8s:pods, k8s:logs, kind:cluster,
+    hypershift:cluster, auth:keycloak-confidential-client,
+    istio:ambient-waypoint, openshift:debug, tdd:hypershift, etc.
+  - Custom commands for common operations
+  - Scripts for automated workflows
+  - Context budget management (log redirection, subagent analysis)
+Dependencies:     Claude Code CLI
+Complexity:       LOW (skill definitions, shell scripts)
+Languages:        Markdown (skill definitions), Shell (scripts)
+
+
+================================================================================
+FEATURE SUMMARY BY CATEGORY
+================================================================================
+
+SECURITY / IDENTITY (7 features):
+  1.  SPIFFE/SPIRE Workload Identity                    [Core]      [HIGH]
+  2.  OAuth2/OIDC Integration (Keycloak)                [Core]      [HIGH]
+  3.  OAuth2 Token Exchange (RFC 8693)                   [Core]      [HIGH]
+  4.  Identity & Auth Bridge (AuthBridge/Cortex)         [Core]      [VERY HIGH]
+  5.  Fine-Grained Zero-Trust Access Control             [Extension] [VERY HIGH]
+  6.  Keycloak Client Registration (Operator-Managed)    [Core]      [MEDIUM]
+  41. Agent API Authentication (Bearer Token)            [Core]      [LOW]
+
+NETWORKING / GATEWAY (4 features):
+  7.  MCP Gateway (Envoy-Based Tool Routing)             [Core]      [HIGH]
+  8.  Plugins Adapter for Envoy (ext_proc)               [Extension] [HIGH]
+  21. Istio Ambient Service Mesh (mTLS)                  [Core]      [MEDIUM]
+  22. Ingress Gateway (Kubernetes Gateway API)            [Core]      [LOW]
+
+ORCHESTRATION / LIFECYCLE (3 features):
+  9.  Agent Lifecycle Management (K8s Workloads)          [Core]      [MEDIUM]
+  11. AgentRuntime CRD and Kagenti Operator              [Core]      [MEDIUM]
+  29. Dynamic Agent and Subagent Materialization          [Extension] [VERY HIGH]
+
+PROTOCOLS / COMMUNICATION (2 features):
+  12. A2A (Agent-to-Agent) Protocol Support              [Core]      [LOW]
+  13. MCP (Model Context Protocol) Support               [Core]      [LOW]
+
+DISCOVERY (1 feature):
+  10. Agent/Tool Discovery via Labels and CRDs           [Core]      [LOW]
+
+DEPLOYMENT / CI-CD (4 features):
+  14. Container Build System (Shipwright)                 [Extension] [MEDIUM]
+  34. Helm Chart Packaging and Deployment                [Core]      [HIGH]
+  35. Kind/OpenShift Multi-Platform Deployment Scripts   [Core]      [MEDIUM]
+  36. Terraform Infrastructure Management                [Extension] [MEDIUM]
+
+KNOWLEDGE / EXTENSION (2 features):
+  15. Skills System (ConfigMap-Based Skill Registry)      [Extension] [LOW]
+  16. Skillberry Store (External Skill Registry)          [Integration] [MEDIUM]
+
+OBSERVABILITY / COST CONTROL (4 features):
+  17. LLM Budget Proxy (Token Tracking and Cost Control) [Extension] [MEDIUM]
+  18. Phoenix/Langfuse Tracing (OpenTelemetry)           [Integration] [MEDIUM]
+  19. MLflow Integration                                  [Integration] [MEDIUM]
+  20. Kiali Network Visualization                         [Integration] [LOW]
+
+UI / DASHBOARD (2 features):
+  23. Kagenti Web UI (React Dashboard)                   [Core]      [HIGH]
+  24. Kagenti TUI (Go Terminal UI)                        [Extension] [MEDIUM]
+
+BACKEND / API (1 feature):
+  25. Kagenti Backend API (FastAPI)                       [Core]      [HIGH]
+
+STATE / PERSISTENCE (2 features):
+  26. Session Management and Conversation Persistence    [Core]      [MEDIUM]
+  40. Workspace File Browsing and Persistence            [Extension] [LOW]
+
+SECURITY / ISOLATION (2 features):
+  27. Agent Sandbox Integration (OpenShell)               [Integration] [VERY HIGH]
+  28. Multi-Tenant Namespace Isolation                    [Core]      [MEDIUM]
+
+AUTOMATION / EVENTS (2 features):
+  30. Event-Driven Trigger System                         [Extension] [MEDIUM]
+  31. Integration Management (Webhooks, Schedules)        [Extension] [MEDIUM]
+
+LLM / INTEGRATION (1 feature):
+  32. LLM Model Backend Flexibility                       [Core]      [LOW]
+
+PLATFORM / CONFIGURATION (1 feature):
+  33. Feature Flag System                                 [Core]      [LOW]
+
+TESTING (1 feature):
+  37. E2E Testing Framework                               [Core]      [MEDIUM]
+
+SAFETY / GOVERNANCE (1 feature):
+  38. Human-in-the-Loop (HITL) Approval Workflows        [Extension] [MEDIUM]
+
+VISUALIZATION (1 feature):
+  39. Session Graph Visualization (Delegation DAGs)       [Extension] [MEDIUM]
+
+DEMO / SETUP (1 feature):
+  42. Keycloak Demo Configuration System                  [Extension] [LOW]
+
+DEVELOPER EXPERIENCE (1 feature):
+  43. Claude Code Skills (AI-Ops Automation)              [Extension] [LOW]
+
+ADDITIONAL (from deep source analysis):
+  44. ACP WebSocket Gateway                               [Extension] [MEDIUM]
+  45. Sidecar Agent System (Looper/Observer/Guardian)      [Extension] [MEDIUM]
+  46. Build Reconciliation Service                         [Core]      [LOW]
+  47. Agent CRD Migration Tool                            [Extension] [LOW]
+  48. Custom Keycloak Authenticator (GitHub Org Check)     [Extension] [LOW]
+
+================================================================================
+COMPLEXITY DISTRIBUTION
+================================================================================
+
+VERY HIGH (4 features):
+  4.  Identity & Auth Bridge (AuthBridge/Cortex Sidecar)
+  5.  Fine-Grained Zero-Trust Access Control (Cortex/OPA)
+  27. Agent Sandbox Integration (OpenShell)
+  29. Dynamic Agent and Subagent Materialization
+
+HIGH (7 features):
+  1.  SPIFFE/SPIRE Workload Identity
+  2.  OAuth2/OIDC Integration (Keycloak)
+  3.  OAuth2 Token Exchange (RFC 8693)
+  7.  MCP Gateway (Envoy-Based Tool Routing)
+  8.  Plugins Adapter for Envoy (ext_proc)
+  23. Kagenti Web UI (React Dashboard)
+  25. Kagenti Backend API (FastAPI)
+  34. Helm Chart Packaging and Deployment
+
+MEDIUM (17 features):
+  6, 9, 11, 14, 16, 17, 18, 19, 21, 24, 26, 28, 30, 31, 35, 36, 37, 38, 39
+
+LOW (8 features):
+  10, 12, 13, 15, 20, 22, 32, 33, 40, 41, 42, 43
+
+================================================================================
+ADDITIONAL FEATURES (from deep source code analysis)
+================================================================================
+
+--------------------------------------------------------------------------------
+44. ACP WEBSOCKET GATEWAY
+--------------------------------------------------------------------------------
+Category:         Protocols / Communication
+Type:             Extension
+Description:      WebSocket-based bidirectional communication gateway for Agent
+                  Communication Protocol (ACP). Provides real-time streaming
+                  between clients and agents via JSON-RPC 2.0 over WebSocket.
+                  Feature-flagged and being phased out in favor of A2A/MCP.
+Key Files:
+  - kagenti/backend/app/routers/acp.py      (WebSocket endpoint)
+  - kagenti/backend/app/services/acp_bridge.py (Bridge service)
+Architecture:
+  - WebSocket endpoint: /ws/{namespace}/{agent_name}
+  - JSON-RPC 2.0 protocol routing
+  - Bidirectional streaming between client and agent
+  - Feature-flagged (kagenti_feature_flag_acp)
+Dependencies:     Kagenti Backend, WebSocket
+Complexity:       MEDIUM (WebSocket management, JSON-RPC routing)
+Languages:        Python (FastAPI WebSocket)
+
+--------------------------------------------------------------------------------
+45. SIDECAR AGENT SYSTEM (LOOPER, HALLUCINATION OBSERVER, CONTEXT GUARDIAN)
+--------------------------------------------------------------------------------
+Category:         Safety / Governance
+Type:             Extension
+Description:      Pluggable sidecar agent system that runs alongside primary
+                  agents to provide continuous monitoring and safety capabilities.
+                  Three sidecar types: Looper (execution loop monitoring),
+                  Hallucination Observer (output validation), and Context Guardian
+                  (context integrity). Sidecars can be enabled/disabled per agent.
+Key Files:
+  - kagenti/backend/app/services/sidecar_manager.py  (Sidecar management)
+  - kagenti/ui-v2/src/components/SidecarTab.tsx       (UI management tab)
+Architecture:
+  - Sidecar types: Looper, Hallucination Observer, Context Guardian
+  - Per-agent enable/disable via UI or API
+  - SSE observation stream for real-time monitoring
+  - Approve/deny workflow for sidecar observations
+  - Config update and state reset capabilities
+  - Feature-flagged (kagenti_feature_flag_sidecars)
+Dependencies:     Kagenti Backend
+Complexity:       MEDIUM (sidecar lifecycle, observation streams)
+Languages:        Python (backend), TypeScript (UI)
+
+--------------------------------------------------------------------------------
+46. BUILD RECONCILIATION SERVICE
+--------------------------------------------------------------------------------
+Category:         Deployment / Automation
+Type:             Core
+Description:      Background service that periodically scans for orphaned
+                  Shipwright builds (succeeded BuildRun without corresponding
+                  workload) and auto-finalizes them. Ensures builds that
+                  completed but weren't finalized (e.g., due to UI timeout)
+                  are properly reconciled into deployments.
+Key Files:
+  - kagenti/backend/app/services/reconciliation.py   (Reconciliation loop)
+  - kagenti/backend/app/services/shipwright_builds.py (Build collection)
+Architecture:
+  - Background async loop in FastAPI lifespan
+  - Periodic scan (configurable interval)
+  - Idempotent finalization (409 conflict handling)
+  - Orphan detection: succeeded BuildRun, no matching workload
+  - Sequential loop: sleep after completion, not before
+  - Enable via ENABLE_BUILD_RECONCILIATION env var
+Dependencies:     Shipwright, Kubernetes API
+Complexity:       LOW (periodic scan, idempotent operations)
+Languages:        Python
+
+--------------------------------------------------------------------------------
+47. AGENT CRD MIGRATION TOOL
+--------------------------------------------------------------------------------
+Category:         Migration / Tooling
+Type:             Extension
+Description:      CLI tool for migrating legacy Agent Custom Resource Definitions
+                  to standard Kubernetes Deployments and Services. Part of Phase 4
+                  migration from proprietary CRDs to vanilla Kubernetes workloads.
+                  Supports dry-run, per-namespace migration, JSON output, and
+                  optional CRD deletion after migration.
+Key Files:
+  - kagenti/tools/migrate_agents.py          (Migration tool)
+Architecture:
+  - MigrationClient class wrapping Kubernetes API
+  - List eligible agents (dry-run by default)
+  - Create Deployment + Service from Agent CRD spec
+  - Preserve labels, env vars, ports, resource limits
+  - Optional: delete old Agent CRDs post-migration
+  - Per-namespace and per-agent targeting
+  - JSON output for automation
+Dependencies:     Kubernetes API (Python client)
+Complexity:       LOW (CRUD operations, spec transformation)
+Languages:        Python
+
+--------------------------------------------------------------------------------
+48. CUSTOM KEYCLOAK AUTHENTICATOR (GITHUB ORG MEMBER CHECK)
+--------------------------------------------------------------------------------
+Category:         Security / Identity
+Type:             Extension
+Description:      Custom Keycloak SPI authenticator that validates GitHub
+                  organization membership during first broker login. Uses
+                  GitHub's public API to check if authenticating user is a
+                  public member of a configured organization. Fail-closed
+                  design (network errors deny access).
+Key Files:
+  - kagenti/keycloak/src/main/java/io/kagenti/keycloak/authenticator/
+    GitHubOrgMemberAuthenticator.java
+  - kagenti/keycloak/src/main/java/io/kagenti/keycloak/authenticator/
+    GitHubOrgMemberAuthenticatorFactory.java
+Architecture:
+  - Keycloak SPI (Service Provider Interface) plugin
+  - Runs during first broker login flow (GitHub IdP federation)
+  - Public API check: GET api.github.com/orgs/{org}/members/{username}
+  - 204 → allow, 404 → deny, error → deny (fail-closed)
+  - Configurable org parameter (default: kagenti)
+  - Timeouts: 5s connect, 5s read
+  - Factory pattern with singleton instance
+Dependencies:     Keycloak, GitHub API
+Complexity:       LOW (simple HTTP check, SPI boilerplate)
+Languages:        Java
+
+================================================================================
+LANGUAGE DISTRIBUTION
+================================================================================
+
+Python:    Backend API, LLM Budget Proxy, auth scripts, demo setup,
+           E2E tests, Keycloak config, examples (FastAPI, pytest, httpx)
+
+TypeScript: Web UI (React, PatternFly, React Flow)
+
+Go:        TUI (Bubble Tea), Kagenti Operator, AuthBridge ext-proc,
+           OpenShell compute/credentials drivers
+
+Shell:     Deployment scripts (Kind, OpenShift, OpenShell), CI scripts
+
+Rust:      OpenShell core (gateway, supervisor) — external dependency
+
+Java:      Keycloak SPI/plugins — minimal
+
+YAML:      Helm charts, K8s manifests, CI workflows, CRDs
+
+HCL:       Terraform configurations
+
+Rego:      OPA/Cortex access control policies
+
+================================================================================
+END OF FEATURE ANALYSIS
+================================================================================

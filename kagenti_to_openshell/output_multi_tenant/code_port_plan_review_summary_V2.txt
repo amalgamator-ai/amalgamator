@@ -1,0 +1,244 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — REVIEW SUMMARY V2
+================================================================================
+Date: 2026-07-03
+Review: V2-R1 (review of iteration 2)
+================================================================================
+
+1. ISSUES FOUND AND FIXED
+================================================================================
+
+This review identified 6 issues in the V2 porting plan. All issues have
+been addressed in the corrected plan.
+
+HIGH ISSUES (1):
+
+  ISSUE R2-1: Provider runtime guard uses empty admin_role
+    Affected: Step 11A
+    Problem: When ownership is disabled, ownership_config() returns
+      OwnershipEnforcement::disabled() which sets admin_role to "".
+      The runtime guard in handle_create_provider checks:
+        user.identity.roles.iter().any(|r| r == &ownership_config.admin_role)
+      Since admin_role is "", this comparison NEVER matches any role.
+      Result: ALL users (including admins) are denied from creating
+      providers when ownership is disabled but OIDC is configured.
+    Why it matters: This is a functional regression — deployments that
+      upgrade to the new code with OIDC enabled but ownership disabled
+      would find that no user can create providers, breaking existing
+      admin workflows.
+    Fix: Read admin_role directly from state.config.oidc (the OIDC
+      configuration) instead of from OwnershipEnforcement. The corrected
+      code checks `state.config.oidc.as_ref().map(|o| &o.admin_role)`
+      which always has the correct role name ("openshell-admin") when
+      OIDC is configured, regardless of ownership state.
+    Validation: Added two test cases —
+      admin_can_create_provider_when_ownership_disabled and
+      user_cannot_create_provider_when_ownership_disabled.
+
+MEDIUM ISSUES (2):
+
+  ISSUE R2-2: OidcConfig deny_unknown_fields claim incorrect
+    Affected: Step 2A (NOTE), Step 3 (Prerequisites)
+    Problem: The V2 plan states "The OidcConfig struct itself does NOT
+      have deny_unknown_fields (only GatewayFileSection does)." Verified:
+      OidcConfig HAS #[serde(deny_unknown_fields)] at line 462 of
+      config.rs.
+    Why it matters: While the proposed fix (adding groups_claim with
+      #[serde(default)]) is still correct and safe, the reasoning is
+      wrong. An implementer reading the plan might make incorrect
+      assumptions about OidcConfig's serde behavior. More importantly,
+      knowing that OidcConfig has deny_unknown_fields confirms that
+      groups_claim MUST be added to OidcConfig itself — it cannot be
+      added only to GatewayFileSection or an intermediate struct.
+    Fix: Corrected the NOTE to accurately describe the
+      deny_unknown_fields behavior and its implications. Added
+      explanation of why adding #[serde(default)] fields to a
+      deny_unknown_fields struct is safe.
+
+  ISSUE R2-3: Scope requirement not mentioned for provider creation
+    Affected: Step 11D
+    Problem: The current CreateProvider annotation is:
+      #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+      The V2 plan mentions changing role="admin" to role="user" but does
+      not mention the existing scope = "provider:write" requirement.
+      When scopes_enabled is true in AuthzPolicy, users need BOTH the
+      role AND the scope to pass authorization.
+    Why it matters: In deployments using OIDC scopes (scopes_claim is
+      configured), regular users would be blocked from creating providers
+      at the authorization layer if they don't have "provider:write"
+      scope — even though the role check passes. The implementer and
+      deployer need to know about this dependency.
+    Fix: Added documentation note about the scope requirement. When
+      scopes_enabled is false (the common case — scopes_claim defaults
+      to empty), scope checking is skipped entirely (authz.rs line 98).
+      When scopes are used, the OIDC provider must grant "provider:write"
+      to user-role principals. Added as Risk #12 in Risk Analysis.
+
+LOW ISSUES (3):
+
+  ISSUE R2-4: labels_from_metadata helper is dead code with wrong bounds
+    Affected: Step 4
+    Problem: The ownership module includes a labels_from_metadata helper
+      function with generic bounds M: AsRef<HashMap<String, String>>.
+      Two issues: (1) The protobuf ObjectMeta does not implement
+      AsRef<HashMap<String, String>>, so the helper cannot be used with
+      protobuf types as intended. (2) The helper is never called anywhere
+      in the plan — all ownership enforcement code uses the inline
+      pattern `sandbox.metadata.as_ref().map(|m| &m.labels).cloned()
+      .unwrap_or_default()`.
+    Why it matters: Dead code with incorrect trait bounds would cause a
+      compile error if someone tried to use it, creating confusion.
+    Fix: Removed the labels_from_metadata function entirely. The inline
+      pattern used throughout the plan is clear and idiomatic.
+
+  ISSUE R2-5: Pod template labels in wrong template file
+    Affected: Step 15D
+    Problem: The V2 plan proposes adding tenant labels to
+      statefulset.yaml. However, the pod template is defined in the
+      shared partial _gateway-workload.tpl (which defines
+      "openshell.gatewayPodTemplate"). Both statefulset.yaml and
+      deployment.yaml reference this shared template. Adding labels
+      only to statefulset.yaml would miss the Deployment workload shape.
+    Why it matters: When using the Deployment workload shape
+      (workload.kind=deployment), pods would not get tenant labels.
+    Fix: Add tenant labels to _gateway-workload.tpl instead of
+      statefulset.yaml. This ensures both workload shapes (StatefulSet
+      and Deployment) get tenant labels without duplication.
+
+  ISSUE R2-6: ClusterRole name missing existing suffix
+    Affected: Step 16B
+    Problem: The V2 plan proposes adding tenant.id to the ClusterRole
+      name as: {{ include "openshell.fullname" . }}-{{ .Values.tenant.id }}
+      But the existing name includes a "-node-reader" suffix:
+      {{ include "openshell.fullname" . }}-node-reader
+      The proposed change drops this suffix.
+    Why it matters: Dropping the suffix would change the resource name
+      for ALL deployments (not just multi-tenant), potentially breaking
+      existing ClusterRoleBindings that reference the old name.
+    Fix: Preserve the existing suffix when adding tenant uniqueness:
+      {{ include "openshell.fullname" . }}-node-reader-{{ .Values.tenant.id }}
+
+2. VERIFICATION METHODOLOGY
+================================================================================
+
+The review was performed using three parallel source code verification
+agents that examined the actual OpenShell codebase (HEAD) against every
+structural claim in the V2 plan:
+
+  Agent 1 — Auth Layer & Config Verification:
+    Verified Identity struct (5 fields, no groups), OidcClaims struct
+    (with #[serde(flatten)] extra field), validate_token signature and
+    Identity construction (lines 342-348), extract_roles pattern (lines
+    119-133), OidcConfig struct (7 fields, HAS deny_unknown_fields —
+    correcting V2), Config struct (no ownership or tenant_id fields),
+    GatewayFileSection (uses Option<OidcConfig> directly, HAS
+    deny_unknown_fields), auth/mod.rs (11 modules, no ownership),
+    ServerState (no ownership_config method), Principal enum (derives
+    Clone, 3 variants).
+
+  Agent 2 — gRPC Handler & Persistence Verification:
+    Verified handle_create_sandbox_inner (line 119, no Principal
+    extraction, into_inner() first), handle_list_sandboxes (line 256,
+    no Principal), handle_get_sandbox (line 235), handle_delete_sandbox_inner
+    (line 496, uses object_id() pattern), handle_watch_sandbox (line 574),
+    handle_exec_sandbox (line 803), sandbox_by_name (line 520),
+    create_provider_record (line 66, no owner param), list_provider_records
+    (line 160, no owner filter), handle_create_provider (line 1150, no
+    Principal), CreateProvider annotation (line 360: role="admin",
+    scope="provider:write"), multiplex.rs Principal insertion (line 623),
+    persistence list_messages_with_selector (line 408), get_message_by_name
+    (line 382), get_message (line 371).
+
+  Agent 3 — K8s Driver & Helm Verification:
+    Verified sandbox_labels function (line 857, 2 labels), driver_utils.rs
+    constants (5 existing, no LABEL_OWNER/LABEL_TENANT), SandboxIndex
+    Inner struct (2 fields), Chart.yaml name ("helm-chart"), template
+    directory (16 files including _gateway-workload.tpl — V2 missed this),
+    values.yaml (no tenant section, oidc structure confirmed),
+    gateway-config.yaml TOML rendering (issuer-gated OIDC section),
+    _helpers.tpl (17 helpers, validateValues at lines 180-199),
+    clusterrole.yaml name (includes "-node-reader" suffix),
+    certgen.yaml SANs (via --server-san flags).
+
+  Additional Direct Verification:
+    Read OidcConfig struct (lines 458-493) confirming deny_unknown_fields.
+    Read handle_delete_sandbox_inner (lines 496-518) confirming object_id()
+    usage. Read _gateway-workload.tpl confirming pod template labels are
+    in the shared partial. Read authz.rs (lines 30-113) confirming
+    scopes_enabled behavior and admin role implicit satisfaction of user
+    role. Read all #[rpc_auth] annotations (lines 360-472) confirming
+    scope requirements on provider methods.
+
+3. ITERATION EVOLUTION
+================================================================================
+
+V1 (initial plan):
+  - First comprehensive 18-step plan covering multi-tenancy
+  - 11 issues identified in V1-R1 review (3 critical, 3 high, 3 medium,
+    2 low)
+
+V1-R1 (review of V1):
+  - Fixed all 11 issues
+  - Added Step 8b for watch/exec/SSH ownership enforcement
+  - Updated effort estimate: 14-19 days
+
+V2 (rebuilt plan incorporating V1 + V1-R1 learnings):
+  - All 11 V1-R1 fixes integrated from the start
+  - 6 additional corrections from fresh source verification (V2-1..V2-6)
+  - Restructured to 20 steps with explicit dependency graph
+  - Updated effort estimate: 16-21 days
+
+V2-R1 (this review):
+  - Found 6 issues (1 high, 2 medium, 3 low)
+  - HIGH: Provider runtime guard uses empty admin_role when ownership is
+    disabled — functional bug that would break admin provider creation
+  - MEDIUM: OidcConfig deny_unknown_fields incorrectly claimed absent;
+    provider:write scope requirement not documented
+  - LOW: Dead helper with wrong bounds; pod labels in wrong template;
+    ClusterRole name missing suffix
+  - All issues fixed in corrected plan
+  - Added Risk #12 (scope requirement for user-created providers)
+  - Added 2 test cases for provider creation with ownership disabled
+  - Corrected Helm file list (_gateway-workload.tpl replaces statefulset.yaml)
+
+4. CONVERGENCE ASSESSMENT
+================================================================================
+
+The plan has improved significantly across iterations:
+
+  V1:    11 issues (3 critical, 3 high, 3 medium, 2 low)
+  V2:    6 issues (1 high, 2 medium, 3 low)  — 45% reduction
+
+  No critical issues remain. The single HIGH issue (R2-1: empty admin_role
+  in runtime guard) is a clear functional bug with a straightforward fix.
+  The MEDIUM issues are documentation accuracy (R2-2) and deployment
+  guidance (R2-3). The LOW issues are code cleanliness (R2-4, R2-5, R2-6).
+
+  The plan is architecturally sound. The two-layer approach (per-user
+  ownership + gateway-per-tenant) is well-designed, leverages existing
+  OpenShell infrastructure correctly, and maintains backward compatibility.
+
+  KEY RISK REMAINING: The provider role change (Step 11D) affects ALL
+  deployments. The runtime guard (Step 11A, now corrected) mitigates this,
+  but it adds application-layer complexity on top of the macro-layer check.
+  This is the most nuanced aspect of the plan and should receive extra
+  review attention during implementation.
+
+5. SUMMARY STATISTICS
+================================================================================
+
+  Issues found:         6 (1 high, 2 medium, 3 low)
+  Issues fixed:         6 (all resolved in corrected plan)
+  Steps modified:       6 (Steps 2, 4, 9, 11, 15, 16)
+  Steps unchanged:      14 (Steps 1, 3, 5, 6, 7, 8, 10, 12, 13, 14, 17,
+                            18, 19, 20*)
+  New risk items:       1 (Risk #12: scope requirement)
+  New test cases:       2 (provider creation with ownership disabled)
+  Files verified:       40+ source files checked against plan claims
+  Effort estimate:      UNCHANGED (16-21 days)
+
+  *Step 20 had test cases added but core structure unchanged
+
+================================================================================
+END OF REVIEW SUMMARY V2
+================================================================================

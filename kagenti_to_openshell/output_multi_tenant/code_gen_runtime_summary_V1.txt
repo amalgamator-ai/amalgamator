@@ -1,0 +1,96 @@
+===============================================================================
+Multi-Tenant Deployment Support - Runtime Fix Summary V1
+Date: 2026-07-03
+Feature: Multi-Tenant Deployment Support (Security / Multi-Tenancy)
+===============================================================================
+
+## Failures Found
+
+### 1. openshell-server Excluded from V1 Testing (Environment Issue)
+- The V1 runtime logs showed 2,111 tests passing, but openshell-server
+  (which contains the bulk of the multi-tenant code) was excluded from
+  testing due to a missing z3-sys/libclang system dependency.
+- Root cause: The z3-sys crate requires libclang for bindgen and z3.h
+  headers for compilation. Neither was on the default PATH.
+- Resolution: Located libclang.so from a Python clang package and z3.h
+  from a Python z3-solver package. Set environment variables:
+    LIBCLANG_PATH, Z3_SYS_Z3_HEADER, Z3_LIBRARY_PATH_OVERRIDE,
+    BINDGEN_EXTRA_CLANG_ARGS, LD_LIBRARY_PATH
+
+### 2. RBAC Role Regression (2 Test Failures)
+- Tests: auth::authz::tests::user_cannot_access_admin_methods
+         auth::authz::tests::openshell_all_with_user_role
+- Root cause: The V3 patch incorrectly downgraded three provider CRUD
+  methods from admin-only to user-accessible:
+    - CreateProvider: role = "admin" -> role = "user"
+    - UpdateProvider: role = "admin" -> role = "user"
+    - DeleteProvider: role = "admin" -> role = "user"
+  This was done in crates/openshell-server/src/grpc/mod.rs as part of
+  the multi-tenant port, with the mistaken rationale that ownership
+  enforcement would replace RBAC for provider operations.
+- The existing tests correctly enforce that provider write operations
+  require admin role in the RBAC layer. The ownership enforcement layer
+  (which we added) provides *additional* per-tenant isolation on top of
+  RBAC, not a replacement for it.
+
+## Fixes Applied
+
+### Fix 1: Revert Provider RBAC Role Annotations
+- File: crates/openshell-server/src/grpc/mod.rs
+- Changed back to original:
+    Line 360: role = "user" -> role = "admin" (CreateProvider)
+    Line 424: role = "user" -> role = "admin" (UpdateProvider)
+    Line 464: role = "user" -> role = "admin" (DeleteProvider)
+- This restores the defense-in-depth model: RBAC gates access at the
+  method level, ownership enforcement gates access at the resource level.
+
+## Current Build/Test Status
+
+### Build: PASS
+- All crates compile successfully:
+  - openshell-core: OK
+  - openshell-server: OK (with z3/libclang env vars)
+  - openshell-cli: OK
+  - All workspace crates: OK
+
+### Tests: ALL PASS
+- Total passed:  3,072  (up from 2,111 in V1)
+- Total failed:  0
+- Total ignored: 10     (require root, LocalStack, or env-specific setup)
+
+### Test Coverage by Crate:
+  - openshell-bootstrap:              71 passed
+  - openshell-core:                  297 passed
+  - openshell-driver-docker:          96 passed
+  - openshell-driver-kubernetes:      93 passed
+  - openshell-driver-podman:         106 passed
+  - openshell-ocsf:                  123 passed
+  - openshell-policy:                110 passed
+  - openshell-prover:                 25 passed  (NEW - was excluded in V1)
+  - openshell-providers:              63 passed
+  - openshell-router:                 64 passed + 17 integration
+  - openshell-sandbox:                63 passed + 2 bin + 1 integration
+  - openshell-server:                908 passed + 28 integration  (NEW)
+  - openshell-server-macros:           0 tests (proc-macro crate)
+  - openshell-supervisor-network:    832 passed + 5 integration
+  - openshell-supervisor-process:    144 passed (2 ignored - require root)
+  - openshell-tui:                    24 passed
+
+### Excluded Crates (system dependency issues, NOT code bugs):
+  - openshell-vfio:       requires bindgen -> libclang (vfio bindings)
+  - openshell-driver-vm:  requires OPENSHELL_VM_RUNTIME_COMPRESSED_DIR
+  - openshell-cli:        binary crate, integration-tested via other paths
+
+## Patch Summary
+- Output: code_gen_runtime_V1.patch
+- Files changed: 21 (down from 22 in V3 - grpc/mod.rs reverted)
+- Lines: +825 / -17
+- Key components:
+  1. OwnershipConfigCore in openshell-core (config, labels, re-exports)
+  2. Ownership enforcement module (ownership.rs - 448 lines with tests)
+  3. OIDC groups extraction for tenant isolation
+  4. CLI arguments for --ownership-enabled and --tenant-id
+  5. Sandbox CRUD ownership stamping and checking
+  6. Provider CRUD ownership stamping and checking
+  7. Label-based tenant filtering for list operations
+===============================================================================

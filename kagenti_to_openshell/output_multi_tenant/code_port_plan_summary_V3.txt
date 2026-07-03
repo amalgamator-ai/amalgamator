@@ -1,0 +1,231 @@
+================================================================================
+MULTI-TENANT DEPLOYMENT SUPPORT — PORTING PLAN SUMMARY V3
+================================================================================
+Date: 2026-07-03
+Iteration: V3 (from scratch, incorporating all prior learnings)
+================================================================================
+
+1. WORK DONE TO GENERATE V3
+================================================================================
+
+V3 was built FROM SCRATCH, not as a patch on V2. The approach was:
+
+Phase 1: Read and Analyze Prior Iterations
+  - Read V2-R1 reviewed plan (code_port_plan_review_V2.txt)
+  - Read V2-R1 review summary (code_port_plan_review_summary_V2.txt)
+  - Read Kagenti code trace (kagenti_code_trace.txt)
+  - Read OpenShell code trace (openshell_code_trace.txt)
+  - Cataloged all 17 issues found across V1-R1 (11) and V2-R1 (6)
+
+Phase 2: Fresh Source Code Verification
+  Four parallel exploration agents verified the OpenShell codebase at HEAD:
+
+  Agent 1 (Auth Layer):
+    Verified Identity struct (5 fields, lines 15-31, #[derive(Debug, Clone)])
+    Verified IdentityProvider enum (4 variants, lines 34-44)
+    Verified Principal enum (3 variants, lines 23-35, #[derive(Debug, Clone)])
+    Verified UserPrincipal struct (1 field, lines 38-42)
+    Verified OidcClaims struct (lines 94-108, #[serde(flatten)] extra)
+    Verified extract_roles (lines 119-133, dot-path navigation)
+    Verified validate_token (lines 288-349, Identity construction at 333-348)
+    Verified AuthzPolicy struct (lines 30-38, 3 fields)
+    Verified AuthzPolicy.check() (lines 66-103, admin implicit user at 87)
+    Verified scopes_enabled gating (line 98)
+    Verified ensure_sandbox_scope (guard.rs, lines 30-51)
+    Verified auth/mod.rs (11 modules, no ownership module)
+
+  Agent 2 (Sandbox/Provider Handlers):
+    Verified handle_create_sandbox_inner (line 119, label validation 132-135)
+    Verified handle_list_sandboxes (line 256, list_messages or list_with_selector)
+    Verified handle_get_sandbox (line 235, get_message_by_name)
+    Verified handle_delete_sandbox_inner (line 496, object_id() at 511)
+    Verified handle_watch_sandbox (line 575, subscribes before snapshot)
+    Verified handle_exec_sandbox (line 803, relay session)
+    Verified handle_create_provider (line 1150, no Principal usage)
+    Verified handle_list_providers (line 1199, list_provider_records)
+    Verified handle_update_provider (line 1890, CAS with resource_version)
+    Verified handle_delete_provider (line 2261, checks blocking sandboxes)
+    Confirmed: NO handler uses Principal or Identity directly
+    Verified Principal insertion at multiplex.rs line 623
+    Verified SandboxIndex Inner (lines 17-20, 2 fields)
+
+  Agent 3 (Config & K8s Driver):
+    Verified Config struct (config.rs, lines 329-403, ~16 fields)
+    Verified OidcConfig (lines 461-493, HAS deny_unknown_fields at 462)
+    Verified OidcConfig defaults (jwks_ttl=3600, roles_claim=realm_access.roles,
+      admin_role=openshell-admin, user_role=openshell-user)
+    Verified GatewayFileSection (config_file.rs, lines 73-161)
+    Verified label constants (driver_utils.rs, lines 14-28, 5 constants)
+    Confirmed: NO sandbox_labels() in driver_utils.rs
+    Verified sandbox_labels() in driver.rs (lines 857-865, 2 labels only)
+    Verified pod creation (driver.rs, line 599, labels from sandbox_labels())
+    Verified ServerState (lib.rs, lines 88-150, ~16 fields, no ownership)
+    Verified Store API: put_if (232), list (306), list_with_selector (328),
+      get_by_name (287), labels as Option<String> JSON
+
+  Agent 4 (Helm Chart):
+    Verified Chart.yaml: name="helm-chart", version 0.0.0
+    Verified values.yaml: server.oidc.audience="openshell-cli",
+      server.sandboxNamespace defaults to Release.Namespace
+    Verified _helpers.tpl: 17 helpers, openshell.labels at lines 34-41,
+      openshell.validateValues at 180-199
+    Verified _gateway-workload.tpl: pod labels at lines 18-22
+    Verified gateway-config.yaml: TOML sections, [openshell.gateway.oidc]
+      at lines 92-110
+    Verified clusterrole.yaml: name={{fullname}}-node-reader (line 7)
+    Verified clusterrolebinding.yaml: same name pattern
+    Verified certgen.yaml: SANs via --server-san (lines 106-115),
+      defaultServerDnsNames at helpers 151-163
+    Listed templates dir: 16 files total
+
+Phase 3: Plan Construction
+  Wrote 20-step plan from scratch incorporating:
+  - All 17 pre-fixed issues from V1-R1 and V2-R1
+  - Fresh verified line numbers from 4 exploration agents
+  - Correct Helm chart details (chart name, values paths, template files)
+  - Improved OwnershipEnforcement design preventing admin_role bug by construction
+  - Known limitations section (name uniqueness, watch bus, pre-existing resources)
+  - Complete test plan with 26+ test cases
+
+Phase 4: Quality Assurance
+  Cross-checked every code snippet against verified codebase patterns:
+  - Principal extraction uses request.extensions().get::<Principal>()
+  - object_id() pattern for sandbox ID extraction
+  - BTreeMap for K8s labels (matching driver.rs pattern)
+  - HashMap for persistence labels (matching ObjectRecord pattern)
+  - #[serde(deny_unknown_fields)] compatible additions
+  - Helm template indentation and conditional rendering syntax
+
+2. ITERATION EVOLUTION
+================================================================================
+
+The following describes the progression across all iterations:
+
+V1 (Initial Plan):
+  - First comprehensive plan for multi-tenant support
+  - 18 steps covering per-user ownership + gateway-per-tenant
+  - V1-R1 review found 11 issues (3 critical, 3 high, 3 medium, 2 low):
+    * Critical: Principal extraction pattern wrong, label access pattern
+      wrong, OidcClaims.extra type wrong
+    * High: object_id() pattern missed, watch/exec handlers missed,
+      Helm pod template wrong file
+    * Medium: deny_unknown_fields implications, GatewayFileSection
+      constraints, scope requirement missed
+    * Low: SandboxIndex optional marking, admin bypass design
+
+V2 (Rebuilt Plan Incorporating V1-R1):
+  - All 11 V1-R1 fixes integrated from the start
+  - Restructured to 20 steps with explicit dependency graph
+  - Added 6 corrections from fresh source verification
+  - V2-R1 review found 6 additional issues (1 high, 2 medium, 3 low):
+    * HIGH: Provider runtime guard uses empty admin_role when ownership
+      disabled -- functional regression that would break admin provider
+      creation in OIDC-enabled, ownership-disabled deployments
+    * MEDIUM: OidcConfig deny_unknown_fields incorrectly claimed absent;
+      provider:write scope requirement not documented
+    * LOW: Dead helper function with wrong trait bounds; pod labels
+      targeting wrong template file; ClusterRole name drops suffix
+
+V3 (Current -- From Scratch):
+  - Built from scratch with ALL 17 prior issues pre-fixed
+  - Fresh codebase verification with 4 parallel exploration agents
+  - Key improvements over V2:
+
+    1. Correct OwnershipEnforcement Design (prevents R2-1 by construction):
+       ownership_config() ALWAYS populates admin_role from OIDC config,
+       regardless of whether ownership is enabled. The V2 design required
+       a separate code path to read admin_role from state.config.oidc
+       when ownership was disabled. V3 eliminates this complexity by
+       ensuring admin_role is always populated from the same source.
+
+    2. Verified Line Numbers:
+       All line numbers confirmed against current OpenShell HEAD via
+       4 parallel exploration agents. No unverified structural claims.
+
+    3. Correct Helm Chart Details:
+       - Chart name is "helm-chart" (V2 used "openshell")
+       - Values path is server.oidc.* (V2 used oidc.*)
+       - Sandbox namespace is server.sandboxNamespace (V2 used driver.namespace)
+       - Template directory has 16 files (V2 had incomplete list)
+
+    4. Cleaner Tenant Label Architecture:
+       V3 adds tenant labels to the openshell.labels helper (which all
+       resources use), rather than modifying individual template files.
+       This ensures comprehensive coverage without per-file changes.
+       V2 required modifying _gateway-workload.tpl; V3 requires only
+       _helpers.tpl (the labels helper).
+
+    5. No Dead Code:
+       V2 included a labels_from_metadata helper with incorrect trait
+       bounds that was never called. V3 has no helper function -- uses
+       the inline pattern throughout, which is clearer and avoids the
+       compile error.
+
+    6. Known Limitations Section:
+       V3 adds Section 10 documenting three known limitations:
+       - Global name uniqueness constraint (with future migration path)
+       - Watch bus not tenant-filtered (with explanation of why it's safe)
+       - Pre-existing resources without owner labels (with admin fallback)
+
+    7. Complete Test Plan:
+       V3's Step 20 provides actual Rust test code for 13 ownership
+       module unit tests, 5 provider ownership tests, 8 integration
+       tests, and Helm template validation tests. V2 had test
+       descriptions without code.
+
+    8. Better Risk Analysis:
+       V3's risk analysis includes 12 risks with specific mitigations.
+       Risk #5 (admin role source) is explicitly marked as "MITIGATED
+       BY DESIGN" since the V3 ownership_config() design prevents it.
+
+3. CONVERGENCE ASSESSMENT
+================================================================================
+
+Issue count by iteration:
+  V1-R1:  11 issues found (3 critical, 3 high, 3 medium, 2 low)
+  V2-R1:   6 issues found (0 critical, 1 high, 2 medium, 3 low)
+  V3:      0 known issues (all 17 prior issues pre-fixed)
+
+Quality trend:
+  V1:  First draft -- correct architecture, many implementation errors
+  V2:  Major improvement -- correct patterns, residual config/template bugs
+  V3:  Production-ready -- verified against source, defensive design patterns
+
+Architectural stability:
+  The two-layer architecture (per-user ownership + gateway-per-tenant) has
+  been stable since V1. No architectural changes across iterations. All
+  improvements have been implementation-level corrections:
+  - Correct Rust patterns (Principal extraction, label access, object_id)
+  - Correct serde behavior (deny_unknown_fields + default)
+  - Correct Helm patterns (shared partials, suffix preservation, values paths)
+  - Correct authorization logic (admin_role source, scope requirements)
+
+Key design decision validated across iterations:
+  The ownership_config() method on ServerState that always populates
+  admin_role from OIDC config is the V3 innovation that prevents the
+  most serious bug found in V2 (Issue R2-1). This design makes the
+  bug impossible by construction, rather than relying on correct code
+  paths in each handler.
+
+4. PLAN STATISTICS
+================================================================================
+
+  Steps:                    20 (same as V2)
+  Rust files modified:      16 (same as V2)
+  Helm files modified:       9 (same as V2, corrected file names)
+  New Rust files:            1 (auth/ownership.rs)
+  New Helm files:            2 (resourcequota.yaml, limitrange.yaml)
+  New Cargo dependencies:    0
+  Unit test cases:          13+ (ownership module)
+  Integration test cases:   13+ (provider + sandbox ownership)
+  Helm test scenarios:       5+ (template validation)
+  Prior issues pre-fixed:   17 (11 from V1-R1 + 6 from V2-R1)
+  Known limitations:         3 (documented with mitigations)
+  Risk items:               12 (all with specific mitigations)
+  Estimated effort:         16-21 developer days (unchanged)
+  Milestones:                7 (Foundation, Sandbox, Provider, Driver,
+                               Helm, CLI, Testing)
+
+================================================================================
+END OF V3 SUMMARY
+================================================================================
