@@ -42,6 +42,7 @@ def load_config(config_path: Path) -> ScanConfig:
     return ScanConfig(
         repo_path=repo_path,
         fix_commit=fix_cfg["commit"],
+        vuln_commit=fix_cfg.get("vuln_commit"),
         branches=scan_cfg.get("branches", []),
         branch_pattern=scan_cfg.get("branch_pattern"),
         use_llm=llm_cfg.get("enabled", False),

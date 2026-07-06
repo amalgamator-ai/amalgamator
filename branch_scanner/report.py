@@ -5,12 +5,13 @@ Report generation — JSON and human-readable table output.
 import json
 from pathlib import Path
 
-from .git_utils import FixStatus
+from .triage import FixStatus
 from .scanner import ScanReport
 
 STATUS_ICON = {
     FixStatus.EXACT_MATCH:    "✓  ALREADY FIXED (exact commit)",
     FixStatus.EQUIVALENT:     "✓  ALREADY FIXED (equivalent patch)",
+    FixStatus.NOT_AFFECTED:   "—  NOT AFFECTED  (branch predates the bug)",
     FixStatus.LIKELY_PRESENT: "~  LIKELY FIXED  (file diff)",
     FixStatus.NEEDS_FIX:      "✗  NEEDS FIX",
     FixStatus.AMBIGUOUS:      "?  AMBIGUOUS     (recommend LLM check)",
@@ -20,6 +21,7 @@ STATUS_ICON = {
 STATUS_SYMBOL = {
     FixStatus.EXACT_MATCH:    "ALREADY_FIXED",
     FixStatus.EQUIVALENT:     "ALREADY_FIXED",
+    FixStatus.NOT_AFFECTED:   "NOT_AFFECTED",
     FixStatus.LIKELY_PRESENT: "LIKELY_FIXED",
     FixStatus.NEEDS_FIX:      "NEEDS_FIX",
     FixStatus.AMBIGUOUS:      "AMBIGUOUS",
@@ -55,6 +57,8 @@ def print_report(report: ScanReport) -> None:
     print("-" * 70)
     print(f"  NEEDS FIX    : {len(report.needs_fix)} branch(es)")
     print(f"  ALREADY FIXED: {len(report.already_fixed)} branch(es)")
+    if report.not_affected:
+        print(f"  NOT AFFECTED : {len(report.not_affected)} branch(es) — predates the bug")
     if report.ambiguous:
         print(f"  AMBIGUOUS    : {len(report.ambiguous)} branch(es) — review manually")
     if report.errors:

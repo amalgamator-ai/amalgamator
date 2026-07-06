@@ -15,8 +15,13 @@ repository:
 
 fix:
   # The commit SHA that contains the fix (from source/main branch)
-  commit: "REPLACE_WITH_COMMIT_SHA"
+  commit: "REPLACE_WITH_FIX_COMMIT_SHA"
   description: "CVE-2024-XXXXX: description of the fix"
+
+  # Optional: SHA of the commit that INTRODUCED the bug.
+  # When set, branches that predate this commit are marked NOT_AFFECTED
+  # (they never had the bug, so they don't need the fix).
+  # vuln_commit: "REPLACE_WITH_VULN_COMMIT_SHA"
 
 scan:
   # Option A: auto-discover branches matching a pattern
