@@ -8,24 +8,29 @@ Designed to feed directly into the [Amalgamator](../auto_bug_fix/) pipeline — 
 
 ## How it works
 
-For each branch, three checks run in order — the first conclusive result wins:
+For each branch, checks run in order — the first conclusive result wins:
 
-| Level | Method | What it detects |
+| Level | Function | What it detects |
 |---|---|---|
-| 1 | `git merge-base --is-ancestor` | Exact commit already on branch |
-| 2 | `git cherry` | Same patch content with a different SHA (e.g. manual cherry-pick) |
-| 3 | File diff heuristic | 85%+ of the fix's added lines are present in the branch |
-| 4 *(optional)* | LLM semantic check | Claude resolves `AMBIGUOUS` cases |
+| 1 | `git_is_ancestor()` | Exact fix commit already on branch |
+| 2 | `forward_patch_id_check()` | Same patch content, different SHA (e.g. manual cherry-pick) |
+| 3 | `backward_patch_id_check()` | Branch predates the bug — never affected, skip |
+| 4 | File diff heuristic | 85%+ of the fix's added lines present in branch files |
+| 5 *(optional)* | LLM semantic check | Claude resolves remaining `AMBIGUOUS` cases |
+
+Levels 1–3 reuse existing functions from `auto_bug_fix` — no duplication.
+Level 4 (file diff heuristic) is new and also fills a gap in Phase 0.
 
 **Possible results per branch:**
 
 | Status | Meaning |
 |---|---|
 | `✓ ALREADY FIXED (exact commit)` | Same SHA is in this branch's history |
-| `✓ ALREADY FIXED (equivalent patch)` | Different SHA but identical patch |
-| `~ LIKELY FIXED (file diff)` | Fix lines found via heuristic — verify manually |
-| `✗ NEEDS FIX` | Fix is absent — backport needed |
-| `? AMBIGUOUS` | Inconclusive — enable LLM check |
+| `✓ ALREADY FIXED (equivalent patch)` | Different SHA but identical patch content |
+| `—  NOT AFFECTED` | Branch predates the bug — no fix needed |
+| `~  LIKELY FIXED (file diff)` | Fix lines found via heuristic — verify manually |
+| `✗  NEEDS FIX` | Fix is absent — backport needed |
+| `?  AMBIGUOUS` | Inconclusive — enable LLM check |
 
 ---
 
@@ -54,6 +59,10 @@ repository:
 fix:
   commit: "d3b1036cc"            # SHA of the fix on the source branch (main)
   description: "oci: use shared lock for read-only stats collection"
+
+  # Optional: SHA of the commit that INTRODUCED the bug.
+  # Branches that predate this commit are marked NOT_AFFECTED (no false positives).
+  # vuln_commit: "abc1234"
 
 scan:
   # Auto-discover branches matching a pattern:
@@ -218,14 +227,14 @@ python -m branch_scanner.generate_config \
     {
       "branch": "release-1.33",
       "status": "NEEDS_FIX",
-      "method": "git cherry",
-      "detail": "Fix not found on origin/release-1.33",
+      "method": "file diff heuristic",
+      "detail": "Fix lines not found in branch files",
       "changed_files": ["server/container_server.go"]
     },
     {
       "branch": "release-1.37",
       "status": "ALREADY_FIXED",
-      "method": "git merge-base --is-ancestor",
+      "method": "git_is_ancestor",
       "detail": "Commit d3b1036cc is a direct ancestor of origin/release-1.37",
       "changed_files": ["server/container_server.go"]
     }
