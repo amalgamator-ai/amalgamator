@@ -11,12 +11,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .git_utils import (
-    BranchCheckResult,
-    FixStatus,
-    check_branch,
-    get_remote_branches,
-)
+from .triage import BranchCheckResult, FixStatus, check_branch
+from .git_utils import get_remote_branches
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +26,7 @@ class ScanConfig:
     use_llm: bool = False          # enable LLM for AMBIGUOUS cases
     llm_model: str = "claude-opus-4-6"
     fix_description: str = ""
+    vuln_commit: str | None = None  # commit that introduced the bug (enables NOT_AFFECTED detection)
 
 
 @dataclass
@@ -48,6 +45,10 @@ class ScanReport:
         return [r for r in self.results if r.status in (
             FixStatus.EXACT_MATCH, FixStatus.EQUIVALENT, FixStatus.LIKELY_PRESENT
         )]
+
+    @property
+    def not_affected(self) -> list[BranchCheckResult]:
+        return [r for r in self.results if r.status == FixStatus.NOT_AFFECTED]
 
     @property
     def ambiguous(self) -> list[BranchCheckResult]:
@@ -222,7 +223,10 @@ def run_scan(config: ScanConfig) -> ScanReport:
 
     for branch in branches:
         log.info("Checking branch: %s", branch)
-        result = check_branch(config.repo_path, branch, config.fix_commit)
+        result = check_branch(
+            config.repo_path, branch, config.fix_commit,
+            vuln_commit=config.vuln_commit,
+        )
 
         # Optionally resolve ambiguous cases with LLM
         if result.status == FixStatus.AMBIGUOUS and config.use_llm:
