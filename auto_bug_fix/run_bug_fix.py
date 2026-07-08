@@ -1280,7 +1280,7 @@ def _run_pipeline_phases(
         if state.red_passed_output:
             with tracker.phase("Phase 1.5 — RED triage"):
                 triage_result = phase_1_5_red_triage(config, claude_config, state, tracker)
-                verdict = triage_result.get("verdict", "inconclusive")
+                verdict = triage_result.get("verdict", "inconclusive").strip().lower()
                 tracker.record_gate("red_triage_verdict", verdict)
                 state.dossier.add(
                     "RED triage",
@@ -1291,7 +1291,11 @@ def _run_pipeline_phases(
                 if verdict == "not_vulnerable":
                     raise PipelineStop(f"RED triage: target branch is not vulnerable — {triage_result.get('reasoning', '')[:200]}")
 
-                if verdict == "vulnerable":
+                if verdict == "mitigated":
+                    log.info("RED triage: root cause present but mitigated — porting fix for defense-in-depth")
+                    state.red_passed_output = ""
+
+                elif verdict == "vulnerable":
                     replacement = triage_result.get("replacement_test_file")
                     if replacement and os.path.exists(replacement):
                         log.info("RED triage produced replacement test — rerunning RED check")
