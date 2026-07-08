@@ -505,3 +505,129 @@ def test_run_targets_worktree_failure_continues(mock_pipeline, mock_wt_add, mock
     assert results[1].cost_usd == 3.21
 
     assert mock_pipeline.call_count == 1
+
+
+# --- Phase 1.5 RED triage tests ---
+
+from auto_bug_fix.run_bug_fix import phase_1_5_red_triage
+from auto_bug_fix.bug_fix_prompts import RED_TRIAGE_FILE
+from common.claude_utils import ClaudeConfig
+
+
+def _make_claude_config():
+    return ClaudeConfig(
+        model="test-model",
+        allowed_tools=["Read", "Write", "Bash"],
+        perm_mode="acceptEdits",
+        cwd="/tmp/repo",
+    )
+
+
+def _make_state_with_red_pass():
+    state = PipelineState()
+    state.red_passed_output = "PASSED tests/test_security.py::test_attr_filter"
+    state.ported_test_files = ["tests/test_security.py"]
+    state.triage_assessment = {"commit_type": "security", "estimated_difficulty": "MEDIUM"}
+    return state
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_red_triage_not_vulnerable(mock_claude, tmp_path):
+    config = _make_config(repo_path=str(tmp_path), build_dir=str(tmp_path))
+    state = _make_state_with_red_pass()
+    triage_json = {
+        "verdict": "not_vulnerable",
+        "reasoning": "The sandbox blocks this vector via existing SandboxedFormatter",
+        "test_analysis": "Test hits call() path which is already protected",
+        "replacement_test_file": None,
+    }
+    triage_file = tmp_path / RED_TRIAGE_FILE
+    triage_file.write_text(json.dumps(triage_json))
+
+    result = phase_1_5_red_triage(config, _make_claude_config(), state, None)
+    assert result["verdict"] == "not_vulnerable"
+    assert mock_claude.called
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_red_triage_vulnerable_with_replacement(mock_claude, tmp_path):
+    config = _make_config(repo_path=str(tmp_path), build_dir=str(tmp_path))
+    state = _make_state_with_red_pass()
+    replacement_path = str(tmp_path / "tests" / "test_new.py")
+    os.makedirs(os.path.dirname(replacement_path), exist_ok=True)
+    with open(replacement_path, "w") as f:
+        f.write("def test_real_vuln(): assert False")
+
+    triage_json = {
+        "verdict": "vulnerable",
+        "reasoning": "The |attr filter bypasses call() via custom filter path",
+        "test_analysis": "Ported test hits call() but real vector bypasses it",
+        "replacement_test_file": replacement_path,
+    }
+    triage_file = tmp_path / RED_TRIAGE_FILE
+    triage_file.write_text(json.dumps(triage_json))
+
+    result = phase_1_5_red_triage(config, _make_claude_config(), state, None)
+    assert result["verdict"] == "vulnerable"
+    assert result["replacement_test_file"] == replacement_path
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_red_triage_inconclusive(mock_claude, tmp_path):
+    config = _make_config(repo_path=str(tmp_path), build_dir=str(tmp_path))
+    state = _make_state_with_red_pass()
+    triage_json = {
+        "verdict": "inconclusive",
+        "reasoning": "Cannot determine with confidence",
+        "test_analysis": "Unclear code path",
+        "replacement_test_file": None,
+    }
+    triage_file = tmp_path / RED_TRIAGE_FILE
+    triage_file.write_text(json.dumps(triage_json))
+
+    result = phase_1_5_red_triage(config, _make_claude_config(), state, None)
+    assert result["verdict"] == "inconclusive"
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_red_triage_no_output_file(mock_claude, tmp_path):
+    config = _make_config(repo_path=str(tmp_path), build_dir=str(tmp_path))
+    state = _make_state_with_red_pass()
+
+    result = phase_1_5_red_triage(config, _make_claude_config(), state, None)
+    assert result == {}
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_red_triage_malformed_json(mock_claude, tmp_path):
+    config = _make_config(repo_path=str(tmp_path), build_dir=str(tmp_path))
+    state = _make_state_with_red_pass()
+    triage_file = tmp_path / RED_TRIAGE_FILE
+    triage_file.write_text("not valid json {{{")
+
+    result = phase_1_5_red_triage(config, _make_claude_config(), state, None)
+    assert result == {}
+
+
+def test_pipeline_state_red_passed_output_default():
+    state = PipelineState()
+    assert state.red_passed_output == ""
+
+
+@patch("auto_bug_fix.run_bug_fix.capture_output")
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_red_triage_integration_not_vulnerable_raises_stop(mock_claude, mock_capture, tmp_path):
+    """End-to-end: RED passes → triage says not_vulnerable → PipelineStop."""
+    from auto_bug_fix.run_bug_fix import phase_1_baseline_and_red
+    config = _make_config(
+        repo_path=str(tmp_path), build_dir=str(tmp_path),
+        test_command="pytest tests/", build_command="",
+    )
+    state = PipelineState()
+    state.ported_test_files = ["tests/test_security.py"]
+    state.triage_assessment = {"commit_type": "security"}
+
+    mock_capture.return_value = (0, "all tests passed")
+
+    phase_1_baseline_and_red(config, _make_claude_config(), state)
+    assert state.red_passed_output == "all tests passed"
