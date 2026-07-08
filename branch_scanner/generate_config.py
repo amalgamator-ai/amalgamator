@@ -20,7 +20,8 @@ from pathlib import Path
 
 import yaml
 
-from .git_utils import FixStatus, check_branch, get_commit_changed_files
+from auto_bug_fix.git_tools import git_show_files
+from .triage import FixStatus, check_branch
 from .run_scanner import load_config
 from .scanner import ScanConfig, run_scan
 
@@ -78,7 +79,7 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
     log.info("Mode: generate — scanning branches and writing YAMLs to %s", output_dir)
 
     report = run_scan(config)
-    changed_files = get_commit_changed_files(config.repo_path, config.fix_commit)
+    changed_files = git_show_files(str(config.repo_path), config.fix_commit)
 
     if not report.needs_fix:
         log.info("No branches need the fix — nothing to generate.")

@@ -22,7 +22,7 @@ from enum import Enum
 from pathlib import Path
 
 # Reuse existing detection functions from the pipeline — no reimplementation
-from auto_bug_fix.git_tools import git_is_ancestor, git_cat_file_exists
+from auto_bug_fix.git_tools import git_is_ancestor, git_cat_file_exists, git_show_files
 from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
 
 log = logging.getLogger(__name__)
@@ -59,16 +59,7 @@ def _run(cmd: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
         return 1, "", str(e)
 
 
-def _get_changed_files(repo_path: Path, commit: str) -> list[str]:
-    """Files touched by a commit."""
-    rc, out, _ = _run(
-        ["git", "diff-tree", "--no-commit-id", "-r", "--name-only", commit],
-        cwd=repo_path,
-    )
-    return [f for f in out.splitlines() if f] if rc == 0 else []
-
-
-def _get_remote_branches(repo_path: Path, pattern: str | None = None) -> list[str]:
+def get_remote_branches(repo_path: Path, pattern: str | None = None) -> list[str]:
     """List remote branches, optionally filtered by a glob pattern."""
     import fnmatch
     rc, out, _ = _run(["git", "branch", "-r", "--format=%(refname:short)"], cwd=repo_path)
@@ -110,12 +101,21 @@ def _check_file_diff(
     if not added_lines:
         return FixStatus.AMBIGUOUS
 
-    rc, branch_content, _ = _run(
-        ["git", "show", f"origin/{branch}:{changed_files[0]}"],
-        cwd=repo_path,
-    )
-    if rc != 0:
-        return FixStatus.AMBIGUOUS
+    # Check across ALL changed files, not just the first one
+    branch_content = ""
+    files_found = 0
+    for f in changed_files:
+        rc, content, _ = _run(
+            ["git", "show", f"origin/{branch}:{f}"],
+            cwd=repo_path,
+        )
+        if rc == 0:
+            files_found += 1
+            branch_content += content
+
+    # If none of the changed files exist on the branch, it predates this code
+    if files_found == 0:
+        return FixStatus.NOT_AFFECTED
 
     matched = sum(1 for line in added_lines if line.strip() in branch_content)
     ratio = matched / len(added_lines)
@@ -148,7 +148,7 @@ def check_branch(
     """
     repo = str(repo_path)
     target = f"origin/{branch}"
-    changed_files = _get_changed_files(repo_path, fix_commit)
+    changed_files = git_show_files(repo, fix_commit)
 
     # Level 1: exact commit — reuses git_is_ancestor from auto_bug_fix
     if git_is_ancestor(repo, fix_commit, target):
@@ -161,7 +161,11 @@ def check_branch(
         )
 
     # Level 2: equivalent patch — reuses forward_patch_id_check from auto_bug_fix
-    match = forward_patch_id_check(repo, fix_commit, target)
+    try:
+        match = forward_patch_id_check(repo, fix_commit, target)
+    except Exception as e:
+        log.debug("forward_patch_id_check failed for %s: %s — skipping to Level 4", branch, e)
+        match = None
     if match:
         return BranchCheckResult(
             branch=branch,
@@ -174,7 +178,11 @@ def check_branch(
     # Level 3: backward patch-id — reuses backward_patch_id_check from auto_bug_fix
     # If vuln_commit is not on the branch, the branch predates the bug entirely.
     if vuln_commit:
-        vuln_on_branch = backward_patch_id_check(repo, vuln_commit, target)
+        try:
+            vuln_on_branch = backward_patch_id_check(repo, vuln_commit, target)
+        except Exception as e:
+            log.debug("backward_patch_id_check failed for %s: %s — skipping", branch, e)
+            vuln_on_branch = None
         seed_exists = any(
             git_cat_file_exists(repo, target, f) for f in changed_files[:3]
         )
