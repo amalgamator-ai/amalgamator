@@ -573,6 +573,26 @@ def test_red_triage_vulnerable_with_replacement(mock_claude, tmp_path):
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_red_triage_mitigated(mock_claude, tmp_path):
+    config = _make_config(repo_path=str(tmp_path), build_dir=str(tmp_path))
+    state = _make_state_with_red_pass()
+    triage_json = {
+        "verdict": "mitigated",
+        "reasoning": "Root cause present but call() intercepts the exploit",
+        "test_analysis": "do_attr uses raw getattr but call() catches format methods",
+        "root_cause_present": True,
+        "mitigation_mechanism": "SandboxedEnvironment.call() → inspect_format_method()",
+        "replacement_test_file": None,
+    }
+    triage_file = tmp_path / RED_TRIAGE_FILE
+    triage_file.write_text(json.dumps(triage_json))
+
+    result = phase_1_5_red_triage(config, _make_claude_config(), state, None)
+    assert result["verdict"] == "mitigated"
+    assert result["root_cause_present"] is True
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
 def test_red_triage_inconclusive(mock_claude, tmp_path):
     config = _make_config(repo_path=str(tmp_path), build_dir=str(tmp_path))
     state = _make_state_with_red_pass()
