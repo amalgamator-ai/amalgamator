@@ -11,8 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .triage import BranchCheckResult, FixStatus, check_branch
-from .git_utils import get_remote_branches
+from .triage import BranchCheckResult, FixStatus, check_branch, get_remote_branches
 
 log = logging.getLogger(__name__)
 
@@ -71,20 +70,6 @@ def resolve_branches(config: ScanConfig) -> list[str]:
     return discovered
 
 
-def _make_anthropic_client():
-    """
-    Create an Anthropic client, using Vertex AI if CLAUDE_CODE_USE_VERTEX is set,
-    otherwise fall back to a direct API key.
-    """
-    import os
-    if os.environ.get("CLAUDE_CODE_USE_VERTEX"):
-        from anthropic import AnthropicVertex
-        project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
-        region = os.environ.get("CLOUD_ML_REGION", "us-east5")
-        return AnthropicVertex(project_id=project, region=region)
-    else:
-        import anthropic
-        return anthropic.Anthropic()
 
 
 def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResult:
@@ -96,7 +81,8 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
     try:
         import subprocess
 
-        client = _make_anthropic_client()
+        from common.claude_utils import make_anthropic_client
+        client = make_anthropic_client()
 
         # Get the fix diff
         fix_diff = subprocess.run(
@@ -176,7 +162,7 @@ Provide a one-sentence explanation after your answer."""
 
         response = client.messages.create(
             model=config.llm_model,
-            max_tokens=256,
+            max_tokens=4096,
             messages=[{"role": "user", "content": prompt}]
         )
         answer = response.content[0].text.strip()
