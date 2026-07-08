@@ -85,8 +85,10 @@ from auto_bug_fix.bug_fix_prompts import (
     TestPortAgentPrompt,
     NarrowResolutionAgentPrompt,
     BuildErrorRecoveryPrompt,
+    RedTriagePrompt,
     SEMANTIC_TRIAGE_FILE,
     TEST_PORT_MANIFEST_FILE,
+    RED_TRIAGE_FILE,
 )
 
 LOG_FILE = "__run_log_bug_fix.txt"
@@ -94,7 +96,9 @@ DOSSIER_FILE = "dossier.md"
 _PIPELINE_ARTIFACTS = (
     SEMANTIC_TRIAGE_FILE,
     TEST_PORT_MANIFEST_FILE,
+    RED_TRIAGE_FILE,
     os.path.join("runs", SEMANTIC_TRIAGE_FILE),
+    os.path.join("runs", RED_TRIAGE_FILE),
 )
 
 log = logging.getLogger(__name__)
@@ -158,6 +162,7 @@ class PipelineState:
     baseline_build_exit: int = 0
     baseline_build_output: str = ""
     baseline_verification: list[dict] = field(default_factory=list)
+    red_passed_output: str = ""
 
 
 def phase_0_triage(
@@ -507,10 +512,12 @@ def phase_1_baseline_and_red(
         is_bugfix = state.triage_assessment.get("commit_type", "").lower() in _BUGFIX_TYPES
         if red_exit == 0:
             if state.ported_test_files and is_bugfix:
-                raise PipelineEscalation("RED check passed — target may already be fixed or test is inapplicable")
-            log.info("Baseline tests pass — %s",
-                     "feature/refactor commit, RED check not applicable" if not is_bugfix
-                     else "no ported vulnerability test available — proceeding")
+                log.warning("RED check passed — deferring to Phase 1.5 triage")
+                state.red_passed_output = red_output
+            else:
+                log.info("Baseline tests pass — %s",
+                         "feature/refactor commit, RED check not applicable" if not is_bugfix
+                         else "no ported vulnerability test available — proceeding")
     else:
         log.info("Baseline test: skipped (no test command)")
 
@@ -538,6 +545,50 @@ def phase_1_baseline_and_red(
             log.info("Baseline verification passed: %s", vcmd)
         else:
             log.info("Baseline verification failed (exit %d, pre-existing): %s", entry["exit_code"], vcmd)
+
+
+def phase_1_5_red_triage(
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+) -> dict:
+    """LLM triage when RED check passes — determine if vulnerability exists via a different vector."""
+    context = create_context_str(claude_config, config)
+    triage_json = json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "{}"
+
+    prompt = RedTriagePrompt(
+        context=context,
+        bug_description=config.bug_description,
+        test_output=state.red_passed_output,
+        ported_test_files=state.ported_test_files,
+        triage_assessment=triage_json,
+    )
+
+    claude_config_triage = ClaudeConfig(
+        model=claude_config.model,
+        allowed_tools=claude_config.allowed_tools,
+        perm_mode=claude_config.perm_mode,
+        cwd=config.repo_path,
+    )
+
+    asyncio.run(claude_run(claude_config_triage, [prompt.prompt()], tracker=tracker))
+
+    triage_candidates = [
+        os.path.join(config.repo_path, RED_TRIAGE_FILE),
+        os.path.join(config.repo_path, "runs", RED_TRIAGE_FILE),
+    ]
+    triage_path = next((p for p in triage_candidates if os.path.exists(p)), None)
+    result = {}
+    if triage_path:
+        try:
+            with open(triage_path) as f:
+                result = json.load(f)
+            log.info("RED triage verdict=%s", result.get("verdict", "?"))
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("Failed to parse RED triage output: %s", e)
+
+    return result
 
 
 MAX_ERROR_CHARS = 50_000
@@ -1225,6 +1276,42 @@ def _run_pipeline_phases(
                 status = "PASSED" if entry["exit_code"] == 0 else f"FAILED (exit {entry['exit_code']}, pre-existing)"
                 baseline_summary += f"\n{entry['cmd']}: {status}"
             state.dossier.add("Baseline (clean target branch)", baseline_summary, "Phase 1")
+
+        if state.red_passed_output:
+            with tracker.phase("Phase 1.5 — RED triage"):
+                triage_result = phase_1_5_red_triage(config, claude_config, state, tracker)
+                verdict = triage_result.get("verdict", "inconclusive")
+                tracker.record_gate("red_triage_verdict", verdict)
+                state.dossier.add(
+                    "RED triage",
+                    f"Verdict: {verdict}\n{triage_result.get('reasoning', 'no reasoning')}",
+                    "Phase 1.5",
+                )
+
+                if verdict == "not_vulnerable":
+                    raise PipelineStop(f"RED triage: target branch is not vulnerable — {triage_result.get('reasoning', '')[:200]}")
+
+                if verdict == "vulnerable":
+                    replacement = triage_result.get("replacement_test_file")
+                    if replacement and os.path.exists(replacement):
+                        log.info("RED triage produced replacement test — rerunning RED check")
+                        subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+                        git_commit(config.repo_path, f"RED triage replacement test for {config.issue_id} (Phase 1.5)")
+                        rerun_exit, rerun_output = capture_output(
+                            [config.test_command], config.build_dir, timeout=config.command_timeout,
+                        )
+                        if rerun_exit != 0:
+                            log.info("RED triage replacement test confirms vulnerability (exit %d) — continuing", rerun_exit)
+                            state.baseline = parse_test_failures(rerun_output, "")
+                            state.red_passed_output = ""
+                        else:
+                            log.warning("RED triage replacement test also passes — escalating to Phase 4b")
+                            raise PipelineEscalation("RED triage: replacement test also passes on unmodified code")
+                    else:
+                        log.warning("RED triage says vulnerable but no valid replacement test — escalating")
+                        raise PipelineEscalation("RED triage: vulnerable verdict but no replacement test produced")
+                else:
+                    raise PipelineEscalation(f"RED triage inconclusive — escalating to Phase 4b")
 
         subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
         status = git_status_porcelain(config.repo_path)

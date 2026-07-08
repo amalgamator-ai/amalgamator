@@ -398,3 +398,104 @@ Do NOT attempt partial workarounds — either the fix compiles cleanly or it doe
         )
 
 
+RED_TRIAGE_FILE = "red_triage.json"
+
+
+@dataclass
+class RedTriagePrompt:
+    """Prompt for Phase 1.5 — LLM triage when the RED check passes unexpectedly.
+
+    When the ported vulnerability test passes on unmodified target code, the test
+    may be exercising the wrong code path rather than proving the branch is safe.
+    This prompt asks the LLM to investigate and either produce a better test or
+    confirm the branch is genuinely not vulnerable.
+    """
+    context: str
+    bug_description: str
+    test_output: str
+    ported_test_files: list[str]
+    triage_assessment: str
+
+    prompt_template: ClassVar[str] = """\
+{context}
+
+You are the RED Triage Agent (Phase 1.5). The pipeline ported a vulnerability test from the \
+upstream fix commit, but the test PASSED on the unmodified target branch. This means one of:
+
+(A) The target branch is genuinely not vulnerable — the test proves it.
+(B) The test exercises the wrong code path — it passes for the wrong reason, and the \
+vulnerability still exists via a different vector.
+
+## Bug / vulnerability description
+<bug_description>
+{bug_description}
+</bug_description>
+
+## Semantic triage assessment (from Phase 0.5)
+<triage>
+{triage_assessment}
+</triage>
+
+## Ported test files
+{ported_test_files}
+
+## Test output (the test that passed on unmodified code)
+<test_output>
+{test_output}
+</test_output>
+
+## Your task
+
+1. **Read the ported test code** in each file listed above. Understand exactly what code path \
+the test exercises.
+
+2. **Read the bug description carefully**. Identify the specific attack vector or vulnerable \
+code path described.
+
+3. **Compare**: Does the test exercise the exact vulnerability vector described? Or does it \
+hit a different code path that happens to be safe (e.g., a pre-existing mitigation that \
+catches the test's specific input but doesn't address the root cause)?
+
+4. **Investigate the target branch code**: Read the relevant production code on the current \
+branch. Trace the code path that the vulnerability description targets. Is it actually \
+protected, or is it exposed?
+
+5. **Decide**:
+   - If the target branch code genuinely blocks the described attack vector through its own \
+logic (not just because the test happens to trigger a different mitigation): verdict is \
+**not_vulnerable**.
+   - If the test is hitting the wrong code path and the actual vulnerability vector is \
+unprotected: verdict is **vulnerable**. In this case, write a NEW test that exercises the \
+actual attack vector. The test MUST fail on the current unmodified code. Run the test to \
+confirm it fails.
+   - If you cannot determine the answer with confidence: verdict is **inconclusive**.
+
+## Output
+
+Write a JSON file to `{output_file}` with this structure:
+
+```json
+{{
+  "verdict": "vulnerable | not_vulnerable | inconclusive",
+  "reasoning": "Detailed explanation of why the test passes and whether the vulnerability exists",
+  "test_analysis": "What code path the ported test actually exercises vs what the vulnerability targets",
+  "replacement_test_file": "absolute path to the new test file, or null if not applicable"
+}}
+```
+
+If verdict is "vulnerable", the replacement test file MUST exist and MUST fail when run with \
+the test command. Verify this before writing the JSON.
+"""
+
+    def prompt(self) -> str:
+        """Render the Phase 1.5 RED triage prompt."""
+        return self.prompt_template.format(
+            context=self.context,
+            bug_description=self.bug_description,
+            test_output=self.test_output[-10000:] if len(self.test_output) > 10000 else self.test_output,
+            ported_test_files="\n".join(f"  - {f}" for f in self.ported_test_files),
+            triage_assessment=self.triage_assessment,
+            output_file=RED_TRIAGE_FILE,
+        )
+
+
