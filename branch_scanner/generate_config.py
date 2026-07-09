@@ -29,6 +29,27 @@ from .scanner import ScanConfig, run_scan
 log = logging.getLogger(__name__)
 
 
+# ── Default branch discovery ───────────────────────────────────────────────────
+
+def _get_default_branch(repo_path: Path) -> str:
+    """
+    Discover the default branch of the remote (e.g. main, master, develop).
+    Uses `git symbolic-ref refs/remotes/origin/HEAD` with a fallback to 'main'.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+            cwd=repo_path, capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            # Returns e.g. "origin/main" — strip the "origin/" prefix
+            return result.stdout.strip().removeprefix("origin/")
+    except Exception:
+        pass
+    log.warning("Could not detect default branch, falling back to 'main'")
+    return "main"
+
+
 # ── Command discovery ─────────────────────────────────────────────────────────
 
 # Files the LLM reads to understand how to build and test the project
@@ -139,6 +160,7 @@ def _make_bug_fix_yaml(
     changed_files: list[str],
     build_command: str = "",
     test_command: str = "",
+    default_branch: str = "main",
 ) -> dict:
     """Produce an auto_bug_fix-compatible YAML dict for one target branch."""
     short = fix_commit[:10]
@@ -151,7 +173,7 @@ def _make_bug_fix_yaml(
             "workdir": f"/tmp/bugfix-{safe_branch}-{short}",
         },
         "branches": {
-            "source": "origin/main",
+            "source": f"origin/{default_branch}",
             "target": f"origin/{target_branch}",
         },
         "fix": {
@@ -188,6 +210,9 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
         log.info("No branches need the fix — nothing to generate.")
         return
 
+    default_branch = _get_default_branch(config.repo_path)
+    log.info("Default branch detected as: %s", default_branch)
+
     # Optionally discover build/test commands once for the whole repo
     build_cmd, test_cmd = "", ""
     if config.discover_commands:
@@ -207,6 +232,7 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
             changed_files=changed_files,
             build_command=build_cmd,
             test_command=test_cmd,
+            default_branch=default_branch,
         )
         safe = result.branch.replace("/", "-").replace(".", "-")
         out_path = output_dir / f"{safe}.yaml"
@@ -298,14 +324,20 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
 
     still_needs: list[str] = []
     already_fixed: list[str] = []
+    not_affected: list[str] = []
     ambiguous: list[str] = []
 
     for branch in branches_to_check:
-        result = check_branch(config.repo_path, branch, fix_commit)
+        result = check_branch(
+            config.repo_path, branch, fix_commit,
+            vuln_commit=config.vuln_commit,
+        )
         if result.status == FixStatus.NEEDS_FIX:
             still_needs.append(branch)
         elif result.status in (FixStatus.EXACT_MATCH, FixStatus.EQUIVALENT, FixStatus.LIKELY_PRESENT):
             already_fixed.append(branch)
+        elif result.status == FixStatus.NOT_AFFECTED:
+            not_affected.append(branch)
         else:
             ambiguous.append(branch)
         log.info("  %s → %s", branch, result.status.value)
@@ -326,6 +358,10 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
         print(f"  ✓ Already fixed ({len(already_fixed)}) — safe to remove from YAML:")
         for b in already_fixed:
             print(f"      - {b}")
+    if not_affected:
+        print(f"  ~ Not affected ({len(not_affected)}) — branch predates the bug, may have been incorrectly included:")
+        for b in not_affected:
+            print(f"      - {b}")
     if ambiguous:
         print(f"  ? Ambiguous ({len(ambiguous)}) — review manually:")
         for b in ambiguous:
@@ -335,6 +371,8 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
 
     if already_fixed:
         print("\nTip: Remove already-fixed branches from the YAML to avoid redundant runs.")
+    if not_affected:
+        print("\nTip: NOT_AFFECTED branches may have been incorrectly added — review and remove if so.")
 
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
