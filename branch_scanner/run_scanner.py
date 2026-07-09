@@ -48,6 +48,7 @@ def load_config(config_path: Path) -> ScanConfig:
         use_llm=llm_cfg.get("enabled", False),
         llm_model=llm_cfg.get("model", "claude-opus-4-6"),
         fix_description=fix_cfg.get("description", ""),
+        discover_commands=llm_cfg.get("discover_commands", False),
     )
 
 

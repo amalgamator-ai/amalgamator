@@ -10,16 +10,13 @@ Designed to feed directly into the [Amalgamator](../auto_bug_fix/) pipeline — 
 
 For each branch, checks run in order — the first conclusive result wins:
 
-| Level | Function | What it detects |
+| Level | Method | What it detects |
 |---|---|---|
 | 1 | `git_is_ancestor()` | Exact fix commit already on branch |
 | 2 | `forward_patch_id_check()` | Same patch content, different SHA (e.g. manual cherry-pick) |
-| 3 | `backward_patch_id_check()` | Branch predates the bug — never affected, skip |
+| 3 | `backward_patch_id_check()` | Branch predates the bug — never affected |
 | 4 | File diff heuristic | 85%+ of the fix's added lines present in branch files |
 | 5 *(optional)* | LLM semantic check | Claude resolves remaining `AMBIGUOUS` cases |
-
-Levels 1–3 reuse existing functions from `auto_bug_fix` — no duplication.
-Level 4 (file diff heuristic) is new and also fills a gap in Phase 0.
 
 **Possible results per branch:**
 
@@ -28,7 +25,7 @@ Level 4 (file diff heuristic) is new and also fills a gap in Phase 0.
 | `✓ ALREADY FIXED (exact commit)` | Same SHA is in this branch's history |
 | `✓ ALREADY FIXED (equivalent patch)` | Different SHA but identical patch content |
 | `—  NOT AFFECTED` | Branch predates the bug — no fix needed |
-| `~  LIKELY FIXED (file diff)` | Fix lines found via heuristic — verify manually |
+| `~  LIKELY FIXED` | Fix lines found via heuristic — verify manually |
 | `✗  NEEDS FIX` | Fix is absent — backport needed |
 | `?  AMBIGUOUS` | Inconclusive — enable LLM check |
 
@@ -38,7 +35,7 @@ Level 4 (file diff heuristic) is new and also fills a gap in Phase 0.
 
 ```bash
 # Clone the target repository locally (only needed once)
-git clone https://github.com/cri-o/cri-o.git /path/to/cri-o
+git clone https://github.com/<org>/<repo>.git /path/to/repo
 
 # Install amalgamator dependencies
 cd amalgamator/
@@ -49,24 +46,24 @@ pip install -e .
 
 ## Quickstart
 
-### Step 1 — Write a config file
+### Step 1 — Write a scan config
 
 ```yaml
 # my_scan.yaml
 repository:
-  local_path: "/path/to/cri-o"   # local clone of the repo
+  local_path: "/path/to/repo"     # local clone of the repository
 
 fix:
-  commit: "d3b1036cc"            # SHA of the fix on the source branch (main)
-  description: "oci: use shared lock for read-only stats collection"
+  commit: "abc1234"               # SHA of the fix on the source branch (main)
+  description: "fix: short description of the bug fix"
 
-  # Optional: SHA of the commit that INTRODUCED the bug.
-  # Branches that predate this commit are marked NOT_AFFECTED (no false positives).
-  # vuln_commit: "abc1234"
+  # Optional: SHA of the commit that introduced the bug.
+  # Branches that predate this commit are marked NOT_AFFECTED.
+  # vuln_commit: "def5678"
 
 scan:
   # Auto-discover branches matching a pattern:
-  branch_pattern: "release-1.3*"
+  branch_pattern: "release-1.*"
 
   # OR specify branches explicitly:
   # branches:
@@ -74,8 +71,9 @@ scan:
   #   - "release-1.34"
 
 llm:
-  enabled: false   # set true to resolve AMBIGUOUS cases with Claude
+  enabled: false          # set true to resolve AMBIGUOUS cases with Claude
   model: "claude-opus-4-6"
+  discover_commands: false  # set true to auto-discover build/test commands
 ```
 
 ### Step 2 — Run the scanner
@@ -84,127 +82,111 @@ llm:
 # From the amalgamator/ root directory:
 python -m branch_scanner.run_scanner --config my_scan.yaml
 
-# Save a JSON report as well:
+# Save a JSON report:
 python -m branch_scanner.run_scanner --config my_scan.yaml --output report.json
 
 # Verbose logging:
 python -m branch_scanner.run_scanner --config my_scan.yaml --verbose
 ```
 
-### Step 3 — Use the output to drive backporting
+### Step 3 — Generate Amalgamator configs and run the pipeline
 
-Branches listed under **"NEEDS FIX"** are your backport targets. Feed them into
-the Amalgamator `auto_bug_fix` YAML:
+```bash
+# Auto-generate one YAML config per NEEDS_FIX branch
+python -m branch_scanner.generate_config \
+  --config my_scan.yaml \
+  --mode generate \
+  --output-dir ./generated/
 
-```yaml
-# auto_bug_fix config generated from scan output
-issue_id: "crio-shared-lock-d3b1036cc"
-repository:
-  source_path: "/path/to/cri-o"
-  workdir: "/tmp/bugfix-workdir"
-branches:
-  source: "origin/main"
-  target: "origin/release-1.33"   # ← one entry per NEEDS_FIX branch
-fix:
-  commit: "d3b1036cc"
-build:
-  command: "go build ./..."
-  test_command: "go test ./..."
-model: "claude-opus-4-6"
+# Run the Amalgamator pipeline for one branch
+python -m auto_bug_fix.run_bug_fix --config ./generated/release-1-33.yaml
+
+# Or run all generated configs in parallel
+for f in ./generated/*.yaml; do
+  python -m auto_bug_fix.run_bug_fix --config "$f" &
+done
+wait
 ```
 
-Or use `generate_config.py` to generate the YAML automatically — see below.
+> Each generated YAML targets one branch. The scanner produces one file per `NEEDS_FIX` branch automatically.
 
 ---
 
 ## Example output
 
-Running against `cri-o` with commit `d3b1036cc` (fix merged to main + release-1.37):
-
 ```
 ======================================================================
   BRANCH SCANNER REPORT
 ======================================================================
-  Repo:        /path/to/cri-o
-  Fix commit:  d3b1036cc
-  Description: oci: use shared lock for read-only stats collection
+  Repo:        /path/to/repo
+  Fix commit:  abc1234
+  Description: fix: short description of the bug fix
   Branches scanned: 8
 ======================================================================
 
   BRANCH          STATUS
   --------------  ----------------------------------------
   release-1.30    ✗  NEEDS FIX
-                  → Fix not found on origin/release-1.30
+                  → Fix lines not found in branch files
   release-1.31    ✗  NEEDS FIX
-                  → Fix not found on origin/release-1.31
-  release-1.32    ✗  NEEDS FIX
-                  → Fix not found on origin/release-1.32
-  release-1.33    ✗  NEEDS FIX
-                  → Fix not found on origin/release-1.33
-  release-1.34    ✗  NEEDS FIX
-                  → Fix not found on origin/release-1.34
-  release-1.35    ✗  NEEDS FIX
-                  → Fix not found on origin/release-1.35
-  release-1.36    ✗  NEEDS FIX
-                  → Fix not found on origin/release-1.36
+                  → Fix lines not found in branch files
   release-1.37    ✓  ALREADY FIXED (exact commit)
-                  → Commit d3b1036cc is a direct ancestor of origin/release-1.37
+                  → Commit abc1234 is a direct ancestor of origin/release-1.37
+  release-1.0     —  NOT AFFECTED  (branch predates the bug)
 
 ----------------------------------------------------------------------
-  NEEDS FIX    : 7 branch(es)
+  NEEDS FIX    : 6 branch(es)
   ALREADY FIXED: 1 branch(es)
+  NOT AFFECTED : 1 branch(es) — predates the bug
 ======================================================================
-
-  Branches that NEED the fix:
-    - release-1.30
-    - release-1.31
-    - release-1.32
-    - release-1.33
-    - release-1.34
-    - release-1.35
-    - release-1.36
 ```
 
 ---
 
 ## Auto-generate Amalgamator YAML (`generate_config.py`)
 
-Instead of manually writing the `auto_bug_fix` YAML for each branch, use the
-generator to do it automatically from scan results.
+Three modes to bridge scanner output → `auto_bug_fix` pipeline configs:
 
-### Three modes
-
-**`generate` — create YAML from scratch**
-
-Scans all branches and generates one YAML per `NEEDS_FIX` branch:
+**`generate` — create YAMLs from scratch**
 
 ```bash
 python -m branch_scanner.generate_config \
   --config my_scan.yaml \
   --mode generate \
-  --output-dir ./configs/generated/
+  --output-dir ./generated/
 ```
 
-**`add` — append branches to an existing YAML**
+**Auto-discovering build and test commands**
 
-Scans and adds any newly-discovered `NEEDS_FIX` branches to an existing config:
+By default, `build.command` and `build.test_command` are left empty for you to fill in. Enable `discover_commands` to have the LLM read the repo's `README`, `Makefile`, CI workflows, and build files to suggest the right commands:
+
+```yaml
+llm:
+  enabled: false
+  model: "claude-opus-4-6"
+  discover_commands: true   # LLM fills in build/test commands
+```
+
+The LLM reads: `README.md`, `Makefile`, `go.mod`, `pom.xml`, `pyproject.toml`, `setup.py`, `.github/workflows/*.yml`
+
+> Always review discovered commands before running the pipeline.
+
+**`add` — append newly-found branches to an existing YAML**
 
 ```bash
 python -m branch_scanner.generate_config \
   --config my_scan.yaml \
   --mode add \
-  --existing-yaml ./configs/crio_fix.yaml
+  --existing-yaml ./configs/my_fix.yaml
 ```
 
-**`verify` — confirm existing YAML branches still need the fix**
-
-Checks each target branch in an existing YAML and reports any that are already fixed:
+**`verify` — confirm branches in an existing YAML still need the fix**
 
 ```bash
 python -m branch_scanner.generate_config \
   --config my_scan.yaml \
   --mode verify \
-  --existing-yaml ./configs/crio_fix.yaml
+  --existing-yaml ./configs/my_fix.yaml
 ```
 
 ---
@@ -213,12 +195,12 @@ python -m branch_scanner.generate_config \
 
 ```json
 {
-  "repo": "/path/to/cri-o",
-  "fix_commit": "d3b1036cc",
-  "fix_description": "oci: use shared lock for read-only stats collection",
+  "repo": "/path/to/repo",
+  "fix_commit": "abc1234",
+  "fix_description": "fix: short description",
   "summary": {
     "total": 8,
-    "needs_fix": 7,
+    "needs_fix": 6,
     "already_fixed": 1,
     "ambiguous": 0,
     "errors": 0
@@ -229,14 +211,14 @@ python -m branch_scanner.generate_config \
       "status": "NEEDS_FIX",
       "method": "file diff heuristic",
       "detail": "Fix lines not found in branch files",
-      "changed_files": ["server/container_server.go"]
+      "changed_files": ["path/to/changed_file.go"]
     },
     {
       "branch": "release-1.37",
       "status": "ALREADY_FIXED",
       "method": "git_is_ancestor",
-      "detail": "Commit d3b1036cc is a direct ancestor of origin/release-1.37",
-      "changed_files": ["server/container_server.go"]
+      "detail": "Commit abc1234 is a direct ancestor of origin/release-1.37",
+      "changed_files": ["path/to/changed_file.go"]
     }
   ]
 }

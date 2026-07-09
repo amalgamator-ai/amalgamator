@@ -35,6 +35,11 @@ scan:
   #   - "openssl-3.3"
 
 llm:
-  # Set to true to use LLM for ambiguous cases
+  # Set to true to use LLM for ambiguous branch detection cases
   enabled: false
   model: "claude-opus-4-6"
+
+  # Set to true to auto-discover build/test commands when generating YAMLs.
+  # The LLM reads README, Makefile, CI configs etc. and suggests commands.
+  # Commands are written into the generated YAML for you to review.
+  discover_commands: false
