@@ -22,7 +22,6 @@ class ScanConfig:
     fix_commit: str
     branches: list[str] = field(default_factory=list)
     branch_pattern: str | None = None
-    use_llm: bool = False           # enable LLM for AMBIGUOUS branch checks
     llm_model: str = "claude-opus-4-6"
     fix_description: str = ""
     vuln_commit: str | None = None  # commit that introduced the bug (enables NOT_AFFECTED detection)
@@ -215,8 +214,8 @@ def run_scan(config: ScanConfig) -> ScanReport:
             vuln_commit=config.vuln_commit,
         )
 
-        # Optionally resolve ambiguous cases with LLM
-        if result.status == FixStatus.AMBIGUOUS and config.use_llm:
+        # Always resolve ambiguous cases with LLM
+        if result.status == FixStatus.AMBIGUOUS:
             log.info("Running LLM check for ambiguous result on %s", branch)
             result = _llm_check(result, config)
 

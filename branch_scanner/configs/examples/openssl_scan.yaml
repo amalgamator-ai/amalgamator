@@ -35,8 +35,7 @@ scan:
   #   - "openssl-3.3"
 
 llm:
-  # Set to true to use LLM for ambiguous branch detection cases
-  enabled: false
+  # LLM is always used to resolve ambiguous branch detection cases.
   model: "claude-opus-4-6"
 
   # Set to true to auto-discover build/test commands when generating YAMLs.
