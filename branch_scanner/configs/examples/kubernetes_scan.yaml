@@ -1,0 +1,40 @@
+# Branch Scanner Example Config — Kubernetes
+#
+# Example: scan Kubernetes release branches to check whether
+# a fix commit has been backported.
+#
+# This example uses:
+#   Fix: avoid panic on services with empty IPFamilies
+#   Commit: b135fbae169b6d7d3597dfcb628be295c777e0b5
+#
+# Usage:
+#   git clone https://github.com/kubernetes/kubernetes.git /path/to/kubernetes
+#   python -m branch_scanner.run_scanner \
+#     --config branch_scanner/configs/examples/kubernetes_scan.yaml \
+#     --output scan_report.json
+
+repository:
+  # Path to a local clone of the repo — replace with your actual path.
+  local_path: "/path/to/kubernetes"
+
+fix:
+  # Replace with the commit SHA that contains the fix.
+  commit: "b135fbae169b6d7d3597dfcb628be295c777e0b5"
+  description: "fix(endpoint): avoid panic on services with empty IPFamilies"
+
+scan:
+  # Glob pattern to auto-discover branches to scan.
+  # Replace with the pattern matching your release branches.
+  branch_pattern: "release-1.3*"
+
+  # Or list branches explicitly (comment out branch_pattern above):
+  # branches:
+  #   - "release-1.33"
+  #   - "release-1.34"
+  #   - "release-1.35"
+
+llm:
+  model: "claude-opus-4-6"
+
+  # Set to true to auto-discover build/test commands when generating YAMLs.
+  discover_commands: false

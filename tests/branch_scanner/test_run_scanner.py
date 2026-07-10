@@ -33,14 +33,13 @@ def test_load_config_basic(tmp_path):
         scan:
           branch_pattern: "release-1.*"
         llm:
-          enabled: false
+          model: "claude-opus-4-6"
     """)
     from branch_scanner.run_scanner import load_config
     config = load_config(cfg_file)
     assert config.fix_commit == "abc123"
     assert config.fix_description == "fix a bug"
     assert config.branch_pattern == "release-1.*"
-    assert config.use_llm is False
     assert config.vuln_commit is None
 
 
@@ -58,14 +57,12 @@ def test_load_config_with_vuln_commit(tmp_path):
             - release-1.33
             - release-1.34
         llm:
-          enabled: true
           model: "claude-sonnet-4-6"
     """)
     from branch_scanner.run_scanner import load_config
     config = load_config(cfg_file)
     assert config.vuln_commit == "def456"
     assert config.branches == ["release-1.33", "release-1.34"]
-    assert config.use_llm is True
     assert config.llm_model == "claude-sonnet-4-6"
 
 
