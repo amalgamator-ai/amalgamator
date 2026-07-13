@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m auto_profile.*)",
+      "Bash(python -m auto_analyze.*)",
+      "Bash(python -m auto_code_gen.*)",
+      "Bash(python -m auto_bug_fix.*)",
+      "Bash(./run_all.sh*)",
+      "Bash(./run_step1_profile.sh*)",
+      "Bash(./run_step2_parse.sh*)",
+      "Bash(./run_step3_analyze.sh*)",
+      "Bash(source env.sh*)",
+      "Bash(pytest*)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(wc *)"
+    ]
+  }
+}
