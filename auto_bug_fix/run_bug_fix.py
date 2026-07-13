@@ -1524,7 +1524,7 @@ def _run_pipeline_phases(
     )
 
     log.info("Phase 5 — Dossier ready for human review")
-    state.dossier.add("Candidate patch", git_format_patch(config.repo_path), "git format-patch")
+    state.dossier.add("Candidate patch", git_format_patch(config.repo_path, base_ref=config.target_branch), "git format-patch")
     state.dossier.add(
         "Allowlist conformance",
         "\n".join(state.allowed_modules),

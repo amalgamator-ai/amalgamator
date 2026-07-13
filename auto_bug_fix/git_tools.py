@@ -156,9 +156,12 @@ def git_range_diff(repo_path: str, upstream_range: str, ported_range: str) -> st
     return r.stdout
 
 
-def git_format_patch(repo_path: str, n: int = 1) -> str:
+def git_format_patch(repo_path: str, n: int = 1, base_ref: str | None = None) -> str:
     """Generate a patch for the last n commits and return it as a string."""
-    r = _run_git(repo_path, ["format-patch", f"-{n}", "--stdout"])
+    if base_ref:
+        r = _run_git(repo_path, ["format-patch", "--stdout", base_ref])
+    else:
+        r = _run_git(repo_path, ["format-patch", f"-{n}", "--stdout"])
     return r.stdout
 
 
