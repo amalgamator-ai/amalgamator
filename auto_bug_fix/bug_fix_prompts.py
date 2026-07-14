@@ -212,6 +212,7 @@ class TestPortAgentPrompt:
     target_branch: str
     test_files: list[str]
     output_manifest_file: str
+    diff_command: str
 
     prompt_template: ClassVar[str] = """\
 {context}
@@ -225,7 +226,7 @@ The fix commit {source_fix_commit} modified these test files:
 ## Rules
 
 1. For each test file above, extract ONLY the new or modified test functions/cases from \
-the fix commit. Use `git show {source_fix_commit} -- <test_file>` to see what changed.
+the fix commit. Use `{diff_command} <test_file>` to see what changed.
 
 2. Do NOT `git checkout` the entire file from the source — that would overwrite the \
 target branch's version. Instead, surgically insert the new test functions into the \
@@ -253,6 +254,7 @@ one per line.
             target_branch=self.target_branch,
             test_files="\n".join(f"  - {f}" for f in self.test_files),
             output_manifest_file=self.output_manifest_file,
+            diff_command=self.diff_command,
         )
 
 

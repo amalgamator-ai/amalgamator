@@ -67,7 +67,7 @@ from auto_bug_fix.git_tools import (
     resolve_merge_commit,
     git_is_ancestor,
     git_cat_file_exists,
-    _is_merge_commit,
+    is_merge_commit,
     git_worktree_add,
 )
 from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
@@ -175,10 +175,10 @@ def phase_0_triage(
     fix = resolve_merge_commit(repo, config.source_fix_commit)
     target = config.target_branch
 
-    state.seed = derive_seed(repo, fix)
+    state.seed = derive_seed(repo, config.source_fix_commit)
     if not state.seed:
         seed_from_diff = subprocess.run(
-            ["git", "diff", "--name-only", f"{fix}^..{fix}"],
+            ["git", "diff", "--name-only", f"{config.source_fix_commit}^1", config.source_fix_commit],
             cwd=repo, capture_output=True, text=True,
         ).stdout.strip().splitlines()
         state.seed = [f for f in seed_from_diff if f.strip()]
@@ -225,7 +225,7 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
 
 
     if for_files:
-        if _is_merge_commit(config.repo_path, sha):
+        if is_merge_commit(config.repo_path, sha):
             stat = subprocess.run(
                 ["git", "diff", "--stat", f"{sha}^1..{sha}"],
                 cwd=config.repo_path, capture_output=True, text=True,
@@ -250,7 +250,7 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
         return fix_diff
 
 
-    if _is_merge_commit(config.repo_path, sha):
+    if is_merge_commit(config.repo_path, sha):
         fix_diff = subprocess.run(
             ["git", "diff", f"{sha}^1..{sha}"],
             cwd=config.repo_path, capture_output=True, text=True,
@@ -264,7 +264,7 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
     MAX_DIFF_CHARS = 200_000
     if len(fix_diff) > MAX_DIFF_CHARS:
         log.warning("fix_diff too large (%d chars), using --stat only", len(fix_diff))
-        if _is_merge_commit(config.repo_path, sha):
+        if is_merge_commit(config.repo_path, sha):
             fix_diff = subprocess.run(
                 ["git", "diff", "--stat", f"{sha}^1..{sha}"],
                 cwd=config.repo_path, capture_output=True, text=True,
@@ -366,7 +366,7 @@ def phase_0_5_semantic_triage(
 
 
     sha = config.source_fix_commit
-    if _is_merge_commit(config.repo_path, sha):
+    if is_merge_commit(config.repo_path, sha):
         fix_diff = subprocess.run(
             ["git", "diff", "--stat", f"{sha}^1..{sha}"],
             cwd=config.repo_path, capture_output=True, text=True,
@@ -449,12 +449,18 @@ def phase_0_5c_test_port(
 
     manifest_abs = os.path.join(config.repo_path, TEST_PORT_MANIFEST_FILE)
     context = create_context_str(claude_config, config)
+    sha = config.source_fix_commit
+    if is_merge_commit(config.repo_path, sha):
+        diff_command = f"git diff {sha}^1..{sha} --"
+    else:
+        diff_command = f"git show {sha} --"
     prompt = TestPortAgentPrompt(
         context=context,
         source_fix_commit=config.source_fix_commit,
         target_branch=config.target_branch,
         test_files=test_files,
         output_manifest_file=manifest_abs,
+        diff_command=diff_command,
     )
 
     claude_config_test = ClaudeConfig(

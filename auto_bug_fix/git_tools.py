@@ -101,7 +101,7 @@ def git_diff_find_renames(
 
 
 
-def _is_merge_commit(repo_path: str, commit: str) -> bool:
+def is_merge_commit(repo_path: str, commit: str) -> bool:
     """Return True if commit has more than one parent (is a merge)."""
     r = subprocess.run(
         ["git", "rev-parse", "--verify", f"{commit}^2"],
@@ -123,7 +123,7 @@ def git_cherry_pick(
     from the entire topic branch.
     """
     args = ["cherry-pick", "-x"]
-    if _is_merge_commit(repo_path, commit):
+    if is_merge_commit(repo_path, commit):
         args.append("-m1")
     args.append(commit)
     if strategy is not None:
@@ -147,6 +147,12 @@ def git_status_porcelain(repo_path: str) -> list[str]:
 def git_diff_name_only(repo_path: str, ref: str = "HEAD") -> list[str]:
     """Return list of file paths that differ from ref."""
     r = _run_git(repo_path, ["diff", "--name-only", ref])
+    return [line for line in r.stdout.splitlines() if line.strip()]
+
+
+def git_diff_name_only_range(repo_path: str, ref_a: str, ref_b: str) -> list[str]:
+    """Return list of file paths changed between two refs (ref_a..ref_b)."""
+    r = _run_git(repo_path, ["diff", "--name-only", ref_a, ref_b])
     return [line for line in r.stdout.splitlines() if line.strip()]
 
 
@@ -240,10 +246,9 @@ def git_log_count(repo_path: str, range_spec: str) -> int:
 def resolve_merge_commit(repo_path: str, commit: str) -> str:
     """If commit is a merge, return the second parent (topic head); else resolve to SHA.
 
-    Many CVE fixes land as PR merge commits. The actual fix code is on the topic branch,
-    so we need to resolve the merge to the topic head for seed derivation and cherry-pick.
-
-    Returns the full SHA in both cases for consistency.
+    Used for patch-id and ancestry checks where the topic head is the
+    meaningful reference.  Seed derivation uses ``derive_seed`` which
+    handles merge commits directly via ``git diff --name-only M^1..M``.
     """
     result = subprocess.run(
         ["git", "rev-parse", "--verify", f"{commit}^2"],
