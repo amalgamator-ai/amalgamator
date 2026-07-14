@@ -5,14 +5,23 @@ from auto_bug_fix.git_tools import (
     git_cat_file_exists,
     git_diff_find_renames,
     git_diff_name_only,
+    git_diff_name_only_range,
     git_show_files,
+    is_merge_commit,
 )
 
 _DEFAULT_TEST_PATTERNS: list[str] = ["tests", "testing", "test_", "testdata", "spec", "_test."]
 
 
 def derive_seed(repo_path: str, fix_commit: str) -> list[str]:
-    """Return the list of files touched by the fix commit."""
+    """Return the list of files touched by the fix commit.
+
+    For merge commits, uses ``git diff --name-only M^1..M`` to capture all
+    files from the merged topic branch — matching what ``cherry-pick -m1``
+    applies.  For regular commits, falls back to ``git show --name-only``.
+    """
+    if is_merge_commit(repo_path, fix_commit):
+        return git_diff_name_only_range(repo_path, f"{fix_commit}^1", fix_commit)
     return git_show_files(repo_path, fix_commit)
 
 
