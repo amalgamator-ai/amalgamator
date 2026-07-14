@@ -20,6 +20,37 @@ def test_derive_seed(tmp_git_repo):
     assert "tests/test_fix.c" in seed
 
 
+def test_derive_seed_merge_commit(tmp_git_repo):
+    """derive_seed on a merge commit must return all files from the merged branch."""
+    rp = tmp_git_repo.repo_path
+
+    subprocess.run(["git", "checkout", "-b", "topic"], cwd=rp, check=True)
+    Path(rp) / "lib" and None  # lib/ already exists from fixture
+    (Path(rp) / "topic_file_1.c").write_text("int a;")
+    subprocess.run(["git", "add", "topic_file_1.c"], cwd=rp, check=True)
+    subprocess.run(["git", "commit", "-m", "topic: add file 1"], cwd=rp, check=True)
+
+    (Path(rp) / "tests" / "test_topic.c").write_text("void test_topic() {}")
+    subprocess.run(["git", "add", "tests/test_topic.c"], cwd=rp, check=True)
+    subprocess.run(["git", "commit", "-m", "topic: add test"], cwd=rp, check=True)
+
+    (Path(rp) / "topic_file_2.c").write_text("int b;")
+    subprocess.run(["git", "add", "topic_file_2.c"], cwd=rp, check=True)
+    subprocess.run(["git", "commit", "-m", "topic: add file 2"], cwd=rp, check=True)
+
+    subprocess.run(["git", "checkout", "main"], cwd=rp, check=True)
+    subprocess.run(["git", "merge", "topic", "--no-ff", "-m", "merge topic"], cwd=rp, check=True)
+
+    merge_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=rp, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    seed = derive_seed(rp, merge_sha)
+    assert "topic_file_1.c" in seed, "must include file from first topic commit"
+    assert "tests/test_topic.c" in seed, "must include test file from second topic commit"
+    assert "topic_file_2.c" in seed, "must include file from third topic commit"
+
+
 def test_resolve_renames_existing_files(tmp_git_repo):
     rp = tmp_git_repo.repo_path
     seed = derive_seed(rp, tmp_git_repo.fix_sha)
