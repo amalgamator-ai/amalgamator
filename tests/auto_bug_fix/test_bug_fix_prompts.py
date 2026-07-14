@@ -61,8 +61,23 @@ def test_test_port_prompt_lists_test_files():
         target_branch="origin/release-1.0",
         test_files=["pkg/foo_test.go", "pkg/bar_test.go"],
         output_manifest_file="/tmp/manifest.txt",
+        diff_command="git show abc123 --",
     )
     text = prompt.prompt()
     assert "pkg/foo_test.go" in text
     assert "abc123" in text
     assert "Do NOT modify any production code" in text
+
+
+def test_test_port_prompt_uses_diff_command_for_merges():
+    prompt = TestPortAgentPrompt(
+        context="<context>test</context>",
+        source_fix_commit="merge_abc",
+        target_branch="origin/release-1.0",
+        test_files=["pkg/foo_test.go"],
+        output_manifest_file="/tmp/manifest.txt",
+        diff_command="git diff merge_abc^1..merge_abc --",
+    )
+    text = prompt.prompt()
+    assert "git diff merge_abc^1..merge_abc --" in text
+    assert "git show merge_abc --" not in text

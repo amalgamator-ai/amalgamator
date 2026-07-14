@@ -6,6 +6,7 @@ import subprocess
 from auto_bug_fix.git_tools import (
     git_cat_file_exists,
     git_diff_name_only,
+    git_diff_name_only_range,
     git_is_ancestor,
     git_log_commits,
     git_log_count,
@@ -13,6 +14,7 @@ from auto_bug_fix.git_tools import (
     git_rev_parse,
     git_show_files,
     git_status_porcelain,
+    is_merge_commit,
     resolve_merge_commit,
 )
 
@@ -141,3 +143,53 @@ def test_resolve_merge_commit_is_merge(tmp_git_repo):
     result = resolve_merge_commit(rp, merge_sha)
     assert result == topic_head
     assert result != merge_sha
+
+
+def test_is_merge_commit_regular(tmp_git_repo):
+    assert not is_merge_commit(tmp_git_repo.repo_path, tmp_git_repo.fix_sha)
+
+
+def test_is_merge_commit_merge(tmp_git_repo):
+    from pathlib import Path
+    rp = tmp_git_repo.repo_path
+
+    subprocess.run(["git", "checkout", "-b", "feat"], cwd=rp, check=True)
+    Path(rp, "feat.txt").write_text("feat")
+    subprocess.run(["git", "add", "feat.txt"], cwd=rp, check=True)
+    subprocess.run(["git", "commit", "-m", "feat"], cwd=rp, check=True)
+
+    subprocess.run(["git", "checkout", "main"], cwd=rp, check=True)
+    subprocess.run(["git", "merge", "feat", "--no-ff", "-m", "merge feat"], cwd=rp, check=True)
+
+    assert is_merge_commit(rp, "HEAD")
+
+
+def test_git_diff_name_only_range(tmp_git_repo):
+    rp = tmp_git_repo.repo_path
+    parent = f"{tmp_git_repo.fix_sha}^"
+    files = git_diff_name_only_range(rp, parent, tmp_git_repo.fix_sha)
+    assert "lib/url.c" in files
+    assert "tests/test_fix.c" in files
+
+
+def test_git_diff_name_only_range_merge(tmp_git_repo):
+    """For a merge commit, diff M^1..M captures all files from the topic branch."""
+    from pathlib import Path
+    rp = tmp_git_repo.repo_path
+
+    subprocess.run(["git", "checkout", "-b", "topic"], cwd=rp, check=True)
+    Path(rp, "topic_a.txt").write_text("a")
+    subprocess.run(["git", "add", "topic_a.txt"], cwd=rp, check=True)
+    subprocess.run(["git", "commit", "-m", "topic commit 1"], cwd=rp, check=True)
+
+    Path(rp, "topic_b.txt").write_text("b")
+    subprocess.run(["git", "add", "topic_b.txt"], cwd=rp, check=True)
+    subprocess.run(["git", "commit", "-m", "topic commit 2"], cwd=rp, check=True)
+
+    subprocess.run(["git", "checkout", "main"], cwd=rp, check=True)
+    subprocess.run(["git", "merge", "topic", "--no-ff", "-m", "merge topic"], cwd=rp, check=True)
+
+    merge_sha = git_rev_parse(rp, "HEAD")
+    files = git_diff_name_only_range(rp, f"{merge_sha}^1", merge_sha)
+    assert "topic_a.txt" in files, "must include file from first topic commit"
+    assert "topic_b.txt" in files, "must include file from second topic commit"
