@@ -16,11 +16,6 @@ import yaml
 from .report import print_report, save_json
 from .scanner import ScanConfig, run_scan
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 
@@ -52,6 +47,11 @@ def load_config(config_path: Path) -> ScanConfig:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
     parser = argparse.ArgumentParser(
         description="Scan repo branches to identify which need a bug fix backported."
     )
