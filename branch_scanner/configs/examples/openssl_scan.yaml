@@ -1,0 +1,44 @@
+# Branch Scanner Example Config — OpenSSL
+#
+# This scans all OpenSSL release branches to check whether
+# a given fix commit has been backported.
+#
+# Usage:
+#   python -m branch_scanner.run_scanner \
+#     --config branch_scanner/configs/examples/openssl_scan.yaml \
+#     --output scan_report.json
+
+repository:
+  # Path to a local clone of the repo.
+  # Clone first: git clone https://github.com/openssl/openssl.git
+  local_path: "/path/to/openssl"
+
+fix:
+  # The commit SHA that contains the fix (from source/main branch)
+  commit: "REPLACE_WITH_FIX_COMMIT_SHA"
+  description: "CVE-2024-XXXXX: description of the fix"
+
+  # Optional: SHA of the commit that INTRODUCED the bug.
+  # When set, branches that predate this commit are marked NOT_AFFECTED
+  # (they never had the bug, so they don't need the fix).
+  # vuln_commit: "REPLACE_WITH_VULN_COMMIT_SHA"
+
+scan:
+  # Option A: auto-discover branches matching a pattern
+  branch_pattern: "openssl-3.*"
+
+  # Option B: explicit list (comment out branch_pattern above)
+  # branches:
+  #   - "openssl-3.0"
+  #   - "openssl-3.1"
+  #   - "openssl-3.2"
+  #   - "openssl-3.3"
+
+llm:
+  # LLM is always used to resolve ambiguous branch detection cases.
+  model: "claude-opus-4-6"
+
+  # Set to true to auto-discover build/test commands when generating YAMLs.
+  # The LLM reads README, Makefile, CI configs etc. and suggests commands.
+  # Commands are written into the generated YAML for you to review.
+  discover_commands: false
