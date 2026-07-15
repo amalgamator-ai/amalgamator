@@ -3,6 +3,21 @@ import time
 from dataclasses import dataclass, field, fields
 from colorama import Fore, Style
 
+
+def make_anthropic_client():
+    """
+    Create a raw Anthropic client for simple one-shot API calls.
+    Uses Vertex AI if CLAUDE_CODE_USE_VERTEX is set, otherwise direct API key.
+    """
+    import anthropic
+    if os.environ.get("CLAUDE_CODE_USE_VERTEX"):
+        from anthropic import AnthropicVertex
+        return AnthropicVertex(
+            project_id=os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", ""),
+            region=os.environ.get("CLOUD_ML_REGION", "us-east5"),
+        )
+    return anthropic.Anthropic()
+
 from claude_agent_sdk import (
     AssistantMessage,
     TextBlock,
