@@ -20,9 +20,14 @@ fix:
 build:
   command: "make -j$(nproc)"                    # build command
   test_command: "make check -j$(nproc)"         # test command
+  # file_check_command: "gcc -fsyntax-only {file}"  # optional per-file check after resolution
 
 model: "claude-sonnet-4-6"     # or claude-opus-4-6 for harder backports
 
 # Optional:
 # output:
 #   directory: "runs/my-backport"
+# advanced:
+#   mechanical_resolution: true   # git-apply rungs before the LLM (ablation flag)
+#   snapback: true                # snap LLM-drifted lines back to source bytes
+#   evidence_checks: true         # token audit + substitution mining + follow-up scan

@@ -74,7 +74,7 @@ def validate_config(config: dict[str, Any]) -> None:
     if fix.get("commit") is None:
         raise ConfigError("fix.commit is required")
 
-    build = _require_mapping(config, "build")
+    _require_mapping(config, "build")
 
 
 def expand_path(path: str | None, default: str = "") -> str:
@@ -122,12 +122,16 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         build_command=config["build"].get("command", ""),
         test_command=config["build"].get("test_command", ""),
         lint_command=config["build"].get("lint_command", ""),
+        file_check_command=config["build"].get("file_check_command", ""),
         auto_discover_tests=config["build"].get("auto_discover_tests", False),
         max_build_test_retries=advanced.get("max_build_test_retries", 3),
         max_resolution_retries=advanced.get("max_resolution_retries", 3),
         forward_patch_id_lookback=advanced.get("forward_patch_id_lookback", "12 months"),
         allowlist_rename_expansion_cap=advanced.get("allowlist_rename_expansion_cap", 3),
         command_timeout=command_timeout,
+        mechanical_resolution=bool(advanced.get("mechanical_resolution", True)),
+        snapback=bool(advanced.get("snapback", True)),
+        evidence_checks=bool(advanced.get("evidence_checks", True)),
     )
 
     return bug_fix_config, workdir, source_path
