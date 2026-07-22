@@ -8,6 +8,7 @@ import pytest
 from auto_bug_fix.evidence import (
     LineFinding,
     TokenFinding,
+    TriageCorrection,
     added_lines_by_file,
     annotate_dead_config,
     apply_substitutions,
@@ -24,6 +25,7 @@ from auto_bug_fix.evidence import (
     scan_followup_fixes,
     target_config_state,
     token_exists_on_ref,
+    validate_triage_prerequisites,
 )
 
 SAMPLE_DIFF = """\
@@ -595,3 +597,73 @@ def test_render_evidence_dead_config_and_line_findings():
     assert "old_target_call();" in report
     assert "reproduce the fix's bytes" in report
     assert "CRITICAL: conflict markers" in report and "g.c" in report
+
+
+# ---------------------------------------------------------------------------
+# validate_triage_prerequisites
+# ---------------------------------------------------------------------------
+
+
+class TestValidateTriagePrerequisites:
+    """Cover degenerate symbols, nonexistence vs non-nonexistence reasons."""
+
+    @pytest.mark.parametrize("symbol", ["", "   ", "()", "Foo.", ".foo"])
+    def test_degenerate_symbols_produce_no_crash(self, evidence_repo, symbol):
+        rp, _ = evidence_repo
+        prereqs = [{"symbol": symbol, "portable": False, "reason": "does not exist"}]
+        corrections = validate_triage_prerequisites(rp, "target", prereqs)
+        assert corrections == []
+
+    def test_non_dict_entry_is_skipped(self, evidence_repo):
+        rp, _ = evidence_repo
+        prereqs = [
+            "just a string",
+            42,
+            None,
+            {"symbol": "shared_helper", "portable": False,
+             "reason": "does not exist on target"},
+        ]
+        corrections = validate_triage_prerequisites(rp, "target", prereqs)
+        assert any(c.symbol == "shared_helper" for c in corrections)
+
+    def test_nonexistence_reason_gets_corrected(self, evidence_repo):
+        rp, _ = evidence_repo
+        prereqs = [
+            {"symbol": "shared_helper", "portable": False,
+             "reason": "shared_helper does not exist on the target branch"},
+        ]
+        corrections = validate_triage_prerequisites(rp, "target", prereqs)
+        assert len(corrections) == 1
+        assert "exists on the target branch" in corrections[0].correction
+        assert "pipeline note" not in corrections[0].correction
+
+    def test_signature_difference_reason_is_appended(self, evidence_repo):
+        rp, _ = evidence_repo
+        prereqs = [
+            {"symbol": "shared_helper", "portable": False,
+             "reason": "exists but the signature differs on target"},
+        ]
+        corrections = validate_triage_prerequisites(rp, "target", prereqs)
+        assert len(corrections) == 1
+        assert corrections[0].correction.startswith(
+            "exists but the signature differs on target")
+        assert "pipeline note" in corrections[0].correction
+        assert "word-grep" in corrections[0].correction
+
+    def test_truly_missing_symbol_produces_no_correction(self, evidence_repo):
+        rp, _ = evidence_repo
+        prereqs = [
+            {"symbol": "totally_nonexistent_xyz", "portable": False,
+             "reason": "does not exist on target"},
+        ]
+        corrections = validate_triage_prerequisites(rp, "target", prereqs)
+        assert corrections == []
+
+    def test_portable_true_prereqs_are_skipped(self, evidence_repo):
+        rp, _ = evidence_repo
+        prereqs = [
+            {"symbol": "shared_helper", "portable": True,
+             "reason": "does not exist"},
+        ]
+        corrections = validate_triage_prerequisites(rp, "target", prereqs)
+        assert corrections == []
