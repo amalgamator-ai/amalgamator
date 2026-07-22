@@ -638,6 +638,38 @@ def phase_1_5_red_triage(
 
 
 MAX_ERROR_CHARS = 50_000
+MAX_DIFF_PROMPT_CHARS = 200_000
+
+
+def _safe_git_diff(repo_path: str, *refs: str) -> str:
+    """Run ``git diff`` with size cap and decode safety.
+
+    Returns at most MAX_DIFF_PROMPT_CHARS of output; appends a stat
+    summary when truncated.  Binary/encoding noise is replaced rather
+    than raising.
+    """
+    result = subprocess.run(
+        ["git", "diff", *refs],
+        cwd=repo_path, capture_output=True,
+    )
+    try:
+        text = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        text = result.stdout.decode("utf-8", errors="replace")
+
+    if len(text) <= MAX_DIFF_PROMPT_CHARS:
+        return text
+
+    log.warning("git diff output too large (%d chars), truncating", len(text))
+    stat = subprocess.run(
+        ["git", "diff", "--stat", *refs],
+        cwd=repo_path, capture_output=True,
+    )
+    try:
+        stat_text = stat.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        stat_text = stat.stdout.decode("utf-8", errors="replace")
+    return text[:MAX_DIFF_PROMPT_CHARS] + f"\n\n[TRUNCATED — full stat below]\n{stat_text}"
 
 
 def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
@@ -762,10 +794,7 @@ def phase_4a_build_recovery(
         if len(test_errors) > MAX_ERROR_CHARS:
             test_errors = test_errors[:MAX_ERROR_CHARS] + "\n\n[TRUNCATED]"
 
-        current_diff = subprocess.run(
-            ["git", "diff", "HEAD"],
-            cwd=config.repo_path, capture_output=True, text=True,
-        ).stdout
+        current_diff = _safe_git_diff(config.repo_path, "HEAD")
 
         pre_fix_files = set(git_diff_name_only(config.repo_path))
 
@@ -1435,10 +1464,7 @@ def _finalize_resolution(
         line_findings=line_findings, conflict_marker_files=marker_files,
         auto_restored=auto_restored)
 
-    current_diff = subprocess.run(
-        ["git", "diff", base_head],
-        cwd=repo, capture_output=True, text=True,
-    ).stdout
+    current_diff = _safe_git_diff(repo, base_head)
     if current_diff.strip():
         log.info("Phase 3a.1 — post-resolution adaptation check")
         check_prompt = PostResolutionCheckPrompt(
@@ -1490,10 +1516,7 @@ def _finalize_resolution(
                     log.warning("Post-3a.1 token re-audit failed: %s", e)
 
     if config.evidence_checks:
-        blind_diff = subprocess.run(
-            ["git", "diff", base_head],
-            cwd=repo, capture_output=True, text=True,
-        ).stdout
+        blind_diff = _safe_git_diff(repo, base_head)
         if blind_diff.strip():
             log.info("Phase 3a.2 — triage-blind independent review")
             blind_prompt = TriageBlindReviewPrompt(
