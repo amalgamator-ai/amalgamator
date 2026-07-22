@@ -419,3 +419,79 @@ def test_flags_disable_mechanical_and_snapback(mock_claude, tmp_path):
     prompts = [call.args[1][0] for call in mock_claude.call_args_list]
     assert any("Narrow Resolution Agent" in p for p in prompts)
     assert not any("mechanical" in s.strategy for s in state.dossier.strategies)
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_post_resolution_check_false_skips_3a1(mock_claude, tmp_path):
+    rp, fix_sha, path = _build_repo(tmp_path, REINDENTED)
+    config = _make_config(rp, fix_sha)
+    config.post_resolution_check = False
+    state = _make_state()
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        if "Narrow Resolution Agent" in prompts[0]:
+            path.write_text(REINDENTED.replace(
+                "\tint c = 3;", "\tint c = 30; /* fixed */"))
+            _git(rp, "add", "base.c")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config, _make_claude_config(rp), state, None,
+        commit=fix_sha, label="test port",
+    )
+    assert result == "resolved"
+    prompts = [call.args[1][0] for call in mock_claude.call_args_list]
+    assert not any("Post-Resolution Verification Agent" in p for p in prompts)
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_blind_review_false_skips_3a2(mock_claude, tmp_path):
+    rp, fix_sha, path = _build_repo(tmp_path, REINDENTED)
+    config = _make_config(rp, fix_sha)
+    config.blind_review = False
+    state = _make_state()
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        if "Narrow Resolution Agent" in prompts[0]:
+            path.write_text(REINDENTED.replace(
+                "\tint c = 3;", "\tint c = 30; /* fixed */"))
+            _git(rp, "add", "base.c")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config, _make_claude_config(rp), state, None,
+        commit=fix_sha, label="test port",
+    )
+    assert result == "resolved"
+    prompts = [call.args[1][0] for call in mock_claude.call_args_list]
+    assert not any("Independent Review Agent" in p for p in prompts)
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_evidence_false_blind_review_true_still_runs_3a2(mock_claude, tmp_path):
+    rp, fix_sha, path = _build_repo(tmp_path, REINDENTED)
+    config = _make_config(rp, fix_sha)
+    config.evidence_checks = False
+    config.blind_review = True
+    state = _make_state()
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        if "Narrow Resolution Agent" in prompts[0]:
+            path.write_text(REINDENTED.replace(
+                "\tint c = 3;", "\tint c = 30; /* fixed */"))
+            _git(rp, "add", "base.c")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config, _make_claude_config(rp), state, None,
+        commit=fix_sha, label="test port",
+    )
+    assert result == "resolved"
+    prompts = [call.args[1][0] for call in mock_claude.call_args_list]
+    assert any("Independent Review Agent" in p for p in prompts)

@@ -46,6 +46,8 @@ class BugFixConfig:
     mechanical_resolution: bool = True   # git-apply rungs before the LLM
     snapback: bool = True                # snap drifted lines back to source bytes
     evidence_checks: bool = True         # token audit + substitution mining + follow-up scan
+    post_resolution_check: bool = True   # Phase 3a.1 verification agent
+    blind_review: bool = True            # Phase 3a.2 triage-blind review agent
     # Optional per-file check run over touched files after resolution,
     # e.g. "gcc -fsyntax-only {file}". {file} is replaced with the absolute path.
     file_check_command: str = ""
