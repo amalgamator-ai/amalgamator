@@ -216,6 +216,42 @@ class TriageCorrection:
     correction: str
 
 
+_NONEXISTENCE_RE = re.compile(
+    r"does\s+not\s+exist|doesn'?t\s+exist|not\s+present|missing|absent"
+    r"|was\s+removed|renamed\s+away|has\s+no\s|lacks?\s",
+    re.IGNORECASE,
+)
+
+
+def _parse_dotted_symbol(symbol: str) -> tuple[str, str] | None:
+    """Parse ``'ClassName.method_name'`` into (class, method).
+
+    Returns None for degenerate inputs (empty parts, whitespace-only, etc.).
+    """
+    parts = symbol.split(".", 1)
+    if len(parts) != 2:
+        return None
+    lhs_words = parts[0].strip().split()
+    rhs_stripped = parts[1].strip().split("(")[0].strip()
+    rhs_words = rhs_stripped.split()
+    if not lhs_words or not rhs_words:
+        return None
+    return lhs_words[-1], rhs_words[0]
+
+
+def _parse_bare_symbol(symbol: str) -> str | None:
+    """Extract a single identifier from a free-form symbol string.
+
+    Returns None for degenerate inputs.
+    """
+    stripped = symbol.strip().split("(")[0].strip()
+    words = stripped.split()
+    if not words:
+        return None
+    candidate = words[-1]
+    return candidate if candidate else None
+
+
 def validate_triage_prerequisites(
     repo_path: str,
     target_ref: str,
@@ -234,40 +270,69 @@ def validate_triage_prerequisites(
         return corrections
 
     for prereq in prerequisites:
+        if not isinstance(prereq, dict):
+            continue
         if prereq.get("portable", True):
             continue
 
         symbol = prereq.get("symbol", "")
         reason = prereq.get("reason", "")
+        claims_nonexistence = bool(_NONEXISTENCE_RE.search(reason))
 
         if "." in symbol:
-            parts = symbol.split(".", 1)
-            class_name = parts[0].strip().split()[-1]
-            method = parts[1].strip().split("(")[0].split()[0]
+            parsed = _parse_dotted_symbol(symbol)
+            if parsed is None:
+                continue
+            class_name, method = parsed
 
             if method_exists_on_class_hierarchy(
                 repo_path, target_ref, class_name, method,
             ):
-                corrections.append(TriageCorrection(
-                    symbol=symbol,
-                    original_reason=reason,
-                    correction=(
-                        f"{class_name}.{method} DOES exist on the target branch "
-                        f"(via inheritance). The resolution agent should keep "
-                        f"{class_name} in any isinstance/type checks."
-                    ),
-                ))
+                if claims_nonexistence:
+                    corrections.append(TriageCorrection(
+                        symbol=symbol,
+                        original_reason=reason,
+                        correction=(
+                            f"{class_name}.{method} DOES exist on the target "
+                            f"branch (via inheritance). The resolution agent "
+                            f"should keep {class_name} in any isinstance/type "
+                            f"checks."
+                        ),
+                    ))
+                else:
+                    corrections.append(TriageCorrection(
+                        symbol=symbol,
+                        original_reason=reason,
+                        correction=(
+                            f"{reason} [pipeline note: `{class_name}.{method}`"
+                            f" does word-grep on the target tree — verify this"
+                            f" claim before adapting]"
+                        ),
+                    ))
         else:
-            bare = symbol.strip().split("(")[0].split()[-1]
-            if bare and token_exists_on_ref(repo_path, target_ref, bare):
-                corrections.append(TriageCorrection(
-                    symbol=symbol,
-                    original_reason=reason,
-                    correction=(
-                        f"{bare} exists on the target branch. The triage claim "
-                        f"that it is missing is incorrect."
-                    ),
-                ))
+            bare = _parse_bare_symbol(symbol)
+            if not bare:
+                continue
+            if token_exists_on_ref(repo_path, target_ref, bare):
+                if claims_nonexistence:
+                    corrections.append(TriageCorrection(
+                        symbol=symbol,
+                        original_reason=reason,
+                        correction=(
+                            f"{bare} exists on the target branch. The triage "
+                            f"claim that it is missing is incorrect."
+                        ),
+                    ))
+                else:
+                    corrections.append(TriageCorrection(
+                        symbol=symbol,
+                        original_reason=reason,
+                        correction=(
+                            f"{reason} [pipeline note: `{bare}` does word-grep"
+                            f" on the target tree — verify this claim before"
+                            f" adapting]"
+                        ),
+                    ))
 
     return corrections
 

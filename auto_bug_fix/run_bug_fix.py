@@ -1693,27 +1693,36 @@ def _run_pipeline_phases(
             with open(triage_dest, "w") as f:
                 json.dump(assessment, f, indent=2)
 
-        prereqs = state.triage_assessment.get("prerequisites", [])
-        if prereqs:
-            corrections = validate_triage_prerequisites(
-                config.repo_path, config.target_branch, prereqs)
-            for corr in corrections:
-                log.warning(
-                    "Triage correction: %s — %s", corr.symbol, corr.correction)
-                for p in prereqs:
-                    if p.get("symbol") == corr.symbol:
-                        p["corrected"] = True
-                        p["original_reason"] = corr.original_reason
-                        p["reason"] = corr.correction
-                state.dossier.add(
-                    f"Triage correction: {corr.symbol}",
-                    f"Original: {corr.original_reason}\n"
-                    f"Correction: {corr.correction}",
-                    "Phase 0.5.1 — deterministic prerequisite validation",
-                )
-            if corrections:
-                tracker.record_gate(
-                    "triage_corrections", str(len(corrections)))
+        if config.evidence_checks:
+            prereqs = state.triage_assessment.get("prerequisites", [])
+            if prereqs:
+                try:
+                    corrections = validate_triage_prerequisites(
+                        config.repo_path, config.target_branch, prereqs)
+                except Exception as e:
+                    log.warning("Triage prerequisite validation failed: %s", e)
+                    corrections = []
+                for corr in corrections:
+                    log.warning(
+                        "Triage correction: %s — %s",
+                        corr.symbol, corr.correction)
+                    for p in prereqs:
+                        if p.get("symbol") == corr.symbol:
+                            p["corrected"] = True
+                            p["original_reason"] = corr.original_reason
+                            p["reason"] = corr.correction
+                    state.dossier.add(
+                        f"Triage correction: {corr.symbol}",
+                        f"Original: {corr.original_reason}\n"
+                        f"Correction: {corr.correction}",
+                        "Phase 0.5.1 — deterministic prerequisite validation",
+                    )
+                if corrections:
+                    tracker.record_gate(
+                        "triage_corrections", str(len(corrections)))
+                    if assessment:
+                        with open(triage_dest, "w") as f:
+                            json.dump(assessment, f, indent=2)
 
     cherry_pick_succeeded = False
     try:
