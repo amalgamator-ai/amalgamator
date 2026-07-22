@@ -667,3 +667,87 @@ class TestValidateTriagePrerequisites:
         ]
         corrections = validate_triage_prerequisites(rp, "target", prereqs)
         assert corrections == []
+
+
+# ---------------------------------------------------------------------------
+# Macro-generated token (## token-pasting) false-positive guard
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def macro_repo(tmp_path):
+    """Repo where the target generates helper_foo via ## but has no literal call."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rp = str(repo)
+    _git(rp, "init", "-b", "main")
+    _git(rp, "config", "user.name", "t")
+    _git(rp, "config", "user.email", "t@t")
+
+    # Base: a generator macro, no call sites yet.
+    (repo / "helpers.h").write_text(
+        "#define MAKE_HELPER(name) void helper_##name(void) {}\n"
+        "MAKE_HELPER(foo);\n"
+        "MAKE_HELPER(bar);\n"
+    )
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "base")
+    base = _sha(rp)
+
+    # Upstream pre-fix: adds a literal call site for helper_foo.
+    (repo / "caller.c").write_text("void use(void) { helper_foo(); }\n")
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "upstream: first call site")
+
+    # Upstream fix: adds another call site.
+    (repo / "caller.c").write_text(
+        "void use(void) { helper_foo(); }\n"
+        "void use2(void) { helper_foo(); }\n"
+    )
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "fix: second call site")
+    fix = _sha(rp)
+
+    # Target branch diverged from base — has the generator but no literal calls.
+    _git(rp, "branch", "target", base)
+    _git(rp, "checkout", "-q", "target")
+    (repo / "helpers.h").write_text(
+        "#define MAKE_HELPER(name) void helper_##name(void) {}\n"
+        "MAKE_HELPER(foo);\n"
+        "MAKE_HELPER(bar);\n"
+        "MAKE_HELPER(baz);\n"
+    )
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "target: add baz helper")
+    _git(rp, "checkout", "-q", "main")
+
+    return rp, fix
+
+
+def test_macro_generated_token_not_unconditional_must(macro_repo):
+    """A token generated via ## on the target must not get 'MUST be adapted'."""
+    rp, fix = macro_repo
+    added = {"caller.c": ["\tvoid use2(void) { helper_foo(); }"]}
+    findings = audit_added_tokens(rp, "target", fix, added)
+    foo_findings = [f for f in findings if f.token == "helper_foo"]
+    assert len(foo_findings) == 1
+    f = foo_findings[0]
+    assert f.status == "upstream_only"
+    assert f.generated_hint is not None
+    assert "##" in f.generated_hint or "MAKE_HELPER" in f.generated_hint
+
+    report = render_evidence(findings, {}, {}, [], [])
+    assert "MUST be adapted" not in report
+    assert "macro-generated" in report or "token-pasting" in report
+
+
+def test_non_macro_token_still_gets_must(evidence_repo):
+    """A regular upstream_only token without ## generators still gets MUST."""
+    rp, fix = evidence_repo
+    added = {"lib.c": ["\tlegacy_release(delta);"]}
+    findings = audit_added_tokens(rp, "target", fix, added)
+    legacy = [f for f in findings if f.token == "legacy_release"]
+    assert len(legacy) == 1
+    assert legacy[0].generated_hint is None
+
+    report = render_evidence(findings, {}, {}, [], [])
+    assert "MUST be adapted" in report

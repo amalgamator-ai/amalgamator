@@ -482,17 +482,21 @@ use `git log --all`, `--remotes`, or unrelated branches.
 """
 
     _evidence_section_template: ClassVar[str] = """
-## Deterministic evidence (computed by the pipeline — treat as ground truth):
+## Deterministic evidence (computed by the pipeline — treat as ground truth for \
+classifications, but follow each finding's own directive):
 <evidence_report>
 {evidence_report}
 </evidence_report>
-Findings marked `upstream_only` use a symbol that does NOT exist on the target branch — \
-these MUST be adapted to the target's equivalent, UNLESS the finding says the code is \
-compiled out on the target (then keep the upstream bytes verbatim). Findings marked \
-`unknown` may be hallucinated identifiers — verify each one. Three-way discipline \
-findings list port lines that carry neither the fix's bytes nor the target's bytes — \
-resolve each one per its directive. Substitution patterns were mined mechanically from \
-the upstream-base vs target delta of the touched files.
+Findings marked `upstream_only` use a symbol that does NOT exist as a literal identifier \
+on the target branch — these MUST be adapted to the target's equivalent, UNLESS: \
+(a) the finding says the code is compiled out on the target (keep the upstream bytes \
+verbatim), or (b) the finding indicates the identifier may be macro-generated on the \
+target via token-pasting (`##` concatenation, `TRACE_EVENT`, `DEFINE_*` generators) — \
+in that case grep for the generator and cite the line; if confirmed, keep the upstream \
+form. Findings marked `unknown` may be hallucinated identifiers — verify each one. \
+Three-way discipline findings list port lines that carry neither the fix's bytes nor \
+the target's bytes — resolve each one per its directive. Substitution patterns were \
+mined mechanically from the upstream-base vs target delta of the touched files.
 """
 
     def prompt(self) -> str:
