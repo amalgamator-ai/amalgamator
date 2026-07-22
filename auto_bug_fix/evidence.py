@@ -68,6 +68,9 @@ class TokenFinding:
     # is dead there, and backporters keep upstream bytes verbatim in dead
     # regions instead of adapting them.
     dead_config: str | None = None
+    # Set when the token may be generated on the target via macro
+    # token-pasting (``##``).  The hint is the grep match line.
+    generated_hint: str | None = None
 
 
 @dataclass
@@ -348,6 +351,39 @@ def _fix_added_tokens(repo_path: str, fix_commit: str) -> set[str]:
     return tokens
 
 
+def _check_token_paste_hint(
+    repo_path: str, ref: str, token: str,
+) -> str | None:
+    """Check if *token* could be generated on *ref* via ``##`` token-pasting.
+
+    Strategy: look for a macro whose prefix matches the token's prefix and
+    that uses ``##`` to paste a parameter as the suffix.  Also check for
+    generator-style invocations (``TRACE_EVENT(tail)``, ``DEFINE_*(tail)``).
+    Returns the first matching grep line, or None.
+    """
+    parts = token.split("_")
+    for i in range(1, len(parts)):
+        prefix = "_".join(parts[:i])
+        tail = "_".join(parts[i:])
+        if len(tail) < 2 or len(prefix) < 2:
+            continue
+        # Pattern 1: a #define that builds the prefix via ##
+        # e.g.  #define MAKE(name) void helper_##name(void)
+        # matches: prefix_## (the macro builds prefix_ then pastes)
+        result = subprocess.run(
+            ["git", "grep", "-n", "-E",
+             rf"{re.escape(prefix)}_\s*##"
+             rf"|##\s*{re.escape(tail)}"
+             rf"|TRACE_EVENT\(\s*{re.escape(tail)}"
+             rf"|DEFINE_\w+\(\s*{re.escape(tail)}",
+             ref],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().splitlines()[0]
+    return None
+
+
 def audit_added_tokens(
     repo_path: str,
     target_ref: str,
@@ -393,7 +429,11 @@ def audit_added_tokens(
             repo_path, parent_ref, token
         )
         if in_parent:
-            findings.append(TokenFinding(token, "upstream_only", token_files[token]))
+            hint = _check_token_paste_hint(repo_path, target_ref, token)
+            findings.append(TokenFinding(
+                token, "upstream_only", token_files[token],
+                generated_hint=hint,
+            ))
         elif token not in fix_added:
             findings.append(TokenFinding(token, "unknown", token_files[token]))
     return findings
@@ -1003,11 +1043,22 @@ def render_evidence(
                     f"(`{f.dead_config}` disabled) — dead code; keep the upstream fix's "
                     f"bytes verbatim, do NOT adapt."
                 )
+            elif f.status == "upstream_only" and f.generated_hint:
+                lines.append(
+                    f"- `{f.token}` ({where}): exists upstream BEFORE the fix but NOT as "
+                    f"a literal identifier on the target branch — however it may be "
+                    f"macro-generated on the target via token-pasting "
+                    f"(`{f.generated_hint.strip()[:120]}`). Verify the generator before "
+                    f"adapting; if the upstream form is produced by the generator, keep it."
+                )
             elif f.status == "upstream_only":
                 lines.append(
                     f"- `{f.token}` ({where}): exists upstream BEFORE the fix but NOT on "
                     f"the target branch — the target names or structures this differently; "
-                    f"it MUST be adapted."
+                    f"it MUST be adapted, UNLESS the identifier is generated on the target "
+                    f"by macro token-pasting (e.g. `##` concatenation or a "
+                    f"`TRACE_EVENT`/`DEFINE_*` invocation) — if so, grep for the generator "
+                    f"and cite it."
                 )
             else:
                 lines.append(
