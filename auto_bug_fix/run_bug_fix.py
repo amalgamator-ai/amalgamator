@@ -1147,6 +1147,7 @@ def cherry_pick_and_resolve(
                     allowed_modules=priority,
                     triage_assessment=json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "",
                     target_branch=config.target_branch,
+                    baseline_ref=base_head,
                     followup_fixes=followup_note,
                 )
                 asyncio.run(claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker))
@@ -1158,6 +1159,7 @@ def cherry_pick_and_resolve(
                 allowed_modules=priority,
                 triage_assessment=json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "",
                 target_branch=config.target_branch,
+                baseline_ref=base_head,
                 followup_fixes=followup_note,
             )
             log.info("%s attempt %d/%d — resolving %d conflicts",
@@ -1434,7 +1436,7 @@ def _finalize_resolution(
         auto_restored=auto_restored)
 
     current_diff = subprocess.run(
-        ["git", "diff", config.target_branch],
+        ["git", "diff", base_head],
         cwd=repo, capture_output=True, text=True,
     ).stdout
     if current_diff.strip():
@@ -1446,6 +1448,7 @@ def _finalize_resolution(
             target_branch=config.target_branch,
             triage_assessment=json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "",
             evidence_report=evidence_report,
+            baseline_ref=base_head,
         )
         try:
             asyncio.run(claude_run(claude_config_resolve, [check_prompt.prompt()], tracker=tracker))
@@ -1488,7 +1491,7 @@ def _finalize_resolution(
 
     if config.evidence_checks:
         blind_diff = subprocess.run(
-            ["git", "diff", config.target_branch],
+            ["git", "diff", base_head],
             cwd=repo, capture_output=True, text=True,
         ).stdout
         if blind_diff.strip():
@@ -1498,6 +1501,7 @@ def _finalize_resolution(
                 fix_diff=fix_diff,
                 current_diff=blind_diff,
                 target_branch=config.target_branch,
+                baseline_ref=base_head,
             )
             try:
                 asyncio.run(claude_run(

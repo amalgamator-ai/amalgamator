@@ -235,13 +235,19 @@ def test_evidence_references_ported_prerequisites_not_bare_target(mock_claude, t
         "void caller3(void) { new_helper_fn(3); }\nvoid caller4(void) { new_helper_fn(4); }",
     ).replace("int version = 2;", "int version = 10;")
 
+    captured_prompts: list[str] = []
+
     async def fake_claude_run(claude_config, prompts, tracker=None):
+        captured_prompts.append(prompts[0])
         if "Narrow Resolution Agent" in prompts[0]:
             (repo / "base.c").write_text(resolved)
             _git(rp, "add", "base.c")
         return []
 
     mock_claude.side_effect = fake_claude_run
+
+    # Capture base_head (HEAD before cherry-pick = target + prereq)
+    base_head = _sha(rp)
 
     result = cherry_pick_and_resolve(
         config, _make_claude_config(rp), state, None,
@@ -253,6 +259,26 @@ def test_evidence_references_ported_prerequisites_not_bare_target(mock_claude, t
     ).stdout
     assert "new_helper_fn(4);" in committed
     assert "old_helper_fn" not in committed
+
+    # The resolution prompt must use base_head (not bare "target") for grep.
+    resolution_prompts = [p for p in captured_prompts if "Narrow Resolution Agent" in p]
+    assert resolution_prompts, "expected at least one resolution prompt"
+    for rp_text in resolution_prompts:
+        assert base_head in rp_text, (
+            "resolution prompt must use base_head for grep commands"
+        )
+        assert f"git grep <symbol> {base_head}" in rp_text
+
+    # The verification/blind-review prompts must also use base_head.
+    verifier_prompts = [
+        p for p in captured_prompts
+        if "Post-Resolution Verification Agent" in p
+        or "Independent Review Agent" in p
+    ]
+    for vp_text in verifier_prompts:
+        assert base_head in vp_text, (
+            "verifier prompt must use base_head, not bare target branch"
+        )
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")

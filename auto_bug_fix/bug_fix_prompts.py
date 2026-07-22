@@ -269,6 +269,7 @@ class NarrowResolutionAgentPrompt:
     allowed_modules: list[str]
     triage_assessment: str = ""
     target_branch: str = ""
+    baseline_ref: str = ""
     followup_fixes: str = ""
 
     prompt_template: ClassVar[str] = """\
@@ -329,25 +330,29 @@ named or structured differently on the target branch.
 
     _adaptation_section: ClassVar[str] = """
 ## Adaptation methodology:
+The port baseline is {baseline_ref} (the target branch {target_branch} plus any \
+already-ported prerequisite and test commits). Run all verification commands against \
+this baseline, not against the bare target branch.
+
 When choosing between the upstream and downstream form of a symbol, function, or constant:
-1. Run `git grep <symbol> {target_branch}` to check which form exists on the target branch
-2. If the upstream symbol doesn't exist on the target but an equivalent does -> use the \
-target's form — UNLESS the line sits inside a conditional-compilation region that is \
+1. Run `git grep <symbol> {baseline_ref}` to check which form exists on the port baseline
+2. If the upstream symbol doesn't exist on the baseline but an equivalent does -> use the \
+baseline's form — UNLESS the line sits inside a conditional-compilation region that is \
 disabled in the target's configuration: dead code keeps the upstream bytes verbatim
-3. For function signatures: verify parameter count and types match the target branch
-4. For enum/constant values: check the target branch's actual values, don't assume upstream numbering
+3. For function signatures: verify parameter count and types match the port baseline
+4. For enum/constant values: check the port baseline's actual values, don't assume upstream numbering
 5. For flags or arguments whose validity depends on the calling context (allocation \
-modes, locking discipline): verify against the calling context in the target branch's \
+modes, locking discipline): verify against the calling context in the port baseline's \
 code, not upstream's
 6. Preserve any downstream-specific safety guards (null checks, error handling) that exist in \
-the target branch's version of the code, even if they don't exist upstream
-7. If the upstream symbol EXISTS on the target branch, keep the upstream form — do not \
+the port baseline's version of the code, even if they don't exist upstream
+7. If the upstream symbol EXISTS on the port baseline, keep the upstream form — do not \
 substitute downstream-specific macros, wrappers, or renames that the fix itself doesn't require
-8. Exception to 7: when the target's version of the SAME construct you are editing wraps \
+8. Exception to 7: when the baseline's version of the SAME construct you are editing wraps \
 equivalent members or parameters in a target-specific annotation/compatibility macro \
 (visible on the neighboring lines of the same struct or declaration), follow that local \
 macro convention for the same kind of change — cite the neighboring usage as evidence
-9. Restrict git inspection to {target_branch}, the commit being ported, and their ancestors \
+9. Restrict git inspection to {baseline_ref}, the commit being ported, and their ancestors \
 — never use `git log --all`, `--remotes`, or unrelated branches
 """
 
@@ -365,9 +370,11 @@ if a resolved region seems broken without one, note it in your final summary:
                 triage_assessment=self.triage_assessment,
             )
         adaptation_section = ""
-        if self.target_branch:
+        effective_baseline = self.baseline_ref or self.target_branch
+        if self.target_branch or self.baseline_ref:
             adaptation_section = self._adaptation_section.format(
-                target_branch=self.target_branch,
+                target_branch=self.target_branch or effective_baseline,
+                baseline_ref=effective_baseline,
             )
         followup_section = ""
         if self.followup_fixes:
@@ -394,6 +401,7 @@ class PostResolutionCheckPrompt:
     target_branch: str
     triage_assessment: str = ""
     evidence_report: str = ""
+    baseline_ref: str = ""
 
     prompt_template: ClassVar[str] = """\
 {context}
@@ -402,12 +410,16 @@ You are the Post-Resolution Verification Agent (Phase 3a.1). The conflict resolu
 resolved all cherry-pick conflicts and committed. Your job is to verify that the backport \
 correctly adapts upstream code to the target branch's API surface.
 
+The port baseline is {baseline_ref} (the target branch {target_branch} plus any \
+already-ported prerequisite and test commits). Run all verification commands against \
+this baseline, not against the bare target branch.
+
 The upstream fix diff (what was intended):
 <fix_diff>
 {fix_diff}
 </fix_diff>
 
-The diff actually applied to the target branch:
+The diff actually applied (relative to the port baseline):
 <current_diff>
 {current_diff}
 </current_diff>
@@ -415,34 +427,34 @@ The diff actually applied to the target branch:
 ## Verification steps:
 
 1. **Symbol verification**: For each function, type, macro, or constant that appears in the \
-applied diff, run `git grep <symbol> {target_branch}` to confirm it exists on the target branch. \
-If the applied diff uses an upstream-only symbol that has a different name on the target, fix it.
+applied diff, run `git grep <symbol> {baseline_ref}` to confirm it exists on the port baseline. \
+If the applied diff uses an upstream-only symbol that has a different name on the baseline, fix it.
 
 2. **Function signature check**: For each function call in the applied diff, verify the parameter \
-count and types match the target branch's definition. Run `git grep -n '<function_name>' {target_branch}` \
+count and types match the port baseline's definition. Run `git grep -n '<function_name>' {baseline_ref}` \
 to find the declaration. Fix mismatched signatures.
 
 3. **Enum/constant value check**: If the diff adds or references enum values or bit-shift constants, \
-verify the values match the target branch's numbering. The target branch may have inserted or \
-removed entries, shifting values. Run `git grep -A5 -B5 '<enum_name>' {target_branch}` to check.
+verify the values match the port baseline's numbering. The target branch may have inserted or \
+removed entries, shifting values. Run `git grep -A5 -B5 '<enum_name>' {baseline_ref}` to check.
 
-4. **Downstream guard preservation**: Compare each modified file against the target branch's version \
-(`git show {target_branch}:<file>`). If the target branch has safety guards (null checks, error \
+4. **Downstream guard preservation**: Compare each modified file against the port baseline's version \
+(`git show {baseline_ref}:<file>`). If the baseline has safety guards (null checks, error \
 handling, bounds checks) around the modified code that the upstream doesn't have, ensure they are \
 preserved in the backport.
 
 5. **Context-sensitive arguments**: If the diff uses flags or arguments whose validity \
 depends on the calling context (allocation modes, locking discipline), verify the \
-surrounding function's context on the target branch rather than assuming upstream's.
+surrounding function's context on the port baseline rather than assuming upstream's.
 
 ## Decision rule (three-way discipline):
 - A line the upstream fix changes must carry the fix's exact bytes; a line the fix does \
 not change must carry the target's exact bytes. Verify BOTH directions: revert \
 "improvements" to fix lines AND revert modernizations of target lines the fix never touched.
-- Default to the upstream form: if a symbol used by the upstream diff exists on the target \
-branch, keep the upstream bytes. Adapt ONLY on hard evidence: the symbol does not exist on \
-the target in code that is actually compiled; a function signature or constant value \
-differs; or the target wraps the SAME construct in a target-specific annotation/compat \
+- Default to the upstream form: if a symbol used by the upstream diff exists on the port \
+baseline, keep the upstream bytes. Adapt ONLY on hard evidence: the symbol does not exist on \
+the baseline in code that is actually compiled; a function signature or constant value \
+differs; or the baseline wraps the SAME construct in a target-specific annotation/compat \
 macro on the neighboring lines. Parameter names and types are CONTENT, not style: absent \
 the hard evidence above, they must come from the fix's bytes, never from the target's old \
 declaration.
@@ -453,7 +465,7 @@ values or functionally-equivalent expressions to a "better" form, never reword c
 never reformat or rewrap — even where the target's local conventions differ.
 - Every edit must be justified by one piece of evidence (a line from the evidence report or \
 a `git grep` you ran yourself). If you cannot cite evidence, do NOT make the edit.
-- Restrict git inspection to {target_branch}, the ported commit, and their ancestors — never \
+- Restrict git inspection to {baseline_ref}, the ported commit, and their ancestors — never \
 use `git log --all`, `--remotes`, or unrelated branches.
 
 ## Actions:
@@ -494,11 +506,13 @@ the upstream-base vs target delta of the touched files.
             evidence_section = self._evidence_section_template.format(
                 evidence_report=self.evidence_report,
             )
+        effective_baseline = self.baseline_ref or self.target_branch
         return self.prompt_template.format(
             context=self.context,
             fix_diff=self.fix_diff,
             current_diff=self.current_diff,
             target_branch=self.target_branch,
+            baseline_ref=effective_baseline,
             triage_section=triage_section,
             evidence_section=evidence_section,
         )
@@ -511,22 +525,27 @@ class TriageBlindReviewPrompt:
     fix_diff: str
     current_diff: str
     target_branch: str
+    baseline_ref: str = ""
 
     prompt_template: ClassVar[str] = """\
 {context}
 
 You are an Independent Review Agent (Phase 3a.2). A previous agent resolved \
 cherry-pick conflicts and adapted the backport to the target branch. Your job \
-is to independently verify every symbol adaptation by checking the target branch \
+is to independently verify every symbol adaptation by checking the port baseline \
 directly. You have NOT seen the triage assessment — work only from what the code \
 and git history tell you.
+
+The port baseline is {baseline_ref} (the target branch {target_branch} plus any \
+already-ported prerequisite and test commits). Run all verification commands against \
+this baseline, not against the bare target branch.
 
 The upstream fix diff (what was intended):
 <fix_diff>
 {fix_diff}
 </fix_diff>
 
-The diff actually applied to the target branch:
+The diff actually applied (relative to the port baseline):
 <current_diff>
 {current_diff}
 </current_diff>
@@ -536,11 +555,11 @@ The diff actually applied to the target branch:
 Compare the upstream fix against the applied diff. For every symbol (class, \
 function, method, constant, import) that appears in the upstream fix but was \
 removed or changed in the applied diff, run \
-`git grep '<symbol>' {target_branch}` to check whether it actually exists on \
-the target branch.
+`git grep '<symbol>' {baseline_ref}` to check whether it actually exists on \
+the port baseline.
 
-If a symbol exists on the target but was removed from the port, the removal \
-was wrong — restore it. If a symbol genuinely does not exist on the target, \
+If a symbol exists on the baseline but was removed from the port, the removal \
+was wrong — restore it. If a symbol genuinely does not exist on the baseline, \
 the adaptation was correct — leave it.
 
 When checking whether a class has a particular method, check the full \
@@ -554,16 +573,18 @@ as available.
 - Every edit must be backed by a `git grep` result you ran
 - Stage changes with `git add` if you make any fixes
 - If everything is correct, do nothing — a clean exit means the port passed review
-- Restrict git inspection to {target_branch} and the ported commit — never use \
+- Restrict git inspection to {baseline_ref} and the ported commit — never use \
 `git log --all`, `--remotes`, or unrelated branches
 """
 
     def prompt(self) -> str:
+        effective_baseline = self.baseline_ref or self.target_branch
         return self.prompt_template.format(
             context=self.context,
             fix_diff=self.fix_diff,
             current_diff=self.current_diff,
             target_branch=self.target_branch,
+            baseline_ref=effective_baseline,
         )
 
 
