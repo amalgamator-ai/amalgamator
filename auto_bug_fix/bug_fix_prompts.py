@@ -533,39 +533,23 @@ The diff actually applied to the target branch:
 
 ## Your task
 
-Compare the upstream fix against the applied diff. For every place where the \
-applied diff REMOVES or CHANGES a symbol that the upstream fix uses, verify \
-whether that adaptation was correct:
+Compare the upstream fix against the applied diff. For every symbol (class, \
+function, method, constant, import) that appears in the upstream fix but was \
+removed or changed in the applied diff, run \
+`git grep '<symbol>' {target_branch}` to check whether it actually exists on \
+the target branch.
 
-1. **Removed types from isinstance/type checks**: If the upstream uses \
-`isinstance(x, A | B | C)` but the port uses `isinstance(x, A | C)` (B removed), \
-check whether B exists on the target branch:
-   - `git grep 'class B' {target_branch} -- '*.py'`
-   - If B exists, check whether the method being called on the result also exists \
-on B (check B's class definition AND its parent classes for inherited methods)
-   - If B and the method exist, re-add B to the isinstance check
+If a symbol exists on the target but was removed from the port, the removal \
+was wrong — restore it. If a symbol genuinely does not exist on the target, \
+the adaptation was correct — leave it.
 
-2. **Changed function signatures**: If a function call has different arguments, \
-verify the target branch's actual signature:
-   - `git grep -n 'def function_name' {target_branch}`
-
-3. **Removed imports**: If the upstream imports a symbol that the port doesn't, \
-check if it's used and available:
-   - `git grep 'symbol_name' {target_branch}`
-
-4. **Added symbols not in upstream**: If the port introduces a symbol the \
-upstream doesn't use, verify it belongs.
-
-## Method inheritance check
-
-When checking if a class has a method, ALWAYS check the inheritance chain:
-1. Find the class: `git grep 'class ClassName' {target_branch} -- '*.py'`
-2. Read its parent class from the `class Foo(Bar):` definition
-3. Check if the method is defined on the parent: `git grep 'def method_name' {target_branch} -- '*.py'`
-4. A method inherited from a parent class IS available on the child class.
+When checking whether a class has a particular method, check the full \
+inheritance chain: find the class definition, read its parent class, and \
+check whether the method is defined on any ancestor. Inherited methods count \
+as available.
 
 ## Rules
-- Only fix genuine errors (symbols wrongly removed or wrongly adapted)
+- Only fix genuine errors — symbols wrongly removed or wrongly adapted
 - Do not reformat, restyle, or improve code
 - Every edit must be backed by a `git grep` result you ran
 - Stage changes with `git add` if you make any fixes
