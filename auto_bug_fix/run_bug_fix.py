@@ -91,6 +91,7 @@ from auto_bug_fix.evidence import (
     scan_followup_fixes,
     run_file_checks,
     render_evidence,
+    validate_triage_prerequisites,
 )
 from auto_bug_fix.allowlist import derive_seed, resolve_renames, enforce_allowlist, enforce_test_file_veto
 from auto_bug_fix.baseline import check_regression, run_test_suite, parse_test_failures, TIMEOUT_EXIT_CODE
@@ -105,6 +106,7 @@ from auto_bug_fix.bug_fix_prompts import (
     TestPortAgentPrompt,
     NarrowResolutionAgentPrompt,
     PostResolutionCheckPrompt,
+    TriageBlindReviewPrompt,
     BuildErrorRecoveryPrompt,
     RedTriagePrompt,
     SEMANTIC_TRIAGE_FILE,
@@ -1484,6 +1486,42 @@ def _finalize_resolution(
                 except Exception as e:
                     log.warning("Post-3a.1 token re-audit failed: %s", e)
 
+    if config.evidence_checks:
+        blind_diff = subprocess.run(
+            ["git", "diff", config.target_branch],
+            cwd=repo, capture_output=True, text=True,
+        ).stdout
+        if blind_diff.strip():
+            log.info("Phase 3a.2 — triage-blind independent review")
+            blind_prompt = TriageBlindReviewPrompt(
+                context=context,
+                fix_diff=fix_diff,
+                current_diff=blind_diff,
+                target_branch=config.target_branch,
+            )
+            try:
+                asyncio.run(claude_run(
+                    claude_config_resolve, [blind_prompt.prompt()],
+                    tracker=tracker))
+            except Exception:
+                log.warning("Phase 3a.2 — blind review failed, continuing")
+            else:
+                blind_status = git_status_porcelain(repo)
+                if blind_status:
+                    subprocess.run(
+                        ["git", "add", "-u"], cwd=repo, capture_output=True)
+                    git_commit(
+                        repo,
+                        "fixup: independent review corrections (Phase 3a.2)")
+                    log.info("Phase 3a.2 — blind review committed corrections")
+                    if state.dossier:
+                        state.dossier.add(
+                            "Independent review corrections",
+                            "Triage-blind reviewer found and fixed symbol "
+                            "adaptations that were incorrect.",
+                            "Phase 3a.2",
+                        )
+
     return "resolved"
 
 
@@ -1650,6 +1688,28 @@ def _run_pipeline_phases(
             triage_dest = os.path.join(tracker._output_dir, "semantic_triage.json")
             with open(triage_dest, "w") as f:
                 json.dump(assessment, f, indent=2)
+
+        prereqs = state.triage_assessment.get("prerequisites", [])
+        if prereqs:
+            corrections = validate_triage_prerequisites(
+                config.repo_path, config.target_branch, prereqs)
+            for corr in corrections:
+                log.warning(
+                    "Triage correction: %s — %s", corr.symbol, corr.correction)
+                for p in prereqs:
+                    if p.get("symbol") == corr.symbol:
+                        p["corrected"] = True
+                        p["original_reason"] = corr.original_reason
+                        p["reason"] = corr.correction
+                state.dossier.add(
+                    f"Triage correction: {corr.symbol}",
+                    f"Original: {corr.original_reason}\n"
+                    f"Correction: {corr.correction}",
+                    "Phase 0.5.1 — deterministic prerequisite validation",
+                )
+            if corrections:
+                tracker.record_gate(
+                    "triage_corrections", str(len(corrections)))
 
     cherry_pick_succeeded = False
     try:

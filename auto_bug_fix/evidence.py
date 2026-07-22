@@ -127,6 +127,151 @@ def _ref_exists(repo_path: str, ref: str) -> bool:
     return _run_git(repo_path, ["rev-parse", "--verify", f"{ref}^{{commit}}"]).success
 
 
+_CLASS_WITH_PARENTS_RE = re.compile(
+    r"class\s+(\w+)\s*\(([^)]+)\)",
+)
+
+_CLASS_HEADER_RE = re.compile(
+    r"^class\s+(\w+)\s*[\(:]",
+)
+
+_MAX_HIERARCHY_DEPTH = 5
+
+
+def _find_parent_classes(
+    repo_path: str, ref: str, class_name: str,
+) -> list[str]:
+    """Return the direct parent class names of *class_name* on *ref*."""
+    result = subprocess.run(
+        ["git", "grep", "-n", "-E", rf"class\s+{re.escape(class_name)}\s*\(", ref, "--", "*.py"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    parents: list[str] = []
+    for line in result.stdout.splitlines():
+        m = _CLASS_WITH_PARENTS_RE.search(line)
+        if m and m.group(1) == class_name:
+            raw = m.group(2)
+            for p in raw.split(","):
+                p = p.strip().rsplit(".", 1)[-1]  # strip module prefix
+                if p and p not in ("object",):
+                    parents.append(p)
+    return parents
+
+
+def _class_defines_method(
+    repo_path: str, ref: str, class_name: str, method: str,
+) -> bool:
+    """True if *class_name* directly defines *method* (``def method``) on *ref*."""
+    result = subprocess.run(
+        ["git", "grep", "-q", "-E", rf"^\s+def\s+{re.escape(method)}\s*\(", ref, "--", "*.py"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return False
+    result = subprocess.run(
+        ["git", "grep", "-l", "-E", rf"^\s+def\s+{re.escape(method)}\s*\(", ref, "--", "*.py"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    for fpath in result.stdout.strip().splitlines():
+        fpath = fpath.split(":", 1)[-1] if ":" in fpath else fpath
+        blob = _git_blob(repo_path, ref, fpath)
+        if not blob:
+            continue
+        in_class = False
+        for bline in blob.splitlines():
+            cm = _CLASS_HEADER_RE.match(bline)
+            if cm:
+                in_class = cm.group(1) == class_name
+            elif in_class and re.match(rf"^\s+def\s+{re.escape(method)}\s*\(", bline):
+                return True
+            elif in_class and re.match(r"^class\s", bline):
+                in_class = False
+    return False
+
+
+def method_exists_on_class_hierarchy(
+    repo_path: str, ref: str, class_name: str, method: str,
+) -> bool:
+    """True if *method* is available on *class_name* via direct definition or inheritance."""
+    visited: set[str] = set()
+    queue = [class_name]
+    for _ in range(_MAX_HIERARCHY_DEPTH):
+        if not queue:
+            break
+        current = queue.pop(0)
+        if current in visited:
+            continue
+        visited.add(current)
+        if _class_defines_method(repo_path, ref, current, method):
+            return True
+        queue.extend(_find_parent_classes(repo_path, ref, current))
+    return False
+
+
+@dataclass
+class TriageCorrection:
+    """A factual correction to a triage prerequisite claim."""
+    symbol: str
+    original_reason: str
+    correction: str
+
+
+def validate_triage_prerequisites(
+    repo_path: str,
+    target_ref: str,
+    prerequisites: list[dict],
+) -> list[TriageCorrection]:
+    """Verify each triage prerequisite claim against the target branch.
+
+    For ``portable: false`` prerequisites whose reason claims a symbol doesn't
+    exist on the target, check whether the symbol actually exists — including
+    via inheritance for dotted ``Class.method`` symbols.
+
+    Returns a list of corrections for claims that are factually wrong.
+    """
+    corrections: list[TriageCorrection] = []
+    if not _ref_exists(repo_path, target_ref):
+        return corrections
+
+    for prereq in prerequisites:
+        if prereq.get("portable", True):
+            continue
+
+        symbol = prereq.get("symbol", "")
+        reason = prereq.get("reason", "")
+
+        if "." in symbol:
+            parts = symbol.split(".", 1)
+            class_name = parts[0].strip().split()[-1]
+            method = parts[1].strip().split("(")[0].split()[0]
+
+            if method_exists_on_class_hierarchy(
+                repo_path, target_ref, class_name, method,
+            ):
+                corrections.append(TriageCorrection(
+                    symbol=symbol,
+                    original_reason=reason,
+                    correction=(
+                        f"{class_name}.{method} DOES exist on the target branch "
+                        f"(via inheritance). The resolution agent should keep "
+                        f"{class_name} in any isinstance/type checks."
+                    ),
+                ))
+        else:
+            bare = symbol.strip().split("(")[0].split()[-1]
+            if bare and token_exists_on_ref(repo_path, target_ref, bare):
+                corrections.append(TriageCorrection(
+                    symbol=symbol,
+                    original_reason=reason,
+                    correction=(
+                        f"{bare} exists on the target branch. The triage claim "
+                        f"that it is missing is incorrect."
+                    ),
+                ))
+
+    return corrections
+
+
 def _fix_added_tokens(repo_path: str, fix_commit: str) -> set[str]:
     """Tokens introduced by the upstream fix commit's own added lines."""
     result = _run_git(repo_path, ["diff", f"{fix_commit}^1..{fix_commit}"])
