@@ -31,3 +31,5 @@ model: "claude-sonnet-4-6"     # or claude-opus-4-6 for harder backports
 #   mechanical_resolution: true   # git-apply rungs before the LLM (ablation flag)
 #   snapback: true                # snap LLM-drifted lines back to source bytes
 #   evidence_checks: true         # token audit + substitution mining + follow-up scan
+#   post_resolution_check: true   # Phase 3a.1 verification agent
+#   blind_review: true            # Phase 3a.2 triage-blind review agent

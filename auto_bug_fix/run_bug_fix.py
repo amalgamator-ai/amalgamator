@@ -1465,7 +1465,7 @@ def _finalize_resolution(
         auto_restored=auto_restored)
 
     current_diff = _safe_git_diff(repo, base_head)
-    if current_diff.strip():
+    if config.post_resolution_check and current_diff.strip():
         log.info("Phase 3a.1 — post-resolution adaptation check")
         check_prompt = PostResolutionCheckPrompt(
             context=context,
@@ -1515,7 +1515,7 @@ def _finalize_resolution(
                 except Exception as e:
                     log.warning("Post-3a.1 token re-audit failed: %s", e)
 
-    if config.evidence_checks:
+    if config.blind_review:
         blind_diff = _safe_git_diff(repo, base_head)
         if blind_diff.strip():
             log.info("Phase 3a.2 — triage-blind independent review")

@@ -132,6 +132,8 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         mechanical_resolution=bool(advanced.get("mechanical_resolution", True)),
         snapback=bool(advanced.get("snapback", True)),
         evidence_checks=bool(advanced.get("evidence_checks", True)),
+        post_resolution_check=bool(advanced.get("post_resolution_check", True)),
+        blind_review=bool(advanced.get("blind_review", True)),
     )
 
     return bug_fix_config, workdir, source_path
