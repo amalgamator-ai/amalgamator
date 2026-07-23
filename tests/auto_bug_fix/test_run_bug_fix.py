@@ -13,6 +13,8 @@ from auto_bug_fix.run_bug_fix import (
     TargetResult,
     run_targets,
     _read_tracker_cost,
+    _sanitize_branch_slug,
+    _COAUTHOR_TRAILERS,
 )
 from auto_bug_fix.config_loader import TargetSpec, _sanitize_ref
 from auto_bug_fix.git_tools import GitResult
@@ -688,3 +690,40 @@ def test_run_targets_records_fetch_warning_in_summary(
         summary = json.load(f)
     assert "warnings" in summary
     assert any("Permission denied" in w for w in summary["warnings"])
+
+
+# ---------- _sanitize_branch_slug tests ----------
+
+def test_sanitize_branch_slug_passthrough():
+    assert _sanitize_branch_slug("my-issue-123") == "my-issue-123"
+
+
+def test_sanitize_branch_slug_spaces():
+    assert _sanitize_branch_slug("fix the bug") == "fix-the-bug"
+
+
+def test_sanitize_branch_slug_colons_and_tildes():
+    assert _sanitize_branch_slug("refs:HEAD~2") == "refs-HEAD-2"
+
+
+def test_sanitize_branch_slug_double_dots():
+    assert _sanitize_branch_slug("a..b") == "a.b"
+
+
+def test_sanitize_branch_slug_at_brace():
+    assert _sanitize_branch_slug("ref@{0}") == "refat-0}"
+
+
+def test_sanitize_branch_slug_strips_leading_trailing():
+    assert _sanitize_branch_slug("-./slug/.-") == "slug"
+
+
+def test_sanitize_branch_slug_empty_fallback():
+    assert _sanitize_branch_slug("---") == "unknown"
+
+
+# ---------- _COAUTHOR_TRAILERS tests ----------
+
+def test_coauthor_trailers_canonical_casing():
+    assert "Co-authored-by" in _COAUTHOR_TRAILERS
+    assert "Co-Authored-By" not in _COAUTHOR_TRAILERS
