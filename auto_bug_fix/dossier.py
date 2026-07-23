@@ -53,6 +53,7 @@ def build_trailers(
     trailers = {
         "AutoBugFix-Phase": phase,
         "AutoBugFix-Model": model,
+        "Co-Authored-By": "amalgamator <amalgamator@redhat.com>",
     }
     if resolved_hunks:
         trailers["AutoBugFix-Resolved-Hunks"] = resolved_hunks
