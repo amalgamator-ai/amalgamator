@@ -2254,6 +2254,20 @@ def run_targets(
             ))
             print(f"FINISHED target {spec.branch}: outcome={outcome}, duration={duration}s, cost=${cost_usd:.4f}")
 
+            if outcome == "success" and worktree_created:
+                try:
+                    head_sha = git_rev_parse(worktree_path, "HEAD")
+                    branch_name = f"amalgamator/{target_config.issue_id}"
+                    if len(targets) > 1:
+                        branch_name += f"/{sanitized}"
+                    subprocess.run(
+                        ["git", "branch", "-f", branch_name, head_sha],
+                        cwd=source_path, capture_output=True,
+                    )
+                    log.info("Commits preserved on branch %s", branch_name)
+                except Exception as e:
+                    log.warning("Failed to create branch: %s", e)
+
         finally:
             sys.stdout = saved_stdout
             target_log_file.close()
@@ -2331,6 +2345,13 @@ if __name__ == "__main__":
             with open(dossier_path, "w") as f:
                 f.write(dossier_text)
             print(f"Dossier written to {dossier_path}")
+
+            branch_name = f"amalgamator/{bug_fix_config.issue_id}"
+            subprocess.run(
+                ["git", "branch", "-f", branch_name, "HEAD"],
+                cwd=bug_fix_config.repo_path, capture_output=True,
+            )
+            print(f"Commits preserved on branch {branch_name}")
 
         except PipelineStop as e:
             print(f"PIPELINE STOP: {e}")
