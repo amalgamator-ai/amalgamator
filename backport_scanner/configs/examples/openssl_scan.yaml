@@ -4,8 +4,8 @@
 # a given fix commit has been backported.
 #
 # Usage:
-#   python -m branch_scanner.run_scanner \
-#     --config branch_scanner/configs/examples/openssl_scan.yaml \
+#   python -m backport_scanner.run_scanner \
+#     --config backport_scanner/configs/examples/openssl_scan.yaml \
 #     --output scan_report.json
 
 repository:

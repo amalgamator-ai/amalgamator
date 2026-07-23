@@ -7,27 +7,12 @@ own agent persona subclasses :class:`ClaudeConfig` and overrides
 printing, timing, token accounting) is identical across pipelines and lives
 here only.
 """
+from __future__ import annotations
 
 import os
 import time
 from dataclasses import dataclass, field, fields
 from colorama import Fore, Style
-
-from claude_agent_sdk import (
-    AssistantMessage,
-    TextBlock,
-    ThinkingBlock,
-    ToolUseBlock,
-    ToolResultBlock,
-    ContentBlock,
-    ResultMessage,
-    SystemMessage,
-    UserMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-)
-
-from claude_agent_sdk.types import StreamEvent
 
 
 def make_anthropic_client():
@@ -43,6 +28,26 @@ def make_anthropic_client():
             region=os.environ.get("CLOUD_ML_REGION", "us-east5"),
         )
     return anthropic.Anthropic()
+
+
+try:
+    from claude_agent_sdk import (
+        AssistantMessage,
+        TextBlock,
+        ThinkingBlock,
+        ToolUseBlock,
+        ToolResultBlock,
+        ContentBlock,
+        ResultMessage,
+        SystemMessage,
+        UserMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+    )
+    from claude_agent_sdk.types import StreamEvent
+    _HAS_CLAUDE_SDK = True
+except ImportError:
+    _HAS_CLAUDE_SDK = False
 
 
 # Deliberately domain-neutral: a package that never picks a persona gets a
@@ -232,6 +237,11 @@ async def claude_run(
     steps: list,
     resume: bool = False,
 ):
+    if not _HAS_CLAUDE_SDK:
+        raise ImportError(
+            "claude_agent_sdk is required for claude_run(). "
+            "Install it or run inside the Claude Code environment."
+        )
     assert claude_config.cwd is not None, "claude_config must have CWD set"
 
     # Support legacy callers that pass raw strings/dicts
