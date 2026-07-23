@@ -2257,7 +2257,8 @@ def run_targets(
             if outcome == "success" and worktree_created:
                 try:
                     head_sha = git_rev_parse(worktree_path, "HEAD")
-                    branch_name = f"amalgamator/{target_config.issue_id}"
+                    slug = target_config.issue_id or f"{target_config.source_fix_commit[:12]}-to-{sanitized}"
+                    branch_name = f"amalgamator/{slug}"
                     if len(targets) > 1:
                         branch_name += f"/{sanitized}"
                     subprocess.run(
@@ -2346,7 +2347,8 @@ if __name__ == "__main__":
                 f.write(dossier_text)
             print(f"Dossier written to {dossier_path}")
 
-            branch_name = f"amalgamator/{bug_fix_config.issue_id}"
+            slug = bug_fix_config.issue_id or f"{bug_fix_config.source_fix_commit[:12]}-to-{_sanitize_ref(bug_fix_config.target_branch)}"
+            branch_name = f"amalgamator/{slug}"
             subprocess.run(
                 ["git", "branch", "-f", branch_name, "HEAD"],
                 cwd=bug_fix_config.repo_path, capture_output=True,
