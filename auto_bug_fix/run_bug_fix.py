@@ -2072,10 +2072,14 @@ def _read_tracker_cost(target_run_dir: str, issue_id: str) -> tuple[float, str]:
         return 0.0, tracker_path
 
 
-def _write_summary(results: list[TargetResult], parent_run_dir: str) -> None:
+def _write_summary(
+    results: list[TargetResult],
+    parent_run_dir: str,
+    warnings: list[str] | None = None,
+) -> None:
     """Write summary.json aggregating all target outcomes."""
     succeeded = sum(1 for r in results if r.outcome == "success")
-    summary = {
+    summary: dict = {
         "total_targets": len(results),
         "succeeded": succeeded,
         "failed": len(results) - succeeded,
@@ -2083,6 +2087,8 @@ def _write_summary(results: list[TargetResult], parent_run_dir: str) -> None:
         "total_cost_usd": round(sum(r.cost_usd for r in results), 4),
         "targets": [asdict(r) for r in results],
     }
+    if warnings:
+        summary["warnings"] = warnings
     path = os.path.join(parent_run_dir, "summary.json")
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
@@ -2097,6 +2103,7 @@ def run_targets(
     workdir: str,
     parent_run_dir: str,
     build_subdir: str,
+    run_warnings: list[str] | None = None,
 ) -> list[TargetResult]:
     """Execute the pipeline serially for each target branch.
 
@@ -2242,7 +2249,7 @@ def run_targets(
             if worktree_created:
                 cleanup_worktree(source_path, worktree_path)
 
-    _write_summary(results, parent_run_dir)
+    _write_summary(results, parent_run_dir, warnings=run_warnings)
 
     log.info("=== Multi-target summary ===")
     for r in results:
@@ -2274,10 +2281,22 @@ if __name__ == "__main__":
             print(f"Run directory: {parent_run_dir}")
 
             print("Fetching latest refs from origin...")
-            subprocess.run(["git", "fetch", "--all", "--quiet"], cwd=source_path, capture_output=True)
+            fetch_result = subprocess.run(
+                ["git", "fetch", "--all", "--quiet"],
+                cwd=source_path, capture_output=True, text=True,
+            )
+            fetch_warning = ""
+            if fetch_result.returncode != 0:
+                fetch_warning = (
+                    f"git fetch --all failed (exit {fetch_result.returncode}): "
+                    f"{(fetch_result.stderr or '').strip()[:500]}"
+                )
+                log.warning(fetch_warning)
+                print(f"WARNING: {fetch_warning} — continuing with local refs")
             build_subdir = os.path.relpath(base_config.build_dir, base_config.repo_path)
 
-            results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir)
+            run_warnings = [fetch_warning] if fetch_warning else []
+            results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir, run_warnings=run_warnings)
         finally:
             sys.stdout = original_stdout
             log_file.close()
