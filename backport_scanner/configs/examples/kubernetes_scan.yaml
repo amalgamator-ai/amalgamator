@@ -9,8 +9,8 @@
 #
 # Usage:
 #   git clone https://github.com/kubernetes/kubernetes.git /path/to/kubernetes
-#   python -m branch_scanner.run_scanner \
-#     --config branch_scanner/configs/examples/kubernetes_scan.yaml \
+#   python -m backport_scanner.run_scanner \
+#     --config backport_scanner/configs/examples/kubernetes_scan.yaml \
 #     --output scan_report.json
 
 repository:

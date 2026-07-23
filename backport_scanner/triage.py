@@ -1,15 +1,15 @@
 """
-branch_scanner/triage.py — shared branch triage logic.
+backport_scanner/triage.py — shared ref triage logic.
 
-Single check_branch() used by both:
-  - branch_scanner: loops over all branches to find which need a fix
-  - auto_bug_fix Phase 0: checks one branch before attempting a backport
+Single check_ref() (and its alias check_branch()) used by both:
+  - backport_scanner: loops over all refs (branches AND tags) to find which need a fix
+  - auto_bug_fix Phase 0: checks one ref before attempting a backport
 
 Detection cascade (stops at first conclusive result):
-  1. git_is_ancestor        — exact commit already on branch
+  1. git_is_ancestor        — exact commit already reachable from ref
   2. forward_patch_id_check — equivalent patch (different SHA, same content)
-  3. backward_patch_id_check— branch predates the bug (not affected, skip)
-  4. file diff heuristic    — 85%+ of fix lines present in branch files
+  3. backward_patch_id_check— ref predates the bug (not affected, skip)
+  4. file diff heuristic    — 85%+ of fix lines present in ref's files
   5. LLM semantic check     — resolves AMBIGUOUS cases (optional, caller-driven)
 """
 
@@ -45,6 +45,7 @@ class BranchCheckResult:
     method: str                # which level detected this
     detail: str                # human-readable explanation
     changed_files: list[str]   # files touched by the fix commit
+    ref_type: str = "branch"   # "branch" or "tag"
 
 
 # ── Helpers not already in the pipeline ───────────────────────────────────────
@@ -76,12 +77,32 @@ def get_remote_branches(repo_path: Path, pattern: str | None = None) -> list[str
     return sorted(set(branches))
 
 
+def get_tags(repo_path: Path, pattern: str | None = None) -> list[str]:
+    """List tags (local and fetched), optionally filtered by a glob pattern."""
+    import fnmatch
+    rc, out, _ = _run(["git", "tag", "--list"], cwd=repo_path)
+    if rc != 0:
+        return []
+    tags = [line.strip() for line in out.splitlines() if line.strip()]
+    if pattern:
+        tags = [t for t in tags if fnmatch.fnmatch(t, pattern)]
+    return sorted(set(tags))
+
+
+def _resolve_ref(name: str, ref_type: str) -> str:
+    """Return the git ref string for a branch or tag name."""
+    if ref_type == "tag":
+        return name
+    return f"origin/{name}"
+
+
 def _check_file_diff(
-    repo_path: Path, branch: str, fix_commit: str, changed_files: list[str]
+    repo_path: Path, name: str, fix_commit: str, changed_files: list[str],
+    ref_type: str = "branch",
 ) -> FixStatus:
     """
     Level 4: file diff heuristic.
-    Compare lines added by the fix against the current branch file content.
+    Compare lines added by the fix against the current ref's file content.
     85%+ match → LIKELY_PRESENT, ≤15% → NEEDS_FIX, middle → AMBIGUOUS.
     """
     if not changed_files:
@@ -101,23 +122,22 @@ def _check_file_diff(
     if not added_lines:
         return FixStatus.AMBIGUOUS
 
-    # Check across ALL changed files, not just the first one
-    branch_content = ""
+    ref = _resolve_ref(name, ref_type)
+    content_all = ""
     files_found = 0
     for f in changed_files:
         rc, content, _ = _run(
-            ["git", "show", f"origin/{branch}:{f}"],
+            ["git", "show", f"{ref}:{f}"],
             cwd=repo_path,
         )
         if rc == 0:
             files_found += 1
-            branch_content += content
+            content_all += content
 
-    # If none of the changed files exist on the branch, it predates this code
     if files_found == 0:
         return FixStatus.NOT_AFFECTED
 
-    matched = sum(1 for line in added_lines if line.strip() in branch_content)
+    matched = sum(1 for line in added_lines if line.strip() in content_all)
     ratio = matched / len(added_lines)
 
     if ratio >= 0.85:
@@ -129,83 +149,100 @@ def _check_file_diff(
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def check_branch(
+def check_ref(
     repo_path: Path,
-    branch: str,
+    name: str,
     fix_commit: str,
     vuln_commit: str | None = None,
+    ref_type: str = "branch",
 ) -> BranchCheckResult:
     """
-    Full detection cascade for one branch.
+    Full detection cascade for one git ref (branch or tag).
 
     Args:
         repo_path:   Local path to the git repository.
-        branch:      Short branch name (without 'origin/').
+        name:        Short ref name — branch name (without 'origin/') or tag name.
         fix_commit:  SHA of the commit that introduced the fix on main.
         vuln_commit: SHA of the commit that introduced the bug (optional).
-                     When provided, branches that predate this commit are
+                     When provided, refs that predate this commit are
                      marked NOT_AFFECTED instead of NEEDS_FIX.
+        ref_type:    "branch" or "tag". Tags are resolved directly; branches
+                     are prefixed with 'origin/'.
     """
     repo = str(repo_path)
-    target = f"origin/{branch}"
+    target = _resolve_ref(name, ref_type)
     changed_files = git_show_files(repo, fix_commit)
 
     # Level 1: exact commit — reuses git_is_ancestor from auto_bug_fix
     if git_is_ancestor(repo, fix_commit, target):
         return BranchCheckResult(
-            branch=branch,
+            branch=name,
             status=FixStatus.EXACT_MATCH,
             method="git_is_ancestor",
-            detail=f"Commit {fix_commit[:10]} is a direct ancestor of {target}",
+            detail=f"Commit {fix_commit[:10]} is reachable from {target}",
             changed_files=changed_files,
+            ref_type=ref_type,
         )
 
     # Level 2: equivalent patch — reuses forward_patch_id_check from auto_bug_fix
     try:
         match = forward_patch_id_check(repo, fix_commit, target)
     except Exception as e:
-        log.debug("forward_patch_id_check failed for %s: %s — skipping to Level 4", branch, e)
+        log.debug("forward_patch_id_check failed for %s: %s — skipping to Level 4", name, e)
         match = None
     if match:
         return BranchCheckResult(
-            branch=branch,
+            branch=name,
             status=FixStatus.EQUIVALENT,
             method="forward_patch_id_check",
             detail=f"Equivalent patch already applied on {target} as {match[:10]}",
             changed_files=changed_files,
+            ref_type=ref_type,
         )
 
     # Level 3: backward patch-id — reuses backward_patch_id_check from auto_bug_fix
-    # If vuln_commit is not on the branch, the branch predates the bug entirely.
     if vuln_commit:
         try:
-            vuln_on_branch = backward_patch_id_check(repo, vuln_commit, target)
+            vuln_on_ref = backward_patch_id_check(repo, vuln_commit, target)
         except Exception as e:
-            log.debug("backward_patch_id_check failed for %s: %s — skipping", branch, e)
-            vuln_on_branch = None
+            log.debug("backward_patch_id_check failed for %s: %s — skipping", name, e)
+            vuln_on_ref = None
         seed_exists = any(
             git_cat_file_exists(repo, target, f) for f in changed_files[:3]
         )
-        if not vuln_on_branch and not seed_exists:
+        if not vuln_on_ref and not seed_exists:
             return BranchCheckResult(
-                branch=branch,
+                branch=name,
                 status=FixStatus.NOT_AFFECTED,
                 method="backward_patch_id_check",
-                detail=f"Branch {target} predates the bug — no fix needed",
+                detail=f"{target} predates the bug — no fix needed",
                 changed_files=changed_files,
+                ref_type=ref_type,
             )
 
-    # Level 4: file diff heuristic (new — not in pipeline Phase 0)
-    file_status = _check_file_diff(repo_path, branch, fix_commit, changed_files)
+    # Level 4: file diff heuristic
+    file_status = _check_file_diff(repo_path, name, fix_commit, changed_files,
+                                   ref_type=ref_type)
     detail_map = {
-        FixStatus.LIKELY_PRESENT: "85%+ of fix lines found in branch files",
-        FixStatus.NEEDS_FIX:      "Fix lines not found in branch files",
+        FixStatus.LIKELY_PRESENT: f"85%+ of fix lines found in {target} files",
+        FixStatus.NEEDS_FIX:      f"Fix lines not found in {target} files",
         FixStatus.AMBIGUOUS:      "Inconclusive — enable llm.enabled: true to resolve",
     }
     return BranchCheckResult(
-        branch=branch,
+        branch=name,
         status=file_status,
         method="file diff heuristic",
         detail=detail_map.get(file_status, ""),
         changed_files=changed_files,
+        ref_type=ref_type,
     )
+
+
+def check_branch(
+    repo_path: Path,
+    branch: str,
+    fix_commit: str,
+    vuln_commit: str | None = None,
+) -> BranchCheckResult:
+    """Backward-compatible alias: check a branch (ref_type='branch')."""
+    return check_ref(repo_path, branch, fix_commit, vuln_commit, ref_type="branch")

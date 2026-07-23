@@ -1,16 +1,16 @@
 """
-generate_config.py — bridge between branch scanner and auto_bug_fix YAML configs.
+generate_config.py — bridge between backport scanner and auto_bug_fix YAML configs.
 
 Three modes (Alessandro's three cases from design meeting):
 
-  generate  — scan branches → produce one auto_bug_fix YAML per NEEDS_FIX branch
-  add       — scan branches → append newly-found NEEDS_FIX branches to existing YAML
-  verify    — check branches listed in existing YAML still need the fix
+  generate  — scan branches/tags → produce one auto_bug_fix YAML per NEEDS_FIX ref
+  add       — scan → append newly-found NEEDS_FIX refs to existing YAML
+  verify    — check refs listed in existing YAML still need the fix
 
 Usage:
-    python -m branch_scanner.generate_config --config scan.yaml --mode generate --output-dir ./out/
-    python -m branch_scanner.generate_config --config scan.yaml --mode add     --existing-yaml fix.yaml
-    python -m branch_scanner.generate_config --config scan.yaml --mode verify  --existing-yaml fix.yaml
+    python -m backport_scanner.generate_config --config scan.yaml --mode generate --output-dir ./out/
+    python -m backport_scanner.generate_config --config scan.yaml --mode add     --existing-yaml fix.yaml
+    python -m backport_scanner.generate_config --config scan.yaml --mode verify  --existing-yaml fix.yaml
 """
 
 import argparse
@@ -22,7 +22,7 @@ from pathlib import Path
 import yaml
 
 from auto_bug_fix.git_tools import git_show_files
-from .triage import FixStatus, check_branch
+from .triage import FixStatus, check_ref
 from .run_scanner import load_config
 from .scanner import ScanConfig, run_scan
 
@@ -156,25 +156,27 @@ def _make_bug_fix_yaml(
     repo_path: Path,
     fix_commit: str,
     fix_description: str,
-    target_branch: str,
+    target_name: str,
     changed_files: list[str],
     build_command: str = "",
     test_command: str = "",
     default_branch: str = "main",
+    ref_type: str = "branch",
 ) -> dict:
-    """Produce an auto_bug_fix-compatible YAML dict for one target branch."""
+    """Produce an auto_bug_fix-compatible YAML dict for one target ref."""
     short = fix_commit[:10]
-    safe_branch = target_branch.replace("/", "-").replace(".", "-")
+    safe_name = target_name.replace("/", "-").replace(".", "-")
+    target_ref = target_name if ref_type == "tag" else f"origin/{target_name}"
     return {
-        "issue_id": f"scan-{safe_branch}-{short}",
-        "bug_description": fix_description or f"Backport fix {short} to {target_branch}",
+        "issue_id": f"scan-{safe_name}-{short}",
+        "bug_description": fix_description or f"Backport fix {short} to {target_name}",
         "repository": {
             "source_path": str(repo_path),
-            "workdir": f"/tmp/bugfix-{safe_branch}-{short}",
+            "workdir": f"/tmp/bugfix-{safe_name}-{short}",
         },
         "branches": {
             "source": f"origin/{default_branch}",
-            "target": f"origin/{target_branch}",
+            "target": target_ref,
         },
         "fix": {
             "commit": fix_commit,
@@ -184,7 +186,8 @@ def _make_bug_fix_yaml(
             "test_command": test_command,
         },
         "model": "claude-opus-4-6",
-        "_changed_files": changed_files,  # informational, not used by pipeline
+        "_changed_files": changed_files,
+        "_ref_type": ref_type,
     }
 
 
@@ -228,14 +231,16 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
             repo_path=config.repo_path,
             fix_commit=config.fix_commit,
             fix_description=config.fix_description,
-            target_branch=result.branch,
+            target_name=result.branch,
             changed_files=changed_files,
             build_command=build_cmd,
             test_command=test_cmd,
             default_branch=default_branch,
+            ref_type=getattr(result, "ref_type", "branch"),
         )
         safe = result.branch.replace("/", "-").replace(".", "-")
-        out_path = output_dir / f"{safe}.yaml"
+        prefix = "tag-" if getattr(result, "ref_type", "branch") == "tag" else ""
+        out_path = output_dir / f"{prefix}{safe}.yaml"
         _write_yaml(data, out_path)
 
     print(f"\nGenerated {len(report.needs_fix)} YAML config(s) in {output_dir}/")
@@ -328,7 +333,7 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
     ambiguous: list[str] = []
 
     for branch in branches_to_check:
-        result = check_branch(
+        result = check_ref(
             config.repo_path, branch, fix_commit,
             vuln_commit=config.vuln_commit,
         )

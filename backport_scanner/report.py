@@ -11,7 +11,7 @@ from .scanner import ScanReport
 STATUS_ICON = {
     FixStatus.EXACT_MATCH:    "✓  ALREADY FIXED (exact commit)",
     FixStatus.EQUIVALENT:     "✓  ALREADY FIXED (equivalent patch)",
-    FixStatus.NOT_AFFECTED:   "—  NOT AFFECTED  (branch predates the bug)",
+    FixStatus.NOT_AFFECTED:   "—  NOT AFFECTED  (predates the bug)",
     FixStatus.LIKELY_PRESENT: "~  LIKELY FIXED  (file diff)",
     FixStatus.NEEDS_FIX:      "✗  NEEDS FIX",
     FixStatus.AMBIGUOUS:      "?  AMBIGUOUS     (recommend LLM check)",
@@ -29,47 +29,63 @@ STATUS_SYMBOL = {
 }
 
 
+def _ref_label(result) -> str:
+    """Format a ref with its type prefix for display."""
+    if getattr(result, "ref_type", "branch") == "tag":
+        return f"[tag] {result.branch}"
+    return result.branch
+
+
 def print_report(report: ScanReport) -> None:
     """Print a human-readable report to stdout."""
+    branch_results = [r for r in report.results if getattr(r, "ref_type", "branch") == "branch"]
+    tag_results = [r for r in report.results if getattr(r, "ref_type", "branch") == "tag"]
+
     print()
     print("=" * 70)
-    print("  BRANCH SCANNER REPORT")
+    print("  BACKPORT SCANNER REPORT")
     print("=" * 70)
     print(f"  Repo:        {report.repo}")
     print(f"  Fix commit:  {report.fix_commit}")
     if report.fix_description:
         print(f"  Description: {report.fix_description}")
-    print(f"  Branches scanned: {len(report.results)}")
+    parts = []
+    if branch_results:
+        parts.append(f"{len(branch_results)} branch(es)")
+    if tag_results:
+        parts.append(f"{len(tag_results)} tag(s)")
+    print(f"  Refs scanned: {' + '.join(parts) if parts else len(report.results)}")
     print("=" * 70)
     print()
 
-    col_w = max((len(r.branch) for r in report.results), default=20) + 2
-    print(f"  {'BRANCH':<{col_w}}  STATUS")
+    col_w = max((len(_ref_label(r)) for r in report.results), default=20) + 2
+    print(f"  {'REF':<{col_w}}  STATUS")
     print(f"  {'-'*col_w}  {'-'*40}")
 
-    for result in sorted(report.results, key=lambda r: r.branch):
+    for result in sorted(report.results, key=lambda r: (getattr(r, "ref_type", "branch"), r.branch)):
         icon = STATUS_ICON.get(result.status, result.status.value)
-        print(f"  {result.branch:<{col_w}}  {icon}")
+        label = _ref_label(result)
+        print(f"  {label:<{col_w}}  {icon}")
         if result.detail:
             print(f"  {'':<{col_w}}  → {result.detail}")
 
     print()
     print("-" * 70)
-    print(f"  NEEDS FIX    : {len(report.needs_fix)} branch(es)")
-    print(f"  ALREADY FIXED: {len(report.already_fixed)} branch(es)")
+    print(f"  NEEDS FIX    : {len(report.needs_fix)} ref(s)")
+    print(f"  ALREADY FIXED: {len(report.already_fixed)} ref(s)")
     if report.not_affected:
-        print(f"  NOT AFFECTED : {len(report.not_affected)} branch(es) — predates the bug")
+        print(f"  NOT AFFECTED : {len(report.not_affected)} ref(s) — predates the bug")
     if report.ambiguous:
-        print(f"  AMBIGUOUS    : {len(report.ambiguous)} branch(es) — review manually")
+        print(f"  AMBIGUOUS    : {len(report.ambiguous)} ref(s) — review manually")
     if report.errors:
-        print(f"  ERRORS       : {len(report.errors)} branch(es)")
+        print(f"  ERRORS       : {len(report.errors)} ref(s)")
     print("=" * 70)
 
     if report.needs_fix:
         print()
-        print("  Branches that NEED the fix:")
+        print("  Refs that NEED the fix:")
         for r in report.needs_fix:
-            print(f"    - {r.branch}")
+            print(f"    - {_ref_label(r)}")
     print()
 
 
@@ -86,9 +102,10 @@ def save_json(report: ScanReport, output_path: Path) -> None:
             "ambiguous": len(report.ambiguous),
             "errors": len(report.errors),
         },
-        "branches": [
+        "refs": [
             {
-                "branch": r.branch,
+                "name": r.branch,
+                "ref_type": getattr(r, "ref_type", "branch"),
                 "status": STATUS_SYMBOL.get(r.status, r.status.value),
                 "raw_status": r.status.value,
                 "method": r.method,
