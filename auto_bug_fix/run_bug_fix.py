@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,7 +18,6 @@ import time
 import asyncio
 from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
-from typing import Any
 
 from common.utils import Tee
 from common.claude_utils import ClaudeConfig, claude_run as _claude_run
@@ -54,11 +54,11 @@ claude_run = _run_llm
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.git_tools import (
-    git_show_files,
     git_cherry_pick,
     git_cherry_pick_abort,
     git_status_porcelain,
     git_diff_name_only,
+    git_diff_name_only_range,
     git_format_patch,
     git_merge_base,
     git_reset_hard,
@@ -72,8 +72,29 @@ from auto_bug_fix.git_tools import (
 )
 from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
 from auto_bug_fix.signature import capture_output
+from auto_bug_fix.mechanical import resolve_mechanically
+from auto_bug_fix.snapback import (
+    snap_back_files,
+    _git_blob,
+)
+from auto_bug_fix.evidence import (
+    added_lines_by_file,
+    audit_added_tokens,
+    audit_line_provenance,
+    annotate_dead_config,
+    target_config_state,
+    port_line_changes,
+    mine_substitutions,
+    apply_substitutions,
+    find_pure_rename_restorations,
+    token_exists_on_ref,
+    scan_followup_fixes,
+    run_file_checks,
+    render_evidence,
+    validate_triage_prerequisites,
+)
 from auto_bug_fix.allowlist import derive_seed, resolve_renames, enforce_allowlist, enforce_test_file_veto
-from auto_bug_fix.baseline import capture_baseline, check_regression, run_test_suite, parse_test_failures, TIMEOUT_EXIT_CODE
+from auto_bug_fix.baseline import check_regression, run_test_suite, parse_test_failures, TIMEOUT_EXIT_CODE
 from auto_bug_fix.worktree import cleanup_worktree
 from auto_bug_fix.config_loader import load_multi_target_config, TargetSpec, _sanitize_ref
 from auto_bug_fix.range_diff import run_range_diff, parse_equivalence
@@ -84,6 +105,8 @@ from auto_bug_fix.bug_fix_prompts import (
     SemanticTriagePrompt,
     TestPortAgentPrompt,
     NarrowResolutionAgentPrompt,
+    PostResolutionCheckPrompt,
+    TriageBlindReviewPrompt,
     BuildErrorRecoveryPrompt,
     RedTriagePrompt,
     SEMANTIC_TRIAGE_FILE,
@@ -119,6 +142,18 @@ def git_commit(repo_path: str, message: str) -> None:
     _git_commit_raw(repo_path, message)
 
 
+def git_amend(repo_path: str) -> None:
+    """Amend HEAD with the currently staged changes, keeping the message."""
+    _unstage_pipeline_artifacts(repo_path)
+    result = subprocess.run(
+        ["git", "commit", "--amend", "--no-edit"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        log.warning("git commit --amend failed: %s",
+                    (result.stderr or result.stdout)[:300])
+
+
 class PipelineEscalation(Exception):
     pass
 
@@ -128,6 +163,9 @@ class PipelineStop(Exception):
 
 
 _CONFLICT_PREFIXES = ("UU ", "AA ", "DU ", "UD ", "DD ", "AU ", "UA ")
+
+_MARKER_START_RE = re.compile(r"^<{7}( |\r?$)", re.MULTILINE)
+_MARKER_END_RE = re.compile(r"^>{7}( |\r?$)", re.MULTILINE)
 
 _DANGEROUS_SHELL_PATTERNS = (";", "&&", "||", "|", "`", "$(", "${", ">", "<", "\n")
 
@@ -163,6 +201,8 @@ class PipelineState:
     baseline_build_output: str = ""
     baseline_verification: list[dict] = field(default_factory=list)
     red_passed_output: str = ""
+    followup_fixes: list[str] = field(default_factory=list)
+    followup_fixes_commit: str = ""
 
 
 def phase_0_triage(
@@ -598,6 +638,38 @@ def phase_1_5_red_triage(
 
 
 MAX_ERROR_CHARS = 50_000
+MAX_DIFF_PROMPT_CHARS = 200_000
+
+
+def _safe_git_diff(repo_path: str, *refs: str) -> str:
+    """Run ``git diff`` with size cap and decode safety.
+
+    Returns at most MAX_DIFF_PROMPT_CHARS of output; appends a stat
+    summary when truncated.  Binary/encoding noise is replaced rather
+    than raising.
+    """
+    result = subprocess.run(
+        ["git", "diff", *refs],
+        cwd=repo_path, capture_output=True,
+    )
+    try:
+        text = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        text = result.stdout.decode("utf-8", errors="replace")
+
+    if len(text) <= MAX_DIFF_PROMPT_CHARS:
+        return text
+
+    log.warning("git diff output too large (%d chars), truncating", len(text))
+    stat = subprocess.run(
+        ["git", "diff", "--stat", *refs],
+        cwd=repo_path, capture_output=True,
+    )
+    try:
+        stat_text = stat.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        stat_text = stat.stdout.decode("utf-8", errors="replace")
+    return text[:MAX_DIFF_PROMPT_CHARS] + f"\n\n[TRUNCATED — full stat below]\n{stat_text}"
 
 
 def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
@@ -722,10 +794,7 @@ def phase_4a_build_recovery(
         if len(test_errors) > MAX_ERROR_CHARS:
             test_errors = test_errors[:MAX_ERROR_CHARS] + "\n\n[TRUNCATED]"
 
-        current_diff = subprocess.run(
-            ["git", "diff", "HEAD"],
-            cwd=config.repo_path, capture_output=True, text=True,
-        ).stdout
+        current_diff = _safe_git_diff(config.repo_path, "HEAD")
 
         pre_fix_files = set(git_diff_name_only(config.repo_path))
 
@@ -1041,6 +1110,7 @@ def cherry_pick_and_resolve(
         return "resolved"
 
     original_uu_files = list(uu_files)
+    base_head = git_rev_parse(config.repo_path, "HEAD")
     fix_diff = _compute_fix_diff(config, commit)
     context = create_context_str(claude_config, config)
     priority = state.priority_files if state.priority_files else state.allowed_modules
@@ -1051,6 +1121,36 @@ def cherry_pick_and_resolve(
         perm_mode=claude_config.perm_mode,
         cwd=config.repo_path,
     )
+
+    if config.mechanical_resolution:
+        try:
+            mech = resolve_mechanically(config.repo_path, commit, uu_files)
+        except Exception as e:
+            log.warning("%s: mechanical resolution failed (continuing to LLM): %s", label, e)
+            mech = {}
+        if mech:
+            log.info("%s: mechanically re-applied %d/%d conflicted files",
+                     label, len(mech), len(uu_files))
+            if state.dossier:
+                for f, rung in sorted(mech.items()):
+                    state.dossier.add_strategy(f"mechanical:{rung}", f"resolved {f}")
+            conflict_summary_parts.append(
+                f"Mechanically re-applied {len(mech)} files (git apply, relaxed context)"
+            )
+            uu_files = [f for f in uu_files if f not in mech]
+            if tracker:
+                tracker.record_gate(
+                    "mechanical_resolution", f"{len(mech)}/{len(original_uu_files)}")
+
+    if not uu_files:
+        return _finalize_resolution(
+            config, claude_config_resolve, state, tracker, commit, label,
+            conflict_summary_parts, base_head, fix_diff, context,
+        )
+
+    followup_note = ""
+    if state.followup_fixes and _is_followup_target(config.repo_path, commit, state):
+        followup_note = "\n".join(f"  - {f}" for f in state.followup_fixes)
 
     CHUNK_SIZE = 30
 
@@ -1074,6 +1174,10 @@ def cherry_pick_and_resolve(
                     conflicted_files=chunk,
                     context=context,
                     allowed_modules=priority,
+                    triage_assessment=json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "",
+                    target_branch=config.target_branch,
+                    baseline_ref=base_head,
+                    followup_fixes=followup_note,
                 )
                 asyncio.run(claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker))
         else:
@@ -1082,6 +1186,10 @@ def cherry_pick_and_resolve(
                 conflicted_files=uu_files,
                 context=context,
                 allowed_modules=priority,
+                triage_assessment=json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "",
+                target_branch=config.target_branch,
+                baseline_ref=base_head,
+                followup_fixes=followup_note,
             )
             log.info("%s attempt %d/%d — resolving %d conflicts",
                      label, attempt, config.max_resolution_retries, len(uu_files))
@@ -1093,15 +1201,355 @@ def cherry_pick_and_resolve(
             conflict_summary_parts.append(
                 f"LLM resolved {len(original_uu_files)} source conflicts ({attempt} attempt(s))"
             )
-            summary = "; ".join(conflict_summary_parts)
-            msg = f"Port {label}\n\n[ Conflict summary: {summary} ]"
-            git_commit(config.repo_path, msg)
-            return "resolved"
+            return _finalize_resolution(
+                config, claude_config_resolve, state, tracker, commit, label,
+                conflict_summary_parts, base_head, fix_diff, context,
+            )
         log.warning("%s: attempt %d: %d conflicts remain", label, attempt, len(still_conflicted))
         uu_files = _conflicted_files(still_conflicted)
 
     git_cherry_pick_abort(config.repo_path)
     raise PipelineEscalation(f"{label}: failed after {config.max_resolution_retries} attempts")
+
+
+def _is_followup_target(repo_path: str, commit: str, state: PipelineState) -> bool:
+    """True if the follow-up fixes scanned in Phase 0 refer to this commit.
+
+    Prerequisite ports go through the same resolution path but must not be
+    told that the main commit's follow-ups correct THEM.
+    """
+    if not state.followup_fixes_commit:
+        return False
+    try:
+        return git_rev_parse(repo_path, commit) == state.followup_fixes_commit
+    except RuntimeError:
+        return False
+
+
+def _finalize_resolution(
+    config: BugFixConfig,
+    claude_config_resolve: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+    commit: str,
+    label: str,
+    conflict_summary_parts: list[str],
+    base_head: str,
+    fix_diff: str,
+    context: str,
+) -> str:
+    """Commit the resolution, run deterministic post-passes, then Phase 3a.1.
+
+    Post-passes read only the upstream history and the target branch:
+    - substitution mining + auto-apply of unambiguous downstream renames
+      whose upstream form does not exist on the target at all
+    - whitespace snap-back of LLM-drifted lines to source bytes
+    - token audit + optional per-file checks, injected as evidence into the
+      Phase 3a.1 verification agent
+    """
+    repo = config.repo_path
+
+    # The resolution agent is instructed to commit; conclude the cherry-pick
+    # ourselves if it didn't.
+    if git_rev_parse(repo, "HEAD") == base_head:
+        summary = "; ".join(conflict_summary_parts) if conflict_summary_parts else "resolved"
+        git_commit(repo, f"Port {label}\n\n[ Conflict summary: {summary} ]")
+        if git_rev_parse(repo, "HEAD") == base_head:
+            # Empty resolution or a rejecting commit hook — never amend or
+            # post-process base_head itself.
+            log.warning("%s: resolution commit did not move HEAD — skipping post-passes", label)
+            return "resolved"
+
+    changed_files = git_diff_name_only_range(repo, base_head, "HEAD")
+
+    findings = []
+    line_findings = []
+    applied_subs: dict[str, str] = {}
+    advisory_subs: dict[str, str] = {}
+    auto_restored: dict[str, int] = {}
+    file_check_failures: list[str] = []
+    marker_files: list[str] = []
+
+    # --- Deterministic rewrites (run before any auditing) -----------------
+    if config.evidence_checks:
+        try:
+            port_diff = subprocess.run(
+                ["git", "diff", base_head, "HEAD"],
+                cwd=repo, capture_output=True, text=True,
+            ).stdout
+            added_by_file = added_lines_by_file(port_diff)
+            # Mining references base_head — the tree the port actually lands
+            # on (target tip PLUS ported prerequisites/tests). Using the bare
+            # target branch would mine a ported prerequisite's own rename
+            # backwards and mechanically revert it.
+            mined = mine_substitutions(
+                repo, f"{commit}^1", base_head, sorted(added_by_file))
+            guarded = {
+                old: new for old, new in mined.items()
+                if not token_exists_on_ref(repo, base_head, old)
+            }
+            advisory_subs = {o: n for o, n in mined.items() if o not in guarded}
+            for f in changed_files:
+                abs_path = os.path.join(repo, f)
+                if not guarded or not os.path.isfile(abs_path):
+                    continue
+                try:
+                    with open(abs_path, encoding="utf-8", newline="") as fh:
+                        current = fh.read()
+                except (UnicodeDecodeError, OSError):
+                    continue
+                preimage = _git_blob(repo, base_head, f) or ""
+                new_text, hits = apply_substitutions(current, preimage, guarded)
+                if hits:
+                    with open(abs_path, "w", encoding="utf-8", newline="") as fh:
+                        fh.write(new_text)
+                    for token in hits:
+                        applied_subs[token] = guarded[token]
+            if applied_subs:
+                log.info("Auto-applied downstream substitutions: %s",
+                         ", ".join(f"{o}->{n}" for o, n in sorted(applied_subs.items())))
+                if state.dossier:
+                    state.dossier.add(
+                        "Auto-applied downstream substitutions",
+                        "\n".join(f"{o} -> {n}" for o, n in sorted(applied_subs.items())),
+                        "Phase 3a post-pass (mined from upstream-base vs target delta)",
+                    )
+
+            # Deterministically restore fix bytes for pure token-renames: the
+            # clearest three-way violations must not depend on the verifier's
+            # obedience. Guards inside the finder ensure every restored token
+            # exists on the target.
+            restorations = find_pure_rename_restorations(
+                repo, base_head, commit, port_diff)
+            for f, items in restorations.items():
+                abs_path = os.path.join(repo, f)
+                if not os.path.isfile(abs_path):
+                    continue
+                try:
+                    with open(abs_path, encoding="utf-8", newline="") as fh:
+                        lines = fh.read().split("\n")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                changed = False
+                for lineno, old_line, fix_line in items:
+                    idx = lineno - 1
+                    if not (0 <= idx < len(lines)):
+                        continue
+                    # Diff-derived lines lose their \r; the worktree keeps it.
+                    eol = "\r" if lines[idx].endswith("\r") else ""
+                    if lines[idx].rstrip("\r") == old_line:
+                        lines[idx] = fix_line + eol
+                        auto_restored[f] = auto_restored.get(f, 0) + 1
+                        changed = True
+                if changed:
+                    with open(abs_path, "w", encoding="utf-8", newline="") as fh:
+                        fh.write("\n".join(lines))
+            if auto_restored:
+                log.info("Auto-restored fix bytes for %d pure-renamed lines in %d files",
+                         sum(auto_restored.values()), len(auto_restored))
+                if state.dossier:
+                    state.dossier.add(
+                        "Fix lines auto-restored (pure renames)",
+                        "\n".join(f"{f}: {n} lines" for f, n in sorted(auto_restored.items())),
+                        "Phase 3a post-pass",
+                    )
+        except Exception as e:
+            log.warning("Evidence checks failed (continuing): %s", e)
+
+    if config.snapback:
+        try:
+            snap_counts = snap_back_files(repo, changed_files, base_head, commit)
+            if snap_counts:
+                log.info("Snap-back: restored source bytes in %d files (%d lines)",
+                         len(snap_counts), sum(snap_counts.values()))
+                if state.dossier:
+                    state.dossier.add(
+                        "Snap-back (drifted formatting restored to source bytes)",
+                        "\n".join(f"{f}: {n} lines" for f, n in sorted(snap_counts.items())),
+                        "Phase 3a post-pass",
+                    )
+        except Exception as e:
+            log.warning("Snap-back failed (continuing): %s", e)
+
+    if git_diff_name_only(repo):
+        subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
+        git_amend(repo)
+        changed_files = git_diff_name_only_range(repo, base_head, "HEAD")
+
+    # --- Deterministic audits (on the final rewritten state) --------------
+    current_texts: dict[str, str] = {}
+    for f in changed_files:
+        abs_path = os.path.join(repo, f)
+        if not os.path.isfile(abs_path):
+            continue
+        try:
+            with open(abs_path, encoding="utf-8", newline="") as fh:
+                current_texts[f] = fh.read()
+        except (UnicodeDecodeError, OSError):
+            continue
+
+    try:
+        # Require BOTH an opening and closing marker: a lone seven-equals
+        # line is legitimate content (doc tables, setext underlines).
+        marker_files = [
+            f for f, text in current_texts.items()
+            if _MARKER_START_RE.search(text) and _MARKER_END_RE.search(text)
+        ]
+        if marker_files:
+            log.warning("Conflict markers committed in %d files: %s",
+                        len(marker_files), ", ".join(marker_files))
+            if tracker:
+                tracker.record_gate("conflict_markers", f"{len(marker_files)} files")
+            if state.dossier:
+                state.dossier.add(
+                    "Conflict markers committed",
+                    "\n".join(marker_files),
+                    "Phase 3a post-pass (deterministic scan)",
+                )
+    except Exception as e:
+        log.warning("Conflict-marker scan failed (continuing): %s", e)
+
+    if config.evidence_checks:
+        try:
+            port_diff = subprocess.run(
+                ["git", "diff", base_head, "HEAD"],
+                cwd=repo, capture_output=True, text=True,
+            ).stdout
+            added_by_file = added_lines_by_file(port_diff)
+            findings = audit_added_tokens(repo, base_head, commit, added_by_file)
+            port_changes = port_line_changes(port_diff)
+            annotate_dead_config(
+                findings, port_changes, current_texts,
+                lambda s: target_config_state(repo, base_head, s),
+            )
+            if findings:
+                log.info("Token audit: %d identifiers flagged (%s)",
+                         len(findings), ", ".join(f.token for f in findings[:8]))
+            if tracker:
+                tracker.record_gate("token_audit", f"{len(findings)} flagged")
+
+            line_findings = audit_line_provenance(
+                repo, base_head, commit, port_diff, current_texts,
+                substitutions=applied_subs)
+            if line_findings:
+                log.info("Three-way discipline: %d line findings (%s)",
+                         len(line_findings),
+                         ", ".join(sorted({lf.kind for lf in line_findings})))
+            if tracker:
+                tracker.record_gate("line_provenance", f"{len(line_findings)} findings")
+        except Exception as e:
+            log.warning("Evidence audits failed (continuing): %s", e)
+
+    if config.file_check_command:
+        try:
+            file_check_failures = run_file_checks(
+                repo, changed_files, config.file_check_command, config.command_timeout)
+            if file_check_failures:
+                log.warning("Per-file checks failed for %d files", len(file_check_failures))
+                if state.dossier:
+                    state.dossier.add(
+                        "Per-file check failures",
+                        "\n".join(file_check_failures),
+                        "Phase 3a post-pass",
+                    )
+        except Exception as e:
+            log.warning("Per-file checks failed to run (continuing): %s", e)
+
+    followups = (
+        state.followup_fixes
+        if _is_followup_target(repo, commit, state) else []
+    )
+    evidence_report = render_evidence(
+        findings, applied_subs, advisory_subs, followups, file_check_failures,
+        line_findings=line_findings, conflict_marker_files=marker_files,
+        auto_restored=auto_restored)
+
+    current_diff = _safe_git_diff(repo, base_head)
+    if config.post_resolution_check and current_diff.strip():
+        log.info("Phase 3a.1 — post-resolution adaptation check")
+        check_prompt = PostResolutionCheckPrompt(
+            context=context,
+            fix_diff=fix_diff,
+            current_diff=current_diff,
+            target_branch=config.target_branch,
+            triage_assessment=json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "",
+            evidence_report=evidence_report,
+            baseline_ref=base_head,
+        )
+        try:
+            asyncio.run(claude_run(claude_config_resolve, [check_prompt.prompt()], tracker=tracker))
+        except Exception:
+            log.warning("Phase 3a.1 — post-resolution check failed, continuing with existing resolution")
+        else:
+            # No snap-back after the verifier: its deliberate corrections must
+            # never be rewritten, and every pre-verifier line was already
+            # snapped with the same sources — a second pass could only undo
+            # the verifier's work (observed on real runs) or do nothing.
+            post_status = git_status_porcelain(repo)
+            if post_status:
+                subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
+                git_commit(repo, "fixup: adapt backport to target branch API")
+                log.info("Phase 3a.1 — post-resolution check committed adaptations")
+            if config.evidence_checks and findings:
+                try:
+                    port_diff = subprocess.run(
+                        ["git", "diff", base_head, "HEAD"],
+                        cwd=repo, capture_output=True, text=True,
+                    ).stdout
+                    remaining = audit_added_tokens(
+                        repo, base_head, commit, added_lines_by_file(port_diff))
+                    if tracker:
+                        tracker.record_gate("token_audit_post", f"{len(remaining)} remaining")
+                    if remaining:
+                        log.warning("Token audit: %d identifiers still flagged after Phase 3a.1",
+                                    len(remaining))
+                        if state.dossier:
+                            state.dossier.add(
+                                "Token audit — unresolved after Phase 3a.1",
+                                "\n".join(
+                                    f"{f.token} [{f.status}] in {', '.join(sorted(set(f.files))[:3])}"
+                                    for f in remaining
+                                ),
+                                "Phase 3a.1 advisory re-audit",
+                            )
+                except Exception as e:
+                    log.warning("Post-3a.1 token re-audit failed: %s", e)
+
+    if config.blind_review:
+        blind_diff = _safe_git_diff(repo, base_head)
+        if blind_diff.strip():
+            log.info("Phase 3a.2 — triage-blind independent review")
+            blind_prompt = TriageBlindReviewPrompt(
+                context=context,
+                fix_diff=fix_diff,
+                current_diff=blind_diff,
+                target_branch=config.target_branch,
+                baseline_ref=base_head,
+            )
+            try:
+                asyncio.run(claude_run(
+                    claude_config_resolve, [blind_prompt.prompt()],
+                    tracker=tracker))
+            except Exception:
+                log.warning("Phase 3a.2 — blind review failed, continuing")
+            else:
+                blind_status = git_status_porcelain(repo)
+                if blind_status:
+                    subprocess.run(
+                        ["git", "add", "-u"], cwd=repo, capture_output=True)
+                    git_commit(
+                        repo,
+                        "fixup: independent review corrections (Phase 3a.2)")
+                    log.info("Phase 3a.2 — blind review committed corrections")
+                    if state.dossier:
+                        state.dossier.add(
+                            "Independent review corrections",
+                            "Triage-blind reviewer found and fixed symbol "
+                            "adaptations that were incorrect.",
+                            "Phase 3a.2",
+                        )
+
+    return "resolved"
 
 
 def port_prerequisite_chain(
@@ -1211,7 +1659,7 @@ def run_pipeline(
     except (PipelineStop, PipelineEscalation) as e:
         tracker.set_outcome(type(e).__name__.lower())
         raise
-    except Exception as e:
+    except Exception:
         tracker.set_outcome("error")
         raise
     finally:
@@ -1233,6 +1681,30 @@ def _run_pipeline_phases(
         tracker.record_gate("forward_patch_id", triage_gates["forward_patch_id"])
         tracker.record_gate("ancestry", triage_gates["ancestry"])
 
+        if config.evidence_checks:
+            try:
+                # With source == target (fix commit passed separately, e.g.
+                # unrelated-history setups) the scan would walk the target's
+                # entire history for upstream follow-ups — wrong corpus.
+                if git_rev_parse(config.repo_path, config.source_branch) != \
+                        git_rev_parse(config.repo_path, config.target_branch):
+                    state.followup_fixes = scan_followup_fixes(
+                        config.repo_path, config.source_fix_commit, config.source_branch)
+                if state.followup_fixes:
+                    state.followup_fixes_commit = git_rev_parse(
+                        config.repo_path, config.source_fix_commit)
+            except Exception as e:
+                log.warning("Follow-up fix scan failed: %s", e)
+            if state.followup_fixes:
+                log.info("Upstream has %d follow-up fixes to the ported commit",
+                         len(state.followup_fixes))
+                state.dossier.add(
+                    "Upstream follow-up fixes to the ported commit",
+                    "\n".join(state.followup_fixes),
+                    "Phase 0 — git log --grep 'Fixes:'",
+                )
+                tracker.record_gate("followup_fixes", str(len(state.followup_fixes)))
+
     with tracker.phase("Phase 0.5 — Semantic triage"):
     
         assessment = phase_0_5_semantic_triage(config, claude_config, state, tracker)
@@ -1243,6 +1715,37 @@ def _run_pipeline_phases(
             triage_dest = os.path.join(tracker._output_dir, "semantic_triage.json")
             with open(triage_dest, "w") as f:
                 json.dump(assessment, f, indent=2)
+
+        if config.evidence_checks:
+            prereqs = state.triage_assessment.get("prerequisites", [])
+            if prereqs:
+                try:
+                    corrections = validate_triage_prerequisites(
+                        config.repo_path, config.target_branch, prereqs)
+                except Exception as e:
+                    log.warning("Triage prerequisite validation failed: %s", e)
+                    corrections = []
+                for corr in corrections:
+                    log.warning(
+                        "Triage correction: %s — %s",
+                        corr.symbol, corr.correction)
+                    for p in prereqs:
+                        if p.get("symbol") == corr.symbol:
+                            p["corrected"] = True
+                            p["original_reason"] = corr.original_reason
+                            p["reason"] = corr.correction
+                    state.dossier.add(
+                        f"Triage correction: {corr.symbol}",
+                        f"Original: {corr.original_reason}\n"
+                        f"Correction: {corr.correction}",
+                        "Phase 0.5.1 — deterministic prerequisite validation",
+                    )
+                if corrections:
+                    tracker.record_gate(
+                        "triage_corrections", str(len(corrections)))
+                    if assessment:
+                        with open(triage_dest, "w") as f:
+                            json.dump(assessment, f, indent=2)
 
     cherry_pick_succeeded = False
     try:
@@ -1321,7 +1824,7 @@ def _run_pipeline_phases(
                         log.warning("RED triage says vulnerable but no valid replacement test — escalating")
                         raise PipelineEscalation("RED triage: vulnerable verdict but no replacement test produced")
                 else:
-                    raise PipelineEscalation(f"RED triage inconclusive — escalating to Phase 4b")
+                    raise PipelineEscalation("RED triage inconclusive — escalating to Phase 4b")
 
         subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
         status = git_status_porcelain(config.repo_path)
@@ -1383,7 +1886,7 @@ def _run_pipeline_phases(
                 subprocess.run(["git", "cherry-pick", "--abort"], cwd=config.repo_path,
                                 capture_output=True)
             git_reset_hard(config.repo_path, config.target_branch)
-            result = git_cherry_pick(config.repo_path, config.source_fix_commit)
+            git_cherry_pick(config.repo_path, config.source_fix_commit)
             status = git_status_porcelain(config.repo_path)
             force_conflicts = _conflicted_files(status)
             if force_conflicts:
@@ -1569,10 +2072,14 @@ def _read_tracker_cost(target_run_dir: str, issue_id: str) -> tuple[float, str]:
         return 0.0, tracker_path
 
 
-def _write_summary(results: list[TargetResult], parent_run_dir: str) -> None:
+def _write_summary(
+    results: list[TargetResult],
+    parent_run_dir: str,
+    warnings: list[str] | None = None,
+) -> None:
     """Write summary.json aggregating all target outcomes."""
     succeeded = sum(1 for r in results if r.outcome == "success")
-    summary = {
+    summary: dict = {
         "total_targets": len(results),
         "succeeded": succeeded,
         "failed": len(results) - succeeded,
@@ -1580,6 +2087,8 @@ def _write_summary(results: list[TargetResult], parent_run_dir: str) -> None:
         "total_cost_usd": round(sum(r.cost_usd for r in results), 4),
         "targets": [asdict(r) for r in results],
     }
+    if warnings:
+        summary["warnings"] = warnings
     path = os.path.join(parent_run_dir, "summary.json")
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
@@ -1594,6 +2103,7 @@ def run_targets(
     workdir: str,
     parent_run_dir: str,
     build_subdir: str,
+    run_warnings: list[str] | None = None,
 ) -> list[TargetResult]:
     """Execute the pipeline serially for each target branch.
 
@@ -1677,7 +2187,7 @@ def run_targets(
             worktree_created = True
             target_config.repo_path = worktree_path
             target_config.build_dir = os.path.join(worktree_path, build_subdir)
-            print(f"Worktree created successfully")
+            print("Worktree created successfully")
 
             # --- Pipeline ---
             try:
@@ -1739,7 +2249,7 @@ def run_targets(
             if worktree_created:
                 cleanup_worktree(source_path, worktree_path)
 
-    _write_summary(results, parent_run_dir)
+    _write_summary(results, parent_run_dir, warnings=run_warnings)
 
     log.info("=== Multi-target summary ===")
     for r in results:
@@ -1771,10 +2281,22 @@ if __name__ == "__main__":
             print(f"Run directory: {parent_run_dir}")
 
             print("Fetching latest refs from origin...")
-            subprocess.run(["git", "fetch", "--all", "--quiet"], cwd=source_path, capture_output=True)
+            fetch_result = subprocess.run(
+                ["git", "fetch", "--all", "--quiet"],
+                cwd=source_path, capture_output=True, text=True,
+            )
+            fetch_warning = ""
+            if fetch_result.returncode != 0:
+                fetch_warning = (
+                    f"git fetch --all failed (exit {fetch_result.returncode}): "
+                    f"{(fetch_result.stderr or '').strip()[:500]}"
+                )
+                log.warning(fetch_warning)
+                print(f"WARNING: {fetch_warning} — continuing with local refs")
             build_subdir = os.path.relpath(base_config.build_dir, base_config.repo_path)
 
-            results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir)
+            run_warnings = [fetch_warning] if fetch_warning else []
+            results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir, run_warnings=run_warnings)
         finally:
             sys.stdout = original_stdout
             log_file.close()
