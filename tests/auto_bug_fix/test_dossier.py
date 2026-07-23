@@ -8,6 +8,13 @@ def test_build_trailers_basic():
     assert trailers["AutoBugFix-Model"] == "claude-opus-4-7"
 
 
+def test_build_trailers_coauthor_canonical_casing():
+    trailers = build_trailers(phase="3a", model="claude-opus-4-7")
+    assert "Co-authored-by" in trailers
+    assert "Co-Authored-By" not in trailers
+    assert trailers["Co-authored-by"] == "amalgamator <amalgamator@redhat.com>"
+
+
 def test_build_trailers_optional_fields():
     trailers = build_trailers(
         phase="1",
