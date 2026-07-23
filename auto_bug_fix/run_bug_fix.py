@@ -127,7 +127,16 @@ _PIPELINE_ARTIFACTS = (
 
 log = logging.getLogger(__name__)
 
-_COAUTHOR_TRAILERS = {"Co-Authored-By": "amalgamator <amalgamator@redhat.com>"}
+_COAUTHOR_TRAILERS = {"Co-authored-by": "amalgamator <amalgamator@redhat.com>"}
+
+
+def _sanitize_branch_slug(raw: str) -> str:
+    """Make *raw* safe for use inside a git branch name (``git check-ref-format``)."""
+    s = re.sub(r"[~^: \t\\]+", "-", raw)
+    s = re.sub(r"\.{2,}", ".", s)
+    s = re.sub(r"@\{", "at-", s)
+    s = s.strip("-./")
+    return s or "unknown"
 
 
 def _unstage_pipeline_artifacts(repo_path: str) -> None:
@@ -2041,8 +2050,9 @@ def _run_pipeline_phases(
     log.info("Phase 5 — Dossier ready for human review")
     patch_text = git_format_patch(config.repo_path, base_ref=config.target_branch)
     state.dossier.add("Candidate patch", patch_text, "git format-patch")
+    os.makedirs(tracker._output_dir, exist_ok=True)
     patch_path = os.path.join(tracker._output_dir, PATCH_FILE)
-    with open(patch_path, "w") as f:
+    with open(patch_path, "w", encoding="utf-8") as f:
         f.write(patch_text)
     log.info("Patch written to %s", patch_path)
     state.dossier.add(
@@ -2257,15 +2267,21 @@ def run_targets(
             if outcome == "success" and worktree_created:
                 try:
                     head_sha = git_rev_parse(worktree_path, "HEAD")
-                    slug = target_config.issue_id or f"{target_config.source_fix_commit[:12]}-to-{sanitized}"
+                    slug = _sanitize_branch_slug(
+                        target_config.issue_id
+                        or f"{target_config.source_fix_commit[:12]}-to-{sanitized}"
+                    )
                     branch_name = f"amalgamator/{slug}"
                     if len(targets) > 1:
                         branch_name += f"/{sanitized}"
-                    subprocess.run(
+                    result = subprocess.run(
                         ["git", "branch", "-f", branch_name, head_sha],
-                        cwd=source_path, capture_output=True,
+                        cwd=source_path, capture_output=True, text=True,
                     )
-                    log.info("Commits preserved on branch %s", branch_name)
+                    if result.returncode == 0:
+                        log.info("Commits preserved on branch %s", branch_name)
+                    else:
+                        log.warning("git branch failed: %s", result.stderr.strip())
                 except Exception as e:
                     log.warning("Failed to create branch: %s", e)
 
@@ -2347,13 +2363,19 @@ if __name__ == "__main__":
                 f.write(dossier_text)
             print(f"Dossier written to {dossier_path}")
 
-            slug = bug_fix_config.issue_id or f"{bug_fix_config.source_fix_commit[:12]}-to-{_sanitize_ref(bug_fix_config.target_branch)}"
-            branch_name = f"amalgamator/{slug}"
-            subprocess.run(
-                ["git", "branch", "-f", branch_name, "HEAD"],
-                cwd=bug_fix_config.repo_path, capture_output=True,
+            slug = _sanitize_branch_slug(
+                bug_fix_config.issue_id
+                or f"{bug_fix_config.source_fix_commit[:12]}-to-{_sanitize_ref(bug_fix_config.target_branch)}"
             )
-            print(f"Commits preserved on branch {branch_name}")
+            branch_name = f"amalgamator/{slug}"
+            result = subprocess.run(
+                ["git", "branch", "-f", branch_name, "HEAD"],
+                cwd=bug_fix_config.repo_path, capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                print(f"Commits preserved on branch {branch_name}")
+            else:
+                log.warning("git branch failed: %s", result.stderr.strip())
 
         except PipelineStop as e:
             print(f"PIPELINE STOP: {e}")
