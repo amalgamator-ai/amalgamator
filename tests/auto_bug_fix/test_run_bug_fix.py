@@ -651,3 +651,40 @@ def test_red_triage_integration_not_vulnerable_raises_stop(mock_claude, mock_cap
 
     phase_1_baseline_and_red(config, _make_claude_config(), state)
     assert state.red_passed_output == "all tests passed"
+
+
+@patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
+@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.run_pipeline")
+def test_run_targets_records_fetch_warning_in_summary(
+    mock_pipeline, mock_wt_add, mock_cleanup, tmp_path,
+):
+    """A git fetch failure must be recorded in summary.json, not crash."""
+    base_config = BugFixConfig(**_BASE_CFG)
+    mock_pipeline.return_value = (_make_dossier("fix-1"), MagicMock())
+    mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
+
+    targets = [TargetSpec(branch="branch-a", issue_id="fix-1")]
+    claude_cfg = MagicMock()
+    parent_run_dir = str(tmp_path / "runs" / "test_run")
+    os.makedirs(parent_run_dir, exist_ok=True)
+    _make_tracker_json(
+        os.path.join(parent_run_dir, "branch-a"), "fix-1", cost_usd=1.0,
+    )
+
+    fetch_warning = "git fetch --all failed (exit 128): Permission denied"
+    results = run_targets(
+        targets, base_config, claude_cfg,
+        source_path="/tmp/source", workdir=str(tmp_path / "workdir"),
+        parent_run_dir=parent_run_dir, build_subdir="",
+        run_warnings=[fetch_warning],
+    )
+
+    assert len(results) == 1
+    assert results[0].outcome == "success"
+
+    summary_path = os.path.join(parent_run_dir, "summary.json")
+    with open(summary_path) as f:
+        summary = json.load(f)
+    assert "warnings" in summary
+    assert any("Permission denied" in w for w in summary["warnings"])

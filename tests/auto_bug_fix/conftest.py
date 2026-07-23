@@ -21,7 +21,6 @@ sys.modules["claude_agent_sdk.types"] = _sdk_types
 
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 

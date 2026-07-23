@@ -267,6 +267,10 @@ class NarrowResolutionAgentPrompt:
     fix_diff: str
     conflicted_files: list[str]
     allowed_modules: list[str]
+    triage_assessment: str = ""
+    target_branch: str = ""
+    baseline_ref: str = ""
+    followup_fixes: str = ""
 
     prompt_template: ClassVar[str] = """\
 {context}
@@ -278,30 +282,313 @@ The upstream fix diff for reference:
 <fix_diff>
 {fix_diff}
 </fix_diff>
-
+{triage_section}
 Your task is to resolve ONLY the conflict hunks (marked with <<<<<<<, =======, >>>>>>>). Constraints:
 
 1. Resolve each conflict hunk to produce the intended fix behavior on the target branch.
 2. Do NOT re-derive intent — the fix diff tells you exactly what should change.
 3. Do NOT rewrite surrounding code or modify files outside the cherry-pick's scope.
-
+4. Three-way discipline — the core rule, applied line by line:
+   - A line the fix diff ADDS or MODIFIES: reproduce the fix's bytes exactly \
+(whitespace, wrapping, and wording included), splice — never retype. The ONLY \
+exceptions are the hard target constraints in the Adaptation methodology below.
+   - A line the fix diff does NOT change (its context lines, or lines only the target \
+has): keep the TARGET's bytes exactly, even where upstream's version of the surrounding \
+code differs. Context lines in the fix diff are NOT instructions to change the target.
+   - Never "improve" either side: do not rename parameters or variables to match \
+neighboring code, do not replace error values or expressions with forms you consider \
+better or more idiomatic, do not update comments, wrapping, or formatting the fix \
+doesn't touch. Backports that deviate from these bytes are wrong even when the \
+deviation looks like an improvement.
+{adaptation_section}{followup_section}
 ## Priority files (check these first):
 {allowed_modules}
 
-You may modify any file needed to make the build and tests pass. If you need to add \
-missing types, feature gates, or adapt API patterns for the target branch, do so.
+Beyond the conflict hunks, only make additional changes that are REQUIRED for the fix \
+to function on the target branch — and only on hard evidence: the symbol is missing \
+from the target in code that is actually compiled, a signature differs, a constant's \
+value differs. Style, naming, or convention differences are never a reason to change \
+a line.
 
 After resolving all conflicts:
 - Run `git diff --name-only HEAD` and list any files you modified that are NOT in the priority list above.
 - Stage all resolved files and commit with the cherry-pick message.
 """
 
+    _triage_section_template: ClassVar[str] = """
+## Semantic triage assessment (from pre-analysis):
+<triage_assessment>
+{triage_assessment}
+</triage_assessment>
+
+Pay close attention to the `prerequisites` entries marked `portable: false` — these
+indicate API differences between upstream and the target branch. Adapt call sites to
+match the target branch's existing API rather than copying the upstream form verbatim.
+Also review `new_types_interfaces` and `prerequisite_details` for symbols that may be
+named or structured differently on the target branch.
+"""
+
+    _adaptation_section: ClassVar[str] = """
+## Adaptation methodology:
+The port baseline is {baseline_ref} (the target branch {target_branch} plus any \
+already-ported prerequisite and test commits). Run all verification commands against \
+this baseline, not against the bare target branch.
+
+When choosing between the upstream and downstream form of a symbol, function, or constant:
+1. Run `git grep <symbol> {baseline_ref}` to check which form exists on the port baseline
+2. If the upstream symbol doesn't exist on the baseline but an equivalent does -> use the \
+baseline's form — UNLESS the line sits inside a conditional-compilation region that is \
+disabled in the target's configuration: dead code keeps the upstream bytes verbatim
+3. For function signatures: verify parameter count and types match the port baseline
+4. For enum/constant values: check the port baseline's actual values, don't assume upstream numbering
+5. For flags or arguments whose validity depends on the calling context (allocation \
+modes, locking discipline): verify against the calling context in the port baseline's \
+code, not upstream's
+6. Preserve any downstream-specific safety guards (null checks, error handling) that exist in \
+the port baseline's version of the code, even if they don't exist upstream
+7. If the upstream symbol EXISTS on the port baseline, keep the upstream form — do not \
+substitute downstream-specific macros, wrappers, or renames that the fix itself doesn't require
+8. Exception to 7: when the baseline's version of the SAME construct you are editing wraps \
+equivalent members or parameters in a target-specific annotation/compatibility macro \
+(visible on the neighboring lines of the same struct or declaration), follow that local \
+macro convention for the same kind of change — cite the neighboring usage as evidence
+9. Restrict git inspection to {baseline_ref}, the commit being ported, and their ancestors \
+— never use `git log --all`, `--remotes`, or unrelated branches
+"""
+
+    _followup_section_template: ClassVar[str] = """
+## Upstream follow-up fixes (informational):
+Upstream later corrected THIS commit with the commits below. Do NOT port them here, but \
+if a resolved region seems broken without one, note it in your final summary:
+{followup_fixes}
+"""
+
     def prompt(self) -> str:
+        triage_section = ""
+        if self.triage_assessment:
+            triage_section = self._triage_section_template.format(
+                triage_assessment=self.triage_assessment,
+            )
+        adaptation_section = ""
+        effective_baseline = self.baseline_ref or self.target_branch
+        if self.target_branch or self.baseline_ref:
+            adaptation_section = self._adaptation_section.format(
+                target_branch=self.target_branch or effective_baseline,
+                baseline_ref=effective_baseline,
+            )
+        followup_section = ""
+        if self.followup_fixes:
+            followup_section = self._followup_section_template.format(
+                followup_fixes=self.followup_fixes,
+            )
         return self.prompt_template.format(
             context=self.context,
             fix_diff=self.fix_diff,
             conflicted_files="\n".join(f"  - {f}" for f in self.conflicted_files),
             allowed_modules="\n".join(f"  - {f}" for f in self.allowed_modules),
+            triage_section=triage_section,
+            adaptation_section=adaptation_section,
+            followup_section=followup_section,
+        )
+
+
+@dataclass
+class PostResolutionCheckPrompt:
+    """Prompt for Phase 3a.1 — verify the resolved backport adapts correctly to the target branch."""
+    context: str
+    fix_diff: str
+    current_diff: str
+    target_branch: str
+    triage_assessment: str = ""
+    evidence_report: str = ""
+    baseline_ref: str = ""
+
+    prompt_template: ClassVar[str] = """\
+{context}
+
+You are the Post-Resolution Verification Agent (Phase 3a.1). The conflict resolution agent has \
+resolved all cherry-pick conflicts and committed. Your job is to verify that the backport \
+correctly adapts upstream code to the target branch's API surface.
+
+The port baseline is {baseline_ref} (the target branch {target_branch} plus any \
+already-ported prerequisite and test commits). Run all verification commands against \
+this baseline, not against the bare target branch.
+
+The upstream fix diff (what was intended):
+<fix_diff>
+{fix_diff}
+</fix_diff>
+
+The diff actually applied (relative to the port baseline):
+<current_diff>
+{current_diff}
+</current_diff>
+{triage_section}{evidence_section}
+## Verification steps:
+
+1. **Symbol verification**: For each function, type, macro, or constant that appears in the \
+applied diff, run `git grep <symbol> {baseline_ref}` to confirm it exists on the port baseline. \
+If the applied diff uses an upstream-only symbol that has a different name on the baseline, fix it.
+
+2. **Function signature check**: For each function call in the applied diff, verify the parameter \
+count and types match the port baseline's definition. Run `git grep -n '<function_name>' {baseline_ref}` \
+to find the declaration. Fix mismatched signatures.
+
+3. **Enum/constant value check**: If the diff adds or references enum values or bit-shift constants, \
+verify the values match the port baseline's numbering. The target branch may have inserted or \
+removed entries, shifting values. Run `git grep -A5 -B5 '<enum_name>' {baseline_ref}` to check.
+
+4. **Downstream guard preservation**: Compare each modified file against the port baseline's version \
+(`git show {baseline_ref}:<file>`). If the baseline has safety guards (null checks, error \
+handling, bounds checks) around the modified code that the upstream doesn't have, ensure they are \
+preserved in the backport.
+
+5. **Context-sensitive arguments**: If the diff uses flags or arguments whose validity \
+depends on the calling context (allocation modes, locking discipline), verify the \
+surrounding function's context on the port baseline rather than assuming upstream's.
+
+## Decision rule (three-way discipline):
+- A line the upstream fix changes must carry the fix's exact bytes; a line the fix does \
+not change must carry the target's exact bytes. Verify BOTH directions: revert \
+"improvements" to fix lines AND revert modernizations of target lines the fix never touched.
+- Default to the upstream form: if a symbol used by the upstream diff exists on the port \
+baseline, keep the upstream bytes. Adapt ONLY on hard evidence: the symbol does not exist on \
+the baseline in code that is actually compiled; a function signature or constant value \
+differs; or the baseline wraps the SAME construct in a target-specific annotation/compat \
+macro on the neighboring lines. Parameter names and types are CONTENT, not style: absent \
+the hard evidence above, they must come from the fix's bytes, never from the target's old \
+declaration.
+- Code inside a conditional-compilation region that is disabled in the target's \
+configuration is dead: keep the upstream fix's bytes verbatim there; never adapt dead code.
+- Never rename parameters or variables to match neighboring code, never change error \
+values or functionally-equivalent expressions to a "better" form, never reword comments, \
+never reformat or rewrap — even where the target's local conventions differ.
+- Every edit must be justified by one piece of evidence (a line from the evidence report or \
+a `git grep` you ran yourself). If you cannot cite evidence, do NOT make the edit.
+- Restrict git inspection to {baseline_ref}, the ported commit, and their ancestors — never \
+use `git log --all`, `--remotes`, or unrelated branches.
+
+## Actions:
+- If you find issues, fix them directly in the source files.
+- Stage your changes with `git add`.
+- If everything is correct, do nothing — a clean exit means the backport passed verification.
+"""
+
+    _triage_section_template: ClassVar[str] = """
+## Semantic triage context:
+<triage_assessment>
+{triage_assessment}
+</triage_assessment>
+"""
+
+    _evidence_section_template: ClassVar[str] = """
+## Deterministic evidence (computed by the pipeline — treat as ground truth for \
+classifications, but follow each finding's own directive):
+<evidence_report>
+{evidence_report}
+</evidence_report>
+Findings marked `upstream_only` use a symbol that does NOT exist as a literal identifier \
+on the target branch — these MUST be adapted to the target's equivalent, UNLESS: \
+(a) the finding says the code is compiled out on the target (keep the upstream bytes \
+verbatim), or (b) the finding indicates the identifier may be macro-generated on the \
+target via token-pasting (`##` concatenation, `TRACE_EVENT`, `DEFINE_*` generators) — \
+in that case grep for the generator and cite the line; if confirmed, keep the upstream \
+form. Findings marked `unknown` may be hallucinated identifiers — verify each one. \
+Three-way discipline findings list port lines that carry neither the fix's bytes nor \
+the target's bytes — resolve each one per its directive. Substitution patterns were \
+mined mechanically from the upstream-base vs target delta of the touched files.
+"""
+
+    def prompt(self) -> str:
+        triage_section = ""
+        if self.triage_assessment:
+            triage_section = self._triage_section_template.format(
+                triage_assessment=self.triage_assessment,
+            )
+        evidence_section = ""
+        if self.evidence_report:
+            evidence_section = self._evidence_section_template.format(
+                evidence_report=self.evidence_report,
+            )
+        effective_baseline = self.baseline_ref or self.target_branch
+        return self.prompt_template.format(
+            context=self.context,
+            fix_diff=self.fix_diff,
+            current_diff=self.current_diff,
+            target_branch=self.target_branch,
+            baseline_ref=effective_baseline,
+            triage_section=triage_section,
+            evidence_section=evidence_section,
+        )
+
+
+@dataclass
+class TriageBlindReviewPrompt:
+    """Prompt for Phase 3a.2 — triage-blind independent symbol review."""
+    context: str
+    fix_diff: str
+    current_diff: str
+    target_branch: str
+    baseline_ref: str = ""
+
+    prompt_template: ClassVar[str] = """\
+{context}
+
+You are an Independent Review Agent (Phase 3a.2). A previous agent resolved \
+cherry-pick conflicts and adapted the backport to the target branch. Your job \
+is to independently verify every symbol adaptation by checking the port baseline \
+directly. You have NOT seen the triage assessment — work only from what the code \
+and git history tell you.
+
+The port baseline is {baseline_ref} (the target branch {target_branch} plus any \
+already-ported prerequisite and test commits). Run all verification commands against \
+this baseline, not against the bare target branch.
+
+The upstream fix diff (what was intended):
+<fix_diff>
+{fix_diff}
+</fix_diff>
+
+The diff actually applied (relative to the port baseline):
+<current_diff>
+{current_diff}
+</current_diff>
+
+## Your task
+
+Compare the upstream fix against the applied diff. For every symbol (class, \
+function, method, constant, import) that appears in the upstream fix but was \
+removed or changed in the applied diff, run \
+`git grep '<symbol>' {baseline_ref}` to check whether it actually exists on \
+the port baseline.
+
+If a symbol exists on the baseline but was removed from the port, the removal \
+was wrong — restore it. If a symbol genuinely does not exist on the baseline, \
+the adaptation was correct — leave it.
+
+When checking whether a class has a particular method, check the full \
+inheritance chain: find the class definition, read its parent class, and \
+check whether the method is defined on any ancestor. Inherited methods count \
+as available.
+
+## Rules
+- Only fix genuine errors — symbols wrongly removed or wrongly adapted
+- Do not reformat, restyle, or improve code
+- Every edit must be backed by a `git grep` result you ran
+- Stage changes with `git add` if you make any fixes
+- If everything is correct, do nothing — a clean exit means the port passed review
+- Restrict git inspection to {baseline_ref} and the ported commit — never use \
+`git log --all`, `--remotes`, or unrelated branches
+"""
+
+    def prompt(self) -> str:
+        effective_baseline = self.baseline_ref or self.target_branch
+        return self.prompt_template.format(
+            context=self.context,
+            fix_diff=self.fix_diff,
+            current_diff=self.current_diff,
+            target_branch=self.target_branch,
+            baseline_ref=effective_baseline,
         )
 
 
@@ -354,7 +641,7 @@ Test errors:
 - Fix function call signatures to match the target branch API (verify with `git grep`)
 - Replace types/methods that don't exist on the target with their target-branch equivalents
 - Remove references to symbols that don't exist and aren't required for the fix's intent
-- Adapt API patterns (e.g. `tCtx.WithStep()` → `ktesting.WithStep(tCtx, ...)`)
+- Adapt API patterns to the target branch's existing equivalents
 - Add new type definitions locally if they are needed and don't exist on the target branch
 - Modify any file needed to make the build and tests pass
 
