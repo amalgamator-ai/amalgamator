@@ -61,6 +61,7 @@ from auto_bug_fix.git_tools import (
     git_diff_name_only_range,
     git_format_patch,
     git_merge_base,
+    git_show_files,
     git_reset_hard,
     git_commit as _git_commit_raw,
     git_rev_parse,
@@ -222,6 +223,7 @@ class PipelineState:
     red_passed_output: str = ""
     followup_fixes: list[str] = field(default_factory=list)
     followup_fixes_commit: str = ""
+    failed_prerequisites: list[str] = field(default_factory=list)
 
 
 def phase_0_triage(
@@ -1657,6 +1659,7 @@ def port_prerequisite_chain(
             log.info("Prerequisite %s ported: %s", symbol, result)
         except PipelineEscalation as e:
             log.warning("Prerequisite %s failed: %s — continuing without it", symbol, e)
+            state.failed_prerequisites.append(symbol)
             state.dossier.add(
                 f"Prerequisite failed: {symbol}",
                 str(e),
@@ -1695,6 +1698,62 @@ def _squashed_backport_range(config: BugFixConfig) -> str | None:
         return f"{squash}^..{squash}" if squash else None
     except Exception:
         return None
+
+
+def _backport_completeness(config: BugFixConfig, state: PipelineState) -> tuple[str, str]:
+    """Classify the finished backport as "success" or "partial_success".
+
+    Fires ONLY for non-bugfix commits (feature/api-change ports). A bug fix
+    that reached this point ported its whole file set by construction, while
+    a feature port can "succeed" by dropping most of its files —
+    files_to_skip reverts them to the target's version, so a passing build
+    mostly proves the target still compiles. Returns (outcome, detail).
+    """
+    raw_type = state.triage_assessment.get("commit_type")
+    commit_type = (raw_type if isinstance(raw_type, str) else "")
+    # Normalize LLM variants ("Bug Fix", " bug_fix ") before matching, so a
+    # sloppily-labeled bug fix can never be downgraded.
+    commit_type = commit_type.strip().lower().replace("_", "-").replace(" ", "-")
+    if not commit_type or commit_type in _BUGFIX_TYPES:
+        return "success", ""
+
+    reasons = []
+    try:
+        if state.failed_prerequisites:
+            reasons.append(
+                "prerequisites failed to port: "
+                + ", ".join(str(s) for s in state.failed_prerequisites)
+            )
+
+        # state.seed is the fix's file set with merge-commit (-m1) handling;
+        # git show --name-only is the fallback and is empty for merges.
+        fix_files = set(state.seed) or set(
+            git_show_files(config.repo_path, config.source_fix_commit))
+        skipped = set(state.triage_assessment.get("files_to_skip", [])) & fix_files
+        if fix_files and skipped:
+            target_base = git_merge_base(config.repo_path, config.target_branch, "HEAD")
+            result = subprocess.run(
+                ["git", "diff", "--name-only", f"{target_base}..HEAD"],
+                cwd=config.repo_path, capture_output=True, text=True,
+            )
+            backported = set(result.stdout.splitlines()) if result.returncode == 0 else set()
+            # A skipped file that reappears in the final diff was regenerated
+            # (Phase 3b) or otherwise recovered — only count real drops.
+            dropped = sorted(skipped - backported)
+            ratio = len(dropped) / len(fix_files)
+            if dropped and ratio >= config.partial_success_skip_ratio:
+                reasons.append(
+                    f"{len(dropped)}/{len(fix_files)} of the fix's files were "
+                    f"dropped (reverted to target, never regenerated): "
+                    + ", ".join(dropped[:10])
+                    + (" …" if len(dropped) > 10 else "")
+                )
+    except Exception as e:
+        log.warning("Completeness check failed: %s", e)
+
+    if reasons:
+        return "partial_success", "; ".join(reasons)
+    return "success", ""
 
 
 def phase_4_5_semantic_equivalence(
@@ -2150,7 +2209,13 @@ def _run_pipeline_phases(
         "git diff --name-only",
     )
 
-    tracker.set_outcome("success")
+    with tracker.phase("Phase 5 — Completeness check"):
+        outcome, completeness_detail = _backport_completeness(config, state)
+        tracker.record_gate("completeness", "partial" if outcome != "success" else "complete")
+        if outcome != "success":
+            log.warning("Backport is partial: %s", completeness_detail)
+            state.dossier.add("Partial backport", completeness_detail, "completeness check")
+    tracker.set_outcome(outcome)
     return state.dossier, tracker
 
 
@@ -2301,8 +2366,10 @@ def run_targets(
 
             # --- Pipeline ---
             try:
-                dossier, _ = run_pipeline(target_config, claude_config, output_dir=target_run_dir)
-                outcome = "success"
+                dossier, run_tracker = run_pipeline(target_config, claude_config, output_dir=target_run_dir)
+                # The tracker may have downgraded a clean finish (e.g. to
+                # partial_success for an incomplete non-bugfix port).
+                outcome = run_tracker.outcome if run_tracker.outcome != "in_progress" else "success"
             except PipelineStop as e:
                 dossier = None
                 outcome = "pipeline_stop"
@@ -2353,7 +2420,9 @@ def run_targets(
             ))
             print(f"FINISHED target {spec.branch}: outcome={outcome}, duration={duration}s, cost=${cost_usd:.4f}")
 
-            if outcome == "success" and worktree_created:
+            # Preserve partial backports too — an incomplete port is exactly
+            # what a human needs to inspect and finish.
+            if outcome in ("success", "partial_success") and worktree_created:
                 try:
                     head_sha = git_rev_parse(worktree_path, "HEAD")
                     slug = _sanitize_branch_slug(
@@ -2476,7 +2545,7 @@ if __name__ == "__main__":
             print(f"PIPELINE ERROR: {type(e).__name__}: {e}")
             exit_code = 1
         else:
-            exit_code = 0
+            exit_code = 0 if tracker.outcome == "success" else 1
         finally:
             duration = time.time() - start_time
             print(f"FINISHED: total_duration = {duration:.1f}s")

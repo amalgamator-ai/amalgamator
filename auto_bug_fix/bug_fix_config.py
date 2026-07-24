@@ -48,6 +48,10 @@ class BugFixConfig:
     evidence_checks: bool = True         # token audit + substitution mining + follow-up scan
     post_resolution_check: bool = True   # Phase 3a.1 verification agent
     blind_review: bool = True            # Phase 3a.2 triage-blind review agent
+    # Non-bugfix ports only: fraction of the fix's files that may be dropped
+    # (skipped and never regenerated) before the outcome is downgraded from
+    # success to partial_success.
+    partial_success_skip_ratio: float = 0.5
     # Optional per-file check run over touched files after resolution,
     # e.g. "gcc -fsyntax-only {file}". {file} is replaced with the absolute path.
     file_check_command: str = ""

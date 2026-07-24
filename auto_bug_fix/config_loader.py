@@ -134,6 +134,11 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         evidence_checks=bool(advanced.get("evidence_checks", True)),
         post_resolution_check=bool(advanced.get("post_resolution_check", True)),
         blind_review=bool(advanced.get("blind_review", True)),
+        partial_success_skip_ratio=(
+            float(advanced["partial_success_skip_ratio"])
+            if isinstance(advanced.get("partial_success_skip_ratio"), (int, float))
+            else 0.5
+        ),
     )
 
     return bug_fix_config, workdir, source_path
