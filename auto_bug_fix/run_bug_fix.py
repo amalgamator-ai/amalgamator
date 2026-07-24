@@ -1008,9 +1008,20 @@ def phase_4b_run_and_fix(
             failure_text = f.read()
         state.dossier.add("Run-and-fix failure", failure_text, "Phase 4b")
         raise PipelineEscalation("Phase 4b: run-and-fix loop exhausted retries")
-    else:
+    elif os.path.exists(success_file):
         state.dossier.add("Run-and-fix loop", "Build-test-fix loop succeeded", "Phase 4b")
         log.info("Phase 4b: run-and-fix loop succeeded")
+    else:
+        # The agent session ended without writing either marker (crash, early
+        # exit, ignored instructions) — success may not be assumed.
+        state.dossier.add(
+            "Run-and-fix loop",
+            "Agent ended without writing a success or failure file",
+            "Phase 4b",
+        )
+        raise PipelineEscalation(
+            "Phase 4b: run-and-fix loop ended without writing a result file"
+        )
 
 
 MAX_PREREQUISITE_DEPTH = 5

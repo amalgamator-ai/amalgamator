@@ -727,3 +727,57 @@ def test_sanitize_branch_slug_empty_fallback():
 def test_coauthor_trailers_canonical_casing():
     assert "Co-authored-by" in _COAUTHOR_TRAILERS
     assert "Co-Authored-By" not in _COAUTHOR_TRAILERS
+
+
+# ---------- Phase 4b result-file contract ----------
+
+def _phase_4b_fixtures(tmp_path):
+    from auto_bug_fix.claude_utils import ClaudeConfig
+    config = BugFixConfig(
+        repo_path=str(tmp_path),
+        build_dir=str(tmp_path),
+        source_branch="origin/main",
+        target_branch="origin/release",
+        source_fix_commit="abc1234",
+        bug_description="test bug",
+        issue_id="tid-1",
+    )
+    claude_cfg = ClaudeConfig(
+        model="test-model",
+        allowed_tools=["Bash"],
+        perm_mode="acceptEdits",
+        cwd=str(tmp_path),
+    )
+    state = PipelineState()
+    state.dossier = Dossier(
+        issue_id="tid-1",
+        source_branch="origin/main",
+        target_branch="origin/release",
+        fix_commit="abc1234",
+        bug_description="test bug",
+    )
+    return config, claude_cfg, state
+
+
+async def _fake_claude_run(cfg, steps):
+    return []
+
+
+def test_phase_4b_success_file_accepted(tmp_path):
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\nRetries: 1/3\n")
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_fake_claude_run):
+        phase_4b_run_and_fix(config, claude_cfg, state, None)  # must not raise
+
+
+def test_phase_4b_missing_result_file_escalates(tmp_path):
+    """A session that ends without writing either marker must not count as success."""
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_fake_claude_run):
+        try:
+            phase_4b_run_and_fix(config, claude_cfg, state, None)
+            assert False, "expected PipelineEscalation when no result file is written"
+        except PipelineEscalation as exc:
+            assert "without writing a result file" in str(exc)

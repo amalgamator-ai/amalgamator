@@ -84,8 +84,12 @@ def print_claude_config(config: ClaudeConfig) -> None:
         print(f"  {name}: {value}")
 
 
-def profile_system_prompt():
-    return "You are a benchmarking and profiling expert of LLMs that run via vLLM, SGLang and TRT"
+def bug_fix_system_prompt():
+    return (
+        "You are an expert software engineer specializing in backporting bug "
+        "fixes between branches of large codebases: git history analysis, "
+        "cherry-picking, merge conflict resolution, and build/test verification."
+    )
 
 
 def print_dict(d, indent):
@@ -267,7 +271,7 @@ async def claude_run(
     thinking = claude_config.thinking if claude_config.thinking else {"type": "adaptive"}
 
     options = ClaudeAgentOptions(
-        system_prompt=profile_system_prompt(),
+        system_prompt=bug_fix_system_prompt(),
         allowed_tools=claude_config.allowed_tools,
         permission_mode=claude_config.perm_mode,
         cwd=claude_config.cwd,
@@ -290,14 +294,19 @@ async def claude_run(
 
             prompt = step.prompt
             if isinstance(prompt, dict):
+                # Only explicit callables are allowed as non-LLM steps. The
+                # original module also accepted {"cmd": ...} strings executed
+                # via eval() — an arbitrary-code-execution footgun, removed
+                # from this vendored copy.
                 if "fn" in prompt:
                     fn_name = prompt.get("fn_name", str(prompt["fn"]))
                     print("{} RUN CMD: {} {}".format(Fore.GREEN, fn_name, Style.RESET_ALL))
                     prompt["fn"]()
                 else:
-                    cmd = prompt["cmd"]
-                    print("{} RUN CMD: {} {}".format(Fore.GREEN, cmd, Style.RESET_ALL))
-                    eval(cmd)
+                    raise ValueError(
+                        "Unsupported dict step {!r}: only callable 'fn' steps "
+                        "are allowed".format(step.name)
+                    )
                 continue
 
             prompt_step += 1
