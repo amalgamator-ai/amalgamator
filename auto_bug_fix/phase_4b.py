@@ -56,7 +56,7 @@ class RunAndFixPrompt:
 <instructions>
 The goal of this task is to autonomously drive a build-test-fix loop until both the build and tests are clean. Think hard and follow these guidelines:
 
-IMPORTANT: If <target_branch> is provided in the context, ALL code analysis, reading, and modifications MUST be restricted to that branch only. Do NOT examine or reference code from other branches. Before starting, verify you are on <target_branch> by running `git -C <target_source_code_dir> branch --show-current`.
+IMPORTANT: If <target_branch> is provided in the context, ALL code analysis, reading, and modifications MUST be restricted to that branch only. Do NOT examine or reference code from other branches. Before starting, verify you are on <target_branch> by running `git -C <build_dir> branch --show-current`.
 
 - Run <build_command> from <build_dir>.
     - Use all available CPUs (the command already specifies this).
@@ -81,7 +81,7 @@ IMPORTANT: If <target_branch> is provided in the context, ALL code analysis, rea
         - Rerun <test_command>.
 - Count each complete build+test attempt as one retry. Repeat until clean or <max_build_test_retries> is exhausted.
 - If retries are exhausted:
-    - Write the final build/test output and a summary of all attempted fixes to <output_dir>/<output_failure_file>.
+    - Write the final build/test output and a summary of all attempted fixes to <output_dir>/{output_failure_file}.
     - Stop. Do not attempt further fixes.
 </instructions>
 
