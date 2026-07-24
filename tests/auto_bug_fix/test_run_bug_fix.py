@@ -731,8 +731,21 @@ def test_coauthor_trailers_canonical_casing():
 
 # ---------- Phase 4b result-file contract ----------
 
+def _git_4b(tmp_path, *args):
+    import subprocess
+    return subprocess.run(
+        ["git", *args], cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
 def _phase_4b_fixtures(tmp_path):
     from auto_bug_fix.claude_utils import ClaudeConfig
+    _git_4b(tmp_path, "init", "-b", "main")
+    _git_4b(tmp_path, "config", "user.name", "t")
+    _git_4b(tmp_path, "config", "user.email", "t@t")
+    (tmp_path / "src.c").write_text("int a = 1;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "base")
     config = BugFixConfig(
         repo_path=str(tmp_path),
         build_dir=str(tmp_path),
@@ -774,9 +787,70 @@ def _marker_writing_claude_run(marker_path, text="SUCCESS\nRetries: 1/3\n"):
 def test_phase_4b_success_file_accepted(tmp_path):
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
     with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
         phase_4b_run_and_fix(config, claude_cfg, state, None)  # must not raise
+    # Marker-only session: nothing to commit, no empty fixup created.
+    assert _git_4b(tmp_path, "rev-parse", "HEAD") == head_before
+
+
+def test_phase_4b_success_commits_recovery_edits(tmp_path):
+    """4b edits must become a commit — the patch and preserved branch are commit-based."""
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    async def session(cfg, steps):
+        (tmp_path / "src.c").write_text("int a = 2; /* fixed by 4b */\n")
+        (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\nRetries: 1/3\n")
+        return []
+
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=session):
+        phase_4b_run_and_fix(config, claude_cfg, state, None)
+
+    assert _git_4b(tmp_path, "rev-parse", "HEAD") != head_before
+    assert "fixup: build/test recovery" in _git_4b(tmp_path, "log", "-1", "--format=%s")
+    assert "fixed by 4b" in _git_4b(tmp_path, "show", "HEAD:src.c")
+    # The result markers are session plumbing, never part of the backport.
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD")
+    assert "run_and_fix_success.txt" not in tree
+    assert _git_4b(tmp_path, "status", "--porcelain") == ""
+
+
+def test_commit_recovery_edits_artifact_only_dirt_returns_false(tmp_path):
+    """Untracked pipeline artifacts alone must not be reported as a recovery commit."""
+    from auto_bug_fix.run_bug_fix import _commit_recovery_edits
+    from auto_bug_fix.bug_fix_prompts import SEMANTIC_TRIAGE_FILE
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    (tmp_path / SEMANTIC_TRIAGE_FILE).write_text("{}")
+    head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
+    assert _commit_recovery_edits(config, "Phase 4b") is False
+    assert _git_4b(tmp_path, "rev-parse", "HEAD") == head_before
+
+
+def test_phase_4_5_fixup_commit_does_not_degrade_verdict(tmp_path):
+    """A recovery fixup must not turn the equivalence verdict into 'unmatched'."""
+    from auto_bug_fix.run_bug_fix import phase_4_5_semantic_equivalence
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    base_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    # The fix on the source side.
+    (tmp_path / "src.c").write_text("int a = 2;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "fix: bump a")
+    fix_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    # The backport: same change ported, then a recovery fixup on top.
+    _git_4b(tmp_path, "checkout", "-q", "-b", "target", base_sha)
+    (tmp_path / "src.c").write_text("int a = 2;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "Port fix")
+    (tmp_path / "extra.c").write_text("int b = 3;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "fixup: build/test recovery")
+    config.source_fix_commit = fix_sha
+    config.target_branch = base_sha
+    verdict = phase_4_5_semantic_equivalence(config, state)
+    assert verdict != "unmatched", "squashed comparison must see content, not commit count"
 
 
 def test_phase_4b_stale_success_file_is_ignored(tmp_path):
