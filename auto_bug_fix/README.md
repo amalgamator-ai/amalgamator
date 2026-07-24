@@ -29,7 +29,7 @@ flowchart TD
     P15 --> P2
     P2 --> P3B[Phase 3b — Regeneration<br/>re-generate skipped generated files]
     P3B --> P4[Phase 4 — Verify<br/>build + test with recovery attempts]
-    P4 -->|unrecoverable| P4B[Phase 4b — Escalation<br/>external build-test-fix loop]
+    P4 -->|unrecoverable| P4B[Phase 4b — Escalation<br/>autonomous build-test-fix loop]
     P4 --> P45[Phase 4.5 — Semantic equivalence<br/>git range-diff source vs. ported]
     P4B --> P45
     P45 --> P5([Phase 5 — Dossier for human review])
@@ -47,7 +47,7 @@ flowchart TD
 | 1.5 — RED triage | If RED unexpectedly passed: decides between *not vulnerable* (pipeline stops — no backport needed), *mitigated* (port anyway for defense-in-depth), or *bad test* (produce a replacement or escalate). |
 | 2+3a — Cherry-pick and resolve | `git cherry-pick` with a strategy ladder (default → patience → ort). Conflicted files first go through mechanical rungs (`git apply --ignore-whitespace`, `-C1` of the per-file patch onto the target side — byte-spliced, never regenerated). What remains goes to a narrowly-scoped LLM resolution loop. Finalization then runs the deterministic safety nets (below) and two review agents (3a.1 verification fed with computed evidence, 3a.2 triage-blind review). |
 | 3b — Regeneration | Runs the validated regeneration commands for generated files that were deliberately skipped, keeping the result only if the build still passes. |
-| 4 — Verify | Build + test. On failure, an agent diagnoses and repairs iteratively (4a); if unrecoverable, escalates to the code-gen pipeline's autonomous build-test-fix loop (4b) as a last resort — a single long-running agent (strongest model, max effort) fed the full dossier, which writes `run_and_fix_success.txt` or `run_and_fix_failure.txt` to report back. |
+| 4 — Verify | Build + test. On failure, an agent diagnoses and repairs iteratively (4a); if unrecoverable, escalates to the autonomous build-test-fix loop (4b, `phase_4b.py`) as a last resort — a single long-running agent (strongest model, max effort) fed the full dossier, which writes `run_and_fix_success.txt` or `run_and_fix_failure.txt` to report back. |
 | 4.5 — Semantic equivalence | `git range-diff` between the source fix and the ported commit, classified into an equivalence verdict. |
 | 5 — Dossier | Writes `dossier.md` — every decision, gate value, audit finding, and diff, organized for a human reviewer. |
 
@@ -207,23 +207,22 @@ The dossier is written in every case that reaches Phase 2; the tracker JSON is w
 
 ## Extracting this pipeline standalone
 
-`auto_bug_fix/` is nearly self-contained. To lift it out of this repository you need:
+`auto_bug_fix/` is fully self-contained — every import resolves inside the package. The pieces it used to share with the rest of this repository are vendored in:
 
-```
-auto_bug_fix/               # the whole directory
-common/claude_utils.py      # ClaudeConfig, claude_run (agent runner), PipelineStep
-common/utils.py             # Tee (log tee-ing), clear_repo
+- `claude_utils.py` — the Claude Agent SDK glue (`ClaudeConfig`, `claude_run`, `PipelineStep`)
+- `utils.py` — small helpers (`Tee`)
+- `phase_4b.py` — the autonomous build-test-fix loop prompt (Phase 4b)
+
+To move it elsewhere:
+
+```bash
+cp -r auto_bug_fix/ /new/home/
+cd /new/home/
+pip install claude-agent-sdk pyyaml colorama
+python -m auto_bug_fix.run_bug_fix path/to/config.yaml
 ```
 
-Those cover every top-level import. One phase has a lazy dependency: **Phase 4b** (the last-resort escalation, `phase_4b_external_pipeline` in `run_bug_fix.py`) imports the code-gen pipeline's `RunAndFix` prompt at call time:
-
-```
-auto_code_gen/use_cases/bug_fix.py    # gen_RunAndFixPrompt, RUN_AND_FIX_FAILURE_FILE
-auto_code_gen/use_cases/base.py       # UseCase ABC (imported by bug_fix.py)
-auto_code_gen/code_gen_prompts.py     # prompt templates (imported by bug_fix.py)
-```
-
-Either copy that slice too, or accept that runs which escalate to Phase 4b will fail with an `ImportError` instead of running the recovery loop (every earlier phase works without it). Dependencies: `claude-agent-sdk`, `pyyaml`, `colorama`. Keep the package layout (`auto_bug_fix/`, `common/`, optionally `auto_code_gen/`) or rewrite the imports, and run with `python -m auto_bug_fix.run_bug_fix <config>` from the directory containing the packages.
+Run from the directory *containing* `auto_bug_fix/` (the `-m` invocation needs the package on the path). Verify self-containment any time with `grep -rnE "^\s*(from|import) (common|auto_code_gen)" auto_bug_fix/*.py` — it should return nothing.
 
 ### Module map
 
@@ -232,6 +231,9 @@ Either copy that slice too, or accept that runs which escalate to Phase 4b will 
 | `run_bug_fix.py` | Orchestrator: all phases, multi-target loop, entry point |
 | `config_loader.py` / `bug_fix_config.py` | YAML/JSON loading, validation, config dataclasses |
 | `bug_fix_prompts.py` | All agent prompt templates |
+| `claude_utils.py` | Claude Agent SDK glue: `claude_run` agent runner, `ClaudeConfig`, `PipelineStep` |
+| `phase_4b.py` | Phase 4b autonomous build-test-fix loop prompt |
+| `utils.py` | Small helpers (`Tee` log tee-ing) |
 | `git_tools.py` | git plumbing helpers (ancestry, commits, worktrees, status) |
 | `patch_id.py` | Forward/backward patch-id checks (already-applied / predates-bug) |
 | `mechanical.py` | Mechanical conflict resolution (`git apply` rungs on conflicted files) |

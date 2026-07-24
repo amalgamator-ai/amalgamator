@@ -513,7 +513,7 @@ def test_run_targets_worktree_failure_continues(mock_pipeline, mock_wt_add, mock
 
 from auto_bug_fix.run_bug_fix import phase_1_5_red_triage
 from auto_bug_fix.bug_fix_prompts import RED_TRIAGE_FILE
-from common.claude_utils import ClaudeConfig
+from auto_bug_fix.claude_utils import ClaudeConfig
 
 
 def _make_claude_config():

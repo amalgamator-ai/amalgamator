@@ -7,7 +7,7 @@ from unittest.mock import patch
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.dossier import Dossier
 from auto_bug_fix.run_bug_fix import PipelineState, cherry_pick_and_resolve
-from common.claude_utils import ClaudeConfig
+from auto_bug_fix.claude_utils import ClaudeConfig
 
 BASE = """\
 void foo(void)

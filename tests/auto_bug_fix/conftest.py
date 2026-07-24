@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import pytest
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
-from common.claude_utils import ClaudeConfig
+from auto_bug_fix.claude_utils import ClaudeConfig
 
 
 @pytest.fixture
