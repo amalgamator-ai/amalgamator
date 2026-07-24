@@ -19,8 +19,8 @@ import asyncio
 from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
 
-from common.utils import Tee
-from common.claude_utils import ClaudeConfig, claude_run as _claude_run
+from auto_bug_fix.utils import Tee
+from auto_bug_fix.claude_utils import ClaudeConfig, PipelineStep, claude_run as _claude_run
 
 
 async def _run_llm(claude_config, prompts, tracker=None):
@@ -852,31 +852,24 @@ def phase_4a_build_recovery(
     )
 
 
-def phase_4b_external_pipeline(
+def phase_4b_run_and_fix(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
     state: PipelineState,
     tracker,
 ) -> None:
-    """Hand off to the external new_ai_auto_analyze pipeline's autonomous build-test-fix loop.
+    """Escalate to the autonomous build-test-fix loop (last resort).
 
-    Writes a rich context file with ALL pipeline data (dossier, triage, fix_diff,
-    prerequisite analysis) then calls the external pipeline's RunAndFixPrompt which
-    drives an LLM-heavy iterative fix loop.
+    Assembles a rich context with ALL pipeline data (dossier, triage, config)
+    and runs the RunAndFixPrompt as a single long agent session that iterates
+    build → test → targeted fix until clean or retries are exhausted.
     """
 
-    ext_pipeline_root = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
-
-    if not os.path.isdir(ext_pipeline_root):
-        raise FileNotFoundError(f"External pipeline not found at {ext_pipeline_root}")
-
-    if ext_pipeline_root not in sys.path:
-        sys.path.insert(0, ext_pipeline_root)
-
-    from auto_code_gen.use_cases.bug_fix import gen_RunAndFixPrompt, RUN_AND_FIX_FAILURE_FILE
-    from common.claude_utils import PipelineStep
-    from common.claude_utils import claude_run as ext_claude_run
-    from common.claude_utils import ClaudeConfig as ExtClaudeConfig
+    from auto_bug_fix.phase_4b import (
+        gen_RunAndFixPrompt,
+        RUN_AND_FIX_FAILURE_FILE,
+        RUN_AND_FIX_SUCCESS_FILE,
+    )
 
     dossier_text = format_dossier(state.dossier) if state.dossier else ""
     triage_json = json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "{}"
@@ -905,7 +898,7 @@ def phase_4b_external_pipeline(
 </semantic_triage>
 """
 
-    ext_claude_config = ExtClaudeConfig(
+    ext_claude_config = ClaudeConfig(
         model="claude-opus-4-6",
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -953,7 +946,7 @@ def phase_4b_external_pipeline(
             json.dump(phase_4b_data, f, indent=2)
         log.info("Phase 4b input written to %s", phase_4b_json_path)
 
-    log.info("Phase 4b: handing off to external pipeline (build-test-fix loop)")
+    log.info("Phase 4b: starting run-and-fix loop (build-test-fix)")
 
     _4b_start = time.time()
 
@@ -965,7 +958,7 @@ def phase_4b_external_pipeline(
         sys.stdout = Tee(_prev_stdout, _4b_log_file)
 
     try:
-        timings = asyncio.run(ext_claude_run(ext_claude_config, steps))
+        timings = asyncio.run(_claude_run(ext_claude_config, steps))
     finally:
         if phase_4b_log_path:
             sys.stdout = _prev_stdout
@@ -988,7 +981,7 @@ def phase_4b_external_pipeline(
             )
 
     failure_file = os.path.join(config.repo_path, RUN_AND_FIX_FAILURE_FILE)
-    success_file = os.path.join(config.repo_path, "run_and_fix_success.txt")
+    success_file = os.path.join(config.repo_path, RUN_AND_FIX_SUCCESS_FILE)
 
     if tracker and phase_4b_json_path:
         phase_4b_data["duration_seconds"] = _4b_end - _4b_start
@@ -1013,11 +1006,11 @@ def phase_4b_external_pipeline(
     if os.path.exists(failure_file):
         with open(failure_file) as f:
             failure_text = f.read()
-        state.dossier.add("External pipeline failure", failure_text, "Phase 4b")
-        raise PipelineEscalation("Phase 4b: external pipeline exhausted retries")
+        state.dossier.add("Run-and-fix failure", failure_text, "Phase 4b")
+        raise PipelineEscalation("Phase 4b: run-and-fix loop exhausted retries")
     else:
-        state.dossier.add("External pipeline", "Build-test-fix loop succeeded", "Phase 4b")
-        log.info("Phase 4b: external pipeline succeeded")
+        state.dossier.add("Run-and-fix loop", "Build-test-fix loop succeeded", "Phase 4b")
+        log.info("Phase 4b: run-and-fix loop succeeded")
 
 
 MAX_PREREQUISITE_DEPTH = 5
@@ -1916,8 +1909,8 @@ def _run_pipeline_phases(
                        f"[ All conflicts force-resolved with --theirs ]",
                        trailers=_COAUTHOR_TRAILERS)
 
-        with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
-            phase_4b_external_pipeline(config, claude_config, state, tracker)
+        with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
+            phase_4b_run_and_fix(config, claude_config, state, tracker)
         cherry_pick_succeeded = True
 
     if not cherry_pick_succeeded:
@@ -1939,8 +1932,8 @@ def _run_pipeline_phases(
                 phase_4_verify(config, state)
                 tracker.record_gate("verify", "passed")
         except PipelineEscalation:
-            with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
-                phase_4b_external_pipeline(config, claude_config, state, tracker)
+            with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
+                phase_4b_run_and_fix(config, claude_config, state, tracker)
 
     phase4_lint = _resolve_lint_command(config, state)
     lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c) and c != phase4_lint]
@@ -2017,10 +2010,10 @@ def _run_pipeline_phases(
                     else:
                         log.info("Phase 4.1: all verification commands pass after recovery")
             except PipelineEscalation as e:
-                log.warning("Phase 4a recovery failed — escalating to external pipeline: %s", e)
+                log.warning("Phase 4a recovery failed — escalating to run-and-fix loop: %s", e)
 
-                with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
-                    phase_4b_external_pipeline(config, claude_config, state, tracker)
+                with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
+                    phase_4b_run_and_fix(config, claude_config, state, tracker)
 
     with tracker.phase("Phase 4.5 — Semantic equivalence"):
         eq_result = phase_4_5_semantic_equivalence(config, state)
