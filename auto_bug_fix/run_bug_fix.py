@@ -113,6 +113,11 @@ from auto_bug_fix.bug_fix_prompts import (
     TEST_PORT_MANIFEST_FILE,
     RED_TRIAGE_FILE,
 )
+from auto_bug_fix.phase_4b import (
+    gen_RunAndFixPrompt,
+    RUN_AND_FIX_FAILURE_FILE,
+    RUN_AND_FIX_SUCCESS_FILE,
+)
 
 LOG_FILE = "__run_log_bug_fix.txt"
 DOSSIER_FILE = "dossier.md"
@@ -121,6 +126,8 @@ _PIPELINE_ARTIFACTS = (
     SEMANTIC_TRIAGE_FILE,
     TEST_PORT_MANIFEST_FILE,
     RED_TRIAGE_FILE,
+    RUN_AND_FIX_FAILURE_FILE,
+    RUN_AND_FIX_SUCCESS_FILE,
     os.path.join("runs", SEMANTIC_TRIAGE_FILE),
     os.path.join("runs", RED_TRIAGE_FILE),
 )
@@ -766,6 +773,36 @@ def phase_4_verify(
     raise PipelineEscalation("Phase 4 verify failed")
 
 
+def _commit_recovery_edits(config: BugFixConfig, phase_label: str) -> bool:
+    """Commit agent recovery edits so they reach the deliverables.
+
+    The candidate patch (git format-patch), the preserved branch, and the
+    Phase 4.5 range-diff are all commit-based — recovery edits left in the
+    working tree by the 4a/4b agents would silently vanish from every one
+    of them. Returns True if a commit was created.
+    """
+    for marker in (RUN_AND_FIX_FAILURE_FILE, RUN_AND_FIX_SUCCESS_FILE):
+        path = os.path.join(config.repo_path, marker)
+        if os.path.exists(path):
+            os.remove(path)
+    if not git_status_porcelain(config.repo_path):
+        return False
+    head_before = git_rev_parse(config.repo_path, "HEAD")
+    subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+    git_commit(
+        config.repo_path,
+        f"fixup: build/test recovery for {config.issue_id} ({phase_label})",
+        trailers=_COAUTHOR_TRAILERS,
+    )
+    if git_rev_parse(config.repo_path, "HEAD") == head_before:
+        # Either only unstageable pipeline artifacts were dirty, or the
+        # commit itself failed — in both cases nothing landed on HEAD.
+        log.warning("%s: no recovery commit created", phase_label)
+        return False
+    log.info("%s: recovery edits committed", phase_label)
+    return True
+
+
 def phase_4a_build_recovery(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -794,6 +831,7 @@ def phase_4a_build_recovery(
             no_regression, _ = check_regression(failures, state.baseline)
             if test_exit != TIMEOUT_EXIT_CODE and no_regression:
                 log.info("Phase 4a: build+test passed on attempt %d", attempt)
+                _commit_recovery_edits(config, "Phase 4a")
                 return
         else:
             test_stdout, test_stderr = "", ""
@@ -845,6 +883,7 @@ def phase_4a_build_recovery(
         no_regression, _ = check_regression(failures, state.baseline)
         if test_exit != TIMEOUT_EXIT_CODE and no_regression:
             log.info("Phase 4a: build+test passed after final attempt")
+            _commit_recovery_edits(config, "Phase 4a")
             return
 
     raise PipelineEscalation(
@@ -864,13 +903,6 @@ def phase_4b_run_and_fix(
     and runs the RunAndFixPrompt as a single long agent session that iterates
     build → test → targeted fix until clean or retries are exhausted.
     """
-
-    from auto_bug_fix.phase_4b import (
-        gen_RunAndFixPrompt,
-        RUN_AND_FIX_FAILURE_FILE,
-        RUN_AND_FIX_SUCCESS_FILE,
-    )
-
     dossier_text = format_dossier(state.dossier) if state.dossier else ""
     triage_json = json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "{}"
 
@@ -1019,6 +1051,12 @@ def phase_4b_run_and_fix(
     elif os.path.exists(success_file):
         state.dossier.add("Run-and-fix loop", "Build-test-fix loop succeeded", "Phase 4b")
         log.info("Phase 4b: run-and-fix loop succeeded")
+        if _commit_recovery_edits(config, "Phase 4b"):
+            state.dossier.add(
+                "Run-and-fix loop",
+                "Recovery edits committed (fixup)",
+                "Phase 4b",
+            )
     else:
         # The agent session ended without writing either marker (crash, early
         # exit, ignored instructions) — success may not be assumed.
@@ -1630,6 +1668,35 @@ def port_prerequisite_chain(
     return ported
 
 
+def _squashed_backport_range(config: BugFixConfig) -> str | None:
+    """Synthetic single-commit range spanning the whole backport.
+
+    Pipeline commits (test port, resolution, review fixups, 4a/4b recovery)
+    make target..HEAD multi-commit, and range-diff pairs commits one-to-one,
+    so every extra commit shows up as an unmatched row regardless of content.
+    Squashing the backport into one synthetic commit (tree = HEAD's tree,
+    parent = the target base) makes the comparison about content, not
+    commit count.
+    """
+    repo = config.repo_path
+    try:
+        target_base = git_merge_base(repo, config.target_branch, "HEAD")
+        head = git_rev_parse(repo, "HEAD")
+        if not target_base or not head or target_base == head:
+            return None
+        result = subprocess.run(
+            ["git", "commit-tree", f"{head}^{{tree}}", "-p", target_base,
+             "-m", f"squashed backport for {config.issue_id}"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return None
+        squash = result.stdout.strip()
+        return f"{squash}^..{squash}" if squash else None
+    except Exception:
+        return None
+
+
 def phase_4_5_semantic_equivalence(
     config: BugFixConfig,
     state: PipelineState,
@@ -1637,11 +1704,19 @@ def phase_4_5_semantic_equivalence(
     """Run range-diff to classify the port as identical, modified, or unmatched."""
     repo = config.repo_path
     try:
-        target_base = git_merge_base(repo, config.target_branch, "HEAD")
+        backport_range = _squashed_backport_range(config)
+        # The squash is a deliberate one-to-one comparison — force range-diff
+        # to pair the two commits so the verdict reflects content, not the
+        # pairing heuristic's similarity threshold.
+        creation_factor = 999 if backport_range else None
+        if backport_range is None:
+            target_base = git_merge_base(repo, config.target_branch, "HEAD")
+            backport_range = f"{target_base}..HEAD"
         rd_output = run_range_diff(
             repo,
             f"{config.source_fix_commit}^..{config.source_fix_commit}",
-            f"{target_base}..HEAD",
+            backport_range,
+            creation_factor=creation_factor,
         )
     except Exception:
         return "unmatched"
@@ -2040,10 +2115,12 @@ def _run_pipeline_phases(
         tracker.record_gate("semantic_equivalence", eq_result)
 
         try:
+            squashed = _squashed_backport_range(config)
             rd_output = run_range_diff(
                 config.repo_path,
                 f"{config.source_fix_commit}^..{config.source_fix_commit}",
-                "HEAD^..HEAD",
+                squashed or "HEAD^..HEAD",
+                creation_factor=999 if squashed else None,
             )
             if rd_output.strip():
                 state.dossier.add(

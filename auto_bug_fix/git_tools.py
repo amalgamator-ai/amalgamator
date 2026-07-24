@@ -156,9 +156,23 @@ def git_diff_name_only_range(repo_path: str, ref_a: str, ref_b: str) -> list[str
     return [line for line in r.stdout.splitlines() if line.strip()]
 
 
-def git_range_diff(repo_path: str, upstream_range: str, ported_range: str) -> str:
-    """Run git range-diff and return stdout."""
-    r = _run_git(repo_path, ["range-diff", upstream_range, ported_range])
+def git_range_diff(
+    repo_path: str,
+    upstream_range: str,
+    ported_range: str,
+    creation_factor: int | None = None,
+) -> str:
+    """Run git range-diff and return stdout.
+
+    creation_factor: percentage passed to --creation-factor. Range-diff only
+    pairs commits whose diffs are similar enough; a high factor forces
+    pairing, which is what a deliberate one-to-one comparison wants.
+    """
+    args = ["range-diff"]
+    if creation_factor is not None:
+        args.append(f"--creation-factor={creation_factor}")
+    args += [upstream_range, ported_range]
+    r = _run_git(repo_path, args)
     return r.stdout
 
 
