@@ -170,6 +170,7 @@ advanced:
   timeout_minutes: 0             # per-command timeout; 0/unset = unlimited
   max_build_test_retries: 3      # Phase 4a repair attempts
   max_resolution_retries: 3      # LLM resolution attempts per conflict round
+  partial_success_skip_ratio: 0.5  # non-bugfix ports only: dropped-file fraction that downgrades success to partial_success
   forward_patch_id_lookback: "12 months"   # window for the already-applied check
 ```
 
@@ -197,6 +198,7 @@ Per-target override keys: `issue_id`, `bug_description`, `build_command`, `test_
 | Outcome | Meaning |
 |---|---|
 | `success` (exit 0) | Fix ported, verified, dossier written |
+| `partial_success` (exit 1) | Non-bugfix port finished and builds, but dropped a large share of the fix's files or lost prerequisites — see the dossier's "Partial backport" section. Never fires for bug fix commits. |
 | `PIPELINE STOP` | A gate decided no backport is needed (fix already present, or target not vulnerable) — this is a *good* outcome, documented in the dossier |
 | `PIPELINE ESCALATION` | The pipeline could not finish safely and handed off (Phase 4b) or stopped with a partial, force-resolved state for a human |
 | `PIPELINE ERROR` | Unexpected failure; see `run_log.txt` |

@@ -357,7 +357,7 @@ def test_run_targets_continues_on_failure(mock_pipeline, mock_wt_add, mock_clean
         _make_tracker_json(output_dir, config.issue_id, cost_usd=1.50 * call_count[0])
         if call_count[0] == 1:
             raise PipelineEscalation("build failed on target 1")
-        return _make_dossier(config.issue_id), MagicMock()
+        return _make_dossier(config.issue_id), MagicMock(outcome="success")
 
     mock_pipeline.side_effect = pipeline_side_effect
     mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
@@ -404,7 +404,7 @@ def test_run_targets_single_target(mock_pipeline, mock_wt_add, mock_cleanup, tmp
 
     def pipeline_side_effect(config, claude_config, output_dir):
         _make_tracker_json(output_dir, config.issue_id, cost_usd=2.00)
-        return _make_dossier(config.issue_id), MagicMock()
+        return _make_dossier(config.issue_id), MagicMock(outcome="success")
 
     mock_pipeline.side_effect = pipeline_side_effect
     mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
@@ -476,7 +476,7 @@ def test_run_targets_worktree_failure_continues(mock_pipeline, mock_wt_add, mock
 
     def pipeline_side_effect(config, claude_config, output_dir):
         _make_tracker_json(output_dir, config.issue_id, cost_usd=3.21)
-        return _make_dossier(config.issue_id), MagicMock()
+        return _make_dossier(config.issue_id), MagicMock(outcome="success")
 
     mock_pipeline.side_effect = pipeline_side_effect
 
@@ -663,7 +663,7 @@ def test_run_targets_records_fetch_warning_in_summary(
 ):
     """A git fetch failure must be recorded in summary.json, not crash."""
     base_config = BugFixConfig(**_BASE_CFG)
-    mock_pipeline.return_value = (_make_dossier("fix-1"), MagicMock())
+    mock_pipeline.return_value = (_make_dossier("fix-1"), MagicMock(outcome="success"))
     mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
 
     targets = [TargetSpec(branch="branch-a", issue_id="fix-1")]
@@ -876,3 +876,119 @@ def test_phase_4b_missing_result_file_escalates(tmp_path):
             assert False, "expected PipelineEscalation when no result file is written"
         except PipelineEscalation as exc:
             assert "without writing a result file" in str(exc)
+
+
+# ---------- Backport completeness (partial_success, non-bugfix only) ----------
+
+def test_completeness_bugfix_commits_never_downgrade(tmp_path):
+    """The check must fire ONLY for non-bugfix commits."""
+    from auto_bug_fix.run_bug_fix import _backport_completeness
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    state.triage_assessment = {"commit_type": "bugfix", "files_to_skip": ["src.c"]}
+    state.failed_prerequisites = ["some_symbol"]
+    outcome, detail = _backport_completeness(config, state)
+    assert outcome == "success"
+    assert detail == ""
+
+
+def test_completeness_unknown_commit_type_stays_success(tmp_path):
+    from auto_bug_fix.run_bug_fix import _backport_completeness
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    state.triage_assessment = {}
+    state.failed_prerequisites = ["some_symbol"]
+    assert _backport_completeness(config, state)[0] == "success"
+
+
+def test_completeness_failed_prereq_downgrades_feature_port(tmp_path):
+    from auto_bug_fix.run_bug_fix import _backport_completeness
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.source_fix_commit = _git_4b(tmp_path, "rev-parse", "HEAD")
+    state.triage_assessment = {"commit_type": "api-change"}
+    state.failed_prerequisites = ["missing_infra_symbol"]
+    outcome, detail = _backport_completeness(config, state)
+    assert outcome == "partial_success"
+    assert "missing_infra_symbol" in detail
+
+
+def _completeness_repo(tmp_path):
+    """Source fix touching a.c+b.c; backport branch carries only a.c."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    base_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "a.c").write_text("int a;\n")
+    (tmp_path / "b.c").write_text("int b;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "feat: add a and b")
+    fix_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    _git_4b(tmp_path, "checkout", "-q", "-b", "target", base_sha)
+    (tmp_path / "a.c").write_text("int a;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "Port fix (b.c skipped)")
+    config.source_fix_commit = fix_sha
+    config.target_branch = base_sha
+    state.triage_assessment = {"commit_type": "feature", "files_to_skip": ["b.c"]}
+    return config, state
+
+
+def test_completeness_dropped_files_downgrade_feature_port(tmp_path):
+    from auto_bug_fix.run_bug_fix import _backport_completeness
+    config, state = _completeness_repo(tmp_path)
+    outcome, detail = _backport_completeness(config, state)
+    assert outcome == "partial_success"
+    assert "b.c" in detail
+
+
+def test_completeness_regenerated_skip_file_counts_as_ported(tmp_path):
+    """A skipped file recovered by regeneration is not a drop."""
+    from auto_bug_fix.run_bug_fix import _backport_completeness
+    config, state = _completeness_repo(tmp_path)
+    (tmp_path / "b.c").write_text("int b;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "Regenerate files")
+    outcome, _ = _backport_completeness(config, state)
+    assert outcome == "success"
+
+
+@patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
+@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.run_pipeline")
+def test_run_targets_propagates_partial_success(mock_pipeline, mock_wt_add, mock_cleanup, tmp_path):
+    """A tracker-downgraded outcome must reach TargetResult (and the exit code)."""
+    base_config = BugFixConfig(**_BASE_CFG)
+
+    def pipeline_side_effect(config, claude_config, output_dir):
+        _make_tracker_json(output_dir, config.issue_id, cost_usd=1.00)
+        return _make_dossier(config.issue_id), MagicMock(outcome="partial_success")
+
+    mock_pipeline.side_effect = pipeline_side_effect
+    mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
+
+    targets = [TargetSpec(branch="release-1.34")]
+    parent_run_dir = str(tmp_path / "runs" / "partial")
+    os.makedirs(parent_run_dir, exist_ok=True)
+
+    results = run_targets(
+        targets, base_config, MagicMock(),
+        source_path="/tmp/source", workdir=str(tmp_path / "workdir"),
+        parent_run_dir=parent_run_dir, build_subdir="",
+    )
+    assert len(results) == 1
+    assert results[0].outcome == "partial_success"
+
+
+def test_completeness_uses_seed_for_merge_commit_fixes(tmp_path):
+    """Merge-commit fixes have empty `git show --name-only`; state.seed must win."""
+    from auto_bug_fix.run_bug_fix import _backport_completeness
+    config, state = _completeness_repo(tmp_path)
+    state.seed = ["a.c", "b.c"]
+    config.source_fix_commit = "0" * 40  # unresolvable — git show yields nothing
+    outcome, detail = _backport_completeness(config, state)
+    assert outcome == "partial_success"
+    assert "b.c" in detail
+
+
+def test_completeness_sloppy_bugfix_label_never_downgrades(tmp_path):
+    from auto_bug_fix.run_bug_fix import _backport_completeness
+    config, state = _completeness_repo(tmp_path)
+    state.triage_assessment["commit_type"] = " Bug Fix "
+    state.failed_prerequisites = ["sym"]
+    assert _backport_completeness(config, state)[0] == "success"
