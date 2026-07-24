@@ -763,12 +763,33 @@ async def _fake_claude_run(cfg, steps):
     return []
 
 
+def _marker_writing_claude_run(marker_path, text="SUCCESS\nRetries: 1/3\n"):
+    """A fake session that writes a result marker, like a well-behaved agent."""
+    async def _run(cfg, steps):
+        marker_path.write_text(text)
+        return []
+    return _run
+
+
 def test_phase_4b_success_file_accepted(tmp_path):
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
-    (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\nRetries: 1/3\n")
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_fake_claude_run):
+    fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
         phase_4b_run_and_fix(config, claude_cfg, state, None)  # must not raise
+
+
+def test_phase_4b_stale_success_file_is_ignored(tmp_path):
+    """A marker left by an earlier 4b invocation must not vouch for this one."""
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS from a previous run\n")
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_fake_claude_run):
+        try:
+            phase_4b_run_and_fix(config, claude_cfg, state, None)
+            assert False, "expected PipelineEscalation despite the stale success file"
+        except PipelineEscalation as exc:
+            assert "without writing a result file" in str(exc)
 
 
 def test_phase_4b_missing_result_file_escalates(tmp_path):

@@ -56,7 +56,7 @@ class RunAndFixPrompt:
 <instructions>
 The goal of this task is to autonomously drive a build-test-fix loop until both the build and tests are clean. Think hard and follow these guidelines:
 
-IMPORTANT: If <target_branch> is provided in the context, ALL code analysis, reading, and modifications MUST be restricted to that branch only. Do NOT examine or reference code from other branches. Before starting, verify you are on <target_branch> by running `git -C <build_dir> branch --show-current`.
+IMPORTANT: The checkout under <build_dir> already contains <target_branch> with the ported fix applied (it may be a detached worktree, so `git branch --show-current` can legitimately print nothing). ALL code analysis, reading, and modifications MUST happen in this checkout only. Do NOT switch branches, check out other refs, or examine other branches' versions of the code.
 
 - Run <build_command> from <build_dir>.
     - Use all available CPUs (the command already specifies this).

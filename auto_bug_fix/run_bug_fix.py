@@ -946,6 +946,15 @@ def phase_4b_run_and_fix(
             json.dump(phase_4b_data, f, indent=2)
         log.info("Phase 4b input written to %s", phase_4b_json_path)
 
+    failure_file = os.path.join(config.repo_path, RUN_AND_FIX_FAILURE_FILE)
+    success_file = os.path.join(config.repo_path, RUN_AND_FIX_SUCCESS_FILE)
+    # 4b can run more than once per target (cherry-pick failure path, then
+    # verify failure). Remove markers from any earlier invocation so whatever
+    # exists after the session is provably this session's verdict.
+    for stale in (failure_file, success_file):
+        if os.path.exists(stale):
+            os.remove(stale)
+
     log.info("Phase 4b: starting run-and-fix loop (build-test-fix)")
 
     _4b_start = time.time()
@@ -980,9 +989,6 @@ def phase_4b_run_and_fix(
                 sdk_cost_usd=sdk_cost if sdk_cost else None,
             )
 
-    failure_file = os.path.join(config.repo_path, RUN_AND_FIX_FAILURE_FILE)
-    success_file = os.path.join(config.repo_path, RUN_AND_FIX_SUCCESS_FILE)
-
     if tracker and phase_4b_json_path:
         phase_4b_data["duration_seconds"] = _4b_end - _4b_start
         if timings:
@@ -990,7 +996,9 @@ def phase_4b_run_and_fix(
             phase_4b_data["input_tokens"] = sum(st.get("input_tokens", 0) for st in timings)
             phase_4b_data["output_tokens"] = sum(st.get("output_tokens", 0) for st in timings)
 
-        for result_file in (success_file, failure_file):
+        # Failure first — must match the decision precedence below, so a
+        # session that somehow writes both files is recorded as a failure.
+        for result_file in (failure_file, success_file):
             if os.path.exists(result_file):
                 dest = os.path.join(tracker._output_dir, os.path.basename(result_file))
                 shutil.copy2(result_file, dest)
