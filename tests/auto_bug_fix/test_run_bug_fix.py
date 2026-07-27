@@ -992,3 +992,16 @@ def test_completeness_sloppy_bugfix_label_never_downgrades(tmp_path):
     state.triage_assessment["commit_type"] = " Bug Fix "
     state.failed_prerequisites = ["sym"]
     assert _backport_completeness(config, state)[0] == "success"
+
+
+def test_squashed_backport_range_is_cached(tmp_path):
+    """commit-tree embeds a timestamp, so both callers must reuse one object."""
+    from auto_bug_fix.run_bug_fix import _squashed_backport_range
+    config, state = _completeness_repo(tmp_path)
+    first = _squashed_backport_range(config, state)
+    assert first and state.squashed_backport_range == first
+    second = _squashed_backport_range(config, state)
+    assert second == first
+    # Exactly one synthetic commit object was created for the two calls.
+    dangling = _git_4b(tmp_path, "fsck", "--dangling")
+    assert dangling.count("dangling commit") == 1

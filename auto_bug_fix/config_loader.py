@@ -1,6 +1,7 @@
 """YAML/JSON configuration loader with validation for bug fix porting pipeline."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 import yaml
@@ -12,10 +13,32 @@ from typing import Any
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.claude_utils import ClaudeConfig
 
+log = logging.getLogger(__name__)
+
 
 class ConfigError(Exception):
     """Raised when configuration is invalid."""
     pass
+
+
+def advanced_float(advanced: dict[str, Any], key: str, default: float) -> float:
+    """Read a float from the ``advanced:`` section, warning on unusable values.
+
+    Accepts YAML numbers and numeric strings (``0.7`` and ``"0.7"`` alike).
+    A key that is absent uses the default silently; a key that is present but
+    unparseable (null, text, a list) warns instead of crashing the run at
+    load time.
+    """
+    if key not in advanced:
+        return default
+    try:
+        return float(advanced[key])
+    except (TypeError, ValueError):
+        log.warning(
+            "advanced.%s=%r is not a number — falling back to %s",
+            key, advanced[key], default,
+        )
+        return default
 
 
 def load_config_file(config_path: str) -> dict[str, Any]:
@@ -134,11 +157,8 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         evidence_checks=bool(advanced.get("evidence_checks", True)),
         post_resolution_check=bool(advanced.get("post_resolution_check", True)),
         blind_review=bool(advanced.get("blind_review", True)),
-        partial_success_skip_ratio=(
-            float(advanced["partial_success_skip_ratio"])
-            if isinstance(advanced.get("partial_success_skip_ratio"), (int, float))
-            else 0.5
-        ),
+        partial_success_skip_ratio=advanced_float(
+            advanced, "partial_success_skip_ratio", 0.5),
     )
 
     return bug_fix_config, workdir, source_path
