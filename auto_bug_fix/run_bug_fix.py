@@ -224,6 +224,7 @@ class PipelineState:
     followup_fixes: list[str] = field(default_factory=list)
     followup_fixes_commit: str = ""
     failed_prerequisites: list[str] = field(default_factory=list)
+    squashed_backport_range: str = ""
 
 
 def phase_0_triage(
@@ -1671,7 +1672,7 @@ def port_prerequisite_chain(
     return ported
 
 
-def _squashed_backport_range(config: BugFixConfig) -> str | None:
+def _squashed_backport_range(config: BugFixConfig, state: PipelineState) -> str | None:
     """Synthetic single-commit range spanning the whole backport.
 
     Pipeline commits (test port, resolution, review fixups, 4a/4b recovery)
@@ -1680,7 +1681,14 @@ def _squashed_backport_range(config: BugFixConfig) -> str | None:
     Squashing the backport into one synthetic commit (tree = HEAD's tree,
     parent = the target base) makes the comparison about content, not
     commit count.
+
+    Cached on ``state``: commit objects embed the committer timestamp, so
+    calling this twice yields two different SHAs (and two dangling objects)
+    for the same tree. The verdict and the dossier's range-diff must quote
+    the same object.
     """
+    if state.squashed_backport_range:
+        return state.squashed_backport_range
     repo = config.repo_path
     try:
         target_base = git_merge_base(repo, config.target_branch, "HEAD")
@@ -1695,7 +1703,10 @@ def _squashed_backport_range(config: BugFixConfig) -> str | None:
         if result.returncode != 0:
             return None
         squash = result.stdout.strip()
-        return f"{squash}^..{squash}" if squash else None
+        if not squash:
+            return None
+        state.squashed_backport_range = f"{squash}^..{squash}"
+        return state.squashed_backport_range
     except Exception:
         return None
 
@@ -1763,7 +1774,7 @@ def phase_4_5_semantic_equivalence(
     """Run range-diff to classify the port as identical, modified, or unmatched."""
     repo = config.repo_path
     try:
-        backport_range = _squashed_backport_range(config)
+        backport_range = _squashed_backport_range(config, state)
         # The squash is a deliberate one-to-one comparison — force range-diff
         # to pair the two commits so the verdict reflects content, not the
         # pairing heuristic's similarity threshold.
@@ -2174,7 +2185,7 @@ def _run_pipeline_phases(
         tracker.record_gate("semantic_equivalence", eq_result)
 
         try:
-            squashed = _squashed_backport_range(config)
+            squashed = _squashed_backport_range(config, state)
             rd_output = run_range_diff(
                 config.repo_path,
                 f"{config.source_fix_commit}^..{config.source_fix_commit}",

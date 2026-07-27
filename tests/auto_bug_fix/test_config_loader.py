@@ -420,3 +420,51 @@ build:
     assert len(targets) == 1
     assert targets[0].branch == "v1.0"
     assert base_config.target_branch == "v1.0"
+
+
+# ---------- advanced_float: tolerant numeric parsing ----------
+
+def _cfg_with_advanced(advanced: dict) -> dict:
+    return {
+        "issue_id": "t-1",
+        "bug_description": "d",
+        "repository": {"source_path": "/tmp/repo"},
+        "branches": {"source": "main", "target": "v1.0"},
+        "fix": {"commit": "abc123"},
+        "build": {},
+        "advanced": advanced,
+    }
+
+
+def test_advanced_float_accepts_quoted_string():
+    """YAML quoting must not silently disable a configured threshold."""
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": "0.7"}))
+    assert cfg.partial_success_skip_ratio == 0.7
+
+
+def test_advanced_float_accepts_number():
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": 0.8}))
+    assert cfg.partial_success_skip_ratio == 0.8
+
+
+def test_advanced_float_null_falls_back_without_crashing(caplog):
+    """A bare `partial_success_skip_ratio:` key yields None — must not raise."""
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": None}))
+    assert cfg.partial_success_skip_ratio == 0.5
+    assert "not a number" in caplog.text
+
+
+def test_advanced_float_garbage_warns_and_defaults(caplog):
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": "high"}))
+    assert cfg.partial_success_skip_ratio == 0.5
+    assert "not a number" in caplog.text
+
+
+def test_advanced_float_absent_is_silent(caplog):
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
+    assert cfg.partial_success_skip_ratio == 0.5
+    assert "not a number" not in caplog.text
