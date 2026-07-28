@@ -3,7 +3,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 
-from common.claude_utils import ClaudeConfig
+from auto_code_gen.claude_utils import ClaudeConfig, CodeGenClaudeConfig
 
 from auto_analyze.configs.cross_trace_config import (
     CrossTraceConfig,
@@ -423,7 +423,7 @@ class CodeGenConfig(PipelineConfig):
 
     def make_claude_config(self) -> ClaudeConfig:
         params = self._MODE_PARAMS[self.thinking_mode]
-        return ClaudeConfig(
+        return CodeGenClaudeConfig(
             model=params["model"],
             allowed_tools=["Read", "Write", "Bash"],
             perm_mode="acceptEdits",

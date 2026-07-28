@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from common.claude_utils import ClaudeConfig, PipelineStep
+from auto_code_gen.claude_utils import ClaudeConfig, PipelineStep
 
 
 class UseCase(ABC):

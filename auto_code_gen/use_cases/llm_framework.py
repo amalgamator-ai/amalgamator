@@ -1,7 +1,7 @@
 import os
 
 from auto_code_gen.use_cases.base import UseCase
-from common.claude_utils import PipelineStep, claude_run
+from auto_code_gen.claude_utils import PipelineStep, claude_run
 from common.utils import clear_vllm_source_tree
 
 from auto_code_gen.code_gen_prompts import (

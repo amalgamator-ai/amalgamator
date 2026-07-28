@@ -14,7 +14,7 @@ import argparse
 import asyncio
 
 from common.utils import setup_logging, safe_clean_dir, clear_vllm_source_tree
-from common.claude_utils import claude_run, PipelineStep, _all_steps_complete
+from auto_code_gen.claude_utils import claude_run, PipelineStep, _all_steps_complete
 
 from auto_code_gen.code_gen_configs import load_config_and_use_case
 

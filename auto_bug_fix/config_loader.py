@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
-from auto_bug_fix.claude_utils import ClaudeConfig
+from auto_bug_fix.claude_utils import BugFixClaudeConfig, ClaudeConfig
 
 log = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ def parse_claude_config(config: dict[str, Any], output_dir: str) -> ClaudeConfig
         claude = {}
     model = claude.get("model") or config.get("model") or "claude-sonnet-4-6"
 
-    return ClaudeConfig(
+    return BugFixClaudeConfig(
         model=model,
         allowed_tools=claude.get("allowed_tools", ["Read", "Write", "Bash"]),
         perm_mode=claude.get("perm_mode", "acceptEdits"),
