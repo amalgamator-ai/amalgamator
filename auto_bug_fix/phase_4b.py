@@ -1,9 +1,11 @@
 """Autonomous build-test-fix loop prompt for Phase 4b.
 
-Extracted from auto_code_gen/use_cases/bug_fix.py so auto_bug_fix is
-standalone-portable. This is the last-resort escalation: a single
-long-running agent that iterates build → test → targeted fix until clean
-or retries are exhausted, reporting back through a success/failure file.
+The last-resort escalation: a single long-running agent that iterates
+build → test → targeted fix until clean or retries are exhausted, reporting
+back through a success/failure file.
+
+The pipeline owns every commit — this agent only edits the working tree, and
+run_bug_fix._commit_recovery_edits picks the edits up afterwards.
 """
 
 from dataclasses import dataclass

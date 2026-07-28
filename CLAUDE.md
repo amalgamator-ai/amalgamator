@@ -23,13 +23,14 @@ GPU profiling and trace analysis across inference frameworks (vLLM, SGLang, TRT-
 
 AI code generation with iterative generate+review convergence loops.
 
-**Two modes:**
+**One mode:**
 - **LLM Framework** (`use_case: llm_framework`) — port GPU kernel optimizations between frameworks
-- **Bug Fix** (`use_case: bug_fix`) — port bug fixes between branches of C/systems projects
+
+Bug fix backporting lives in `auto_bug_fix` (pipeline 3), not here.
 
 **Phases:** Code traces → Port plan → Test plan → Code gen → Runtime iterations
 
-### 3. Gitted Bug Fix (`auto_bug_fix`)
+### 3. Bug Fix Backport (`auto_bug_fix`)
 
 Git-first backporting pipeline: tries `git cherry-pick` first, falls back to LLM resolution.
 
@@ -50,7 +51,7 @@ All pipeline entry points are available as Claude Code skills:
 | `/investigate` | CodeGen | Post-pipeline issue investigation |
 | `/fix` | CodeGen | Post-pipeline issue fixing |
 | `/work-items` | CodeGen | Execute arbitrary work items |
-| `/bugfix` | BugFix | Gitted bug fix pipeline |
+| `/bugfix` | BugFix | Git-first bug fix backport pipeline |
 | `/chrome-trace` | Util | Generate Chrome trace visualization |
 | `/summary` | Util | Generate summary reports (PDF/PPTX) |
 | `/jiras` | Util | Create JIRA tasks from analysis |
@@ -65,9 +66,9 @@ auto_analyze/        GPU trace analysis pipeline
   configs/           Config dataclasses + examples
   prompts/           LLM prompt templates
 auto_code_gen/       AI code generation pipeline
-  use_cases/         UseCase ABC + implementations (llm_framework, bug_fix)
+  use_cases/         UseCase ABC + implementations (llm_framework)
   configs/           Config examples
-auto_bug_fix/        Git-first bug fix pipeline
+auto_bug_fix/        Git-first bug fix backport pipeline
   configs/           YAML config examples
 tests/               Test suite (pytest)
 ```
@@ -75,7 +76,7 @@ tests/               Test suite (pytest)
 ## Configuration
 
 - **Performance analysis:** JSON configs in `auto_profile/test_configs/` and `auto_analyze/configs/`
-- **Code generation:** JSON configs in `auto_code_gen/configs/` (set `use_case` to `llm_framework` or `bug_fix`)
+- **Code generation:** JSON configs in `auto_code_gen/configs/` (`use_case: llm_framework`)
 - **Bug fix:** YAML configs in `auto_bug_fix/configs/`
 
 ## Dependencies

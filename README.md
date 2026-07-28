@@ -15,9 +15,9 @@ Manual analysis of GPU profile traces is labor-intensive, particularly when corr
 3. **Profiling** *(optional)* — Run inference benchmarks with GPU profiling and auto-generate analysis configs
 4. **Code Generation** *(optional)* — Port optimizations from a faster framework to a slower one
 
-### Bug Fix Porting (C/Systems Projects)
+### Bug Fix Porting
 
-Port a bug fix from one branch of a C/systems project (gcc, openssl, glibc, etc.) to another using Claude as the AI engine. The pipeline traces what the fix touches, ports its tests, plans and generates the ported patch, then drives an autonomous build-test-fix loop until the fix is clean on the target branch — no manual copy-pasting of compiler errors required.
+Backport a bug fix from one branch to another using Claude as the AI engine. The [`auto_bug_fix`](auto_bug_fix/README.md) pipeline is git-first: it exhausts deterministic mechanisms (`git cherry-pick`, mechanical re-apply) before letting an LLM touch anything, audits every LLM edit against deterministic evidence, and escalates to an autonomous build-test-fix loop only as a last resort.
 
 ## Examples and Guides
 
@@ -41,7 +41,7 @@ Worked examples with full analysis results:
 
 | Guide | Description |
 |-------|-------------|
-| [auto_code_gen README](auto_code_gen/README.md) | Unified code gen pipeline — covers both LLM framework and bug fix use cases, with config examples for gcc, openssl, and curl |
+| [auto_bug_fix README](auto_bug_fix/README.md) | Git-first backport pipeline — phase-by-phase walkthrough, config reference, and example YAML configs |
 
 ## Project Structure
 
@@ -80,17 +80,26 @@ ai_auto_analyze/
 ├── auto_code_gen/                      # AI-based code generation pipeline
 │   ├── run_code_gen.py                #   Pipeline orchestrator (all use cases)
 │   ├── code_gen_prompts.py            #   Shared prompt classes
-│   ├── code_gen_configs.py            #   PipelineConfig, CodeGenConfig, BugFixConfig
+│   ├── code_gen_configs.py            #   PipelineConfig, CodeGenConfig
 │   ├── use_cases/                     #   Pluggable use case definitions
 │   │   ├── base.py                    #     UseCase ABC
-│   │   ├── llm_framework.py           #     LLM framework optimization porting
-│   │   └── bug_fix.py                 #     Bug fix branch porting
+│   │   └── llm_framework.py           #     LLM framework optimization porting
 │   ├── configs/                       #   Example JSON configs
 │   ├── run_runtime_iters.py           #   Standalone runtime iteration runner
 │   ├── run_investigate_issue.py
 │   ├── run_fix_issue.py
 │   ├── run_work_items.py
 │   └── run_summary.py
+├── auto_bug_fix/                       # Git-first bug fix backport pipeline
+│   ├── run_bug_fix.py                 #   Phase 0-5 orchestrator, entry point
+│   ├── bug_fix_config.py              #   Config dataclass
+│   ├── config_loader.py               #   YAML/JSON loading and validation
+│   ├── bug_fix_prompts.py             #   Agent prompt templates
+│   ├── phase_4b.py                    #   Autonomous build-test-fix loop prompt
+│   ├── git_tools.py                   #   git plumbing (ancestry, worktrees, status)
+│   ├── mechanical.py                  #   Mechanical conflict resolution
+│   ├── evidence.py                    #   Token/line-provenance audits
+│   └── configs/                       #   Example YAML configs
 ├── env.sh                              # Environment variables
 ├── run_all.sh                          # Full pipeline orchestrator
 └── run_all_scheduled.sh                # Scheduled pipeline execution
@@ -268,14 +277,14 @@ All pipeline steps log to `logs/run_{step_name}.log` with simultaneous stdout ou
 
 ## Bug Fix Porting
 
-Port a bug fix from one branch of a C/systems project to another using Claude as the AI engine. Supported for any project with a git repository and shell-invokable build and test commands (gcc, openssl, glibc, etc.).
+Backport a bug fix from one branch to another using Claude as the AI engine. Works for any project with a git repository and shell-invokable build and test commands (tested on Go and C codebases).
 
-See **[auto_code_gen/README.md](auto_code_gen/README.md)** for the full setup and usage guide (covers both LLM framework and bug fix use cases).
+See **[auto_bug_fix/README.md](auto_bug_fix/README.md)** for the full setup and usage guide.
 
 **Quick start:**
 
 ```bash
-# 1. Create a JSON config (see auto_code_gen/configs/bug_fix_config_example.json)
+# 1. Create a YAML config (see auto_bug_fix/configs/example_backport.yaml)
 # 2. Run
-python -m auto_code_gen.run_code_gen --config <path_to_config.json>
+python -m auto_bug_fix.run_bug_fix <path_to_config.yaml>
 ```
