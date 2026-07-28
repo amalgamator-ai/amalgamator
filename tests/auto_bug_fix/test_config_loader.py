@@ -511,3 +511,41 @@ def test_skip_ratio_accepts_the_whole_unit_interval(good, expected):
     cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
         {"partial_success_skip_ratio": good}))
     assert cfg.partial_success_skip_ratio == expected
+
+
+# --- phase_4b_model ---
+# Phase 4b is the last resort before escalating to a human and deliberately
+# runs a stronger model than the rest of the pipeline. Making that configurable
+# must not change the default, and must not let an unusable value through.
+
+def test_phase_4b_model_defaults_to_opus():
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
+    assert cfg.phase_4b_model == "claude-opus-4-6"
+
+
+def test_phase_4b_model_is_independent_of_the_pipeline_model():
+    """Setting `model:` must not silently move the escalation model with it."""
+    config = _cfg_with_advanced({})
+    config["model"] = "claude-sonnet-4-6"
+    cfg, _, _ = parse_bug_fix_config(config)
+    assert cfg.phase_4b_model == "claude-opus-4-6"
+
+
+def test_phase_4b_model_override_is_honoured():
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"phase_4b_model": "claude-opus-5"}))
+    assert cfg.phase_4b_model == "claude-opus-5"
+
+
+def test_phase_4b_model_is_stripped():
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"phase_4b_model": "  claude-opus-5  "}))
+    assert cfg.phase_4b_model == "claude-opus-5"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", None, 42, ["claude-opus-5"], True])
+def test_phase_4b_model_unusable_value_falls_back(bad, caplog):
+    """An empty model name would surface as an opaque API error inside 4b."""
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({"phase_4b_model": bad}))
+    assert cfg.phase_4b_model == "claude-opus-4-6"
+    assert "non-empty string" in caplog.text

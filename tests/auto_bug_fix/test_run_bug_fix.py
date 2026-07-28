@@ -1224,3 +1224,38 @@ def test_faithful_port_of_the_same_lines_stays_matched(tmp_path):
     config.source_fix_commit = fix_sha
     config.target_branch = base_sha
     assert phase_4_5_semantic_equivalence(config, state) != "unmatched"
+
+
+def test_phase_4b_uses_the_configured_model(tmp_path):
+    """The config value must reach the agent session, not just the dataclass."""
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    config.phase_4b_model = "claude-opus-5"
+    seen = {}
+
+    async def _capture(cfg, steps, *a, **kw):
+        seen["model"] = cfg.model
+        (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
+        return []
+
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_capture):
+        phase_4b_run_and_fix(config, claude_cfg, state, None)
+    assert seen["model"] == "claude-opus-5"
+
+
+def test_phase_4b_model_defaults_to_opus_not_the_pipeline_model(tmp_path):
+    """Unconfigured, 4b escalates to Opus even though the pipeline runs Sonnet."""
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    claude_cfg.model = "claude-sonnet-4-6"
+    seen = {}
+
+    async def _capture(cfg, steps, *a, **kw):
+        seen["model"] = cfg.model
+        (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
+        return []
+
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_capture):
+        phase_4b_run_and_fix(config, claude_cfg, state, None)
+    assert seen["model"] == "claude-opus-4-6"
+    assert seen["model"] != claude_cfg.model

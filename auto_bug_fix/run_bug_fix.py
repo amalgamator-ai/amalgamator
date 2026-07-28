@@ -1023,7 +1023,7 @@ def phase_4b_run_and_fix(
 """
 
     ext_claude_config = BugFixClaudeConfig(
-        model="claude-opus-4-6",
+        model=config.phase_4b_model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
         cwd=config.repo_path,
@@ -1031,7 +1031,11 @@ def phase_4b_run_and_fix(
         effort="max",
         max_thinking_tokens=1048576,
     )
-    log.info("Phase 4b: escalating to Opus with deep thinking (last resort)")
+    # Named explicitly: 4b is meant to run a stronger model than the rest of
+    # the pipeline, and it is now configurable — the run log should say which
+    # one actually escalated.
+    log.info("Phase 4b: escalating to %s with deep thinking (last resort; "
+             "pipeline model is %s)", config.phase_4b_model, claude_config.model)
 
     prompt = gen_RunAndFixPrompt(
         context=enriched_context,

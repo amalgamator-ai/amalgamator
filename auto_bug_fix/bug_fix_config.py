@@ -52,6 +52,10 @@ class BugFixConfig:
     # (skipped and never regenerated) before the outcome is downgraded from
     # success to partial_success.
     partial_success_skip_ratio: float = 0.5
+    # Model for the Phase 4b escalation. Deliberately stronger than the model
+    # the rest of the pipeline runs on: 4b is the last resort, a single long
+    # autonomous build-test-fix session. Lowering it weakens that gate.
+    phase_4b_model: str = "claude-opus-4-6"
     # Optional per-file check run over touched files after resolution,
     # e.g. "gcc -fsyntax-only {file}". {file} is replaced with the absolute path.
     file_check_command: str = ""
