@@ -209,11 +209,12 @@ The dossier is written in every case that reaches Phase 2; the tracker JSON is w
 
 ## Extracting this pipeline standalone
 
-`auto_bug_fix/` is fully self-contained — every import resolves inside the package. The pieces it used to share with the rest of this repository are vendored in:
+`auto_bug_fix/` is almost self-contained. Two pieces it used to share with the rest of this repository are vendored in, because each diverged from its original:
 
 - `claude_utils.py` — the Claude Agent SDK glue (`ClaudeConfig`, `claude_run`, `PipelineStep`)
-- `utils.py` — small helpers (`Tee`)
 - `phase_4b.py` — the autonomous build-test-fix loop prompt (Phase 4b)
+
+One import still resolves outside the package: `Tee` from `common/utils.py`. That helper is identical in both places, so it is shared rather than copied.
 
 To move it elsewhere:
 
@@ -224,7 +225,9 @@ pip install claude-agent-sdk pyyaml colorama
 python -m auto_bug_fix.run_bug_fix path/to/config.yaml
 ```
 
-Run from the directory *containing* `auto_bug_fix/` (the `-m` invocation needs the package on the path). Verify self-containment any time with `grep -rnE "^\s*(from|import) (common|auto_code_gen)" auto_bug_fix/*.py` — it should return nothing.
+Run from the directory *containing* `auto_bug_fix/` (the `-m` invocation needs the package on the path), and provide `Tee` — either copy `common/utils.py` alongside or drop in a three-line replacement.
+
+Audit the external surface any time with `grep -rnE "^\s*(from|import) (common|auto_code_gen)" auto_bug_fix/*.py` — the `common.utils` import above should be the only hit.
 
 ### Module map
 
@@ -235,7 +238,6 @@ Run from the directory *containing* `auto_bug_fix/` (the `-m` invocation needs t
 | `bug_fix_prompts.py` | All agent prompt templates |
 | `claude_utils.py` | Claude Agent SDK glue: `claude_run` agent runner, `ClaudeConfig`, `PipelineStep` |
 | `phase_4b.py` | Phase 4b autonomous build-test-fix loop prompt |
-| `utils.py` | Small helpers (`Tee` log tee-ing) |
 | `git_tools.py` | git plumbing helpers (ancestry, commits, worktrees, status) |
 | `patch_id.py` | Forward/backward patch-id checks (already-applied / predates-bug) |
 | `mechanical.py` | Mechanical conflict resolution (`git apply` rungs on conflicted files) |

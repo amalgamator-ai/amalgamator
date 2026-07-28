@@ -19,7 +19,7 @@ import asyncio
 from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
 
-from auto_bug_fix.utils import Tee
+from common.utils import Tee
 from auto_bug_fix.claude_utils import ClaudeConfig, PipelineStep, claude_run as _claude_run
 
 
