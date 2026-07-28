@@ -16,8 +16,7 @@ The user specifies which config type they want. If not specified, ask them.
    - **single-trace** — for single-trace GPU analysis
    - **cross-trace** — for cross-trace comparison
    - **codegen** — for AI code generation (LLM framework mode)
-   - **bugfix-codegen** — for AI code generation (bug fix mode)
-   - **bugfix** — for gitted bug fix pipeline (YAML)
+   - **bugfix** — for the bug fix backport pipeline (YAML)
 
 2. Based on the type, gather required fields from the user interactively.
 

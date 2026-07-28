@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import yaml
@@ -21,24 +22,57 @@ class ConfigError(Exception):
     pass
 
 
-def advanced_float(advanced: dict[str, Any], key: str, default: float) -> float:
+def advanced_float(
+    advanced: dict[str, Any],
+    key: str,
+    default: float,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
     """Read a float from the ``advanced:`` section, warning on unusable values.
 
     Accepts YAML numbers and numeric strings (``0.7`` and ``"0.7"`` alike).
-    A key that is absent uses the default silently; a key that is present but
-    unparseable (null, text, a list) warns instead of crashing the run at
-    load time.
+    A key that is absent uses the default silently. A key that is present but
+    unusable warns and falls back rather than crashing the run at load time,
+    or — worse — silently disabling the check it configures. Unusable means:
+
+    - unparseable (null, text, a list)
+    - a bool, since ``float(True)`` is ``1.0`` and almost certainly not what
+      a config that says ``true`` intended
+    - NaN or an infinity, which make every comparison against the value false
+    - outside [minimum, maximum] when bounds are given
     """
     if key not in advanced:
         return default
+    raw = advanced[key]
+    if isinstance(raw, bool):
+        log.warning(
+            "advanced.%s=%r is a boolean, not a number — falling back to %s",
+            key, raw, default,
+        )
+        return default
     try:
-        return float(advanced[key])
+        value = float(raw)
     except (TypeError, ValueError):
         log.warning(
             "advanced.%s=%r is not a number — falling back to %s",
-            key, advanced[key], default,
+            key, raw, default,
         )
         return default
+    if not math.isfinite(value):
+        log.warning(
+            "advanced.%s=%r is not finite — falling back to %s",
+            key, raw, default,
+        )
+        return default
+    if (minimum is not None and value < minimum) or \
+       (maximum is not None and value > maximum):
+        log.warning(
+            "advanced.%s=%r is outside [%s, %s] — falling back to %s",
+            key, raw, minimum, maximum, default,
+        )
+        return default
+    return value
 
 
 def load_config_file(config_path: str) -> dict[str, Any]:
@@ -158,7 +192,8 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         post_resolution_check=bool(advanced.get("post_resolution_check", True)),
         blind_review=bool(advanced.get("blind_review", True)),
         partial_success_skip_ratio=advanced_float(
-            advanced, "partial_success_skip_ratio", 0.5),
+            advanced, "partial_success_skip_ratio", 0.5,
+            minimum=0.0, maximum=1.0),
     )
 
     return bug_fix_config, workdir, source_path
