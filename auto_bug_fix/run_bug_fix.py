@@ -20,7 +20,12 @@ from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
 
 from common.utils import Tee
-from auto_bug_fix.claude_utils import ClaudeConfig, PipelineStep, claude_run as _claude_run
+from auto_bug_fix.claude_utils import (
+    BugFixClaudeConfig,
+    ClaudeConfig,
+    PipelineStep,
+    claude_run as _claude_run,
+)
 
 
 async def _run_llm(claude_config, prompts, tracker=None):
@@ -448,7 +453,7 @@ def phase_0_5_semantic_triage(
         seed_files=state.seed,
     )
 
-    claude_config_triage = ClaudeConfig(
+    claude_config_triage = BugFixClaudeConfig(
         model=claude_config.model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -525,7 +530,7 @@ def phase_0_5c_test_port(
         diff_command=diff_command,
     )
 
-    claude_config_test = ClaudeConfig(
+    claude_config_test = BugFixClaudeConfig(
         model=claude_config.model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -633,7 +638,7 @@ def phase_1_5_red_triage(
         triage_assessment=triage_json,
     )
 
-    claude_config_triage = ClaudeConfig(
+    claude_config_triage = BugFixClaudeConfig(
         model=claude_config.model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -816,7 +821,7 @@ def phase_4a_build_recovery(
     """Agent-assisted build/test error recovery. Adapts code to the target branch API."""
     context = create_context_str(claude_config, config)
 
-    claude_config_4a = ClaudeConfig(
+    claude_config_4a = BugFixClaudeConfig(
         model=claude_config.model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -933,7 +938,7 @@ def phase_4b_run_and_fix(
 </semantic_triage>
 """
 
-    ext_claude_config = ClaudeConfig(
+    ext_claude_config = BugFixClaudeConfig(
         model="claude-opus-4-6",
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -1180,7 +1185,7 @@ def cherry_pick_and_resolve(
     context = create_context_str(claude_config, config)
     priority = state.priority_files if state.priority_files else state.allowed_modules
 
-    claude_config_resolve = ClaudeConfig(
+    claude_config_resolve = BugFixClaudeConfig(
         model=claude_config.model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,

@@ -513,11 +513,11 @@ def test_run_targets_worktree_failure_continues(mock_pipeline, mock_wt_add, mock
 
 from auto_bug_fix.run_bug_fix import phase_1_5_red_triage
 from auto_bug_fix.bug_fix_prompts import RED_TRIAGE_FILE
-from auto_bug_fix.claude_utils import ClaudeConfig
+from auto_bug_fix.claude_utils import BugFixClaudeConfig
 
 
 def _make_claude_config():
-    return ClaudeConfig(
+    return BugFixClaudeConfig(
         model="test-model",
         allowed_tools=["Read", "Write", "Bash"],
         perm_mode="acceptEdits",
@@ -739,7 +739,7 @@ def _git_4b(tmp_path, *args):
 
 
 def _phase_4b_fixtures(tmp_path):
-    from auto_bug_fix.claude_utils import ClaudeConfig
+    from auto_bug_fix.claude_utils import BugFixClaudeConfig
     _git_4b(tmp_path, "init", "-b", "main")
     _git_4b(tmp_path, "config", "user.name", "t")
     _git_4b(tmp_path, "config", "user.email", "t@t")
@@ -755,7 +755,7 @@ def _phase_4b_fixtures(tmp_path):
         bug_description="test bug",
         issue_id="tid-1",
     )
-    claude_cfg = ClaudeConfig(
+    claude_cfg = BugFixClaudeConfig(
         model="test-model",
         allowed_tools=["Bash"],
         perm_mode="acceptEdits",

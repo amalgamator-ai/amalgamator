@@ -12,7 +12,7 @@ import argparse
 import asyncio
 
 from common.utils import setup_logging
-from common.claude_utils import claude_run, PipelineStep
+from auto_code_gen.claude_utils import claude_run, PipelineStep
 
 from auto_code_gen.code_gen_configs import CodeGenConfig
 from auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase

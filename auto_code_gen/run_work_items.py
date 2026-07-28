@@ -5,7 +5,7 @@ import asyncio
 
 from pathlib import Path
 from common.utils import setup_logging
-from common.claude_utils import claude_run
+from auto_code_gen.claude_utils import claude_run
 
 from auto_code_gen.code_gen_configs import CodeGenConfig
 from auto_code_gen.code_gen_prompts import (

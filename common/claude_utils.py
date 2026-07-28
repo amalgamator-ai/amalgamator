@@ -1,22 +1,17 @@
+"""Shared Claude Agent SDK glue: the agent runner and its config/step types.
+
+This is the common ground every pipeline builds on. A package that wants its
+own agent persona subclasses :class:`ClaudeConfig` and overrides
+``system_prompt`` — see ``auto_bug_fix/claude_utils.py`` and
+``auto_code_gen/claude_utils.py``. Everything else (resume handling, message
+printing, timing, token accounting) is identical across pipelines and lives
+here only.
+"""
+
 import os
 import time
 from dataclasses import dataclass, field, fields
 from colorama import Fore, Style
-
-
-def make_anthropic_client():
-    """
-    Create a raw Anthropic client for simple one-shot API calls.
-    Uses Vertex AI if CLAUDE_CODE_USE_VERTEX is set, otherwise direct API key.
-    """
-    import anthropic
-    if os.environ.get("CLAUDE_CODE_USE_VERTEX"):
-        from anthropic import AnthropicVertex
-        return AnthropicVertex(
-            project_id=os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", ""),
-            region=os.environ.get("CLOUD_ML_REGION", "us-east5"),
-        )
-    return anthropic.Anthropic()
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -34,7 +29,33 @@ from claude_agent_sdk import (
 
 from claude_agent_sdk.types import StreamEvent
 
-import common.utils  # noqa: F401
+
+def make_anthropic_client():
+    """
+    Create a raw Anthropic client for simple one-shot API calls.
+    Uses Vertex AI if CLAUDE_CODE_USE_VERTEX is set, otherwise direct API key.
+    """
+    import anthropic
+    if os.environ.get("CLAUDE_CODE_USE_VERTEX"):
+        from anthropic import AnthropicVertex
+        return AnthropicVertex(
+            project_id=os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", ""),
+            region=os.environ.get("CLOUD_ML_REGION", "us-east5"),
+        )
+    return anthropic.Anthropic()
+
+
+# Deliberately domain-neutral: a package that never picks a persona gets a
+# sane generalist rather than silently inheriting another domain's expert.
+DEFAULT_SYSTEM_PROMPT = (
+    "You are an expert software engineer working in a large codebase."
+)
+
+PROFILING_SYSTEM_PROMPT = (
+    "You are a benchmarking and profiling expert of LLMs that run via vLLM, "
+    "SGLang and TRT"
+)
+
 
 @dataclass
 class ClaudeConfig:
@@ -45,6 +66,13 @@ class ClaudeConfig:
     thinking: dict | None = None
     effort: str = "max"
     max_thinking_tokens: int = 1048576
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+
+
+@dataclass
+class ProfilingClaudeConfig(ClaudeConfig):
+    """Persona for the GPU profiling and trace-analysis pipelines."""
+    system_prompt: str = PROFILING_SYSTEM_PROMPT
 
 
 @dataclass
@@ -92,10 +120,6 @@ def print_claude_config(config: ClaudeConfig) -> None:
         name = field.name
         value = getattr(config, name)
         print(f"  {name}: {value}")
-
-
-def profile_system_prompt():
-    return "You are a benchmarking and profiling expert of LLMs that run via vLLM, SGLang and TRT"
 
 
 def print_dict(d, indent):
@@ -277,7 +301,7 @@ async def claude_run(
     thinking = claude_config.thinking if claude_config.thinking else {"type": "adaptive"}
 
     options = ClaudeAgentOptions(
-        system_prompt=profile_system_prompt(),
+        system_prompt=claude_config.system_prompt,
         allowed_tools=claude_config.allowed_tools,
         permission_mode=claude_config.perm_mode,
         cwd=claude_config.cwd,
@@ -300,14 +324,15 @@ async def claude_run(
 
             prompt = step.prompt
             if isinstance(prompt, dict):
-                if "fn" in prompt:
-                    fn_name = prompt.get("fn_name", str(prompt["fn"]))
-                    print("{} RUN CMD: {} {}".format(Fore.GREEN, fn_name, Style.RESET_ALL))
-                    prompt["fn"]()
-                else:
-                    cmd = prompt["cmd"]
-                    print("{} RUN CMD: {} {}".format(Fore.GREEN, cmd, Style.RESET_ALL))
-                    eval(cmd)
+                if "fn" not in prompt:
+                    raise ValueError(
+                        "Unsupported dict step {!r}: only callable 'fn' steps are "
+                        "allowed. The former {{'cmd': '<source>'}} form was executed "
+                        "via eval() and has been removed.".format(step.name)
+                    )
+                fn_name = prompt.get("fn_name", str(prompt["fn"]))
+                print("{} RUN CMD: {} {}".format(Fore.GREEN, fn_name, Style.RESET_ALL))
+                prompt["fn"]()
                 continue
 
             prompt_step += 1

@@ -207,27 +207,29 @@ The dossier is written in every case that reaches Phase 2; the tracker JSON is w
 
 ---
 
-## Extracting this pipeline standalone
+## What this package shares with the rest of the repository
 
-`auto_bug_fix/` is almost self-contained. Two pieces it used to share with the rest of this repository are vendored in, because each diverged from its original:
+Two imports resolve outside `auto_bug_fix/`, both into `common/`:
 
-- `claude_utils.py` — the Claude Agent SDK glue (`ClaudeConfig`, `claude_run`, `PipelineStep`)
-- `phase_4b.py` — the autonomous build-test-fix loop prompt (Phase 4b)
+| Import | Why it is shared, not copied |
+|---|---|
+| `common.claude_utils` | The agent runner, resume handling, message printing and token accounting are identical for every pipeline. `auto_bug_fix/claude_utils.py` is a ~45-line specialization that adds only the backport persona (`BugFixClaudeConfig`) and re-exports the common types. |
+| `common.utils` (`Tee`) | A three-line log tee, byte-identical wherever it was copied. |
 
-One import still resolves outside the package: `Tee` from `common/utils.py`. That helper is identical in both places, so it is shared rather than copied.
+Everything else — every phase, prompt, git helper and audit — lives inside the package.
 
-To move it elsewhere:
+To run it from another checkout, keep `common/` alongside it:
 
 ```bash
-cp -r auto_bug_fix/ /new/home/
+cp -r auto_bug_fix/ common/ /new/home/
 cd /new/home/
 pip install claude-agent-sdk pyyaml colorama
 python -m auto_bug_fix.run_bug_fix path/to/config.yaml
 ```
 
-Run from the directory *containing* `auto_bug_fix/` (the `-m` invocation needs the package on the path), and provide `Tee` — either copy `common/utils.py` alongside or drop in a three-line replacement.
+Run from the directory *containing* `auto_bug_fix/` — the `-m` invocation needs the package on the path.
 
-Audit the external surface any time with `grep -rnE "^\s*(from|import) (common|auto_code_gen)" auto_bug_fix/*.py` — the `common.utils` import above should be the only hit.
+Audit the external surface any time with `grep -rnE "^\s*(from|import) (common|auto_code_gen)" auto_bug_fix/*.py` — only the two `common` imports above should appear, and never `auto_code_gen`.
 
 ### Module map
 
@@ -236,7 +238,7 @@ Audit the external surface any time with `grep -rnE "^\s*(from|import) (common|a
 | `run_bug_fix.py` | Orchestrator: all phases, multi-target loop, entry point |
 | `config_loader.py` / `bug_fix_config.py` | YAML/JSON loading, validation, config dataclasses |
 | `bug_fix_prompts.py` | All agent prompt templates |
-| `claude_utils.py` | Claude Agent SDK glue: `claude_run` agent runner, `ClaudeConfig`, `PipelineStep` |
+| `claude_utils.py` | Backport persona (`BugFixClaudeConfig`) over the shared runner in `common/claude_utils.py` |
 | `phase_4b.py` | Phase 4b autonomous build-test-fix loop prompt |
 | `git_tools.py` | git plumbing helpers (ancestry, commits, worktrees, status) |
 | `patch_id.py` | Forward/backward patch-id checks (already-applied / predates-bug) |
