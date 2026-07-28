@@ -153,7 +153,7 @@ The ported commits are also preserved as a branch in the worktree's repo, named 
 | `build.lint_command` | `""` (skip) | Lint command |
 | `build.file_check_command` | `""` (skip) | Per-file check run over touched files after resolution, e.g. `"gcc -fsyntax-only {file}"` — `{file}` is replaced with the absolute path |
 | `build.auto_discover_tests` | `false` | Let the pipeline discover test commands |
-| `model` | `claude-sonnet-4-6` | Model for all agents (use a stronger model for harder backports) |
+| `model` | `claude-sonnet-4-6` | Model for all agents except the Phase 4b escalation (use a stronger model for harder backports) |
 | `output.directory` | `./runs` | Parent directory for run artifacts |
 | `claude.allowed_tools` | `[Read, Write, Bash]` | Tools available to the agents |
 | `claude.perm_mode` | `acceptEdits` | Agent permission mode |
@@ -171,8 +171,16 @@ advanced:
   max_build_test_retries: 3      # Phase 4a repair attempts
   max_resolution_retries: 3      # LLM resolution attempts per conflict round
   partial_success_skip_ratio: 0.5  # non-bugfix ports only: dropped-file fraction that downgrades success to partial_success
+  phase_4b_model: "claude-opus-4-6"  # model for the Phase 4b escalation
   forward_patch_id_lookback: "12 months"   # window for the already-applied check
 ```
+
+`phase_4b_model` is deliberately stronger than `model:` — Phase 4b is the last
+resort before the run escalates to a human, and it runs one long autonomous
+build-test-fix session rather than a narrow scoped edit. Lowering it to the
+pipeline model weakens that gate. The model that actually escalated is named in
+the run log, alongside the pipeline model, so a changed value is visible after
+the fact.
 
 ### Multiple targets
 

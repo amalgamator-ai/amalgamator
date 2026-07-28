@@ -75,6 +75,26 @@ def advanced_float(
     return value
 
 
+def advanced_str(advanced: dict[str, Any], key: str, default: str) -> str:
+    """Read a non-empty string from the ``advanced:`` section.
+
+    A key that is absent uses the default silently. A key that is present but
+    empty, blank, or not a string warns and falls back — an empty model name
+    would otherwise surface as an opaque API error deep inside the phase it
+    configures.
+    """
+    if key not in advanced:
+        return default
+    raw = advanced[key]
+    if not isinstance(raw, str) or not raw.strip():
+        log.warning(
+            "advanced.%s=%r is not a non-empty string — falling back to %s",
+            key, raw, default,
+        )
+        return default
+    return raw.strip()
+
+
 def load_config_file(config_path: str) -> dict[str, Any]:
     """Load YAML or JSON config file."""
     path = Path(config_path)
@@ -194,6 +214,8 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         partial_success_skip_ratio=advanced_float(
             advanced, "partial_success_skip_ratio", 0.5,
             minimum=0.0, maximum=1.0),
+        phase_4b_model=advanced_str(
+            advanced, "phase_4b_model", "claude-opus-4-6"),
     )
 
     return bug_fix_config, workdir, source_path
