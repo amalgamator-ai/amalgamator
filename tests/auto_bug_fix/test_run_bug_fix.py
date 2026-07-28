@@ -1259,3 +1259,128 @@ def test_phase_4b_model_defaults_to_opus_not_the_pipeline_model(tmp_path):
         phase_4b_run_and_fix(config, claude_cfg, state, None)
     assert seen["model"] == "claude-opus-4-6"
     assert seen["model"] != claude_cfg.model
+
+
+# --- review round 3: verification gate, relatedness strength, 4b artifacts ---
+
+def _verify_config(tmp_path, **kw):
+    defaults = dict(
+        repo_path=str(tmp_path), build_dir=str(tmp_path), source_branch="s",
+        target_branch="t", source_fix_commit="abc", bug_description="b", issue_id="i",
+        build_command="true",
+    )
+    defaults.update(kw)
+    return BugFixConfig(**defaults)
+
+
+def test_failing_test_command_does_not_pass_verification(tmp_path):
+    """A nonzero test exit with no parseable failures is not a pass.
+
+    parse_test_failures returns an empty set for output it does not recognize,
+    and an empty set never regresses against the baseline — so without a
+    positive check the gate accepts any failing test command.
+    """
+    from auto_bug_fix.run_bug_fix import _run_build_and_test
+    config = _verify_config(tmp_path, test_command="exit 1")
+    state = PipelineState()
+    passed, *_ = _run_build_and_test(config, state)
+    assert passed is False
+
+
+def test_failing_test_command_excused_when_baseline_failed_the_same_way(tmp_path):
+    """Pre-existing opaque failures stay excused — the lint path's rule."""
+    from auto_bug_fix.run_bug_fix import _run_build_and_test
+    config = _verify_config(tmp_path, test_command="exit 1")
+    state = PipelineState()
+    state.baseline_test_exit = 1
+    passed, *_ = _run_build_and_test(config, state)
+    assert passed is True
+
+
+def test_clean_test_command_still_passes(tmp_path):
+    from auto_bug_fix.run_bug_fix import _run_build_and_test
+    config = _verify_config(tmp_path, test_command="true")
+    assert _run_build_and_test(config, PipelineState())[0] is True
+
+
+def test_phase_4b_verification_gate_rejects_a_failing_test_command(tmp_path):
+    """The 4b gate inherits _run_build_and_test — it must not be bypassable."""
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix, PipelineEscalation
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    config.test_command = "exit 1"
+    fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+        with pytest.raises(PipelineEscalation, match="build/test still fails"):
+            phase_4b_run_and_fix(config, claude_cfg, state, None)
+
+
+def test_relatedness_needs_more_than_one_shared_line(tmp_path):
+    """Any two diffs in a language share boilerplate; one line is not evidence."""
+    from auto_bug_fix.run_bug_fix import _shares_content_with_fix
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "a.py").write_text("def f():\n    return []\n")
+    _git_4b(tmp_path, "add", "."); _git_4b(tmp_path, "commit", "-m", "seed")
+    base_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    # The fix: several distinctive lines in a.py.
+    (tmp_path / "a.py").write_text(
+        "def f():\n    validate_bounds(ptr, length)\n    audit_the_caller(ctx)\n"
+        "    return []\n")
+    _git_4b(tmp_path, "add", "."); _git_4b(tmp_path, "commit", "-m", "fix")
+    fix_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    # The "backport": a different file, sharing only the boilerplate line.
+    _git_4b(tmp_path, "checkout", "-q", "-b", "target", base_sha)
+    (tmp_path / "b.py").write_text("def unrelated():\n    return []\n")
+    _git_4b(tmp_path, "add", "."); _git_4b(tmp_path, "commit", "-m", "unrelated")
+    config.source_fix_commit = fix_sha
+    config.target_branch = base_sha
+    assert _shares_content_with_fix(config, state) is False
+
+
+def test_relatedness_ignores_opposite_polarity(tmp_path):
+    """A line the fix adds, appearing as a line the backport removes, is not a match."""
+    from auto_bug_fix.run_bug_fix import _changed_payload_lines
+    (tmp_path / ".git").mkdir(exist_ok=True)
+    _git_4b(tmp_path, "init", "-b", "main")
+    _git_4b(tmp_path, "config", "user.name", "t")
+    _git_4b(tmp_path, "config", "user.email", "t@t")
+    (tmp_path / "f.py").write_text("alpha_beta_gamma = 1\n")
+    _git_4b(tmp_path, "add", "."); _git_4b(tmp_path, "commit", "-m", "base")
+    (tmp_path / "f.py").write_text("")
+    _git_4b(tmp_path, "add", "."); _git_4b(tmp_path, "commit", "-m", "remove it")
+    removed = _changed_payload_lines(str(tmp_path), ["HEAD^..HEAD"])
+    assert ("-", "alpha_beta_gamma = 1") in removed
+    assert ("+", "alpha_beta_gamma = 1") not in removed
+
+
+def test_phase_4b_artifact_does_not_claim_success_before_verification(tmp_path):
+    """The marker is the agent's claim; the artifact must record the verdict."""
+    import json as _json
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix, PipelineEscalation
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    config.test_command = "exit 1"
+    tracker = MagicMock()
+    tracker._output_dir = str(tmp_path / "out")
+    os.makedirs(tracker._output_dir, exist_ok=True)
+    fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+        with pytest.raises(PipelineEscalation):
+            phase_4b_run_and_fix(config, claude_cfg, state, tracker)
+    data = _json.loads((tmp_path / "out" / "phase_4b_input.json").read_text())
+    assert data["outcome"] == "verification_failed"
+    assert data["agent_reported"] == "success"
+
+
+def test_phase_4b_artifact_records_success_only_after_verification(tmp_path):
+    import json as _json
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    config.build_command = "true"
+    config.test_command = "true"
+    tracker = MagicMock()
+    tracker._output_dir = str(tmp_path / "out")
+    os.makedirs(tracker._output_dir, exist_ok=True)
+    fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+        phase_4b_run_and_fix(config, claude_cfg, state, tracker)
+    data = _json.loads((tmp_path / "out" / "phase_4b_input.json").read_text())
+    assert data["outcome"] == "success"
