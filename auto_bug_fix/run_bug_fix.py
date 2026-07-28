@@ -65,6 +65,7 @@ from auto_bug_fix.git_tools import (
     git_diff_name_only,
     git_diff_name_only_range,
     git_format_patch,
+    git_format_patch_bytes,
     git_merge_base,
     git_show_files,
     git_reset_hard,
@@ -1082,7 +1083,7 @@ def phase_4b_run_and_fix(
     phase_4b_log_path = os.path.join(tracker._output_dir, "phase_4b_log.txt") if tracker else None
     if phase_4b_log_path:
 
-        _4b_log_file = open(phase_4b_log_path, "w")
+        _4b_log_file = open(phase_4b_log_path, "w", encoding="utf-8")
         _prev_stdout = sys.stdout
         sys.stdout = Tee(_prev_stdout, _4b_log_file)
 
@@ -2374,12 +2375,16 @@ def _run_pipeline_phases(
     )
 
     log.info("Phase 5 — Dossier ready for human review")
-    patch_text = git_format_patch(config.repo_path, base_ref=config.target_branch)
-    state.dossier.add("Candidate patch", patch_text, "git format-patch")
+    patch_bytes = git_format_patch_bytes(config.repo_path, base_ref=config.target_branch)
+    # Written as bytes: the patch has to apply, and a repo carrying non-UTF-8
+    # source would otherwise be handed a patch full of replacement characters.
+    # The dossier copy is for humans, so a lossy decode is fine there.
+    state.dossier.add("Candidate patch", patch_bytes.decode("utf-8", "replace"),
+                      "git format-patch")
     os.makedirs(tracker._output_dir, exist_ok=True)
     patch_path = os.path.join(tracker._output_dir, PATCH_FILE)
-    with open(patch_path, "w", encoding="utf-8") as f:
-        f.write(patch_text)
+    with open(patch_path, "wb") as f:
+        f.write(patch_bytes)
     log.info("Patch written to %s", patch_path)
     state.dossier.add(
         "Allowlist conformance",
@@ -2493,7 +2498,7 @@ def run_targets(
         worktree_path = os.path.join(workdir, f"{target_config.issue_id}_{sanitized}")
 
         try:
-            target_log_file = open(os.path.join(target_run_dir, "run_log.txt"), "w")
+            target_log_file = open(os.path.join(target_run_dir, "run_log.txt"), "w", encoding="utf-8")
         except OSError as e:
             log.warning("Target %s: cannot open run log: %s", spec.branch, e)
             results.append(TargetResult(
@@ -2569,7 +2574,7 @@ def run_targets(
                 try:
                     dossier_text = format_dossier(dossier)
                     dp = os.path.join(target_run_dir, DOSSIER_FILE)
-                    with open(dp, "w") as f:
+                    with open(dp, "w", encoding="utf-8") as f:
                         f.write(dossier_text)
                     dossier_path = os.path.join(sanitized, DOSSIER_FILE)
                     print(f"Dossier written to {dp}")
@@ -2651,7 +2656,7 @@ if __name__ == "__main__":
         os.makedirs(parent_run_dir, exist_ok=True)
 
         log_path = os.path.join(parent_run_dir, "run_log.txt")
-        log_file = open(log_path, "w")
+        log_file = open(log_path, "w", encoding="utf-8")
         original_stdout = sys.stdout
         sys.stdout = Tee(original_stdout, log_file)
 
@@ -2685,7 +2690,7 @@ if __name__ == "__main__":
         run_dir = "runs"
         os.makedirs(run_dir, exist_ok=True)
         log_path = os.path.join(run_dir, "run_log.txt")
-        log_file = open(log_path, "w")
+        log_file = open(log_path, "w", encoding="utf-8")
         original_stdout = sys.stdout
         sys.stdout = Tee(original_stdout, log_file)
 
@@ -2695,7 +2700,7 @@ if __name__ == "__main__":
 
             dossier_text = format_dossier(dossier)
             dossier_path = os.path.join(run_dir, DOSSIER_FILE)
-            with open(dossier_path, "w") as f:
+            with open(dossier_path, "w", encoding="utf-8") as f:
                 f.write(dossier_text)
             print(f"Dossier written to {dossier_path}")
 
