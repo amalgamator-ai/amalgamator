@@ -193,3 +193,76 @@ def test_git_diff_name_only_range_merge(tmp_git_repo):
     files = git_diff_name_only_range(rp, f"{merge_sha}^1", merge_sha)
     assert "topic_a.txt" in files, "must include file from first topic commit"
     assert "topic_b.txt" in files, "must include file from second topic commit"
+
+
+# --- non-UTF-8 repository content ---------------------------------------
+# Long-lived C trees carry latin-1 bytes in comments and author names. Strict
+# decoding turns any diff touching such a file into a UnicodeDecodeError that
+# aborts the whole run, so git output must degrade rather than raise — except
+# where byte-exactness is the point.
+
+import pytest
+from auto_bug_fix.git_tools import (
+    _run_git,
+    git_format_patch,
+    git_format_patch_bytes,
+    git_patch_id,
+    git_range_diff,
+)
+
+LATIN1_SOURCE = b"/* Copyright Bj\xf8rn Hansen - caf\xe9 */\nint b = 2;\n"
+
+
+@pytest.fixture
+def latin1_repo(tmp_path):
+    """A repo whose fix commit touches a file that is not valid UTF-8."""
+    def g(*args):
+        return subprocess.run(["git", *args], cwd=tmp_path,
+                              capture_output=True, text=True).stdout.strip()
+    g("init", "-q", "-b", "main", ".")
+    g("config", "user.email", "t@t")
+    g("config", "user.name", "t")
+    (tmp_path / "ok.c").write_text("int a = 1;\n")
+    g("add", "."); g("commit", "-qm", "base")
+    base = g("rev-parse", "HEAD")
+    (tmp_path / "legacy.c").write_bytes(LATIN1_SOURCE)
+    g("add", "."); g("commit", "-qm", "fix: touch a latin-1 file")
+    return tmp_path, base, g("rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("args", [
+    ["show", "HEAD"], ["diff", "HEAD~1", "HEAD"], ["log", "-p", "-1"],
+])
+def test_run_git_does_not_raise_on_non_utf8_content(latin1_repo, args):
+    repo, _, _ = latin1_repo
+    _run_git(str(repo), args)  # must not raise UnicodeDecodeError
+
+
+def test_range_diff_survives_non_utf8_content(latin1_repo):
+    repo, base, head = latin1_repo
+    git_range_diff(str(repo), f"{base}..{head}", f"{base}..{head}")
+
+
+def test_format_patch_bytes_is_byte_exact(latin1_repo):
+    """The candidate patch is a deliverable — it has to apply."""
+    repo, base, _ = latin1_repo
+    expected = subprocess.run(["git", "format-patch", "--stdout", base],
+                              cwd=repo, capture_output=True).stdout
+    produced = git_format_patch_bytes(str(repo), base_ref=base)
+    assert produced == expected
+    assert b"Bj\xf8rn" in produced, "raw bytes must survive, not be replaced"
+
+
+def test_format_patch_text_is_lossy_but_safe(latin1_repo):
+    """The text view is for the dossier, so replacement there is intended."""
+    repo, base, _ = latin1_repo
+    assert "�" in git_format_patch(str(repo), base_ref=base)
+
+
+def test_patch_id_matches_gits_own_on_non_utf8_content(latin1_repo):
+    """A patch-id over lossily-decoded text would gate Phase 0 on a wrong value."""
+    repo, _, head = latin1_repo
+    show = subprocess.run(["git", "show", head], cwd=repo, capture_output=True).stdout
+    expected = subprocess.run(["git", "patch-id", "--stable"], cwd=repo,
+                              input=show, capture_output=True).stdout.decode().split()[0]
+    assert git_patch_id(str(repo), head) == expected
