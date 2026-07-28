@@ -127,7 +127,7 @@ def is_merge_commit(repo_path: str, commit: str) -> bool:
     """Return True if commit has more than one parent (is a merge)."""
     r = subprocess.run(
         ["git", "rev-parse", "--verify", f"{commit}^2"],
-        cwd=repo_path, capture_output=True, text=True,
+        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     return r.returncode == 0
 
@@ -299,7 +299,7 @@ def resolve_merge_commit(repo_path: str, commit: str) -> str:
         ["git", "rev-parse", "--verify", f"{commit}^2"],
         cwd=repo_path,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
 
     if result.returncode == 0:

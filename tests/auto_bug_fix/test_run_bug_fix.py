@@ -786,8 +786,14 @@ def _marker_writing_claude_run(marker_path, text="SUCCESS\nRetries: 1/3\n"):
 
 
 def test_phase_4b_success_file_accepted(tmp_path):
+    """No build/test configured (interpreted projects) — nothing to re-verify.
+
+    The marker is only sufficient in this degenerate case. When commands ARE
+    configured they are re-run; see the two tests below.
+    """
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    assert not config.build_command and not config.test_command
     head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
     with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
@@ -1100,3 +1106,121 @@ def test_unrelated_backport_is_not_reported_as_adapted(tmp_path):
     config.source_fix_commit = fix_sha
     config.target_branch = base_sha
     assert phase_4_5_semantic_equivalence(config, state) == "unmatched"
+
+
+# --- review round 2: 4b build/test gate, non-UTF-8 diffs, content relatedness ---
+
+def test_phase_4b_success_rejected_when_build_still_fails(tmp_path):
+    """A success marker is the agent's self-report, not evidence.
+
+    On the cherry-pick-failure and verify-failure paths extra_verification is
+    empty, so without a deterministic re-run the basic build/test gate would
+    rest entirely on the marker.
+    """
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix, PipelineEscalation
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    config.build_command = "exit 1"
+    fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+        with pytest.raises(PipelineEscalation, match="build/test still fails"):
+            phase_4b_run_and_fix(config, claude_cfg, state, None)
+
+
+def test_phase_4b_success_accepted_when_build_passes(tmp_path):
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    config.build_command = "true"
+    config.test_command = "true"
+    fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+        phase_4b_run_and_fix(config, claude_cfg, state, None)  # must not raise
+
+
+LATIN1_FIX_SOURCE = b"/* Copyright Bj\xf8rn Hansen */\nint a = %d;\n"
+
+
+def _latin1_fix_repo(tmp_path):
+    """A repo whose fix commit changes a file that is not valid UTF-8."""
+    _git_4b(tmp_path, "init", "-b", "main")
+    _git_4b(tmp_path, "config", "user.name", "t")
+    _git_4b(tmp_path, "config", "user.email", "t@t")
+    (tmp_path / "legacy.c").write_bytes(LATIN1_FIX_SOURCE % 1)
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "base")
+    (tmp_path / "legacy.c").write_bytes(LATIN1_FIX_SOURCE % 2)
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "fix")
+    return _git_4b(tmp_path, "rev-parse", "HEAD")
+
+
+def test_compute_fix_diff_survives_non_utf8_content(tmp_path):
+    """Prompt text must degrade, not abort the run, on latin-1 sources."""
+    from auto_bug_fix.run_bug_fix import _compute_fix_diff
+    sha = _latin1_fix_repo(tmp_path)
+    config = BugFixConfig(
+        repo_path=str(tmp_path), build_dir=str(tmp_path), source_branch="main",
+        target_branch="main", source_fix_commit=sha, bug_description="b", issue_id="i",
+    )
+    assert "int a = 2" in _compute_fix_diff(config)
+
+
+def test_compute_fix_diff_chunked_survives_non_utf8_content(tmp_path):
+    """The chunked path (for_files) takes a different branch — same exposure."""
+    from auto_bug_fix.run_bug_fix import _compute_fix_diff
+    sha = _latin1_fix_repo(tmp_path)
+    config = BugFixConfig(
+        repo_path=str(tmp_path), build_dir=str(tmp_path), source_branch="main",
+        target_branch="main", source_fix_commit=sha, bug_description="b", issue_id="i",
+    )
+    _compute_fix_diff(config, for_files=["legacy.c"])  # must not raise
+
+
+def test_same_file_unrelated_change_is_not_reported_as_adapted(tmp_path):
+    """Sharing a filename is not sharing content.
+
+    A backport that touches the right file but rewords a comment beside the
+    untouched bug would pass a file-set test; it must not.
+    """
+    from auto_bug_fix.run_bug_fix import phase_4_5_semantic_equivalence
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "src.c").write_text(
+        "/* header */\nint compute(void) {\n  return check_bounds();\n}\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "seed src.c")
+    base_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    # The real fix changes the code.
+    (tmp_path / "src.c").write_text(
+        "/* header */\nint compute(void) {\n  return safe_check_bounds();\n}\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "fix: harden bounds check")
+    fix_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    # The "backport" touches the same file, but only an unrelated comment.
+    _git_4b(tmp_path, "checkout", "-q", "-b", "target", base_sha)
+    (tmp_path / "src.c").write_text(
+        "/* header, reworded entirely */\nint compute(void) {\n  return check_bounds();\n}\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "docs: reword comment")
+    config.source_fix_commit = fix_sha
+    config.target_branch = base_sha
+    assert phase_4_5_semantic_equivalence(config, state) == "unmatched"
+
+
+def test_faithful_port_of_the_same_lines_stays_matched(tmp_path):
+    """The content check must not fire on a genuine port."""
+    from auto_bug_fix.run_bug_fix import phase_4_5_semantic_equivalence
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "src.c").write_text("int compute(void) {\n  return check_bounds();\n}\n")
+    _git_4b(tmp_path, "add", "."); _git_4b(tmp_path, "commit", "-m", "seed")
+    base_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "src.c").write_text("int compute(void) {\n  return safe_check_bounds();\n}\n")
+    _git_4b(tmp_path, "add", "."); _git_4b(tmp_path, "commit", "-m", "fix")
+    fix_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    _git_4b(tmp_path, "checkout", "-q", "-b", "target", base_sha)
+    (tmp_path / "src.c").write_text("int compute(void) {\n  return safe_check_bounds();\n}\n")
+    _git_4b(tmp_path, "add", "."); _git_4b(tmp_path, "commit", "-m", "Port fix")
+    # ...plus a recovery fixup, as a real run would have.
+    (tmp_path / "extra.c").write_text("int b = 3;\n")
+    _git_4b(tmp_path, "add", "."); _git_4b(tmp_path, "commit", "-m", "fixup: recovery")
+    config.source_fix_commit = fix_sha
+    config.target_branch = base_sha
+    assert phase_4_5_semantic_equivalence(config, state) != "unmatched"
