@@ -173,7 +173,7 @@ def git_amend(repo_path: str) -> None:
     _unstage_pipeline_artifacts(repo_path)
     result = subprocess.run(
         ["git", "commit", "--amend", "--no-edit"],
-        cwd=repo_path, capture_output=True, text=True,
+        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         log.warning("git commit --amend failed: %s",
@@ -247,7 +247,7 @@ def phase_0_triage(
     if not state.seed:
         seed_from_diff = subprocess.run(
             ["git", "diff", "--name-only", f"{config.source_fix_commit}^1", config.source_fix_commit],
-            cwd=repo, capture_output=True, text=True,
+            cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout.strip().splitlines()
         state.seed = [f for f in seed_from_diff if f.strip()]
         if state.seed:
@@ -296,20 +296,20 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
         if is_merge_commit(config.repo_path, sha):
             stat = subprocess.run(
                 ["git", "diff", "--stat", f"{sha}^1..{sha}"],
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
             partial_diff = subprocess.run(
                 ["git", "diff", f"{sha}^1..{sha}", "--"] + for_files,
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
         else:
             stat = subprocess.run(
                 ["git", "show", "--stat", sha],
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
             partial_diff = subprocess.run(
                 ["git", "show", sha, "--"] + for_files,
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
         fix_diff = stat + "\n\n--- Diff for chunk files ---\n\n" + partial_diff
         MAX_CHUNK_CHARS = 50_000
@@ -321,12 +321,12 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
     if is_merge_commit(config.repo_path, sha):
         fix_diff = subprocess.run(
             ["git", "diff", f"{sha}^1..{sha}"],
-            cwd=config.repo_path, capture_output=True, text=True,
+            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout
     else:
         fix_diff = subprocess.run(
             ["git", "show", sha],
-            cwd=config.repo_path, capture_output=True, text=True,
+            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout
 
     MAX_DIFF_CHARS = 200_000
@@ -335,12 +335,12 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
         if is_merge_commit(config.repo_path, sha):
             fix_diff = subprocess.run(
                 ["git", "diff", "--stat", f"{sha}^1..{sha}"],
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
         else:
             fix_diff = subprocess.run(
                 ["git", "show", "--stat", sha],
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
 
     return fix_diff
@@ -366,7 +366,7 @@ def phase_3b_regeneration(
         try:
             result = subprocess.run(
                 cmd, shell=True, cwd=config.repo_path,
-                capture_output=True, text=True, timeout=config.command_timeout,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
             )
         except subprocess.TimeoutExpired:
             log.warning("Phase 3b: regeneration timed out (30min): %s", cmd)
@@ -383,7 +383,7 @@ def phase_3b_regeneration(
             try:
                 build_check = subprocess.run(
                     config.build_command, shell=True, cwd=config.build_dir,
-                    capture_output=True, text=True, timeout=config.command_timeout,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
                 )
             except subprocess.TimeoutExpired:
                 log.warning("Phase 3b: build check timed out, rolling back")
@@ -437,12 +437,12 @@ def phase_0_5_semantic_triage(
     if is_merge_commit(config.repo_path, sha):
         fix_diff = subprocess.run(
             ["git", "diff", "--stat", f"{sha}^1..{sha}"],
-            cwd=config.repo_path, capture_output=True, text=True,
+            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout
     else:
         fix_diff = subprocess.run(
             ["git", "show", "--stat", sha],
-            cwd=config.repo_path, capture_output=True, text=True,
+            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout
 
     context = create_context_str(claude_config, config)
@@ -609,7 +609,7 @@ def phase_1_baseline_and_red(
         try:
             vresult = subprocess.run(
                 vcmd, shell=True, cwd=config.build_dir,
-                capture_output=True, text=True, timeout=config.command_timeout,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
             )
             entry = {"cmd": vcmd, "exit_code": vresult.returncode, "output": (vresult.stdout + "\n" + vresult.stderr)[-3000:]}
         except subprocess.TimeoutExpired:
@@ -826,7 +826,7 @@ def _rerun_verification(config: BugFixConfig, commands: list[str]) -> list[str]:
         try:
             result = subprocess.run(
                 vcmd, shell=True, cwd=config.build_dir,
-                capture_output=True, text=True, timeout=config.command_timeout,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
             )
         except subprocess.TimeoutExpired:
             still_failing.append(vcmd)
@@ -983,12 +983,15 @@ def phase_4b_run_and_fix(
     and runs the RunAndFixPrompt as a single long agent session that iterates
     build → test → targeted fix until clean or retries are exhausted.
 
+    A success marker is the agent's own report, so it never clears the gate by
+    itself: build and test are re-run here, and so is anything in
+    extra_verification.
+
     extra_verification: commands beyond build/test whose failure caused this
     escalation (lint, extended verification). The loop's own success criteria
     only cover build and test, so an agent can honestly report success while
     the command that got it here still fails. They are named in the context so
-    the agent fixes them, and re-run deterministically afterwards so a success
-    marker cannot stand on its own.
+    the agent fixes them, and re-run afterwards alongside the build/test gate.
     """
     extra_verification = list(extra_verification or [])
     dossier_text = format_dossier(state.dossier) if state.dossier else ""
@@ -1139,7 +1142,24 @@ def phase_4b_run_and_fix(
         raise PipelineEscalation("Phase 4b: run-and-fix loop exhausted retries")
     elif os.path.exists(success_file):
         state.dossier.add("Run-and-fix loop", "Build-test-fix loop succeeded", "Phase 4b")
-        log.info("Phase 4b: run-and-fix loop succeeded")
+        log.info("Phase 4b: run-and-fix loop reported success — verifying")
+
+        # The marker says the agent believes it is done. Prove it: on the
+        # cherry-pick-failure and verify-failure paths extra_verification is
+        # empty, so without this the basic build/test gate would rest entirely
+        # on the agent's self-report.
+        try:
+            phase_4_verify(config, state)
+        except PipelineEscalation as e:
+            state.dossier.add(
+                "Run-and-fix loop",
+                f"Reported success, but build/test still fails: {e}",
+                "Phase 4b",
+            )
+            raise PipelineEscalation(
+                f"Phase 4b: reported success while build/test still fails ({e})"
+            )
+
         still_failing = _rerun_verification(config, extra_verification)
         if still_failing:
             state.dossier.add(
@@ -1242,7 +1262,7 @@ def cherry_pick_and_resolve(
         # Reset ALL skip files to target version — both conflicting and cleanly-applied
         all_changed = subprocess.run(
             ["git", "diff", "--name-only", "HEAD"],
-            cwd=config.repo_path, capture_output=True, text=True,
+            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout.strip().splitlines()
         skip_applied_clean = [f for f in all_changed if f in skip_set and f not in uu_files]
         if skip_applied_clean:
@@ -1438,7 +1458,7 @@ def _finalize_resolution(
         try:
             port_diff = subprocess.run(
                 ["git", "diff", base_head, "HEAD"],
-                cwd=repo, capture_output=True, text=True,
+                cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
             added_by_file = added_lines_by_file(port_diff)
             # Mining references base_head — the tree the port actually lands
@@ -1576,7 +1596,7 @@ def _finalize_resolution(
         try:
             port_diff = subprocess.run(
                 ["git", "diff", base_head, "HEAD"],
-                cwd=repo, capture_output=True, text=True,
+                cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
             added_by_file = added_lines_by_file(port_diff)
             findings = audit_added_tokens(repo, base_head, commit, added_by_file)
@@ -1657,7 +1677,7 @@ def _finalize_resolution(
                 try:
                     port_diff = subprocess.run(
                         ["git", "diff", base_head, "HEAD"],
-                        cwd=repo, capture_output=True, text=True,
+                        cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
                     ).stdout
                     remaining = audit_added_tokens(
                         repo, base_head, commit, added_lines_by_file(port_diff))
@@ -1796,7 +1816,7 @@ def _squashed_backport_range(config: BugFixConfig, state: PipelineState) -> str 
         result = subprocess.run(
             ["git", "commit-tree", f"{head}^{{tree}}", "-p", target_base,
              "-m", f"squashed backport for {config.issue_id}"],
-            cwd=repo, capture_output=True, text=True,
+            cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         if result.returncode != 0:
             return None
@@ -1843,7 +1863,7 @@ def _backport_completeness(config: BugFixConfig, state: PipelineState) -> tuple[
             target_base = git_merge_base(config.repo_path, config.target_branch, "HEAD")
             result = subprocess.run(
                 ["git", "diff", "--name-only", f"{target_base}..HEAD"],
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             backported = set(result.stdout.splitlines()) if result.returncode == 0 else set()
             # A skipped file that reappears in the final diff was regenerated
@@ -1865,34 +1885,72 @@ def _backport_completeness(config: BugFixConfig, state: PipelineState) -> tuple[
     return "success", ""
 
 
-def _shares_files_with_fix(config: BugFixConfig, state: PipelineState) -> bool:
-    """Does the backport touch any file the upstream fix touched?
+def _changed_payload_lines(repo: str, diff_args: list[str]) -> set[str]:
+    """Normalized content of the +/- lines in a diff.
 
-    A deliberately coarse relatedness test, used only to recover the
-    "unmatched" verdict that forcing range-diff's pairing destroys. It errs
-    towards True — when the file sets cannot be determined it declines to
+    Structural noise is dropped — hunk headers, file headers, and lines whose
+    payload is too short to carry meaning (``}``, ``{``, ``*/``, blanks) match
+    between any two diffs and would make the comparison useless.
+    """
+    result = subprocess.run(
+        ["git", "diff", "--unified=0", *diff_args],
+        cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if result.returncode != 0:
+        return set()
+    lines = set()
+    for raw in result.stdout.splitlines():
+        if raw[:3] in ("+++", "---") or not raw or raw[0] not in "+-":
+            continue
+        payload = " ".join(raw[1:].split())  # collapse whitespace
+        if len(payload) >= 4:
+            lines.add(payload)
+    return lines
+
+
+def _shares_content_with_fix(config: BugFixConfig, state: PipelineState) -> bool:
+    """Does the backport change any of the same lines the upstream fix changed?
+
+    Used only to recover the "unmatched" verdict that forcing range-diff's
+    pairing destroys. File-set overlap is not enough: a backport that touches
+    the right file but changes something else entirely in it — a reworded
+    comment beside the untouched bug — shares a filename while sharing no
+    content, and would pass a filename test.
+
+    Comparison is at line level. This pipeline's whole discipline is that lines
+    the fix changes carry the fix's exact bytes, so a faithful port overlaps
+    heavily; even a heavily adapted one usually keeps some line verbatim.
+
+    Errs towards True: when either side cannot be determined it declines to
     override, so it can only ever add an unmatched verdict on strong evidence
-    (a backport with no file in common with the fix), never remove one.
-
-    A backport that lands the fix entirely in renamed files reads as unrelated
-    here. That direction is the safe one: it asks a human to look.
+    (nothing in common at all), never remove one. A port landing entirely in
+    renamed files or rewritten line-by-line reads as unrelated here — the safe
+    direction, since it asks a human to look.
     """
     try:
-        fix_files = set(state.seed) or set(
-            git_show_files(config.repo_path, config.source_fix_commit))
-        if not fix_files:
+        fix_commit = config.source_fix_commit
+        if is_merge_commit(config.repo_path, fix_commit):
+            fix_args = [f"{fix_commit}^1..{fix_commit}"]
+        else:
+            fix_args = [f"{fix_commit}^..{fix_commit}"]
+        fix_lines = _changed_payload_lines(config.repo_path, fix_args)
+        if not fix_lines:
             return True
+
         target_base = git_merge_base(config.repo_path, config.target_branch, "HEAD")
-        result = subprocess.run(
-            ["git", "diff", "--name-only", f"{target_base}..HEAD"],
-            cwd=config.repo_path, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
+        if not target_base:
             return True
-        backport_files = {line for line in result.stdout.splitlines() if line.strip()}
-        if not backport_files:
+        backport_lines = _changed_payload_lines(
+            config.repo_path, [f"{target_base}..HEAD"])
+        if not backport_lines:
             return False
-        return bool(fix_files & backport_files)
+
+        shared = fix_lines & backport_lines
+        if not shared:
+            log.info("Relatedness: no changed line in common with the fix "
+                     "(%d fix lines, %d backport lines)",
+                     len(fix_lines), len(backport_lines))
+        return bool(shared)
     except Exception as e:
         log.warning("Relatedness check failed: %s", e)
         return True
@@ -1921,7 +1979,7 @@ def phase_4_5_semantic_equivalence(
     repo = config.repo_path
     try:
         backport_range = _squashed_backport_range(config, state)
-        # See above: forcing is only sound because _shares_files_with_fix
+        # See above: forcing is only sound because _shares_content_with_fix
         # supplies the unmatched signal that forcing destroys.
         creation_factor = 999 if backport_range else None
         if backport_range is None:
@@ -1938,10 +1996,10 @@ def phase_4_5_semantic_equivalence(
 
     equivalence = parse_equivalence(rd_output)
     if equivalence != "unmatched" and creation_factor is not None:
-        if not _shares_files_with_fix(config, state):
+        if not _shares_content_with_fix(config, state):
             log.warning(
                 "Phase 4.5: range-diff paired the commits, but the backport "
-                "touches none of the fix's files — reporting unmatched"
+                "changes none of the lines the fix changed — reporting unmatched"
             )
             return "unmatched"
     return equivalence
@@ -2269,7 +2327,7 @@ def _run_pipeline_phases(
                 try:
                     vresult = subprocess.run(
                         vcmd, shell=True, cwd=config.build_dir,
-                        capture_output=True, text=True, timeout=config.command_timeout,
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
                     )
                 except subprocess.TimeoutExpired:
                     # A timeout is never treated as a pre-existing failure — we
@@ -2308,7 +2366,7 @@ def _run_pipeline_phases(
                         try:
                             vresult = subprocess.run(
                                 vcmd, shell=True, cwd=config.build_dir,
-                                capture_output=True, text=True, timeout=config.command_timeout,
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
                             )
                         except subprocess.TimeoutExpired:
                             still_failing.append(vcmd)
@@ -2617,7 +2675,7 @@ def run_targets(
                         branch_name += f"/{sanitized}"
                     result = subprocess.run(
                         ["git", "branch", "-f", branch_name, head_sha],
-                        cwd=source_path, capture_output=True, text=True,
+                        cwd=source_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
                     )
                     if result.returncode == 0:
                         log.info("Commits preserved on branch %s", branch_name)
@@ -2666,7 +2724,7 @@ if __name__ == "__main__":
             print("Fetching latest refs from origin...")
             fetch_result = subprocess.run(
                 ["git", "fetch", "--all", "--quiet"],
-                cwd=source_path, capture_output=True, text=True,
+                cwd=source_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             fetch_warning = ""
             if fetch_result.returncode != 0:
@@ -2711,7 +2769,7 @@ if __name__ == "__main__":
             branch_name = f"amalgamator/{slug}"
             result = subprocess.run(
                 ["git", "branch", "-f", branch_name, "HEAD"],
-                cwd=bug_fix_config.repo_path, capture_output=True, text=True,
+                cwd=bug_fix_config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             if result.returncode == 0:
                 print(f"Commits preserved on branch {branch_name}")
