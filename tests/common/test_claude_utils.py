@@ -11,7 +11,7 @@ from common.claude_utils import (
     claude_run,
 )
 from auto_bug_fix.claude_utils import BugFixClaudeConfig, BUG_FIX_SYSTEM_PROMPT
-from auto_code_gen.claude_utils import CodeGenClaudeConfig, CODE_GEN_SYSTEM_PROMPT
+from auto_code_gen.claude_utils import CodeGenClaudeConfig
 
 
 BASE_KWARGS = dict(
@@ -29,7 +29,9 @@ class TestPersonas:
         (ClaudeConfig, DEFAULT_SYSTEM_PROMPT),
         (ProfilingClaudeConfig, PROFILING_SYSTEM_PROMPT),
         (BugFixClaudeConfig, BUG_FIX_SYSTEM_PROMPT),
-        (CodeGenClaudeConfig, CODE_GEN_SYSTEM_PROMPT),
+        # auto_code_gen is pinned to the profiling persona it ran with before
+        # the persona was configurable -- see CodeGenClaudeConfig's docstring.
+        (CodeGenClaudeConfig, PROFILING_SYSTEM_PROMPT),
     ])
     def test_default_system_prompt(self, cls, expected):
         assert cls(**BASE_KWARGS).system_prompt == expected
@@ -46,17 +48,39 @@ class TestPersonas:
         assert cfg.system_prompt == "custom"
 
     def test_personas_are_distinct(self):
-        prompts = {
-            DEFAULT_SYSTEM_PROMPT, PROFILING_SYSTEM_PROMPT,
-            BUG_FIX_SYSTEM_PROMPT, CODE_GEN_SYSTEM_PROMPT,
-        }
-        assert len(prompts) == 4
+        assert len({DEFAULT_SYSTEM_PROMPT, PROFILING_SYSTEM_PROMPT,
+                    BUG_FIX_SYSTEM_PROMPT}) == 3
 
     def test_specializations_inherit_common_defaults(self):
         """Subclassing must not disturb the fields it does not override."""
         base, bug_fix = ClaudeConfig(**BASE_KWARGS), BugFixClaudeConfig(**BASE_KWARGS)
         for attr in ("effort", "max_thinking_tokens", "thinking"):
             assert getattr(bug_fix, attr) == getattr(base, attr)
+
+
+# The exact string claude_run hardcoded before the persona was configurable.
+# Spelled out as a literal rather than compared to PROFILING_SYSTEM_PROMPT, so
+# that editing that constant cannot silently move the pipelines pinned to it.
+_LEGACY_HARDCODED_PROMPT = (
+    "You are a benchmarking and profiling expert of LLMs that run via vLLM, "
+    "SGLang and TRT"
+)
+
+
+class TestLegacyBehaviourIsPinned:
+    """Pipelines that predate configurable personas must not have drifted."""
+
+    def test_auto_code_gen_persona_is_unchanged(self):
+        from auto_code_gen.code_gen_configs import CodeGenConfig
+        cfg = CodeGenConfig(output_dir="/tmp", thinking_mode="deep")
+        assert cfg.make_claude_config().system_prompt == _LEGACY_HARDCODED_PROMPT
+
+    def test_profiling_persona_is_unchanged(self):
+        assert ProfilingClaudeConfig(**BASE_KWARGS).system_prompt == _LEGACY_HARDCODED_PROMPT
+
+    def test_only_auto_bug_fix_deviates(self):
+        """auto_bug_fix is the one pipeline that deliberately differs."""
+        assert BugFixClaudeConfig(**BASE_KWARGS).system_prompt != _LEGACY_HARDCODED_PROMPT
 
 
 class _StubClient:
