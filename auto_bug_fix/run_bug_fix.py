@@ -781,13 +781,73 @@ def phase_4_verify(
     raise PipelineEscalation("Phase 4 verify failed")
 
 
+def _non_artifact_dirt(repo_path: str) -> list[str]:
+    """Working-tree changes that are not pipeline artifacts.
+
+    ``git_commit`` unstages everything in ``_PIPELINE_ARTIFACTS`` before
+    committing, so those files legitimately stay dirty afterwards. Anything
+    else left over is real work that did not make it into a commit.
+    """
+    dirt = []
+    for line in git_status_porcelain(repo_path):
+        path = line[3:].strip() if len(line) > 3 else line.strip()
+        # Renames are reported as "old -> new"; the new path is what matters.
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip('"')
+        if path and path not in _PIPELINE_ARTIFACTS:
+            dirt.append(line)
+    return dirt
+
+
+def _extra_verification_section(commands: list[str]) -> str:
+    """Render the commands that must pass on top of build and test."""
+    if not commands:
+        return ""
+    listed = "\n".join(commands)
+    return f"""
+<extra_verification_commands>
+{listed}
+</extra_verification_commands>
+
+IMPORTANT: the commands in <extra_verification_commands> are what caused this
+escalation. They run from <build_dir>. They are NOT optional: do not write the
+success file until every one of them passes in addition to the build and the
+tests. They are re-run automatically afterwards, so reporting success while one
+still fails will simply fail the run.
+"""
+
+
+def _rerun_verification(config: BugFixConfig, commands: list[str]) -> list[str]:
+    """Re-run verification commands, returning those that still fail."""
+    still_failing = []
+    for vcmd in commands:
+        try:
+            result = subprocess.run(
+                vcmd, shell=True, cwd=config.build_dir,
+                capture_output=True, text=True, timeout=config.command_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            still_failing.append(vcmd)
+            continue
+        if result.returncode != 0:
+            still_failing.append(vcmd)
+    return still_failing
+
+
 def _commit_recovery_edits(config: BugFixConfig, phase_label: str) -> bool:
     """Commit agent recovery edits so they reach the deliverables.
 
     The candidate patch (git format-patch), the preserved branch, and the
     Phase 4.5 range-diff are all commit-based — recovery edits left in the
     working tree by the 4a/4b agents would silently vanish from every one
-    of them. Returns True if a commit was created.
+    of them. Returns True if a commit was created, False if there was
+    nothing to commit.
+
+    Raises PipelineEscalation if edits exist but could not be committed. A
+    verified working tree whose deliverables omit those edits is precisely
+    the failure this helper exists to prevent, so it must never be reported
+    as a success.
     """
     for marker in (RUN_AND_FIX_FAILURE_FILE, RUN_AND_FIX_SUCCESS_FILE):
         path = os.path.join(config.repo_path, marker)
@@ -802,13 +862,23 @@ def _commit_recovery_edits(config: BugFixConfig, phase_label: str) -> bool:
         f"fixup: build/test recovery for {config.issue_id} ({phase_label})",
         trailers=_COAUTHOR_TRAILERS,
     )
-    if git_rev_parse(config.repo_path, "HEAD") == head_before:
-        # Either only unstageable pipeline artifacts were dirty, or the
-        # commit itself failed — in both cases nothing landed on HEAD.
-        log.warning("%s: no recovery commit created", phase_label)
-        return False
-    log.info("%s: recovery edits committed", phase_label)
-    return True
+    if git_rev_parse(config.repo_path, "HEAD") != head_before:
+        log.info("%s: recovery edits committed", phase_label)
+        return True
+
+    # Nothing landed on HEAD. That is expected when the only dirt was pipeline
+    # artifacts, which git_commit unstages by design. Anything else still dirty
+    # is real work the deliverables would silently drop, so it must not be
+    # allowed to pass as a success.
+    remaining = _non_artifact_dirt(config.repo_path)
+    if remaining:
+        raise PipelineEscalation(
+            f"{phase_label}: recovery edits could not be committed — the "
+            f"candidate patch, preserved branch and range-diff would omit "
+            f"them. Still uncommitted:\n" + "\n".join(remaining)
+        )
+    log.info("%s: only pipeline artifacts were dirty, no commit needed", phase_label)
+    return False
 
 
 def phase_4a_build_recovery(
@@ -904,13 +974,22 @@ def phase_4b_run_and_fix(
     claude_config: ClaudeConfig,
     state: PipelineState,
     tracker,
+    extra_verification: list[str] | None = None,
 ) -> None:
     """Escalate to the autonomous build-test-fix loop (last resort).
 
     Assembles a rich context with ALL pipeline data (dossier, triage, config)
     and runs the RunAndFixPrompt as a single long agent session that iterates
     build → test → targeted fix until clean or retries are exhausted.
+
+    extra_verification: commands beyond build/test whose failure caused this
+    escalation (lint, extended verification). The loop's own success criteria
+    only cover build and test, so an agent can honestly report success while
+    the command that got it here still fails. They are named in the context so
+    the agent fixes them, and re-run deterministically afterwards so a success
+    marker cannot stand on its own.
     """
+    extra_verification = list(extra_verification or [])
     dossier_text = format_dossier(state.dossier) if state.dossier else ""
     triage_json = json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "{}"
 
@@ -928,6 +1007,7 @@ def phase_4b_run_and_fix(
 <test_command>{config.test_command}</test_command>
 <max_build_test_retries>{config.max_build_test_retries}</max_build_test_retries>
 </context>
+{_extra_verification_section(extra_verification)}
 
 <pipeline_dossier>
 {dossier_text}
@@ -1059,6 +1139,18 @@ def phase_4b_run_and_fix(
     elif os.path.exists(success_file):
         state.dossier.add("Run-and-fix loop", "Build-test-fix loop succeeded", "Phase 4b")
         log.info("Phase 4b: run-and-fix loop succeeded")
+        still_failing = _rerun_verification(config, extra_verification)
+        if still_failing:
+            state.dossier.add(
+                "Run-and-fix loop",
+                "Reported success, but the commands that triggered the "
+                "escalation still fail:\n" + "\n".join(still_failing),
+                "Phase 4b",
+            )
+            raise PipelineEscalation(
+                "Phase 4b: reported success while extended verification still "
+                f"fails: {', '.join(still_failing)}"
+            )
         if _commit_recovery_edits(config, "Phase 4b"):
             state.dossier.add(
                 "Run-and-fix loop",
@@ -1772,17 +1864,64 @@ def _backport_completeness(config: BugFixConfig, state: PipelineState) -> tuple[
     return "success", ""
 
 
+def _shares_files_with_fix(config: BugFixConfig, state: PipelineState) -> bool:
+    """Does the backport touch any file the upstream fix touched?
+
+    A deliberately coarse relatedness test, used only to recover the
+    "unmatched" verdict that forcing range-diff's pairing destroys. It errs
+    towards True — when the file sets cannot be determined it declines to
+    override, so it can only ever add an unmatched verdict on strong evidence
+    (a backport with no file in common with the fix), never remove one.
+
+    A backport that lands the fix entirely in renamed files reads as unrelated
+    here. That direction is the safe one: it asks a human to look.
+    """
+    try:
+        fix_files = set(state.seed) or set(
+            git_show_files(config.repo_path, config.source_fix_commit))
+        if not fix_files:
+            return True
+        target_base = git_merge_base(config.repo_path, config.target_branch, "HEAD")
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{target_base}..HEAD"],
+            cwd=config.repo_path, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return True
+        backport_files = {line for line in result.stdout.splitlines() if line.strip()}
+        if not backport_files:
+            return False
+        return bool(fix_files & backport_files)
+    except Exception as e:
+        log.warning("Relatedness check failed: %s", e)
+        return True
+
+
 def phase_4_5_semantic_equivalence(
     config: BugFixConfig,
     state: PipelineState,
 ) -> str:
-    """Run range-diff to classify the port as identical, modified, or unmatched."""
+    """Run range-diff to classify the port as identical, modified, or unmatched.
+
+    Two things have to be true at once, and range-diff's pairing threshold
+    cannot deliver both on its own:
+
+    - A legitimate backport carrying pipeline commits (test port, resolution,
+      4a/4b recovery) must not be called "unmatched" just for containing more
+      than the fix did. The squash handles the commit count; the threshold
+      still rejects the pairing once the extra content is large enough.
+    - A backport with nothing to do with the fix must not be called "modified".
+
+    Measured on both cases, every creation-factor flips them together — there
+    is no value that separates them. So the pairing is forced, which settles
+    the first, and the "unmatched" signal is recovered independently from
+    whether the backport touches any of the files the fix touched.
+    """
     repo = config.repo_path
     try:
         backport_range = _squashed_backport_range(config, state)
-        # The squash is a deliberate one-to-one comparison — force range-diff
-        # to pair the two commits so the verdict reflects content, not the
-        # pairing heuristic's similarity threshold.
+        # See above: forcing is only sound because _shares_files_with_fix
+        # supplies the unmatched signal that forcing destroys.
         creation_factor = 999 if backport_range else None
         if backport_range is None:
             target_base = git_merge_base(repo, config.target_branch, "HEAD")
@@ -1797,6 +1936,13 @@ def phase_4_5_semantic_equivalence(
         return "unmatched"
 
     equivalence = parse_equivalence(rd_output)
+    if equivalence != "unmatched" and creation_factor is not None:
+        if not _shares_files_with_fix(config, state):
+            log.warning(
+                "Phase 4.5: range-diff paired the commits, but the backport "
+                "touches none of the fix's files — reporting unmatched"
+            )
+            return "unmatched"
     return equivalence
 
 
@@ -2147,6 +2293,9 @@ def _run_pipeline_phases(
 
         if ext_failures:
             log.info("Phase 4.1: %d verification commands failed — triggering Phase 4a recovery", len(ext_failures))
+            # Bound before the try: Phase 4a can raise before the post-recovery
+            # sweep runs, and the handler below reads this.
+            still_failing: list[str] = []
             try:
                 with tracker.phase("Phase 4a — Build error recovery (from 4.1)"):
                     phase_4a_build_recovery(config, claude_config, state, tracker, fix_diff)
@@ -2181,8 +2330,14 @@ def _run_pipeline_phases(
             except PipelineEscalation as e:
                 log.warning("Phase 4a recovery failed — escalating to run-and-fix loop: %s", e)
 
+                # Hand 4b the commands that got us here. Its own success
+                # criteria cover only build and test, so without these it can
+                # report success while the failing command is untouched.
+                escalated_cmds = still_failing or [c for c in verification_cmds
+                                                   if c not in baseline_failures]
                 with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
-                    phase_4b_run_and_fix(config, claude_config, state, tracker)
+                    phase_4b_run_and_fix(config, claude_config, state, tracker,
+                                         extra_verification=escalated_cmds)
 
     with tracker.phase("Phase 4.5 — Semantic equivalence"):
         eq_result = phase_4_5_semantic_equivalence(config, state)
@@ -2191,6 +2346,11 @@ def _run_pipeline_phases(
 
         try:
             squashed = _squashed_backport_range(config, state)
+            # Display only, and deliberately not how eq_result was computed:
+            # forcing the pairing renders a side-by-side even when the two
+            # commits are too dissimilar to pair, which is exactly the case a
+            # reviewer most needs to see. The verdict above uses git's default
+            # threshold so that "unmatched" stays reachable.
             rd_output = run_range_diff(
                 config.repo_path,
                 f"{config.source_fix_commit}^..{config.source_fix_commit}",
@@ -2201,7 +2361,9 @@ def _run_pipeline_phases(
                 state.dossier.add(
                     "Range-diff (upstream vs backport)",
                     rd_output[:10000] + ("\n[TRUNCATED]" if len(rd_output) > 10000 else ""),
-                    "Phase 4.5 — for reviewer: shows how the backport differs from the original fix",
+                    f"Phase 4.5 — for reviewer: shows how the backport differs from the "
+                    f"original fix. Commit pairing is forced for display, so this renders "
+                    f"a diff even when the verdict is 'unmatched' (verdict: {eq_result}).",
                 )
         except Exception:
             pass

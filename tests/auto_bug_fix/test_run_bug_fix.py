@@ -1,6 +1,7 @@
 """Tests for auto_bug_fix.run_bug_fix — pipeline state, strategies, and helpers."""
 import json
 import os
+import pytest
 from unittest.mock import patch, MagicMock
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.run_bug_fix import (
@@ -1005,3 +1006,97 @@ def test_squashed_backport_range_is_cached(tmp_path):
     # Exactly one synthetic commit object was created for the two calls.
     dangling = _git_4b(tmp_path, "fsck", "--dangling")
     assert dangling.count("dangling commit") == 1
+
+
+# --- review findings: recovery commits, 4b extended verification, relatedness ---
+
+def test_commit_recovery_edits_escalates_when_the_commit_does_not_land(tmp_path):
+    """Real edits that fail to commit must never pass as success.
+
+    The deliverables (candidate patch, preserved branch, range-diff) are all
+    commit-based, so a verified working tree whose edits never reached a commit
+    is exactly the silent-drop this helper exists to prevent.
+    """
+    from auto_bug_fix.run_bug_fix import _commit_recovery_edits, PipelineEscalation
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "recovery.c").write_text("int fixed = 1;\n")
+    # A pre-commit hook that always fails stands in for any reason the commit
+    # cannot land (hooks, index lock, bad identity).
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
+    with pytest.raises(PipelineEscalation, match="could not be committed"):
+        _commit_recovery_edits(config, "Phase 4a")
+    assert _git_4b(tmp_path, "rev-parse", "HEAD") == head_before
+
+
+def test_commit_recovery_edits_still_tolerates_artifact_only_dirt(tmp_path):
+    """git_commit unstages pipeline artifacts, so they may legitimately remain."""
+    from auto_bug_fix.run_bug_fix import _commit_recovery_edits
+    from auto_bug_fix.bug_fix_prompts import SEMANTIC_TRIAGE_FILE
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    (tmp_path / SEMANTIC_TRIAGE_FILE).write_text("{}")
+    assert _commit_recovery_edits(config, "Phase 4b") is False
+
+
+def test_phase_4b_success_rejected_while_escalating_command_fails(tmp_path):
+    """4b only has to satisfy build+test, so its marker cannot stand alone.
+
+    The command whose failure caused the escalation is re-run; a success marker
+    written while it still fails must not clear the gate.
+    """
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix, PipelineEscalation
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+        with pytest.raises(PipelineEscalation, match="extended verification still"):
+            phase_4b_run_and_fix(config, claude_cfg, state, None,
+                                 extra_verification=["exit 1"])
+
+
+def test_phase_4b_success_accepted_when_escalating_command_passes(tmp_path):
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+        phase_4b_run_and_fix(config, claude_cfg, state, None,
+                             extra_verification=["true"])  # must not raise
+
+
+def test_phase_4b_names_the_escalating_commands_to_the_agent(tmp_path):
+    """The agent cannot fix what it is not told about."""
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    seen = {}
+
+    async def _capture(cfg, steps, *a, **kw):
+        seen["prompt"] = steps[0].prompt
+        (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
+        return []
+
+    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_capture):
+        phase_4b_run_and_fix(config, claude_cfg, state, None,
+                             extra_verification=["echo golangci-lint-stand-in"])
+    assert "echo golangci-lint-stand-in" in seen["prompt"]
+
+
+def test_unrelated_backport_is_not_reported_as_adapted(tmp_path):
+    """Forced pairing makes range-diff pair anything; relatedness must catch it."""
+    from auto_bug_fix.run_bug_fix import phase_4_5_semantic_equivalence
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    base_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "src.c").write_text("int a = 2;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "fix: bump a")
+    fix_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+    # A "backport" touching nothing the fix touched.
+    _git_4b(tmp_path, "checkout", "-q", "-b", "target", base_sha)
+    (tmp_path / "unrelated.md").write_text("docs, nothing to do with the fix\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "unrelated work")
+    config.source_fix_commit = fix_sha
+    config.target_branch = base_sha
+    assert phase_4_5_semantic_equivalence(config, state) == "unmatched"
