@@ -30,11 +30,7 @@ Below is an example annotated trace from Kimi-K2.5-NVFP4 running on vLLM with
 and clicking any operation reveals its source code references and call chain.
 In this specific example, we can see the selected `moe_gate_router_gemm` operation
 with its `high_level_op`, `source_code` references, `call_chain`, and `kernel_name`
-details in the bottom panel:
-
-<p align="center">
-  <img src="cross_commit_cmp_example_kimi/kimi_annotated_trace.png" alt="Annotated trace in Perfetto" width="600">
-</p>
+details in the bottom panel.
 
 An example of single trace analysis results is here:
 [vllm_kimi_v0.16.0/analyze](https://github.com/neuralmagic/ai_auto_analyze/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi/vllm_kimi_v0.16.0/analyze)
