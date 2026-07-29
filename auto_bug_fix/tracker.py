@@ -147,6 +147,11 @@ class Tracker:
         """Set the final pipeline outcome (e.g. 'success', 'escalate')."""
         self._run.outcome = outcome
 
+    @property
+    def outcome(self) -> str:
+        """The recorded pipeline outcome ('in_progress' until set)."""
+        return self._run.outcome
+
     def _compute_rollups(self) -> None:
         """Aggregate token counts and costs across all phases."""
         total_queries = 0

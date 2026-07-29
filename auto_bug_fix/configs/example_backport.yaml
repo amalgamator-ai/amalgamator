@@ -33,3 +33,10 @@ model: "claude-sonnet-4-6"     # or claude-opus-4-6 for harder backports
 #   evidence_checks: true         # token audit + substitution mining + follow-up scan
 #   post_resolution_check: true   # Phase 3a.1 verification agent
 #   blind_review: true            # Phase 3a.2 triage-blind review agent
+#   partial_success_skip_ratio: 0.5  # non-bugfix ports: fraction of the fix's files
+#                                    # that may be dropped before the outcome is
+#                                    # downgraded to partial_success (0.0-1.0)
+#   phase_4b_model: "claude-opus-4-6"  # model for the Phase 4b escalation. Kept
+#                                      # stronger than `model:` above on purpose —
+#                                      # 4b is the last resort before escalating to
+#                                      # a human. Lowering it weakens that gate.

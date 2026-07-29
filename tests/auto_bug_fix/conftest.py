@@ -25,12 +25,12 @@ from dataclasses import dataclass
 import pytest
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
-from common.claude_utils import ClaudeConfig
+from auto_bug_fix.claude_utils import BugFixClaudeConfig
 
 
 @pytest.fixture
 def claude_cfg():
-    return ClaudeConfig(
+    return BugFixClaudeConfig(
         model="claude-opus-4-6",
         allowed_tools=["Read", "Write", "Bash"],
         perm_mode="acceptEdits",

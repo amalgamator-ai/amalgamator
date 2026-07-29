@@ -147,7 +147,7 @@ def _find_parent_classes(
     """Return the direct parent class names of *class_name* on *ref*."""
     result = subprocess.run(
         ["git", "grep", "-n", "-E", rf"class\s+{re.escape(class_name)}\s*\(", ref, "--", "*.py"],
-        cwd=repo_path, capture_output=True, text=True,
+        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     parents: list[str] = []
     for line in result.stdout.splitlines():
@@ -167,13 +167,13 @@ def _class_defines_method(
     """True if *class_name* directly defines *method* (``def method``) on *ref*."""
     result = subprocess.run(
         ["git", "grep", "-q", "-E", rf"^\s+def\s+{re.escape(method)}\s*\(", ref, "--", "*.py"],
-        cwd=repo_path, capture_output=True, text=True,
+        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         return False
     result = subprocess.run(
         ["git", "grep", "-l", "-E", rf"^\s+def\s+{re.escape(method)}\s*\(", ref, "--", "*.py"],
-        cwd=repo_path, capture_output=True, text=True,
+        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     for fpath in result.stdout.strip().splitlines():
         fpath = fpath.split(":", 1)[-1] if ":" in fpath else fpath
@@ -378,6 +378,7 @@ def _check_token_paste_hint(
              rf"|DEFINE_\w+\(\s*{re.escape(tail)}",
              ref],
             cwd=repo_path, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().splitlines()[0]
@@ -1000,7 +1001,8 @@ def run_file_checks(
         try:
             result = subprocess.run(
                 cmd, shell=True, cwd=repo_path,
-                capture_output=True, text=True, timeout=timeout or 120,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=timeout or 120,
             )
         except subprocess.TimeoutExpired:
             failures.append(f"{f}: check timed out")

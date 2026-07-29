@@ -18,7 +18,7 @@ def run_test_suite(test_command: str, cwd: str, timeout: int | None = None) -> t
     """
     try:
         result = subprocess.run(
-            test_command, shell=True, cwd=cwd, capture_output=True, text=True,
+            test_command, shell=True, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:

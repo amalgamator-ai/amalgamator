@@ -16,8 +16,7 @@ The user specifies which config type they want. If not specified, ask them.
    - **single-trace** — for single-trace GPU analysis
    - **cross-trace** — for cross-trace comparison
    - **codegen** — for AI code generation (LLM framework mode)
-   - **bugfix-codegen** — for AI code generation (bug fix mode)
-   - **bugfix** — for gitted bug fix pipeline (YAML)
+   - **bugfix** — for the bug fix backport pipeline (YAML)
 
 2. Based on the type, gather required fields from the user interactively.
 
@@ -69,27 +68,7 @@ Create a JSON file based on `auto_code_gen/configs/code_gen_config_example.json`
 }
 ```
 
-### Code Gen Config (Bug Fix)
-
-Create a JSON file based on `auto_code_gen/configs/bug_fix_config_example.json`:
-```json
-{
-    "use_case": "bug_fix",
-    "repo_path": "<path_to_repo>",
-    "build_dir": "<path_to_build_dir>",
-    "source_branch": "<source>",
-    "target_branch": "<target>",
-    "source_fix_commit": "<sha>",
-    "bug_description": "<description>",
-    "issue_id": "<id>",
-    "output_dir": "<output_path>",
-    "build_command": "make -j$(nproc)",
-    "test_command": "make check -j$(nproc)",
-    "thinking-mode": "deep"
-}
-```
-
-### Gitted Bug Fix Config (YAML)
+### Bug Fix Config (YAML)
 
 Create a YAML file based on `auto_bug_fix/configs/example_backport.yaml`:
 ```yaml

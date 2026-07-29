@@ -1,6 +1,8 @@
 """YAML/JSON configuration loader with validation for bug fix porting pipeline."""
 from __future__ import annotations
 
+import logging
+import math
 import os
 import re
 import yaml
@@ -10,12 +12,87 @@ from pathlib import Path
 from typing import Any
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
-from common.claude_utils import ClaudeConfig
+from auto_bug_fix.claude_utils import BugFixClaudeConfig, ClaudeConfig
+
+log = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
     """Raised when configuration is invalid."""
     pass
+
+
+def advanced_float(
+    advanced: dict[str, Any],
+    key: str,
+    default: float,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    """Read a float from the ``advanced:`` section, warning on unusable values.
+
+    Accepts YAML numbers and numeric strings (``0.7`` and ``"0.7"`` alike).
+    A key that is absent uses the default silently. A key that is present but
+    unusable warns and falls back rather than crashing the run at load time,
+    or — worse — silently disabling the check it configures. Unusable means:
+
+    - unparseable (null, text, a list)
+    - a bool, since ``float(True)`` is ``1.0`` and almost certainly not what
+      a config that says ``true`` intended
+    - NaN or an infinity, which make every comparison against the value false
+    - outside [minimum, maximum] when bounds are given
+    """
+    if key not in advanced:
+        return default
+    raw = advanced[key]
+    if isinstance(raw, bool):
+        log.warning(
+            "advanced.%s=%r is a boolean, not a number — falling back to %s",
+            key, raw, default,
+        )
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "advanced.%s=%r is not a number — falling back to %s",
+            key, raw, default,
+        )
+        return default
+    if not math.isfinite(value):
+        log.warning(
+            "advanced.%s=%r is not finite — falling back to %s",
+            key, raw, default,
+        )
+        return default
+    if (minimum is not None and value < minimum) or \
+       (maximum is not None and value > maximum):
+        log.warning(
+            "advanced.%s=%r is outside [%s, %s] — falling back to %s",
+            key, raw, minimum, maximum, default,
+        )
+        return default
+    return value
+
+
+def advanced_str(advanced: dict[str, Any], key: str, default: str) -> str:
+    """Read a non-empty string from the ``advanced:`` section.
+
+    A key that is absent uses the default silently. A key that is present but
+    empty, blank, or not a string warns and falls back — an empty model name
+    would otherwise surface as an opaque API error deep inside the phase it
+    configures.
+    """
+    if key not in advanced:
+        return default
+    raw = advanced[key]
+    if not isinstance(raw, str) or not raw.strip():
+        log.warning(
+            "advanced.%s=%r is not a non-empty string — falling back to %s",
+            key, raw, default,
+        )
+        return default
+    return raw.strip()
 
 
 def load_config_file(config_path: str) -> dict[str, Any]:
@@ -134,6 +211,11 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         evidence_checks=bool(advanced.get("evidence_checks", True)),
         post_resolution_check=bool(advanced.get("post_resolution_check", True)),
         blind_review=bool(advanced.get("blind_review", True)),
+        partial_success_skip_ratio=advanced_float(
+            advanced, "partial_success_skip_ratio", 0.5,
+            minimum=0.0, maximum=1.0),
+        phase_4b_model=advanced_str(
+            advanced, "phase_4b_model", "claude-opus-4-6"),
     )
 
     return bug_fix_config, workdir, source_path
@@ -146,7 +228,7 @@ def parse_claude_config(config: dict[str, Any], output_dir: str) -> ClaudeConfig
         claude = {}
     model = claude.get("model") or config.get("model") or "claude-sonnet-4-6"
 
-    return ClaudeConfig(
+    return BugFixClaudeConfig(
         model=model,
         allowed_tools=claude.get("allowed_tools", ["Read", "Write", "Bash"]),
         perm_mode=claude.get("perm_mode", "acceptEdits"),

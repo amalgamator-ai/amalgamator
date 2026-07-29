@@ -1,13 +1,14 @@
 ---
-description: "Run the AI code generation pipeline — LLM framework optimization porting or bug fix porting"
+description: "Run the AI code generation pipeline — LLM framework optimization porting"
 ---
 
 # AI Code Generation Pipeline
 
-Run the multi-phase AI code generation pipeline with iterative generate+review convergence. Supports two modes:
+Run the multi-phase AI code generation pipeline with iterative generate+review convergence. One mode:
 
 - **LLM Framework** (`use_case: llm_framework`): Port GPU kernel optimizations between inference frameworks (vLLM, SGLang, TRT-LLM). Requires prior cross-trace analysis results.
-- **Bug Fix** (`use_case: bug_fix`): Port bug fixes between branches of C/systems projects (gcc, openssl, glibc, curl).
+
+For backporting bug fixes between branches, use `/bugfix` (the `auto_bug_fix` pipeline) instead.
 
 ## Arguments
 
@@ -19,17 +20,13 @@ The user provides:
 
 1. Parse the arguments to get the config path and resume flag. If no config provided:
    - List available configs: `ls auto_code_gen/configs/*.json`
-   - Show examples of both modes:
-     - LLM framework: `auto_code_gen/configs/code_gen_config_example.json`
-     - Bug fix: `auto_code_gen/configs/bug_fix_config_example.json`
-   - Ask the user which mode they want and help them create a config if needed.
+   - Show the example: `auto_code_gen/configs/code_gen_config_example.json`
+   - Help them create a config if needed.
 
 2. Validate the config:
    - Check the file exists
-   - Read it and identify the `use_case` field (defaults to `llm_framework`)
-   - Verify required fields are present:
-     - **LLM framework**: `cross_trace_config`, `improvement_id`, `source_code_dir`, `output_dir`
-     - **Bug fix**: `repo_path`, `source_branch`, `target_branch`, `source_fix_commit`, `output_dir`, `build_command`, `test_command`
+   - Read it and identify the `use_case` field (defaults to `llm_framework`; `bug_fix` is no longer accepted here — point the user at `/bugfix`)
+   - Verify required fields are present: `cross_trace_config`, `improvement_id`, `source_code_dir`, `output_dir`
 
 3. Run the pipeline:
    ```bash
@@ -47,19 +44,15 @@ The user provides:
 
 | Phase | Description |
 |-------|-------------|
-| Phase 0 | Baseline test snapshot (bug fix only, optional) |
 | Phase 1 | Code traces — analyze source/target code paths |
-| Phase 1.5 | Port tests from source (bug fix only) |
-| Phase 1.7 | Test validation / RED check (bug fix only) |
 | Phase 2 | Code port plan — iterative generate+review |
 | Phase 3 | Test plan — iterative generate+review |
 | Phase 4 | Code generation — iterative generate+review + compile |
 | Phase 5 | Runtime iterations — apply, run, investigate, fix |
-| Phase 6 | Baseline diff — do-no-harm check (bug fix only) |
 
 ## Config Options
 
-Key config fields (both modes):
+Key config fields:
 - `thinking-mode`: `"deep"` (Opus, max effort) or `"normal"` (Sonnet, medium effort)
 - `num_code_port_plan_iterations`: Default 3
 - `num_code_gen_iterations`: Default 3
@@ -70,5 +63,5 @@ Key config fields (both modes):
 
 ```
 /codegen auto_code_gen/configs/code_gen_config_example.json
-/codegen auto_code_gen/configs/bug_fix_config_example.json --resume
+/codegen auto_code_gen/configs/code_gen_config_example.json --resume
 ```

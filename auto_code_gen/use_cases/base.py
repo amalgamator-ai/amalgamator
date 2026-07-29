@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from common.claude_utils import ClaudeConfig, PipelineStep
+from auto_code_gen.claude_utils import ClaudeConfig, PipelineStep
 
 
 class UseCase(ABC):
@@ -39,8 +39,7 @@ class UseCase(ABC):
     def skip_test_plan_phase(self, config) -> bool:
         """Whether to skip Phase 3 (test plan iterations).
 
-        Return True when the code port plan already includes the test plan
-        (e.g. bug fix combined mode).
+        Return True when the code port plan already includes the test plan.
         """
         return False
 
@@ -72,7 +71,6 @@ class UseCase(ABC):
         """Phase 5: use-case-specific runtime iterations.
 
         For LLM framework: apply patch, run benchmark, investigate, fix, repeat.
-        For bug fix: autonomous build-test-fix loop.
 
         Returns (phase_results, step_timings).
         """

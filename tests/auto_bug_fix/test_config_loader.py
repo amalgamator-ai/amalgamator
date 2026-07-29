@@ -420,3 +420,132 @@ build:
     assert len(targets) == 1
     assert targets[0].branch == "v1.0"
     assert base_config.target_branch == "v1.0"
+
+
+# ---------- advanced_float: tolerant numeric parsing ----------
+
+def _cfg_with_advanced(advanced: dict) -> dict:
+    return {
+        "issue_id": "t-1",
+        "bug_description": "d",
+        "repository": {"source_path": "/tmp/repo"},
+        "branches": {"source": "main", "target": "v1.0"},
+        "fix": {"commit": "abc123"},
+        "build": {},
+        "advanced": advanced,
+    }
+
+
+def test_advanced_float_accepts_quoted_string():
+    """YAML quoting must not silently disable a configured threshold."""
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": "0.7"}))
+    assert cfg.partial_success_skip_ratio == 0.7
+
+
+def test_advanced_float_accepts_number():
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": 0.8}))
+    assert cfg.partial_success_skip_ratio == 0.8
+
+
+def test_advanced_float_null_falls_back_without_crashing(caplog):
+    """A bare `partial_success_skip_ratio:` key yields None — must not raise."""
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": None}))
+    assert cfg.partial_success_skip_ratio == 0.5
+    assert "not a number" in caplog.text
+
+
+def test_advanced_float_garbage_warns_and_defaults(caplog):
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": "high"}))
+    assert cfg.partial_success_skip_ratio == 0.5
+    assert "not a number" in caplog.text
+
+
+def test_advanced_float_absent_is_silent(caplog):
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
+    assert cfg.partial_success_skip_ratio == 0.5
+    assert "not a number" not in caplog.text
+
+
+# --- advanced_float bounds ---
+# The ratio gates a downgrade to partial_success. A value outside [0, 1] does
+# not fail loudly, it silently disables (or inverts) that gate, so it must be
+# rejected at load time.
+
+@pytest.mark.parametrize("bad", [-0.5, 2, 1.0001, float("nan"),
+                                 float("inf"), float("-inf")])
+def test_skip_ratio_outside_unit_interval_falls_back(bad, caplog):
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": bad}))
+    assert cfg.partial_success_skip_ratio == 0.5
+
+
+def test_skip_ratio_nan_does_not_silently_disable_the_gate():
+    """float('nan') makes every `ratio >= threshold` comparison false."""
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": float("nan")}))
+    assert 1.0 >= cfg.partial_success_skip_ratio
+
+
+def test_skip_ratio_above_one_cannot_suppress_a_total_drop():
+    """A ratio of 2 would let a 100%-dropped port still report success."""
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": 2}))
+    assert 1.0 >= cfg.partial_success_skip_ratio
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_skip_ratio_boolean_is_rejected(flag, caplog):
+    """float(True) is 1.0 — a config saying `true` never meant that."""
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": flag}))
+    assert cfg.partial_success_skip_ratio == 0.5
+    assert "boolean" in caplog.text
+
+
+@pytest.mark.parametrize("good,expected", [(0, 0.0), (1, 1.0), ("0.75", 0.75), (0.25, 0.25)])
+def test_skip_ratio_accepts_the_whole_unit_interval(good, expected):
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"partial_success_skip_ratio": good}))
+    assert cfg.partial_success_skip_ratio == expected
+
+
+# --- phase_4b_model ---
+# Phase 4b is the last resort before escalating to a human and deliberately
+# runs a stronger model than the rest of the pipeline. Making that configurable
+# must not change the default, and must not let an unusable value through.
+
+def test_phase_4b_model_defaults_to_opus():
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
+    assert cfg.phase_4b_model == "claude-opus-4-6"
+
+
+def test_phase_4b_model_is_independent_of_the_pipeline_model():
+    """Setting `model:` must not silently move the escalation model with it."""
+    config = _cfg_with_advanced({})
+    config["model"] = "claude-sonnet-4-6"
+    cfg, _, _ = parse_bug_fix_config(config)
+    assert cfg.phase_4b_model == "claude-opus-4-6"
+
+
+def test_phase_4b_model_override_is_honoured():
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"phase_4b_model": "claude-opus-5"}))
+    assert cfg.phase_4b_model == "claude-opus-5"
+
+
+def test_phase_4b_model_is_stripped():
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
+        {"phase_4b_model": "  claude-opus-5  "}))
+    assert cfg.phase_4b_model == "claude-opus-5"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", None, 42, ["claude-opus-5"], True])
+def test_phase_4b_model_unusable_value_falls_back(bad, caplog):
+    """An empty model name would surface as an opaque API error inside 4b."""
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({"phase_4b_model": bad}))
+    assert cfg.phase_4b_model == "claude-opus-4-6"
+    assert "non-empty string" in caplog.text

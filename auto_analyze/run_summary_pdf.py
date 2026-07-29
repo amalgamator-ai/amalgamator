@@ -39,7 +39,7 @@ import asyncio
 import argparse
 
 from common.utils import setup_logging
-from common.claude_utils import claude_run, ClaudeConfig
+from common.claude_utils import claude_run, ProfilingClaudeConfig
 
 from auto_analyze.prompts.summary_pdf_prompts import SummaryPDFPrompt, SUMMARY_PDF_FILE
 
@@ -47,7 +47,7 @@ from auto_analyze.prompts.summary_pdf_prompts import SummaryPDFPrompt, SUMMARY_P
 def load_claude_config(claude_config_path, cwd):
     with open(claude_config_path) as f:
         data = json.load(f)
-    return ClaudeConfig(
+    return ProfilingClaudeConfig(
         model=data["model"],
         allowed_tools=data["allowed_tools"],
         perm_mode="acceptEdits",

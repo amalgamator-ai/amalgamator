@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import ClassVar, Optional
 
-from common.claude_utils import ClaudeConfig
+from auto_code_gen.claude_utils import ClaudeConfig
 from auto_code_gen.code_gen_configs import CodeGenConfig
 
 

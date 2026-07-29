@@ -7,9 +7,15 @@ from typing import Literal
 from auto_bug_fix.git_tools import git_range_diff as _git_range_diff
 
 
-def run_range_diff(repo_path: str, upstream_range: str, ported_range: str) -> str:
+def run_range_diff(
+    repo_path: str,
+    upstream_range: str,
+    ported_range: str,
+    creation_factor: int | None = None,
+) -> str:
     """Run git range-diff between upstream and ported commit ranges."""
-    return _git_range_diff(repo_path, upstream_range, ported_range)
+    return _git_range_diff(repo_path, upstream_range, ported_range,
+                           creation_factor=creation_factor)
 
 
 def parse_equivalence(range_diff_output: str) -> Literal["identical", "modified", "unmatched"]:

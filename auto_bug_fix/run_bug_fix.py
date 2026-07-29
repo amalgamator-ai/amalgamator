@@ -20,7 +20,12 @@ from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
 
 from common.utils import Tee
-from common.claude_utils import ClaudeConfig, claude_run as _claude_run
+from auto_bug_fix.claude_utils import (
+    BugFixClaudeConfig,
+    ClaudeConfig,
+    PipelineStep,
+    claude_run as _claude_run,
+)
 
 
 async def _run_llm(claude_config, prompts, tracker=None):
@@ -60,7 +65,9 @@ from auto_bug_fix.git_tools import (
     git_diff_name_only,
     git_diff_name_only_range,
     git_format_patch,
+    git_format_patch_bytes,
     git_merge_base,
+    git_show_files,
     git_reset_hard,
     git_commit as _git_commit_raw,
     git_rev_parse,
@@ -113,6 +120,11 @@ from auto_bug_fix.bug_fix_prompts import (
     TEST_PORT_MANIFEST_FILE,
     RED_TRIAGE_FILE,
 )
+from auto_bug_fix.phase_4b import (
+    gen_RunAndFixPrompt,
+    RUN_AND_FIX_FAILURE_FILE,
+    RUN_AND_FIX_SUCCESS_FILE,
+)
 
 LOG_FILE = "__run_log_bug_fix.txt"
 DOSSIER_FILE = "dossier.md"
@@ -121,6 +133,8 @@ _PIPELINE_ARTIFACTS = (
     SEMANTIC_TRIAGE_FILE,
     TEST_PORT_MANIFEST_FILE,
     RED_TRIAGE_FILE,
+    RUN_AND_FIX_FAILURE_FILE,
+    RUN_AND_FIX_SUCCESS_FILE,
     os.path.join("runs", SEMANTIC_TRIAGE_FILE),
     os.path.join("runs", RED_TRIAGE_FILE),
 )
@@ -159,7 +173,7 @@ def git_amend(repo_path: str) -> None:
     _unstage_pipeline_artifacts(repo_path)
     result = subprocess.run(
         ["git", "commit", "--amend", "--no-edit"],
-        cwd=repo_path, capture_output=True, text=True,
+        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         log.warning("git commit --amend failed: %s",
@@ -210,11 +224,14 @@ class PipelineState:
     triage_assessment: dict = field(default_factory=dict)
     priority_files: list[str] = field(default_factory=list)
     baseline_build_exit: int = 0
+    baseline_test_exit: int = 0
     baseline_build_output: str = ""
     baseline_verification: list[dict] = field(default_factory=list)
     red_passed_output: str = ""
     followup_fixes: list[str] = field(default_factory=list)
     followup_fixes_commit: str = ""
+    failed_prerequisites: list[str] = field(default_factory=list)
+    squashed_backport_range: str = ""
 
 
 def phase_0_triage(
@@ -231,7 +248,7 @@ def phase_0_triage(
     if not state.seed:
         seed_from_diff = subprocess.run(
             ["git", "diff", "--name-only", f"{config.source_fix_commit}^1", config.source_fix_commit],
-            cwd=repo, capture_output=True, text=True,
+            cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout.strip().splitlines()
         state.seed = [f for f in seed_from_diff if f.strip()]
         if state.seed:
@@ -280,20 +297,20 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
         if is_merge_commit(config.repo_path, sha):
             stat = subprocess.run(
                 ["git", "diff", "--stat", f"{sha}^1..{sha}"],
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
             partial_diff = subprocess.run(
                 ["git", "diff", f"{sha}^1..{sha}", "--"] + for_files,
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
         else:
             stat = subprocess.run(
                 ["git", "show", "--stat", sha],
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
             partial_diff = subprocess.run(
                 ["git", "show", sha, "--"] + for_files,
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
         fix_diff = stat + "\n\n--- Diff for chunk files ---\n\n" + partial_diff
         MAX_CHUNK_CHARS = 50_000
@@ -305,12 +322,12 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
     if is_merge_commit(config.repo_path, sha):
         fix_diff = subprocess.run(
             ["git", "diff", f"{sha}^1..{sha}"],
-            cwd=config.repo_path, capture_output=True, text=True,
+            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout
     else:
         fix_diff = subprocess.run(
             ["git", "show", sha],
-            cwd=config.repo_path, capture_output=True, text=True,
+            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout
 
     MAX_DIFF_CHARS = 200_000
@@ -319,12 +336,12 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
         if is_merge_commit(config.repo_path, sha):
             fix_diff = subprocess.run(
                 ["git", "diff", "--stat", f"{sha}^1..{sha}"],
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
         else:
             fix_diff = subprocess.run(
                 ["git", "show", "--stat", sha],
-                cwd=config.repo_path, capture_output=True, text=True,
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
 
     return fix_diff
@@ -350,7 +367,7 @@ def phase_3b_regeneration(
         try:
             result = subprocess.run(
                 cmd, shell=True, cwd=config.repo_path,
-                capture_output=True, text=True, timeout=config.command_timeout,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
             )
         except subprocess.TimeoutExpired:
             log.warning("Phase 3b: regeneration timed out (30min): %s", cmd)
@@ -367,7 +384,7 @@ def phase_3b_regeneration(
             try:
                 build_check = subprocess.run(
                     config.build_command, shell=True, cwd=config.build_dir,
-                    capture_output=True, text=True, timeout=config.command_timeout,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
                 )
             except subprocess.TimeoutExpired:
                 log.warning("Phase 3b: build check timed out, rolling back")
@@ -421,12 +438,12 @@ def phase_0_5_semantic_triage(
     if is_merge_commit(config.repo_path, sha):
         fix_diff = subprocess.run(
             ["git", "diff", "--stat", f"{sha}^1..{sha}"],
-            cwd=config.repo_path, capture_output=True, text=True,
+            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout
     else:
         fix_diff = subprocess.run(
             ["git", "show", "--stat", sha],
-            cwd=config.repo_path, capture_output=True, text=True,
+            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout
 
     context = create_context_str(claude_config, config)
@@ -438,7 +455,7 @@ def phase_0_5_semantic_triage(
         seed_files=state.seed,
     )
 
-    claude_config_triage = ClaudeConfig(
+    claude_config_triage = BugFixClaudeConfig(
         model=claude_config.model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -515,7 +532,7 @@ def phase_0_5c_test_port(
         diff_command=diff_command,
     )
 
-    claude_config_test = ClaudeConfig(
+    claude_config_test = BugFixClaudeConfig(
         model=claude_config.model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -566,6 +583,7 @@ def phase_1_baseline_and_red(
             [config.test_command], config.build_dir, timeout=config.command_timeout,
         )
 
+        state.baseline_test_exit = red_exit
         state.baseline = parse_test_failures(red_output, "")
         is_bugfix = state.triage_assessment.get("commit_type", "").lower() in _BUGFIX_TYPES
         if red_exit == 0:
@@ -593,7 +611,7 @@ def phase_1_baseline_and_red(
         try:
             vresult = subprocess.run(
                 vcmd, shell=True, cwd=config.build_dir,
-                capture_output=True, text=True, timeout=config.command_timeout,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
             )
             entry = {"cmd": vcmd, "exit_code": vresult.returncode, "output": (vresult.stdout + "\n" + vresult.stderr)[-3000:]}
         except subprocess.TimeoutExpired:
@@ -623,7 +641,7 @@ def phase_1_5_red_triage(
         triage_assessment=triage_json,
     )
 
-    claude_config_triage = ClaudeConfig(
+    claude_config_triage = BugFixClaudeConfig(
         model=claude_config.model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -720,7 +738,26 @@ def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[boo
             log.warning("Test command timed out — treating as verification failure: %s", config.test_command)
             return False, build_stdout, build_stderr, test_stdout, test_stderr
         failures = parse_test_failures(test_stdout, test_stderr)
-        passed, _ = check_regression(failures, state.baseline)
+        if failures:
+            # Named failures — the baseline says which of them are pre-existing.
+            passed, _ = check_regression(failures, state.baseline)
+        elif test_exit != 0:
+            # The command failed but produced nothing the parser recognized, so
+            # there is nothing to compare against the baseline. Treating that as
+            # a pass would let any failing test command through. Excuse it only
+            # if the baseline failed the same opaque way — the same rule the
+            # lint check below already applies.
+            passed = state.baseline_test_exit != 0
+            if passed:
+                log.info("Test command failed (exit %d) with no parseable failures, "
+                         "but the baseline failed the same way — treating as "
+                         "pre-existing: %s", test_exit, config.test_command)
+            else:
+                log.warning("Test command failed (exit %d) with no parseable "
+                            "failures and a clean baseline — treating as a "
+                            "verification failure: %s", test_exit, config.test_command)
+        else:
+            passed = True
     else:
         passed = True
 
@@ -766,6 +803,106 @@ def phase_4_verify(
     raise PipelineEscalation("Phase 4 verify failed")
 
 
+def _non_artifact_dirt(repo_path: str) -> list[str]:
+    """Working-tree changes that are not pipeline artifacts.
+
+    ``git_commit`` unstages everything in ``_PIPELINE_ARTIFACTS`` before
+    committing, so those files legitimately stay dirty afterwards. Anything
+    else left over is real work that did not make it into a commit.
+    """
+    dirt = []
+    for line in git_status_porcelain(repo_path):
+        path = line[3:].strip() if len(line) > 3 else line.strip()
+        # Renames are reported as "old -> new"; the new path is what matters.
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip('"')
+        if path and path not in _PIPELINE_ARTIFACTS:
+            dirt.append(line)
+    return dirt
+
+
+def _extra_verification_section(commands: list[str]) -> str:
+    """Render the commands that must pass on top of build and test."""
+    if not commands:
+        return ""
+    listed = "\n".join(commands)
+    return f"""
+<extra_verification_commands>
+{listed}
+</extra_verification_commands>
+
+IMPORTANT: the commands in <extra_verification_commands> are what caused this
+escalation. They run from <build_dir>. They are NOT optional: do not write the
+success file until every one of them passes in addition to the build and the
+tests. They are re-run automatically afterwards, so reporting success while one
+still fails will simply fail the run.
+"""
+
+
+def _rerun_verification(config: BugFixConfig, commands: list[str]) -> list[str]:
+    """Re-run verification commands, returning those that still fail."""
+    still_failing = []
+    for vcmd in commands:
+        try:
+            result = subprocess.run(
+                vcmd, shell=True, cwd=config.build_dir,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            still_failing.append(vcmd)
+            continue
+        if result.returncode != 0:
+            still_failing.append(vcmd)
+    return still_failing
+
+
+def _commit_recovery_edits(config: BugFixConfig, phase_label: str) -> bool:
+    """Commit agent recovery edits so they reach the deliverables.
+
+    The candidate patch (git format-patch), the preserved branch, and the
+    Phase 4.5 range-diff are all commit-based — recovery edits left in the
+    working tree by the 4a/4b agents would silently vanish from every one
+    of them. Returns True if a commit was created, False if there was
+    nothing to commit.
+
+    Raises PipelineEscalation if edits exist but could not be committed. A
+    verified working tree whose deliverables omit those edits is precisely
+    the failure this helper exists to prevent, so it must never be reported
+    as a success.
+    """
+    for marker in (RUN_AND_FIX_FAILURE_FILE, RUN_AND_FIX_SUCCESS_FILE):
+        path = os.path.join(config.repo_path, marker)
+        if os.path.exists(path):
+            os.remove(path)
+    if not git_status_porcelain(config.repo_path):
+        return False
+    head_before = git_rev_parse(config.repo_path, "HEAD")
+    subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+    git_commit(
+        config.repo_path,
+        f"fixup: build/test recovery for {config.issue_id} ({phase_label})",
+        trailers=_COAUTHOR_TRAILERS,
+    )
+    if git_rev_parse(config.repo_path, "HEAD") != head_before:
+        log.info("%s: recovery edits committed", phase_label)
+        return True
+
+    # Nothing landed on HEAD. That is expected when the only dirt was pipeline
+    # artifacts, which git_commit unstages by design. Anything else still dirty
+    # is real work the deliverables would silently drop, so it must not be
+    # allowed to pass as a success.
+    remaining = _non_artifact_dirt(config.repo_path)
+    if remaining:
+        raise PipelineEscalation(
+            f"{phase_label}: recovery edits could not be committed — the "
+            f"candidate patch, preserved branch and range-diff would omit "
+            f"them. Still uncommitted:\n" + "\n".join(remaining)
+        )
+    log.info("%s: only pipeline artifacts were dirty, no commit needed", phase_label)
+    return False
+
+
 def phase_4a_build_recovery(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -776,7 +913,7 @@ def phase_4a_build_recovery(
     """Agent-assisted build/test error recovery. Adapts code to the target branch API."""
     context = create_context_str(claude_config, config)
 
-    claude_config_4a = ClaudeConfig(
+    claude_config_4a = BugFixClaudeConfig(
         model=claude_config.model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -794,6 +931,7 @@ def phase_4a_build_recovery(
             no_regression, _ = check_regression(failures, state.baseline)
             if test_exit != TIMEOUT_EXIT_CODE and no_regression:
                 log.info("Phase 4a: build+test passed on attempt %d", attempt)
+                _commit_recovery_edits(config, "Phase 4a")
                 return
         else:
             test_stdout, test_stderr = "", ""
@@ -845,6 +983,7 @@ def phase_4a_build_recovery(
         no_regression, _ = check_regression(failures, state.baseline)
         if test_exit != TIMEOUT_EXIT_CODE and no_regression:
             log.info("Phase 4a: build+test passed after final attempt")
+            _commit_recovery_edits(config, "Phase 4a")
             return
 
     raise PipelineEscalation(
@@ -852,32 +991,30 @@ def phase_4a_build_recovery(
     )
 
 
-def phase_4b_external_pipeline(
+def phase_4b_run_and_fix(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
     state: PipelineState,
     tracker,
+    extra_verification: list[str] | None = None,
 ) -> None:
-    """Hand off to the external new_ai_auto_analyze pipeline's autonomous build-test-fix loop.
+    """Escalate to the autonomous build-test-fix loop (last resort).
 
-    Writes a rich context file with ALL pipeline data (dossier, triage, fix_diff,
-    prerequisite analysis) then calls the external pipeline's RunAndFixPrompt which
-    drives an LLM-heavy iterative fix loop.
+    Assembles a rich context with ALL pipeline data (dossier, triage, config)
+    and runs the RunAndFixPrompt as a single long agent session that iterates
+    build → test → targeted fix until clean or retries are exhausted.
+
+    A success marker is the agent's own report, so it never clears the gate by
+    itself: build and test are re-run here, and so is anything in
+    extra_verification.
+
+    extra_verification: commands beyond build/test whose failure caused this
+    escalation (lint, extended verification). The loop's own success criteria
+    only cover build and test, so an agent can honestly report success while
+    the command that got it here still fails. They are named in the context so
+    the agent fixes them, and re-run afterwards alongside the build/test gate.
     """
-
-    ext_pipeline_root = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
-
-    if not os.path.isdir(ext_pipeline_root):
-        raise FileNotFoundError(f"External pipeline not found at {ext_pipeline_root}")
-
-    if ext_pipeline_root not in sys.path:
-        sys.path.insert(0, ext_pipeline_root)
-
-    from auto_code_gen.use_cases.bug_fix import gen_RunAndFixPrompt, RUN_AND_FIX_FAILURE_FILE
-    from common.claude_utils import PipelineStep
-    from common.claude_utils import claude_run as ext_claude_run
-    from common.claude_utils import ClaudeConfig as ExtClaudeConfig
-
+    extra_verification = list(extra_verification or [])
     dossier_text = format_dossier(state.dossier) if state.dossier else ""
     triage_json = json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "{}"
 
@@ -895,6 +1032,7 @@ def phase_4b_external_pipeline(
 <test_command>{config.test_command}</test_command>
 <max_build_test_retries>{config.max_build_test_retries}</max_build_test_retries>
 </context>
+{_extra_verification_section(extra_verification)}
 
 <pipeline_dossier>
 {dossier_text}
@@ -905,8 +1043,8 @@ def phase_4b_external_pipeline(
 </semantic_triage>
 """
 
-    ext_claude_config = ExtClaudeConfig(
-        model="claude-opus-4-6",
+    ext_claude_config = BugFixClaudeConfig(
+        model=config.phase_4b_model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
         cwd=config.repo_path,
@@ -914,7 +1052,11 @@ def phase_4b_external_pipeline(
         effort="max",
         max_thinking_tokens=1048576,
     )
-    log.info("Phase 4b: escalating to Opus with deep thinking (last resort)")
+    # Named explicitly: 4b is meant to run a stronger model than the rest of
+    # the pipeline, and it is now configurable — the run log should say which
+    # one actually escalated.
+    log.info("Phase 4b: escalating to %s with deep thinking (last resort; "
+             "pipeline model is %s)", config.phase_4b_model, claude_config.model)
 
     prompt = gen_RunAndFixPrompt(
         context=enriched_context,
@@ -931,9 +1073,12 @@ def phase_4b_external_pipeline(
         ),
     ]
 
+    # Bound unconditionally: the finalizers below close over both, and 4b is
+    # called without a tracker in tests and from the standalone paths.
     phase_4b_json_path = None
+    phase_4b_data: dict = {}
     if tracker:
-        phase_4b_data = {
+        phase_4b_data.update({
             "output_dir": tracker._output_dir,
             "repo_path": config.repo_path,
             "build_dir": config.build_dir,
@@ -947,25 +1092,44 @@ def phase_4b_external_pipeline(
             "model": ext_claude_config.model,
             "dossier": dossier_text,
             "semantic_triage": state.triage_assessment if state.triage_assessment else {},
-        }
+        })
         phase_4b_json_path = os.path.join(tracker._output_dir, "phase_4b_input.json")
         with open(phase_4b_json_path, "w") as f:
             json.dump(phase_4b_data, f, indent=2)
         log.info("Phase 4b input written to %s", phase_4b_json_path)
 
-    log.info("Phase 4b: handing off to external pipeline (build-test-fix loop)")
+    def _write_phase_4b_json() -> None:
+        if phase_4b_json_path:
+            with open(phase_4b_json_path, "w") as f:
+                json.dump(phase_4b_data, f, indent=2)
+
+    def _finalize(outcome: str) -> None:
+        """Record the verified outcome before leaving the phase."""
+        phase_4b_data["outcome"] = outcome
+        _write_phase_4b_json()
+
+    failure_file = os.path.join(config.repo_path, RUN_AND_FIX_FAILURE_FILE)
+    success_file = os.path.join(config.repo_path, RUN_AND_FIX_SUCCESS_FILE)
+    # 4b can run more than once per target (cherry-pick failure path, then
+    # verify failure). Remove markers from any earlier invocation so whatever
+    # exists after the session is provably this session's verdict.
+    for stale in (failure_file, success_file):
+        if os.path.exists(stale):
+            os.remove(stale)
+
+    log.info("Phase 4b: starting run-and-fix loop (build-test-fix)")
 
     _4b_start = time.time()
 
     phase_4b_log_path = os.path.join(tracker._output_dir, "phase_4b_log.txt") if tracker else None
     if phase_4b_log_path:
 
-        _4b_log_file = open(phase_4b_log_path, "w")
+        _4b_log_file = open(phase_4b_log_path, "w", encoding="utf-8")
         _prev_stdout = sys.stdout
         sys.stdout = Tee(_prev_stdout, _4b_log_file)
 
     try:
-        timings = asyncio.run(ext_claude_run(ext_claude_config, steps))
+        timings = asyncio.run(_claude_run(ext_claude_config, steps))
     finally:
         if phase_4b_log_path:
             sys.stdout = _prev_stdout
@@ -987,9 +1151,6 @@ def phase_4b_external_pipeline(
                 sdk_cost_usd=sdk_cost if sdk_cost else None,
             )
 
-    failure_file = os.path.join(config.repo_path, RUN_AND_FIX_FAILURE_FILE)
-    success_file = os.path.join(config.repo_path, "run_and_fix_success.txt")
-
     if tracker and phase_4b_json_path:
         phase_4b_data["duration_seconds"] = _4b_end - _4b_start
         if timings:
@@ -997,27 +1158,84 @@ def phase_4b_external_pipeline(
             phase_4b_data["input_tokens"] = sum(st.get("input_tokens", 0) for st in timings)
             phase_4b_data["output_tokens"] = sum(st.get("output_tokens", 0) for st in timings)
 
-        for result_file in (success_file, failure_file):
+        # Failure first — must match the decision precedence below, so a
+        # session that somehow writes both files is recorded as a failure.
+        for result_file in (failure_file, success_file):
             if os.path.exists(result_file):
                 dest = os.path.join(tracker._output_dir, os.path.basename(result_file))
                 shutil.copy2(result_file, dest)
                 log.info("Phase 4b result copied to %s", dest)
                 with open(result_file) as f:
-                    phase_4b_data["outcome"] = "success" if result_file == success_file else "failure"
+                    phase_4b_data["agent_reported"] = (
+                        "success" if result_file == success_file else "failure")
                     phase_4b_data["result_summary"] = f.read()
                 break
-        with open(phase_4b_json_path, "w") as f:
-            json.dump(phase_4b_data, f, indent=2)
-        log.info("Phase 4b JSON updated with results: %s", phase_4b_json_path)
+        # The agent's marker is a claim, not the verdict — build/test and the
+        # escalating commands are re-run below. Record the claim now (so the
+        # artifact survives a crash) but leave the outcome pending until the
+        # deterministic checks have actually run.
+        phase_4b_data["outcome"] = "pending_verification"
+        _write_phase_4b_json()
 
     if os.path.exists(failure_file):
         with open(failure_file) as f:
             failure_text = f.read()
-        state.dossier.add("External pipeline failure", failure_text, "Phase 4b")
-        raise PipelineEscalation("Phase 4b: external pipeline exhausted retries")
+        state.dossier.add("Run-and-fix failure", failure_text, "Phase 4b")
+        _finalize("failure")
+        raise PipelineEscalation("Phase 4b: run-and-fix loop exhausted retries")
+    elif os.path.exists(success_file):
+        state.dossier.add("Run-and-fix loop", "Build-test-fix loop succeeded", "Phase 4b")
+        log.info("Phase 4b: run-and-fix loop reported success — verifying")
+
+        # The marker says the agent believes it is done. Prove it: on the
+        # cherry-pick-failure and verify-failure paths extra_verification is
+        # empty, so without this the basic build/test gate would rest entirely
+        # on the agent's self-report.
+        try:
+            phase_4_verify(config, state)
+        except PipelineEscalation as e:
+            state.dossier.add(
+                "Run-and-fix loop",
+                f"Reported success, but build/test still fails: {e}",
+                "Phase 4b",
+            )
+            _finalize("verification_failed")
+            raise PipelineEscalation(
+                f"Phase 4b: reported success while build/test still fails ({e})"
+            )
+
+        still_failing = _rerun_verification(config, extra_verification)
+        if still_failing:
+            state.dossier.add(
+                "Run-and-fix loop",
+                "Reported success, but the commands that triggered the "
+                "escalation still fail:\n" + "\n".join(still_failing),
+                "Phase 4b",
+            )
+            _finalize("verification_failed")
+            raise PipelineEscalation(
+                "Phase 4b: reported success while extended verification still "
+                f"fails: {', '.join(still_failing)}"
+            )
+        if _commit_recovery_edits(config, "Phase 4b"):
+            state.dossier.add(
+                "Run-and-fix loop",
+                "Recovery edits committed (fixup)",
+                "Phase 4b",
+            )
+        _finalize("success")
     else:
-        state.dossier.add("External pipeline", "Build-test-fix loop succeeded", "Phase 4b")
-        log.info("Phase 4b: external pipeline succeeded")
+        # The agent session ended without writing either marker (crash, early
+        # exit, ignored instructions) — success may not be assumed.
+        state.dossier.add(
+            "Run-and-fix loop",
+            "Agent ended without writing a success or failure file",
+            "Phase 4b",
+        )
+        _finalize("no_result_file")
+        raise PipelineEscalation(
+            "Phase 4b: run-and-fix loop ended without writing a result file"
+        )
 
 
 MAX_PREREQUISITE_DEPTH = 5
@@ -1091,7 +1309,7 @@ def cherry_pick_and_resolve(
         # Reset ALL skip files to target version — both conflicting and cleanly-applied
         all_changed = subprocess.run(
             ["git", "diff", "--name-only", "HEAD"],
-            cwd=config.repo_path, capture_output=True, text=True,
+            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout.strip().splitlines()
         skip_applied_clean = [f for f in all_changed if f in skip_set and f not in uu_files]
         if skip_applied_clean:
@@ -1127,7 +1345,7 @@ def cherry_pick_and_resolve(
     context = create_context_str(claude_config, config)
     priority = state.priority_files if state.priority_files else state.allowed_modules
 
-    claude_config_resolve = ClaudeConfig(
+    claude_config_resolve = BugFixClaudeConfig(
         model=claude_config.model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
@@ -1287,7 +1505,7 @@ def _finalize_resolution(
         try:
             port_diff = subprocess.run(
                 ["git", "diff", base_head, "HEAD"],
-                cwd=repo, capture_output=True, text=True,
+                cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
             added_by_file = added_lines_by_file(port_diff)
             # Mining references base_head — the tree the port actually lands
@@ -1425,7 +1643,7 @@ def _finalize_resolution(
         try:
             port_diff = subprocess.run(
                 ["git", "diff", base_head, "HEAD"],
-                cwd=repo, capture_output=True, text=True,
+                cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
             added_by_file = added_lines_by_file(port_diff)
             findings = audit_added_tokens(repo, base_head, commit, added_by_file)
@@ -1506,7 +1724,7 @@ def _finalize_resolution(
                 try:
                     port_diff = subprocess.run(
                         ["git", "diff", base_head, "HEAD"],
-                        cwd=repo, capture_output=True, text=True,
+                        cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
                     ).stdout
                     remaining = audit_added_tokens(
                         repo, base_head, commit, added_lines_by_file(port_diff))
@@ -1607,6 +1825,7 @@ def port_prerequisite_chain(
             log.info("Prerequisite %s ported: %s", symbol, result)
         except PipelineEscalation as e:
             log.warning("Prerequisite %s failed: %s — continuing without it", symbol, e)
+            state.failed_prerequisites.append(symbol)
             state.dossier.add(
                 f"Prerequisite failed: {symbol}",
                 str(e),
@@ -1618,23 +1837,238 @@ def port_prerequisite_chain(
     return ported
 
 
+def _squashed_backport_range(config: BugFixConfig, state: PipelineState) -> str | None:
+    """Synthetic single-commit range spanning the whole backport.
+
+    Pipeline commits (test port, resolution, review fixups, 4a/4b recovery)
+    make target..HEAD multi-commit, and range-diff pairs commits one-to-one,
+    so every extra commit shows up as an unmatched row regardless of content.
+    Squashing the backport into one synthetic commit (tree = HEAD's tree,
+    parent = the target base) makes the comparison about content, not
+    commit count.
+
+    Cached on ``state``: commit objects embed the committer timestamp, so
+    calling this twice yields two different SHAs (and two dangling objects)
+    for the same tree. The verdict and the dossier's range-diff must quote
+    the same object.
+    """
+    if state.squashed_backport_range:
+        return state.squashed_backport_range
+    repo = config.repo_path
+    try:
+        target_base = git_merge_base(repo, config.target_branch, "HEAD")
+        head = git_rev_parse(repo, "HEAD")
+        if not target_base or not head or target_base == head:
+            return None
+        result = subprocess.run(
+            ["git", "commit-tree", f"{head}^{{tree}}", "-p", target_base,
+             "-m", f"squashed backport for {config.issue_id}"],
+            cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if result.returncode != 0:
+            return None
+        squash = result.stdout.strip()
+        if not squash:
+            return None
+        state.squashed_backport_range = f"{squash}^..{squash}"
+        return state.squashed_backport_range
+    except Exception:
+        return None
+
+
+def _backport_completeness(config: BugFixConfig, state: PipelineState) -> tuple[str, str]:
+    """Classify the finished backport as "success" or "partial_success".
+
+    Fires ONLY for non-bugfix commits (feature/api-change ports). A bug fix
+    that reached this point ported its whole file set by construction, while
+    a feature port can "succeed" by dropping most of its files —
+    files_to_skip reverts them to the target's version, so a passing build
+    mostly proves the target still compiles. Returns (outcome, detail).
+    """
+    raw_type = state.triage_assessment.get("commit_type")
+    commit_type = (raw_type if isinstance(raw_type, str) else "")
+    # Normalize LLM variants ("Bug Fix", " bug_fix ") before matching, so a
+    # sloppily-labeled bug fix can never be downgraded.
+    commit_type = commit_type.strip().lower().replace("_", "-").replace(" ", "-")
+    if not commit_type or commit_type in _BUGFIX_TYPES:
+        return "success", ""
+
+    reasons = []
+    try:
+        if state.failed_prerequisites:
+            reasons.append(
+                "prerequisites failed to port: "
+                + ", ".join(str(s) for s in state.failed_prerequisites)
+            )
+
+        # state.seed is the fix's file set with merge-commit (-m1) handling;
+        # git show --name-only is the fallback and is empty for merges.
+        fix_files = set(state.seed) or set(
+            git_show_files(config.repo_path, config.source_fix_commit))
+        skipped = set(state.triage_assessment.get("files_to_skip", [])) & fix_files
+        if fix_files and skipped:
+            target_base = git_merge_base(config.repo_path, config.target_branch, "HEAD")
+            result = subprocess.run(
+                ["git", "diff", "--name-only", f"{target_base}..HEAD"],
+                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            backported = set(result.stdout.splitlines()) if result.returncode == 0 else set()
+            # A skipped file that reappears in the final diff was regenerated
+            # (Phase 3b) or otherwise recovered — only count real drops.
+            dropped = sorted(skipped - backported)
+            ratio = len(dropped) / len(fix_files)
+            if dropped and ratio >= config.partial_success_skip_ratio:
+                reasons.append(
+                    f"{len(dropped)}/{len(fix_files)} of the fix's files were "
+                    f"dropped (reverted to target, never regenerated): "
+                    + ", ".join(dropped[:10])
+                    + (" …" if len(dropped) > 10 else "")
+                )
+    except Exception as e:
+        log.warning("Completeness check failed: %s", e)
+
+    if reasons:
+        return "partial_success", "; ".join(reasons)
+    return "success", ""
+
+
+# Relatedness thresholds for the Phase 4.5 fallback (see
+# _shares_content_with_fix). Derived by measurement, not taste — re-derive them
+# before changing: compare commits with disjoint file sets and check that the
+# resulting overlap ratios stay well under the threshold.
+_RELATEDNESS_MIN_LINE_LEN = 6
+_RELATEDNESS_MIN_OVERLAP = 0.30
+
+
+def _changed_payload_lines(repo: str, diff_args: list[str]) -> set[tuple[str, str]]:
+    """The +/- lines of a diff, as (polarity, normalized content) pairs.
+
+    Polarity is kept: a line the fix *adds* matching a line the backport
+    *removes* is not evidence that the two are the same work.
+
+    Structural noise is dropped — hunk headers, file headers, and payloads too
+    short to carry meaning (``}``, ``else:``, blanks), which match between any
+    two diffs of the same language.
+    """
+    result = subprocess.run(
+        ["git", "diff", "--unified=0", *diff_args],
+        cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if result.returncode != 0:
+        return set()
+    lines = set()
+    for raw in result.stdout.splitlines():
+        if raw[:3] in ("+++", "---") or not raw or raw[0] not in "+-":
+            continue
+        payload = " ".join(raw[1:].split())  # collapse whitespace
+        if len(payload) >= _RELATEDNESS_MIN_LINE_LEN:
+            lines.add((raw[0], payload))
+    return lines
+
+
+def _shares_content_with_fix(config: BugFixConfig, state: PipelineState) -> bool:
+    """Does the backport change any of the same lines the upstream fix changed?
+
+    Used only to recover the "unmatched" verdict that forcing range-diff's
+    pairing destroys. File-set overlap is not enough: a backport that touches
+    the right file but changes something else entirely in it — a reworded
+    comment beside the untouched bug — shares a filename while sharing no
+    content, and would pass a filename test.
+
+    Comparison is at line level, and requires a *proportion* of the fix's
+    changed lines to reappear — not merely one. Any two diffs in the same
+    language share boilerplate: measured over 918 pairs of commits in this
+    repository with disjoint file sets, requiring a single shared line called
+    204 of them related, on lines like ``return []`` and ``try:``. Their
+    overlap ratio peaked at 0.23 with a 99th percentile of 0.03, so the
+    threshold sits an order of magnitude above the noise floor and far below
+    what a faithful port yields — this pipeline's discipline is that lines the
+    fix changes carry the fix's exact bytes, so a real port overlaps heavily.
+
+    Errs towards True: when either side cannot be determined it declines to
+    override, so it can only ever add an unmatched verdict on strong evidence
+    (nothing in common at all), never remove one. A port landing entirely in
+    renamed files or rewritten line-by-line reads as unrelated here — the safe
+    direction, since it asks a human to look.
+    """
+    try:
+        fix_commit = config.source_fix_commit
+        if is_merge_commit(config.repo_path, fix_commit):
+            fix_args = [f"{fix_commit}^1..{fix_commit}"]
+        else:
+            fix_args = [f"{fix_commit}^..{fix_commit}"]
+        fix_lines = _changed_payload_lines(config.repo_path, fix_args)
+        if not fix_lines:
+            return True
+
+        target_base = git_merge_base(config.repo_path, config.target_branch, "HEAD")
+        if not target_base:
+            return True
+        backport_lines = _changed_payload_lines(
+            config.repo_path, [f"{target_base}..HEAD"])
+        if not backport_lines:
+            return False
+
+        shared = fix_lines & backport_lines
+        overlap = len(shared) / len(fix_lines)
+        if overlap < _RELATEDNESS_MIN_OVERLAP:
+            log.info("Relatedness: only %d/%d of the fix's changed lines appear "
+                     "in the backport (%.0f%%, below %.0f%%)",
+                     len(shared), len(fix_lines),
+                     overlap * 100, _RELATEDNESS_MIN_OVERLAP * 100)
+            return False
+        return True
+    except Exception as e:
+        log.warning("Relatedness check failed: %s", e)
+        return True
+
+
 def phase_4_5_semantic_equivalence(
     config: BugFixConfig,
     state: PipelineState,
 ) -> str:
-    """Run range-diff to classify the port as identical, modified, or unmatched."""
+    """Run range-diff to classify the port as identical, modified, or unmatched.
+
+    Two things have to be true at once, and range-diff's pairing threshold
+    cannot deliver both on its own:
+
+    - A legitimate backport carrying pipeline commits (test port, resolution,
+      4a/4b recovery) must not be called "unmatched" just for containing more
+      than the fix did. The squash handles the commit count; the threshold
+      still rejects the pairing once the extra content is large enough.
+    - A backport with nothing to do with the fix must not be called "modified".
+
+    Measured on both cases, every creation-factor flips them together — there
+    is no value that separates them. So the pairing is forced, which settles
+    the first, and the "unmatched" signal is recovered independently from
+    whether the backport touches any of the files the fix touched.
+    """
     repo = config.repo_path
     try:
-        target_base = git_merge_base(repo, config.target_branch, "HEAD")
+        backport_range = _squashed_backport_range(config, state)
+        # See above: forcing is only sound because _shares_content_with_fix
+        # supplies the unmatched signal that forcing destroys.
+        creation_factor = 999 if backport_range else None
+        if backport_range is None:
+            target_base = git_merge_base(repo, config.target_branch, "HEAD")
+            backport_range = f"{target_base}..HEAD"
         rd_output = run_range_diff(
             repo,
             f"{config.source_fix_commit}^..{config.source_fix_commit}",
-            f"{target_base}..HEAD",
+            backport_range,
+            creation_factor=creation_factor,
         )
     except Exception:
         return "unmatched"
 
     equivalence = parse_equivalence(rd_output)
+    if equivalence != "unmatched" and creation_factor is not None:
+        if not _shares_content_with_fix(config, state):
+            log.warning(
+                "Phase 4.5: range-diff paired the commits, but the backport "
+                "changes none of the lines the fix changed — reporting unmatched"
+            )
+            return "unmatched"
     return equivalence
 
 
@@ -1916,8 +2350,8 @@ def _run_pipeline_phases(
                        f"[ All conflicts force-resolved with --theirs ]",
                        trailers=_COAUTHOR_TRAILERS)
 
-        with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
-            phase_4b_external_pipeline(config, claude_config, state, tracker)
+        with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
+            phase_4b_run_and_fix(config, claude_config, state, tracker)
         cherry_pick_succeeded = True
 
     if not cherry_pick_succeeded:
@@ -1939,8 +2373,8 @@ def _run_pipeline_phases(
                 phase_4_verify(config, state)
                 tracker.record_gate("verify", "passed")
         except PipelineEscalation:
-            with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
-                phase_4b_external_pipeline(config, claude_config, state, tracker)
+            with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
+                phase_4b_run_and_fix(config, claude_config, state, tracker)
 
     phase4_lint = _resolve_lint_command(config, state)
     lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c) and c != phase4_lint]
@@ -1960,7 +2394,7 @@ def _run_pipeline_phases(
                 try:
                     vresult = subprocess.run(
                         vcmd, shell=True, cwd=config.build_dir,
-                        capture_output=True, text=True, timeout=config.command_timeout,
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
                     )
                 except subprocess.TimeoutExpired:
                     # A timeout is never treated as a pre-existing failure — we
@@ -1985,6 +2419,9 @@ def _run_pipeline_phases(
 
         if ext_failures:
             log.info("Phase 4.1: %d verification commands failed — triggering Phase 4a recovery", len(ext_failures))
+            # Bound before the try: Phase 4a can raise before the post-recovery
+            # sweep runs, and the handler below reads this.
+            still_failing: list[str] = []
             try:
                 with tracker.phase("Phase 4a — Build error recovery (from 4.1)"):
                     phase_4a_build_recovery(config, claude_config, state, tracker, fix_diff)
@@ -1996,7 +2433,7 @@ def _run_pipeline_phases(
                         try:
                             vresult = subprocess.run(
                                 vcmd, shell=True, cwd=config.build_dir,
-                                capture_output=True, text=True, timeout=config.command_timeout,
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
                             )
                         except subprocess.TimeoutExpired:
                             still_failing.append(vcmd)
@@ -2017,10 +2454,16 @@ def _run_pipeline_phases(
                     else:
                         log.info("Phase 4.1: all verification commands pass after recovery")
             except PipelineEscalation as e:
-                log.warning("Phase 4a recovery failed — escalating to external pipeline: %s", e)
+                log.warning("Phase 4a recovery failed — escalating to run-and-fix loop: %s", e)
 
-                with tracker.phase("Phase 4b — External pipeline (build-test-fix loop)"):
-                    phase_4b_external_pipeline(config, claude_config, state, tracker)
+                # Hand 4b the commands that got us here. Its own success
+                # criteria cover only build and test, so without these it can
+                # report success while the failing command is untouched.
+                escalated_cmds = still_failing or [c for c in verification_cmds
+                                                   if c not in baseline_failures]
+                with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
+                    phase_4b_run_and_fix(config, claude_config, state, tracker,
+                                         extra_verification=escalated_cmds)
 
     with tracker.phase("Phase 4.5 — Semantic equivalence"):
         eq_result = phase_4_5_semantic_equivalence(config, state)
@@ -2028,16 +2471,25 @@ def _run_pipeline_phases(
         tracker.record_gate("semantic_equivalence", eq_result)
 
         try:
+            squashed = _squashed_backport_range(config, state)
+            # Display only, and deliberately not how eq_result was computed:
+            # forcing the pairing renders a side-by-side even when the two
+            # commits are too dissimilar to pair, which is exactly the case a
+            # reviewer most needs to see. The verdict above uses git's default
+            # threshold so that "unmatched" stays reachable.
             rd_output = run_range_diff(
                 config.repo_path,
                 f"{config.source_fix_commit}^..{config.source_fix_commit}",
-                "HEAD^..HEAD",
+                squashed or "HEAD^..HEAD",
+                creation_factor=999 if squashed else None,
             )
             if rd_output.strip():
                 state.dossier.add(
                     "Range-diff (upstream vs backport)",
                     rd_output[:10000] + ("\n[TRUNCATED]" if len(rd_output) > 10000 else ""),
-                    "Phase 4.5 — for reviewer: shows how the backport differs from the original fix",
+                    f"Phase 4.5 — for reviewer: shows how the backport differs from the "
+                    f"original fix. Commit pairing is forced for display, so this renders "
+                    f"a diff even when the verdict is 'unmatched' (verdict: {eq_result}).",
                 )
         except Exception:
             pass
@@ -2048,12 +2500,16 @@ def _run_pipeline_phases(
     )
 
     log.info("Phase 5 — Dossier ready for human review")
-    patch_text = git_format_patch(config.repo_path, base_ref=config.target_branch)
-    state.dossier.add("Candidate patch", patch_text, "git format-patch")
+    patch_bytes = git_format_patch_bytes(config.repo_path, base_ref=config.target_branch)
+    # Written as bytes: the patch has to apply, and a repo carrying non-UTF-8
+    # source would otherwise be handed a patch full of replacement characters.
+    # The dossier copy is for humans, so a lossy decode is fine there.
+    state.dossier.add("Candidate patch", patch_bytes.decode("utf-8", "replace"),
+                      "git format-patch")
     os.makedirs(tracker._output_dir, exist_ok=True)
     patch_path = os.path.join(tracker._output_dir, PATCH_FILE)
-    with open(patch_path, "w", encoding="utf-8") as f:
-        f.write(patch_text)
+    with open(patch_path, "wb") as f:
+        f.write(patch_bytes)
     log.info("Patch written to %s", patch_path)
     state.dossier.add(
         "Allowlist conformance",
@@ -2061,7 +2517,13 @@ def _run_pipeline_phases(
         "git diff --name-only",
     )
 
-    tracker.set_outcome("success")
+    with tracker.phase("Phase 5 — Completeness check"):
+        outcome, completeness_detail = _backport_completeness(config, state)
+        tracker.record_gate("completeness", "partial" if outcome != "success" else "complete")
+        if outcome != "success":
+            log.warning("Backport is partial: %s", completeness_detail)
+            state.dossier.add("Partial backport", completeness_detail, "completeness check")
+    tracker.set_outcome(outcome)
     return state.dossier, tracker
 
 
@@ -2161,7 +2623,7 @@ def run_targets(
         worktree_path = os.path.join(workdir, f"{target_config.issue_id}_{sanitized}")
 
         try:
-            target_log_file = open(os.path.join(target_run_dir, "run_log.txt"), "w")
+            target_log_file = open(os.path.join(target_run_dir, "run_log.txt"), "w", encoding="utf-8")
         except OSError as e:
             log.warning("Target %s: cannot open run log: %s", spec.branch, e)
             results.append(TargetResult(
@@ -2212,8 +2674,10 @@ def run_targets(
 
             # --- Pipeline ---
             try:
-                dossier, _ = run_pipeline(target_config, claude_config, output_dir=target_run_dir)
-                outcome = "success"
+                dossier, run_tracker = run_pipeline(target_config, claude_config, output_dir=target_run_dir)
+                # The tracker may have downgraded a clean finish (e.g. to
+                # partial_success for an incomplete non-bugfix port).
+                outcome = run_tracker.outcome if run_tracker.outcome != "in_progress" else "success"
             except PipelineStop as e:
                 dossier = None
                 outcome = "pipeline_stop"
@@ -2235,7 +2699,7 @@ def run_targets(
                 try:
                     dossier_text = format_dossier(dossier)
                     dp = os.path.join(target_run_dir, DOSSIER_FILE)
-                    with open(dp, "w") as f:
+                    with open(dp, "w", encoding="utf-8") as f:
                         f.write(dossier_text)
                     dossier_path = os.path.join(sanitized, DOSSIER_FILE)
                     print(f"Dossier written to {dp}")
@@ -2264,7 +2728,9 @@ def run_targets(
             ))
             print(f"FINISHED target {spec.branch}: outcome={outcome}, duration={duration}s, cost=${cost_usd:.4f}")
 
-            if outcome == "success" and worktree_created:
+            # Preserve partial backports too — an incomplete port is exactly
+            # what a human needs to inspect and finish.
+            if outcome in ("success", "partial_success") and worktree_created:
                 try:
                     head_sha = git_rev_parse(worktree_path, "HEAD")
                     slug = _sanitize_branch_slug(
@@ -2276,7 +2742,7 @@ def run_targets(
                         branch_name += f"/{sanitized}"
                     result = subprocess.run(
                         ["git", "branch", "-f", branch_name, head_sha],
-                        cwd=source_path, capture_output=True, text=True,
+                        cwd=source_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
                     )
                     if result.returncode == 0:
                         log.info("Commits preserved on branch %s", branch_name)
@@ -2315,7 +2781,7 @@ if __name__ == "__main__":
         os.makedirs(parent_run_dir, exist_ok=True)
 
         log_path = os.path.join(parent_run_dir, "run_log.txt")
-        log_file = open(log_path, "w")
+        log_file = open(log_path, "w", encoding="utf-8")
         original_stdout = sys.stdout
         sys.stdout = Tee(original_stdout, log_file)
 
@@ -2325,7 +2791,7 @@ if __name__ == "__main__":
             print("Fetching latest refs from origin...")
             fetch_result = subprocess.run(
                 ["git", "fetch", "--all", "--quiet"],
-                cwd=source_path, capture_output=True, text=True,
+                cwd=source_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             fetch_warning = ""
             if fetch_result.returncode != 0:
@@ -2349,7 +2815,7 @@ if __name__ == "__main__":
         run_dir = "runs"
         os.makedirs(run_dir, exist_ok=True)
         log_path = os.path.join(run_dir, "run_log.txt")
-        log_file = open(log_path, "w")
+        log_file = open(log_path, "w", encoding="utf-8")
         original_stdout = sys.stdout
         sys.stdout = Tee(original_stdout, log_file)
 
@@ -2359,7 +2825,7 @@ if __name__ == "__main__":
 
             dossier_text = format_dossier(dossier)
             dossier_path = os.path.join(run_dir, DOSSIER_FILE)
-            with open(dossier_path, "w") as f:
+            with open(dossier_path, "w", encoding="utf-8") as f:
                 f.write(dossier_text)
             print(f"Dossier written to {dossier_path}")
 
@@ -2370,7 +2836,7 @@ if __name__ == "__main__":
             branch_name = f"amalgamator/{slug}"
             result = subprocess.run(
                 ["git", "branch", "-f", branch_name, "HEAD"],
-                cwd=bug_fix_config.repo_path, capture_output=True, text=True,
+                cwd=bug_fix_config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             if result.returncode == 0:
                 print(f"Commits preserved on branch {branch_name}")
@@ -2387,7 +2853,7 @@ if __name__ == "__main__":
             print(f"PIPELINE ERROR: {type(e).__name__}: {e}")
             exit_code = 1
         else:
-            exit_code = 0
+            exit_code = 0 if tracker.outcome == "success" else 1
         finally:
             duration = time.time() - start_time
             print(f"FINISHED: total_duration = {duration:.1f}s")
