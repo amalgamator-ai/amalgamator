@@ -18,13 +18,13 @@ def capture_output(cmd: list[str], cwd: str, timeout: int | None = None) -> tupl
         if len(cmd) == 1:
             result = subprocess.run(
                 cmd[0], cwd=cwd, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, shell=True,
+                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", shell=True,
                 timeout=timeout,
             )
         else:
             result = subprocess.run(
                 cmd, cwd=cwd, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True,
+                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
                 timeout=timeout,
             )
     except subprocess.TimeoutExpired as e:

@@ -52,7 +52,7 @@ import asyncio
 import argparse
 
 from common.utils import setup_logging, safe_clean_dir, clean_output_dir
-from common.claude_utils import claude_run, ClaudeConfig
+from common.claude_utils import claude_run, ProfilingClaudeConfig
 
 from auto_analyze.configs.cross_trace_config import CrossTraceConfig
 from auto_analyze.prompts.cross_trace_prompts import gen_cross_trace_prompts
@@ -61,7 +61,7 @@ from auto_analyze.prompts.cross_trace_prompts import gen_cross_trace_prompts
 def load_claude_config(claude_config_path, output_dir):
     with open(claude_config_path) as f:
         data = json.load(f)
-    return ClaudeConfig(
+    return ProfilingClaudeConfig(
         model=data["model"],
         allowed_tools=data["allowed_tools"],
         perm_mode="acceptEdits",

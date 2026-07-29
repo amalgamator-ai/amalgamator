@@ -637,12 +637,13 @@ def gen_single_trace_prompts(config: SingleTraceConfig, file_prefix=""):
     for i, (step_name, prompt_obj) in enumerate(
         zip(step_names, prompt_objects), 1
     ):
+        banner = f"\n=== [Step {i}/{total_steps}] {step_name}... ==="
+        # Bind the banner as a default argument: the lambda outlives this
+        # loop iteration and would otherwise close over the final value.
         prompts.append(
             {
-                "cmd": (
-                    f"print('\\n=== [Step {i}/{total_steps}]"
-                    f" {step_name}... ===')"
-                )
+                "fn": lambda text=banner: print(text),
+                "fn_name": f"print step banner ({i}/{total_steps})",
             }
         )
         prompts.append(prompt_obj.prompt())

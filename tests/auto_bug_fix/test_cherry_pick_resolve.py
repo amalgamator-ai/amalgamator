@@ -7,7 +7,7 @@ from unittest.mock import patch
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.dossier import Dossier
 from auto_bug_fix.run_bug_fix import PipelineState, cherry_pick_and_resolve
-from common.claude_utils import ClaudeConfig
+from auto_bug_fix.claude_utils import BugFixClaudeConfig
 
 BASE = """\
 void foo(void)
@@ -80,7 +80,7 @@ def _make_config(rp, fix_sha):
 
 
 def _make_claude_config(rp):
-    return ClaudeConfig(
+    return BugFixClaudeConfig(
         model="test-model",
         allowed_tools=["Read", "Write", "Bash"],
         perm_mode="acceptEdits",

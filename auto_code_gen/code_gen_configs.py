@@ -3,7 +3,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 
-from common.claude_utils import ClaudeConfig
+from auto_code_gen.claude_utils import ClaudeConfig, CodeGenClaudeConfig
 
 from auto_analyze.configs.cross_trace_config import (
     CrossTraceConfig,
@@ -423,140 +423,7 @@ class CodeGenConfig(PipelineConfig):
 
     def make_claude_config(self) -> ClaudeConfig:
         params = self._MODE_PARAMS[self.thinking_mode]
-        return ClaudeConfig(
-            model=params["model"],
-            allowed_tools=["Read", "Write", "Bash"],
-            perm_mode="acceptEdits",
-            cwd=self.output_dir,
-            thinking=params["thinking"],
-            effort=params["effort"],
-            max_thinking_tokens=params["max_thinking_tokens"],
-        )
-
-
-@dataclass
-class BugFixConfig(PipelineConfig):
-    repo_path: str = ""
-    build_dir: str = ""
-    source_branch: str = ""
-    target_branch: str = ""
-    source_fix_commit: list[str] = field(default_factory=list)  # Can be single commit or list
-    bug_description: str = ""
-    issue_id: str = ""
-    build_command: str = ""
-    test_command: str = ""
-    max_build_test_retries: int = 3
-    use_combined_code_and_test_port_plan: bool = True
-    enable_test_port: bool = True
-    enable_baseline_diff: bool = False
-
-    @classmethod
-    def from_json(cls, path: str) -> "BugFixConfig":
-        with open(path) as f:
-            data = json.load(f)
-
-        errors = []
-
-        # Validate required fields
-        repo_path = data.get("repo_path", "")
-        if not repo_path:
-            errors.append('"repo_path" is required.')
-        elif not os.path.isdir(repo_path):
-            errors.append(f'"repo_path" directory not found: {repo_path}')
-
-        source_branch = data.get("source_branch", "")
-        if not source_branch:
-            errors.append('"source_branch" is required.')
-
-        target_branch = data.get("target_branch", "")
-        if not target_branch:
-            errors.append('"target_branch" is required.')
-
-        source_fix_commit_raw = data.get("source_fix_commit", "")
-        if not source_fix_commit_raw:
-            errors.append('"source_fix_commit" is required.')
-
-        # Normalize to list: accept either string or list of strings
-        if isinstance(source_fix_commit_raw, str):
-            source_fix_commit = [source_fix_commit_raw]
-        elif isinstance(source_fix_commit_raw, list):
-            if not all(isinstance(c, str) for c in source_fix_commit_raw):
-                errors.append('"source_fix_commit" list must contain only strings.')
-            source_fix_commit = source_fix_commit_raw
-        else:
-            errors.append('"source_fix_commit" must be a string or a list of strings.')
-            source_fix_commit = []
-
-        output_dir = data.get("output_dir", "")
-        if not output_dir:
-            errors.append('"output_dir" is required.')
-
-        build_command = data.get("build_command", "")
-        if not build_command:
-            errors.append('"build_command" is required.')
-
-        test_command = data.get("test_command", "")
-        if not test_command:
-            errors.append('"test_command" is required.')
-
-        # Optional fields with defaults
-        build_dir = data.get("build_dir", repo_path)
-        bug_description = data.get("bug_description", "")
-        issue_id = data.get("issue_id", "")
-        max_build_test_retries = data.get("max_build_test_retries", 3)
-        use_combined_code_and_test_port_plan = data.get("use_combined_code_and_test_port_plan", True)
-        enable_test_port = data.get("enable_test_port", True)
-        enable_baseline_diff = data.get("enable_baseline_diff", False)
-        disallowed_modules = data.get("disallowed_modules", [])
-        thinking_mode = data.get("thinking-mode", "deep")
-
-        # Iteration counts
-        num_code_port_plan_iterations = data.get("num_code_port_plan_iterations", 3)
-        num_test_plan_iterations = data.get("num_test_plan_iterations", 3)
-        num_code_gen_iterations = data.get("num_code_gen_iterations", 3)
-
-        code_port_plan_skip_review = data.get("code_port_plan_skip_review", False)
-        test_plan_skip_review = data.get("test_plan_skip_review", False)
-        code_gen_skip_review = data.get("code_gen_skip_review", False)
-
-        if thinking_mode not in ("normal", "deep"):
-            errors.append('"thinking-mode" must be "normal" or "deep".')
-
-        if errors:
-            raise ValueError(
-                "Bug fix config errors:\n" + "\n".join(f"  - {e}" for e in errors)
-            )
-
-        return cls(
-            output_dir=os.path.abspath(output_dir),
-            source_code_dir=os.path.abspath(repo_path),
-            num_code_port_plan_iterations=num_code_port_plan_iterations,
-            num_test_plan_iterations=num_test_plan_iterations,
-            num_code_gen_iterations=num_code_gen_iterations,
-            disallowed_modules=disallowed_modules,
-            thinking_mode=thinking_mode,
-            repo_path=os.path.abspath(repo_path),
-            build_dir=os.path.abspath(build_dir),
-            source_branch=source_branch,
-            target_branch=target_branch,
-            source_fix_commit=source_fix_commit,
-            bug_description=bug_description,
-            issue_id=issue_id,
-            build_command=build_command,
-            test_command=test_command,
-            max_build_test_retries=max_build_test_retries,
-            use_combined_code_and_test_port_plan=use_combined_code_and_test_port_plan,
-            enable_test_port=enable_test_port,
-            enable_baseline_diff=enable_baseline_diff,
-            code_port_plan_skip_review=code_port_plan_skip_review,
-            test_plan_skip_review=test_plan_skip_review,
-            code_gen_skip_review=code_gen_skip_review,
-        )
-
-    # Reuse the same _MODE_PARAMS pattern from CodeGenConfig
-    def make_claude_config(self) -> ClaudeConfig:
-        params = CodeGenConfig._MODE_PARAMS[self.thinking_mode]
-        return ClaudeConfig(
+        return CodeGenClaudeConfig(
             model=params["model"],
             allowed_tools=["Read", "Write", "Bash"],
             perm_mode="acceptEdits",
@@ -570,8 +437,8 @@ class BugFixConfig(PipelineConfig):
 def load_config_and_use_case(path: str):
     """Load a pipeline config and its corresponding UseCase from a JSON file.
 
-    The JSON must have a "use_case" field ("llm_framework" or "bug_fix").
-    Defaults to "llm_framework" if not specified.
+    The optional "use_case" field must be "llm_framework", which is also the
+    default. Bug-fix porting lives in the ``auto_bug_fix`` package.
     """
     with open(path) as f:
         data = json.load(f)
@@ -581,8 +448,10 @@ def load_config_and_use_case(path: str):
     if use_case_name == "llm_framework":
         from auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase
         return CodeGenConfig.from_json(path), LLMFrameworkUseCase()
-    elif use_case_name == "bug_fix":
-        from auto_code_gen.use_cases.bug_fix import BugFixUseCase
-        return BugFixConfig.from_json(path), BugFixUseCase()
-    else:
-        raise ValueError(f'Unknown use_case: "{use_case_name}". Must be "llm_framework" or "bug_fix".')
+    if use_case_name == "bug_fix":
+        raise ValueError(
+            'use_case "bug_fix" was removed from auto_code_gen. Use the '
+            "auto_bug_fix pipeline instead: python -m auto_bug_fix.run_bug_fix "
+            "<config.yaml>"
+        )
+    raise ValueError(f'Unknown use_case: "{use_case_name}". Must be "llm_framework".')

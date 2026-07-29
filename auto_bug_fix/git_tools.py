@@ -17,12 +17,26 @@ class GitResult:
 
 
 def _run_git(repo_path: str, args: list[str], **kwargs) -> GitResult:
-    """Execute a git command in repo_path and return a GitResult."""
+    """Execute a git command in repo_path and return a GitResult.
+
+    Decodes as UTF-8 with replacement. Real codebases carry non-UTF-8 bytes
+    (latin-1 author names and comments are common in long-lived C trees), and
+    strict decoding turns any diff touching such a file into a
+    UnicodeDecodeError that aborts the run.
+
+    Replacement is safe *here* because this output drives analysis, verdicts,
+    prompts and logs. Anywhere byte-exactness is required — patch generation,
+    patch-ids, blob content for splicing — read bytes instead. See
+    git_format_patch_bytes, git_patch_id, mechanical._git_bytes and
+    snapback._git_blob.
+    """
     result = subprocess.run(
         ["git"] + args,
         cwd=repo_path,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         **kwargs,
     )
     return GitResult(result.returncode, result.stdout, result.stderr)
@@ -35,16 +49,24 @@ def git_show_files(repo_path: str, commit: str) -> list[str]:
 
 
 def git_patch_id(repo_path: str, commit: str) -> str:
-    """Compute stable patch-id for a commit. Returns empty string for merge commits."""
-    show = _run_git(repo_path, ["show", commit])
+    """Compute stable patch-id for a commit. Returns empty string for merge commits.
+
+    Piped as bytes end to end. A patch-id computed over lossily-decoded text
+    would not match the same patch elsewhere, and these ids gate the Phase 0
+    already-applied and predates-the-bug decisions — a wrong answer there is
+    worse than a crash.
+    """
+    show = subprocess.run(
+        ["git", "show", commit], cwd=repo_path, capture_output=True,
+    )
     pid = subprocess.run(
         ["git", "patch-id", "--stable"],
         cwd=repo_path,
         input=show.stdout,
         capture_output=True,
-        text=True,
     )
-    output = pid.stdout.strip()
+    # The id itself is hex, so decoding the result is always safe.
+    output = pid.stdout.decode("utf-8", "replace").strip()
     if not output:
         return ""
     return output.split()[0]
@@ -105,7 +127,7 @@ def is_merge_commit(repo_path: str, commit: str) -> bool:
     """Return True if commit has more than one parent (is a merge)."""
     r = subprocess.run(
         ["git", "rev-parse", "--verify", f"{commit}^2"],
-        cwd=repo_path, capture_output=True, text=True,
+        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     return r.returncode == 0
 
@@ -156,19 +178,42 @@ def git_diff_name_only_range(repo_path: str, ref_a: str, ref_b: str) -> list[str
     return [line for line in r.stdout.splitlines() if line.strip()]
 
 
-def git_range_diff(repo_path: str, upstream_range: str, ported_range: str) -> str:
-    """Run git range-diff and return stdout."""
-    r = _run_git(repo_path, ["range-diff", upstream_range, ported_range])
+def git_range_diff(
+    repo_path: str,
+    upstream_range: str,
+    ported_range: str,
+    creation_factor: int | None = None,
+) -> str:
+    """Run git range-diff and return stdout.
+
+    creation_factor: percentage passed to --creation-factor. Range-diff only
+    pairs commits whose diffs are similar enough; a high factor forces
+    pairing, which is what a deliberate one-to-one comparison wants.
+    """
+    args = ["range-diff"]
+    if creation_factor is not None:
+        args.append(f"--creation-factor={creation_factor}")
+    args += [upstream_range, ported_range]
+    r = _run_git(repo_path, args)
     return r.stdout
+
+
+def git_format_patch_bytes(repo_path: str, n: int = 1, base_ref: str | None = None) -> bytes:
+    """Generate a patch for the last n commits as raw bytes.
+
+    The patch is a deliverable that has to apply cleanly, so it must never be
+    round-tripped through a lossy decode — a replacement character would
+    silently produce a patch git cannot apply.
+    """
+    args = ["format-patch", "--stdout", base_ref] if base_ref \
+        else ["format-patch", f"-{n}", "--stdout"]
+    result = subprocess.run(["git"] + args, cwd=repo_path, capture_output=True)
+    return result.stdout
 
 
 def git_format_patch(repo_path: str, n: int = 1, base_ref: str | None = None) -> str:
-    """Generate a patch for the last n commits and return it as a string."""
-    if base_ref:
-        r = _run_git(repo_path, ["format-patch", "--stdout", base_ref])
-    else:
-        r = _run_git(repo_path, ["format-patch", f"-{n}", "--stdout"])
-    return r.stdout
+    """Patch text for display (dossier). Use git_format_patch_bytes to write it."""
+    return git_format_patch_bytes(repo_path, n, base_ref).decode("utf-8", "replace")
 
 
 def git_reset_hard(repo_path: str, ref: str = "HEAD") -> GitResult:
@@ -254,7 +299,7 @@ def resolve_merge_commit(repo_path: str, commit: str) -> str:
         ["git", "rev-parse", "--verify", f"{commit}^2"],
         cwd=repo_path,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
 
     if result.returncode == 0:

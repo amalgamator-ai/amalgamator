@@ -13,10 +13,10 @@ import argparse
 from common.utils import setup_logging, safe_clean_dir, output_dir_from_run_config, PROFILE_RESULTS_DIR
 from common.claude_utils import claude_run
 
-from common.claude_utils import ClaudeConfig
+from common.claude_utils import ProfilingClaudeConfig
 from auto_profile.parse_prompts import ParseResultsPrompt
 
-claude_config = ClaudeConfig(
+claude_config = ProfilingClaudeConfig(
     model="claude-opus-4-6",
     # model="claude-opus-4-5",
     allowed_tools=["Read", "Write", "Bash"],
