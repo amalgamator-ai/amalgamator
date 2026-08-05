@@ -41,8 +41,14 @@ class Tee(object):
 
     def write(self, obj):
         for f in self.files:
-            f.write(obj)
-            f.flush()  # Ensure immediate writing
+            while True:
+                try:
+                    f.write(obj)
+                    f.flush()
+                    break
+                except BlockingIOError:
+                    import time
+                    time.sleep(0.01)
 
     def flush(self):
         for f in self.files:
