@@ -277,9 +277,17 @@ def phase_0_triage(
             git_cat_file_exists(repo, target, f) for f in state.seed
         )
         if not seed_exists_on_target:
-            raise PipelineStop("Target branch is not affected (no ancestry, no patch-id match, no seed files)")
-        ancestry_status = "seed_files_only"
-        log.info("Ancestry/patch-id checks failed but seed files exist on target — proceeding with caution")
+            ancestry_status = "no_seed_files"
+            state.allowed_modules = list(state.seed)
+            log.warning(
+                "No ancestry, no patch-id match, and seed files not found on target. "
+                "The upstream fix touches: %s — the equivalent code may live in a "
+                "different file on the target branch. Proceeding anyway.",
+                ", ".join(state.seed),
+            )
+        else:
+            ancestry_status = "seed_files_only"
+            log.info("Ancestry/patch-id checks failed but seed files exist on target — proceeding with caution")
 
     return {"forward_patch_id": "not_found", "ancestry": ancestry_status}
 
@@ -2198,8 +2206,7 @@ def _run_pipeline_phases(
     try:
         prereqs = state.triage_assessment.get("prerequisites", [])
         portable_prereqs = [p for p in prereqs if p.get("portable", False) and p.get("introduced_by")]
-        is_bugfix = state.triage_assessment.get("commit_type", "").lower() in _BUGFIX_TYPES
-        if portable_prereqs and not is_bugfix:
+        if portable_prereqs:
             with tracker.phase("Phase 0.5b — Prerequisite chain"):
                 ported = port_prerequisite_chain(config, claude_config, state, tracker)
                 state.dossier.add(
