@@ -31,15 +31,15 @@ STATUS_SYMBOL = {
 
 def _ref_label(result) -> str:
     """Format a ref with its type prefix for display."""
-    if getattr(result, "ref_type", "branch") == "tag":
+    if result.ref_type == "tag":
         return f"[tag] {result.branch}"
     return result.branch
 
 
 def print_report(report: ScanReport) -> None:
     """Print a human-readable report to stdout."""
-    branch_results = [r for r in report.results if getattr(r, "ref_type", "branch") == "branch"]
-    tag_results = [r for r in report.results if getattr(r, "ref_type", "branch") == "tag"]
+    branch_results = [r for r in report.results if r.ref_type == "branch"]
+    tag_results = [r for r in report.results if r.ref_type == "tag"]
 
     print()
     print("=" * 70)
@@ -62,7 +62,7 @@ def print_report(report: ScanReport) -> None:
     print(f"  {'REF':<{col_w}}  STATUS")
     print(f"  {'-'*col_w}  {'-'*40}")
 
-    for result in sorted(report.results, key=lambda r: (getattr(r, "ref_type", "branch"), r.branch)):
+    for result in sorted(report.results, key=lambda r: (r.ref_type, r.branch)):
         icon = STATUS_ICON.get(result.status, result.status.value)
         label = _ref_label(result)
         print(f"  {label:<{col_w}}  {icon}")
@@ -105,7 +105,7 @@ def save_json(report: ScanReport, output_path: Path) -> None:
         "refs": [
             {
                 "name": r.branch,
-                "ref_type": getattr(r, "ref_type", "branch"),
+                "ref_type": r.ref_type,
                 "status": STATUS_SYMBOL.get(r.status, r.status.value),
                 "raw_status": r.status.value,
                 "method": r.method,

@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .triage import (
-    BranchCheckResult, FixStatus, check_ref, check_branch,
-    get_remote_branches, get_tags,
+    BranchCheckResult, FixStatus, check_ref,
+    get_remote_branches, get_tags, _run, _resolve_ref,
 )
 
 log = logging.getLogger(__name__)
@@ -102,26 +102,25 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
     asks the LLM whether the fix is present.
     """
     try:
-        import subprocess
-
         from common.claude_utils import make_anthropic_client
         client = make_anthropic_client()
 
-        from .triage import _resolve_ref
         ref = _resolve_ref(result.branch, result.ref_type)
         ref_label = f"tag '{result.branch}'" if result.ref_type == "tag" else f"branch '{result.branch}'"
+        ref_type_upper = "TAG" if result.ref_type == "tag" else "BRANCH"
 
-        fix_diff = subprocess.run(
+        _, fix_diff, _ = _run(
             ["git", "show", "--unified=5", config.fix_commit, "--", *result.changed_files],
-            cwd=config.repo_path, capture_output=True, text=True
-        ).stdout[:8000]
+            cwd=config.repo_path,
+        )
+        fix_diff = fix_diff[:8000]
 
         ref_content = ""
         for f in result.changed_files[:3]:
-            diff_lines = subprocess.run(
+            _, diff_lines, _ = _run(
                 ["git", "show", "--unified=0", config.fix_commit, "--", f],
-                cwd=config.repo_path, capture_output=True, text=True
-            ).stdout
+                cwd=config.repo_path,
+            )
 
             search_terms = []
             for line in diff_lines.splitlines():
@@ -131,10 +130,10 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
                 if len(search_terms) >= 5:
                     break
 
-            full_file = subprocess.run(
+            _, full_file, _ = _run(
                 ["git", "show", f"{ref}:{f}"],
-                cwd=config.repo_path, capture_output=True, text=True
-            ).stdout
+                cwd=config.repo_path,
+            )
 
             if search_terms and full_file:
                 lines = full_file.splitlines()
@@ -166,7 +165,7 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
 FIX COMMIT DIFF (what the fix adds/removes):
 {fix_diff}
 
-CURRENT STATE OF CHANGED FILES ON {ref_label.upper()}:
+CURRENT STATE OF CHANGED FILES ON {ref_type_upper} '{result.branch}':
 {ref_content}
 
 Question: Is the fix already applied on {ref_label}?
@@ -185,9 +184,10 @@ Provide a one-sentence explanation after your answer."""
         answer = response.content[0].text.strip()
         log.info("LLM answer for %s: %s", result.branch, answer[:120])
 
-        if "NEEDS_FIX" in answer.upper():
+        first_token = answer.split()[0].rstrip(":").upper() if answer.split() else ""
+        if first_token == "NEEDS_FIX":
             new_status = FixStatus.NEEDS_FIX
-        elif "FIXED" in answer.upper():
+        elif first_token == "FIXED":
             new_status = FixStatus.LIKELY_PRESENT
         else:
             new_status = FixStatus.AMBIGUOUS
@@ -227,32 +227,20 @@ def run_scan(config: ScanConfig) -> ScanReport:
         fix_description=config.fix_description,
     )
 
-    for branch in branches:
-        log.info("Checking branch: %s", branch)
+    refs_to_scan = [(b, "branch") for b in branches] + [(t, "tag") for t in tags]
+
+    for name, ref_type in refs_to_scan:
+        log.info("Checking %s: %s", ref_type, name)
         result = check_ref(
-            config.repo_path, branch, config.fix_commit,
-            vuln_commit=config.vuln_commit, ref_type="branch",
+            config.repo_path, name, config.fix_commit,
+            vuln_commit=config.vuln_commit, ref_type=ref_type,
         )
 
         if result.status == FixStatus.AMBIGUOUS:
-            log.info("Running LLM check for ambiguous result on %s", branch)
+            log.info("Running LLM check for ambiguous result on %s %s", ref_type, name)
             result = _llm_check(result, config)
 
-        log.info("  %s → %s (%s)", branch, result.status.value, result.method)
-        report.results.append(result)
-
-    for tag in tags:
-        log.info("Checking tag: %s", tag)
-        result = check_ref(
-            config.repo_path, tag, config.fix_commit,
-            vuln_commit=config.vuln_commit, ref_type="tag",
-        )
-
-        if result.status == FixStatus.AMBIGUOUS:
-            log.info("Running LLM check for ambiguous result on tag %s", tag)
-            result = _llm_check(result, config)
-
-        log.info("  %s → %s (%s)", tag, result.status.value, result.method)
+        log.info("  %s → %s (%s)", name, result.status.value, result.method)
         report.results.append(result)
 
     return report

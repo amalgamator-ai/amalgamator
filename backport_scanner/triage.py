@@ -1,9 +1,8 @@
 """
 backport_scanner/triage.py — shared ref triage logic.
 
-Single check_ref() (and its alias check_branch()) used by both:
-  - backport_scanner: loops over all refs (branches AND tags) to find which need a fix
-  - auto_bug_fix Phase 0: checks one ref before attempting a backport
+check_ref() used by backport_scanner to loop over all refs (branches AND
+tags) and determine which need a fix backported.
 
 Detection cascade (stops at first conclusive result):
   1. git_is_ancestor        — exact commit already reachable from ref
@@ -34,7 +33,7 @@ class FixStatus(str, Enum):
     NOT_AFFECTED   = "not_affected"      # branch predates the bug — no fix needed
     LIKELY_PRESENT = "likely_present"    # file diff heuristic says fix is there
     NEEDS_FIX      = "needs_fix"         # fix is absent — backport needed
-    AMBIGUOUS      = "ambiguous"         # inconclusive — enable LLM to resolve
+    AMBIGUOUS      = "ambiguous"         # inconclusive — LLM will attempt to resolve
     ERROR          = "error"             # git command failed
 
 
@@ -92,7 +91,7 @@ def get_tags(repo_path: Path, pattern: str | None = None) -> list[str]:
 def _resolve_ref(name: str, ref_type: str) -> str:
     """Return the git ref string for a branch or tag name."""
     if ref_type == "tag":
-        return name
+        return f"refs/tags/{name}"
     return f"origin/{name}"
 
 
@@ -173,6 +172,21 @@ def check_ref(
     target = _resolve_ref(name, ref_type)
     changed_files = git_show_files(repo, fix_commit)
 
+    # Validate that the ref actually exists before proceeding
+    rc, _, _ = _run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{target}^{{commit}}"],
+        cwd=repo_path,
+    )
+    if rc != 0:
+        return BranchCheckResult(
+            branch=name,
+            status=FixStatus.ERROR,
+            method="ref validation",
+            detail=f"Ref {target} does not exist or cannot be resolved",
+            changed_files=changed_files,
+            ref_type=ref_type,
+        )
+
     # Level 1: exact commit — reuses git_is_ancestor from auto_bug_fix
     if git_is_ancestor(repo, fix_commit, target):
         return BranchCheckResult(
@@ -226,7 +240,8 @@ def check_ref(
     detail_map = {
         FixStatus.LIKELY_PRESENT: f"85%+ of fix lines found in {target} files",
         FixStatus.NEEDS_FIX:      f"Fix lines not found in {target} files",
-        FixStatus.AMBIGUOUS:      "Inconclusive — enable llm.enabled: true to resolve",
+        FixStatus.AMBIGUOUS:      "Inconclusive — LLM semantic check will resolve",
+        FixStatus.NOT_AFFECTED:   f"Changed files not found on {target}",
     }
     return BranchCheckResult(
         branch=name,
@@ -236,13 +251,3 @@ def check_ref(
         changed_files=changed_files,
         ref_type=ref_type,
     )
-
-
-def check_branch(
-    repo_path: Path,
-    branch: str,
-    fix_commit: str,
-    vuln_commit: str | None = None,
-) -> BranchCheckResult:
-    """Backward-compatible alias: check a branch (ref_type='branch')."""
-    return check_ref(repo_path, branch, fix_commit, vuln_commit, ref_type="branch")

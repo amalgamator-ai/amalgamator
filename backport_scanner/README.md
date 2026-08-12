@@ -79,7 +79,7 @@ For each ref (branch or tag), a 5-level detection cascade runs in order — the 
 | `—  NOT AFFECTED` | Ref predates the bug — no fix needed |
 | `~  LIKELY FIXED` | Fix lines found via heuristic — verify manually |
 | `✗  NEEDS FIX` | Fix is absent — backport needed |
-| `?  AMBIGUOUS` | Inconclusive — enable LLM check |
+| `?  AMBIGUOUS` | Inconclusive — LLM semantic check will resolve |
 
 ---
 
@@ -177,24 +177,7 @@ python -m backport_scanner.run_scanner --config my_scan.yaml --verbose
 
 ### Step 3 — Generate Amalgamator configs and run the pipeline
 
-```bash
-# Auto-generate one YAML config per NEEDS_FIX ref (branch or tag)
-python -m backport_scanner.generate_config \
-  --config my_scan.yaml \
-  --mode generate \
-  --output-dir ./generated/
-
-# Run the Amalgamator pipeline for one ref
-python -m auto_bug_fix.run_bug_fix --config ./generated/release-1-33.yaml
-
-# Or run all generated configs in parallel
-for f in ./generated/*.yaml; do
-  python -m auto_bug_fix.run_bug_fix --config "$f" &
-done
-wait
-```
-
-> Each generated YAML targets one ref (branch or tag). The scanner produces one file per `NEEDS_FIX` ref automatically. Tag-based configs are prefixed with `tag-` (e.g. `tag-v6-1-120.yaml`).
+See the [Auto-generate Amalgamator YAML](#auto-generate-amalgamator-yaml-generate_configpy) section below for `generate`, `add`, and `verify` modes.
 
 ---
 
@@ -227,7 +210,7 @@ wait
 
 ----------------------------------------------------------------------
   NEEDS FIX    : 3 ref(s)
-  ALREADY FIXED: 2 ref(s)
+  ALREADY FIXED: 3 ref(s)
   NOT AFFECTED : 1 ref(s) — predates the bug
 ======================================================================
 ```
@@ -253,7 +236,7 @@ By default, `build.command` and `build.test_command` are left empty for you to f
 
 ```yaml
 llm:
-  enabled: false
+  # LLM is always used for ambiguous cases (Level 5)
   model: "claude-opus-4-6"
   discover_commands: true   # LLM fills in build/test commands
 ```
@@ -292,7 +275,7 @@ python -m backport_scanner.generate_config \
   "summary": {
     "total": 7,
     "needs_fix": 3,
-    "already_fixed": 2,
+    "already_fixed": 3,
     "ambiguous": 0,
     "errors": 0
   },
@@ -333,4 +316,3 @@ python -m backport_scanner.generate_config \
 |---|---|---|
 | [`openssl_scan.yaml`](configs/examples/openssl_scan.yaml) | OpenSSL release branches | Branches |
 | [`kubernetes_scan.yaml`](configs/examples/kubernetes_scan.yaml) | Kubernetes release branches | Branches |
-| [`linux_kernel_tags.yaml`](configs/examples/linux_kernel_tags.yaml) | Linux kernel stable releases | Tags |
