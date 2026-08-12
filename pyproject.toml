@@ -9,3 +9,6 @@ dependencies = [
     "colorama>=0.4.6",
     "pyyaml>=6.0",
 ]
+
+[tool.setuptools.packages.find]
+include = ["auto_bug_fix*", "auto_code_gen*", "auto_analyze*", "auto_profile*", "common*"]

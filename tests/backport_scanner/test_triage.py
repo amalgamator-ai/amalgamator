@@ -1,18 +1,15 @@
-"""Tests for backport_scanner/triage.py — check_branch() and check_ref() detection cascade."""
+"""Tests for backport_scanner/triage.py — check_ref() detection cascade."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from backport_scanner.triage import (
     BranchCheckResult,
     FixStatus,
     _check_file_diff,
     _resolve_ref,
-    check_branch,
     check_ref,
     get_tags,
 )
@@ -24,84 +21,80 @@ FIX = "abc1234567890"
 VULN = "def9876543210"
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+# ── check_ref: Level 1 (exact commit) ─────────────────────────────────────
 
-def _make_result(status: FixStatus, ref_type: str = "branch") -> BranchCheckResult:
-    name = TAG if ref_type == "tag" else BRANCH
-    return BranchCheckResult(
-        branch=name, status=status, method="test", detail="",
-        changed_files=["foo.go"], ref_type=ref_type,
-    )
-
-
-# ── check_branch: Level 1 (exact commit) ─────────────────────────────────────
-
+@patch("backport_scanner.triage._run", return_value=(0, "", ""))
 @patch("backport_scanner.triage.git_show_files", return_value=["server/foo.go"])
 @patch("backport_scanner.triage.git_is_ancestor", return_value=True)
-def test_check_branch_exact_match(mock_ancestor, mock_files):
-    result = check_branch(REPO, BRANCH, FIX)
+def test_check_ref_branch_exact_match(mock_ancestor, mock_files, mock_run):
+    result = check_ref(REPO, BRANCH, FIX, ref_type="branch")
     assert result.status == FixStatus.EXACT_MATCH
     assert result.method == "git_is_ancestor"
     mock_ancestor.assert_called_once_with(str(REPO), FIX, f"origin/{BRANCH}")
 
 
-# ── check_branch: Level 2 (equivalent patch) ─────────────────────────────────
+# ── check_ref: Level 2 (equivalent patch) ─────────────────────────────────
 
+@patch("backport_scanner.triage._run", return_value=(0, "", ""))
 @patch("backport_scanner.triage.git_show_files", return_value=["server/foo.go"])
 @patch("backport_scanner.triage.forward_patch_id_check", return_value="deadbeef1234")
 @patch("backport_scanner.triage.git_is_ancestor", return_value=False)
-def test_check_branch_equivalent(mock_ancestor, mock_fwd, mock_files):
-    result = check_branch(REPO, BRANCH, FIX)
+def test_check_ref_branch_equivalent(mock_ancestor, mock_fwd, mock_files, mock_run):
+    result = check_ref(REPO, BRANCH, FIX, ref_type="branch")
     assert result.status == FixStatus.EQUIVALENT
     assert result.method == "forward_patch_id_check"
     assert "deadbeef" in result.detail
 
 
-# ── check_branch: Level 3 (not affected — branch predates bug) ───────────────
+# ── check_ref: Level 3 (not affected — branch predates bug) ───────────────
 
+@patch("backport_scanner.triage._run", return_value=(0, "", ""))
 @patch("backport_scanner.triage.git_show_files", return_value=["server/foo.go"])
 @patch("backport_scanner.triage.git_cat_file_exists", return_value=False)
 @patch("backport_scanner.triage.backward_patch_id_check", return_value=None)
 @patch("backport_scanner.triage.forward_patch_id_check", return_value=None)
 @patch("backport_scanner.triage.git_is_ancestor", return_value=False)
-def test_check_branch_not_affected(mock_ancestor, mock_fwd, mock_bwd, mock_cat, mock_files):
-    result = check_branch(REPO, BRANCH, FIX, vuln_commit=VULN)
+def test_check_ref_branch_not_affected(mock_ancestor, mock_fwd, mock_bwd, mock_cat, mock_files, mock_run):
+    result = check_ref(REPO, BRANCH, FIX, vuln_commit=VULN, ref_type="branch")
     assert result.status == FixStatus.NOT_AFFECTED
     assert result.method == "backward_patch_id_check"
 
 
+@patch("backport_scanner.triage._run", return_value=(0, "", ""))
 @patch("backport_scanner.triage.git_show_files", return_value=["server/foo.go"])
 @patch("backport_scanner.triage.forward_patch_id_check", return_value=None)
 @patch("backport_scanner.triage.git_is_ancestor", return_value=False)
-def test_check_branch_no_vuln_commit_skips_level3(mock_ancestor, mock_fwd, mock_files):
+def test_check_ref_branch_no_vuln_commit_skips_level3(mock_ancestor, mock_fwd, mock_files, mock_run):
     """Without vuln_commit, level 3 is skipped entirely."""
     with patch("backport_scanner.triage._check_file_diff", return_value=FixStatus.NEEDS_FIX):
-        result = check_branch(REPO, BRANCH, FIX, vuln_commit=None)
+        result = check_ref(REPO, BRANCH, FIX, vuln_commit=None, ref_type="branch")
     assert result.status == FixStatus.NEEDS_FIX
 
 
-# ── check_branch: Level 4 (file diff heuristic) ──────────────────────────────
+# ── check_ref: Level 4 (file diff heuristic) ──────────────────────────────────
 
+@patch("backport_scanner.triage._run", return_value=(0, "", ""))
 @patch("backport_scanner.triage.git_show_files", return_value=["server/foo.go"])
 @patch("backport_scanner.triage.git_cat_file_exists", return_value=True)
 @patch("backport_scanner.triage.backward_patch_id_check", return_value=None)
 @patch("backport_scanner.triage.forward_patch_id_check", return_value=None)
 @patch("backport_scanner.triage.git_is_ancestor", return_value=False)
-def test_check_branch_needs_fix(mock_ancestor, mock_fwd, mock_bwd, mock_cat, mock_files):
+def test_check_ref_branch_needs_fix(mock_ancestor, mock_fwd, mock_bwd, mock_cat, mock_files, mock_run):
     with patch("backport_scanner.triage._check_file_diff", return_value=FixStatus.NEEDS_FIX):
-        result = check_branch(REPO, BRANCH, FIX, vuln_commit=VULN)
+        result = check_ref(REPO, BRANCH, FIX, vuln_commit=VULN, ref_type="branch")
     assert result.status == FixStatus.NEEDS_FIX
     assert result.method == "file diff heuristic"
 
 
+@patch("backport_scanner.triage._run", return_value=(0, "", ""))
 @patch("backport_scanner.triage.git_show_files", return_value=["server/foo.go"])
 @patch("backport_scanner.triage.git_cat_file_exists", return_value=True)
 @patch("backport_scanner.triage.backward_patch_id_check", return_value=None)
 @patch("backport_scanner.triage.forward_patch_id_check", return_value=None)
 @patch("backport_scanner.triage.git_is_ancestor", return_value=False)
-def test_check_branch_ambiguous(mock_ancestor, mock_fwd, mock_bwd, mock_cat, mock_files):
+def test_check_ref_branch_ambiguous(mock_ancestor, mock_fwd, mock_bwd, mock_cat, mock_files, mock_run):
     with patch("backport_scanner.triage._check_file_diff", return_value=FixStatus.AMBIGUOUS):
-        result = check_branch(REPO, BRANCH, FIX, vuln_commit=VULN)
+        result = check_ref(REPO, BRANCH, FIX, vuln_commit=VULN, ref_type="branch")
     assert result.status == FixStatus.AMBIGUOUS
 
 
@@ -172,7 +165,7 @@ def test_resolve_ref_branch():
 
 
 def test_resolve_ref_tag():
-    assert _resolve_ref("v6.12.25", "tag") == "v6.12.25"
+    assert _resolve_ref("v6.12.25", "tag") == "refs/tags/v6.12.25"
 
 
 # ── get_tags ──────────────────────────────────────────────────────────────────
@@ -201,29 +194,32 @@ def test_get_tags_empty(mock_run):
 
 # ── check_ref with ref_type="tag" ─────────────────────────────────────────────
 
+@patch("backport_scanner.triage._run", return_value=(0, "", ""))
 @patch("backport_scanner.triage.git_show_files", return_value=["net/core/dev.c"])
 @patch("backport_scanner.triage.git_is_ancestor", return_value=True)
-def test_check_ref_tag_exact_match(mock_ancestor, mock_files):
+def test_check_ref_tag_exact_match(mock_ancestor, mock_files, mock_run):
     result = check_ref(REPO, TAG, FIX, ref_type="tag")
     assert result.status == FixStatus.EXACT_MATCH
     assert result.ref_type == "tag"
-    mock_ancestor.assert_called_once_with(str(REPO), FIX, TAG)
+    mock_ancestor.assert_called_once_with(str(REPO), FIX, f"refs/tags/{TAG}")
 
 
+@patch("backport_scanner.triage._run", return_value=(0, "", ""))
 @patch("backport_scanner.triage.git_show_files", return_value=["net/core/dev.c"])
 @patch("backport_scanner.triage.forward_patch_id_check", return_value="deadbeef1234")
 @patch("backport_scanner.triage.git_is_ancestor", return_value=False)
-def test_check_ref_tag_equivalent(mock_ancestor, mock_fwd, mock_files):
+def test_check_ref_tag_equivalent(mock_ancestor, mock_fwd, mock_files, mock_run):
     result = check_ref(REPO, TAG, FIX, ref_type="tag")
     assert result.status == FixStatus.EQUIVALENT
     assert result.ref_type == "tag"
-    mock_fwd.assert_called_once_with(str(REPO), FIX, TAG)
+    mock_fwd.assert_called_once_with(str(REPO), FIX, f"refs/tags/{TAG}")
 
 
+@patch("backport_scanner.triage._run", return_value=(0, "", ""))
 @patch("backport_scanner.triage.git_show_files", return_value=["net/core/dev.c"])
 @patch("backport_scanner.triage.forward_patch_id_check", return_value=None)
 @patch("backport_scanner.triage.git_is_ancestor", return_value=False)
-def test_check_ref_tag_needs_fix(mock_ancestor, mock_fwd, mock_files):
+def test_check_ref_tag_needs_fix(mock_ancestor, mock_fwd, mock_files, mock_run):
     with patch("backport_scanner.triage._check_file_diff", return_value=FixStatus.NEEDS_FIX):
         result = check_ref(REPO, TAG, FIX, ref_type="tag")
     assert result.status == FixStatus.NEEDS_FIX
@@ -232,25 +228,15 @@ def test_check_ref_tag_needs_fix(mock_ancestor, mock_fwd, mock_files):
 
 @patch("backport_scanner.triage._run")
 def test_file_diff_tag_ref(mock_run):
-    """File diff heuristic uses tag name directly (no origin/ prefix)."""
+    """File diff heuristic uses refs/tags/ prefix (no origin/ prefix)."""
     fix_diff = "+new_function()\n+another_line()"
     def side_effect(cmd, cwd, timeout=30):
         if "--unified=0" in cmd:
             return 0, fix_diff, ""
         cmd_str = " ".join(cmd)
-        if f"{TAG}:foo.c" in cmd_str:
+        if f"refs/tags/{TAG}:foo.c" in cmd_str:
             return 0, "old_code()\n", ""
         return 1, "", "not found"
     mock_run.side_effect = side_effect
     result = _check_file_diff(REPO, TAG, FIX, ["foo.c"], ref_type="tag")
     assert result == FixStatus.NEEDS_FIX
-
-
-def test_check_branch_is_alias_for_check_ref():
-    """check_branch() should produce identical results to check_ref(ref_type='branch')."""
-    with patch("backport_scanner.triage.git_show_files", return_value=["foo.go"]), \
-         patch("backport_scanner.triage.git_is_ancestor", return_value=True):
-        r1 = check_branch(REPO, BRANCH, FIX)
-        r2 = check_ref(REPO, BRANCH, FIX, ref_type="branch")
-    assert r1.status == r2.status == FixStatus.EXACT_MATCH
-    assert r1.ref_type == "branch"

@@ -79,6 +79,11 @@ def main():
     log.info("Repo: %s", config.repo_path)
 
     report = run_scan(config)
+
+    if not report.results:
+        log.warning("No refs were scanned — config has neither branches nor tags.")
+        sys.exit(2)
+
     print_report(report)
 
     if args.output:
