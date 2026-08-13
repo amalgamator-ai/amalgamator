@@ -11,4 +11,4 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["auto_bug_fix*", "auto_code_gen*", "auto_analyze*", "auto_profile*", "common*"]
+include = ["auto_bug_fix*", "auto_code_gen*", "auto_analyze*", "auto_profile*", "backport_scanner*", "common*"]

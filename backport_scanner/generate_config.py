@@ -270,11 +270,12 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
     with open(existing_yaml) as f:
         existing = yaml.safe_load(f)
 
-    # Collect branches already in the existing YAML
-    existing_target = existing.get("branches", {}).get("target", "")
+    # Collect branches already in the existing YAML (supports both
+    # singular "target" and plural "targets" forms)
+    branches_section = existing.get("branches", {})
+    existing_target = branches_section.get("targets") or branches_section.get("target", "")
     existing_branches: set[str] = set()
     if isinstance(existing_target, str):
-        # single target — normalize (strip "origin/")
         existing_branches.add(existing_target.removeprefix("origin/"))
     elif isinstance(existing_target, list):
         existing_branches = {b.removeprefix("origin/") for b in existing_target}
@@ -297,10 +298,11 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
     for r in new_branches:
         ref_type_map[r.branch] = r.ref_type
     all_targets = sorted(existing_branches | {r.branch for r in new_branches})
-    existing["branches"]["target"] = [
+    existing["branches"]["targets"] = [
         name if ref_type_map.get(name, "branch") == "tag" else f"origin/{name}"
         for name in all_targets
     ]
+    existing["branches"].pop("target", None)
 
     with open(existing_yaml, "w") as f:
         yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
@@ -329,14 +331,15 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
     with open(existing_yaml) as f:
         existing = yaml.safe_load(f)
 
-    existing_target = existing.get("branches", {}).get("target", "")
+    branches_section = existing.get("branches", {})
+    existing_target = branches_section.get("targets") or branches_section.get("target", "")
     ref_type = existing.get("ref_type", "branch")
     if isinstance(existing_target, str):
         refs_to_check = [existing_target.removeprefix("origin/")]
     elif isinstance(existing_target, list):
         refs_to_check = [b.removeprefix("origin/") for b in existing_target]
     else:
-        log.error("Could not parse branches.target from YAML")
+        log.error("Could not parse branches.target/targets from YAML")
         sys.exit(1)
 
     fix_commit = existing.get("fix", {}).get("commit") or config.fix_commit

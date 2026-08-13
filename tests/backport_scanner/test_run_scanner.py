@@ -171,7 +171,7 @@ def test_mode_add_appends_new_branch(tmp_path, capsys):
         mode_add(cfg, existing)
 
     updated = yaml.safe_load(existing.read_text())
-    targets = updated["branches"]["target"]
+    targets = updated["branches"]["targets"]
     assert "origin/release-1.33" in targets
     assert "origin/release-1.34" in targets
 
