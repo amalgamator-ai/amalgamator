@@ -134,7 +134,7 @@ def _check_file_diff(
             content_all += content
 
     if files_found == 0:
-        return FixStatus.NOT_AFFECTED
+        return FixStatus.AMBIGUOUS
 
     matched = sum(1 for line in added_lines if line.strip() in content_all)
     ratio = matched / len(added_lines)
@@ -241,7 +241,6 @@ def check_ref(
         FixStatus.LIKELY_PRESENT: f"85%+ of fix lines found in {target} files",
         FixStatus.NEEDS_FIX:      f"Fix lines not found in {target} files",
         FixStatus.AMBIGUOUS:      "Inconclusive — LLM semantic check will resolve",
-        FixStatus.NOT_AFFECTED:   f"Changed files not found on {target}",
     }
     return BranchCheckResult(
         branch=name,
