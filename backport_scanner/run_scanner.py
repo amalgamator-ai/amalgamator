@@ -89,7 +89,9 @@ def main():
     if args.output:
         save_json(report, args.output)
 
-    # Exit code: 0 if all branches fixed, 1 if any need fix
+    if report.errors:
+        log.error("%d ref(s) failed validation — see report above", len(report.errors))
+        sys.exit(2)
     sys.exit(0 if not report.needs_fix else 1)
 
 

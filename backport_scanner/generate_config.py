@@ -153,10 +153,34 @@ TEST: python -m pytest"""
 
 # ── YAML template ─────────────────────────────────────────────────────────────
 
+def _parse_target_ref(raw: str) -> tuple[str, str]:
+    """Infer (bare_name, ref_type) from a stored target string."""
+    if raw.startswith("refs/tags/"):
+        return raw.removeprefix("refs/tags/"), "tag"
+    if raw.startswith("origin/"):
+        return raw.removeprefix("origin/"), "branch"
+    return raw, "tag"
+
+
+def _format_target_ref(name: str, ref_type: str) -> str:
+    """Format a bare ref name for YAML output."""
+    if ref_type == "tag":
+        return f"refs/tags/{name}"
+    return f"origin/{name}"
+
+
 def _safe_name(target_name: str, ref_type: str) -> str:
-    """Compute a collision-free safe name with a prefix for tags."""
+    """Compute a collision-resistant safe name with a prefix for tags.
+
+    Appends a short hash of the original name so that refs whose names
+    collapse under the / → - and . → - substitution (e.g. a/b.c vs a-b.c)
+    still produce distinct filenames and workdirs.
+    """
+    import hashlib
     prefix = "tag-" if ref_type == "tag" else ""
-    return f"{prefix}{target_name.replace('/', '-').replace('.', '-')}"
+    safe = target_name.replace("/", "-").replace(".", "-")
+    short_hash = hashlib.sha256(target_name.encode()).hexdigest()[:6]
+    return f"{prefix}{safe}-{short_hash}"
 
 
 def _make_bug_fix_yaml(
@@ -173,7 +197,7 @@ def _make_bug_fix_yaml(
     """Produce an auto_bug_fix-compatible YAML dict for one target ref."""
     short = fix_commit[:10]
     safe = _safe_name(target_name, ref_type)
-    target_ref = target_name if ref_type == "tag" else f"origin/{target_name}"
+    target_ref = _format_target_ref(target_name, ref_type)
     return {
         "issue_id": f"scan-{safe}-{short}",
         "bug_description": fix_description or f"Backport fix {short} to {target_name}",
@@ -271,15 +295,20 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
         existing = yaml.safe_load(f)
 
     # Collect branches already in the existing YAML (supports both
-    # singular "target" and plural "targets" forms)
+    # singular "target" and plural "targets" forms).  Track ref_type so
+    # existing tags are not silently rewritten as origin/<tag>.
     branches_section = existing.get("branches", {})
     existing_target = branches_section.get("targets") or branches_section.get("target", "")
-    existing_branches: set[str] = set()
+    ref_type_map: dict[str, str] = {}
     if isinstance(existing_target, str):
-        existing_branches.add(existing_target.removeprefix("origin/"))
+        name, rtype = _parse_target_ref(existing_target)
+        ref_type_map[name] = rtype
     elif isinstance(existing_target, list):
-        existing_branches = {b.removeprefix("origin/") for b in existing_target}
+        for entry in existing_target:
+            name, rtype = _parse_target_ref(entry)
+            ref_type_map[name] = rtype
 
+    existing_branches = set(ref_type_map.keys())
     log.info("Existing YAML already covers: %s", sorted(existing_branches))
 
     report = run_scan(config)
@@ -293,13 +322,11 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
         print_report(report)
         return
 
-    # Build a map of name → ref_type for proper prefix handling
-    ref_type_map: dict[str, str] = {}
     for r in new_branches:
         ref_type_map[r.branch] = r.ref_type
     all_targets = sorted(existing_branches | {r.branch for r in new_branches})
     existing["branches"]["targets"] = [
-        name if ref_type_map.get(name, "branch") == "tag" else f"origin/{name}"
+        _format_target_ref(name, ref_type_map.get(name, "branch"))
         for name in all_targets
     ]
     existing["branches"].pop("target", None)
@@ -333,15 +360,19 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
 
     branches_section = existing.get("branches", {})
     existing_target = branches_section.get("targets") or branches_section.get("target", "")
-    ref_type = existing.get("ref_type", "branch")
+    ref_type_map: dict[str, str] = {}
     if isinstance(existing_target, str):
-        refs_to_check = [existing_target.removeprefix("origin/")]
+        name, rtype = _parse_target_ref(existing_target)
+        ref_type_map[name] = rtype
     elif isinstance(existing_target, list):
-        refs_to_check = [b.removeprefix("origin/") for b in existing_target]
+        for entry in existing_target:
+            name, rtype = _parse_target_ref(entry)
+            ref_type_map[name] = rtype
     else:
         log.error("Could not parse branches.target/targets from YAML")
         sys.exit(1)
 
+    refs_to_check = list(ref_type_map.keys())
     fix_commit = existing.get("fix", {}).get("commit") or config.fix_commit
     log.info("Verifying %d ref(s) for commit %s", len(refs_to_check), fix_commit)
 
@@ -351,11 +382,10 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
     ambiguous: list[str] = []
 
     for name in refs_to_check:
-        entry_ref_type = ref_type if not name.startswith("origin/") else "branch"
         result = check_ref(
             config.repo_path, name, fix_commit,
             vuln_commit=config.vuln_commit,
-            ref_type=entry_ref_type,
+            ref_type=ref_type_map[name],
         )
         if result.status == FixStatus.NEEDS_FIX:
             still_needs.append(name)
