@@ -1,9 +1,9 @@
 """
-Entry point for the branch scanner.
+Entry point for the backport scanner.
 
 Usage:
-    python -m branch_scanner.run_scanner --config configs/examples/openssl_scan.yaml
-    python -m branch_scanner.run_scanner --config configs/examples/openssl_scan.yaml --output report.json
+    python -m backport_scanner.run_scanner --config configs/examples/openssl_scan.yaml
+    python -m backport_scanner.run_scanner --config configs/examples/openssl_scan.yaml --output report.json
 """
 
 import argparse
@@ -40,6 +40,8 @@ def load_config(config_path: Path) -> ScanConfig:
         vuln_commit=fix_cfg.get("vuln_commit"),
         branches=scan_cfg.get("branches", []),
         branch_pattern=scan_cfg.get("branch_pattern"),
+        tags=scan_cfg.get("tags", []),
+        tag_pattern=scan_cfg.get("tag_pattern"),
         llm_model=llm_cfg.get("model", "claude-opus-4-6"),
         fix_description=fix_cfg.get("description", ""),
         discover_commands=llm_cfg.get("discover_commands", False),
@@ -57,7 +59,7 @@ def main():
     )
     parser.add_argument(
         "--config", "-c", required=True, type=Path,
-        help="Path to YAML scan config file"
+        help="Path to YAML scan config file (supports branches and/or tags)"
     )
     parser.add_argument(
         "--output", "-o", type=Path, default=None,
@@ -73,16 +75,29 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
 
     config = load_config(args.config)
-    log.info("Starting branch scan for commit %s", config.fix_commit)
+    log.info("Starting backport scan for commit %s", config.fix_commit)
     log.info("Repo: %s", config.repo_path)
 
     report = run_scan(config)
+
+    if not report.results:
+        log.warning("No refs were scanned — config has neither branches nor tags.")
+        sys.exit(2)
+
     print_report(report)
 
     if args.output:
         save_json(report, args.output)
 
-    # Exit code: 0 if all branches fixed, 1 if any need fix
+    if report.errors:
+        log.error("%d ref(s) failed validation — see report above", len(report.errors))
+        sys.exit(2)
+    if report.ambiguous:
+        log.warning(
+            "%d ref(s) remain AMBIGUOUS after LLM check — manual review needed",
+            len(report.ambiguous),
+        )
+        sys.exit(3)
     sys.exit(0 if not report.needs_fix else 1)
 
 

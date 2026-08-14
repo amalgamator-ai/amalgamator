@@ -1,7 +1,7 @@
 """
-Main branch scanner orchestrator.
+Main scanner orchestrator — scans branches AND tags.
 
-For each branch in scope:
+For each ref (branch or tag) in scope:
   1. Run git-based checks (exact, cherry, file diff)
   2. Optionally run LLM semantic check for AMBIGUOUS results
   3. Collect results into a ScanReport
@@ -11,7 +11,10 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .triage import BranchCheckResult, FixStatus, check_branch, get_remote_branches
+from .triage import (
+    BranchCheckResult, FixStatus, check_ref,
+    get_remote_branches, get_tags, _run, _resolve_ref,
+)
 
 log = logging.getLogger(__name__)
 
@@ -22,10 +25,12 @@ class ScanConfig:
     fix_commit: str
     branches: list[str] = field(default_factory=list)
     branch_pattern: str | None = None
+    tags: list[str] = field(default_factory=list)
+    tag_pattern: str | None = None
     llm_model: str = "claude-opus-4-6"
     fix_description: str = ""
-    vuln_commit: str | None = None  # commit that introduced the bug (enables NOT_AFFECTED detection)
-    discover_commands: bool = False  # use LLM to auto-discover build/test commands per repo
+    vuln_commit: str | None = None
+    discover_commands: bool = False
 
 
 @dataclass
@@ -64,10 +69,28 @@ def resolve_branches(config: ScanConfig) -> list[str]:
         log.info("Using explicit branch list (%d branches)", len(config.branches))
         return config.branches
 
-    log.info("Auto-discovering branches with pattern: %s", config.branch_pattern)
-    discovered = get_remote_branches(config.repo_path, pattern=config.branch_pattern)
-    log.info("Discovered %d branches: %s", len(discovered), discovered)
-    return discovered
+    if config.branch_pattern:
+        log.info("Auto-discovering branches with pattern: %s", config.branch_pattern)
+        discovered = get_remote_branches(config.repo_path, pattern=config.branch_pattern)
+        log.info("Discovered %d branches: %s", len(discovered), discovered)
+        return discovered
+
+    return []
+
+
+def resolve_tags(config: ScanConfig) -> list[str]:
+    """Determine which tags to scan."""
+    if config.tags:
+        log.info("Using explicit tag list (%d tags)", len(config.tags))
+        return config.tags
+
+    if config.tag_pattern:
+        log.info("Auto-discovering tags with pattern: %s", config.tag_pattern)
+        discovered = get_tags(config.repo_path, pattern=config.tag_pattern)
+        log.info("Discovered %d tags: %s", len(discovered), discovered)
+        return discovered
+
+    return []
 
 
 
@@ -75,34 +98,30 @@ def resolve_branches(config: ScanConfig) -> list[str]:
 def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResult:
     """
     Use an LLM to resolve AMBIGUOUS cases.
-    Reads changed files on both source commit and target branch,
+    Reads changed files on both source commit and target ref,
     asks the LLM whether the fix is present.
     """
     try:
-        import subprocess
-
         from common.claude_utils import make_anthropic_client
         client = make_anthropic_client()
 
-        # Get the fix diff
-        fix_diff = subprocess.run(
+        ref = _resolve_ref(result.branch, result.ref_type)
+        ref_label = f"tag '{result.branch}'" if result.ref_type == "tag" else f"branch '{result.branch}'"
+        ref_type_upper = "TAG" if result.ref_type == "tag" else "BRANCH"
+
+        _, fix_diff, _ = _run(
             ["git", "show", "--unified=5", config.fix_commit, "--", *result.changed_files],
-            cwd=config.repo_path, capture_output=True, text=True
-        ).stdout[:8000]
+            cwd=config.repo_path,
+        )
+        fix_diff = fix_diff[:8000]
 
-        # Extract a focused patch-context window from each changed file on the branch.
-        # Instead of the raw file (can be huge), we use `git diff` to surface the
-        # lines that the original commit touched, then `git show` those hunks on the
-        # target branch via `grep -n` around the changed symbols.
-        branch_content = ""
+        ref_content = ""
         for f in result.changed_files[:3]:
-            # Pull the lines changed by the fix so we know what to look for
-            diff_lines = subprocess.run(
+            _, diff_lines, _ = _run(
                 ["git", "show", "--unified=0", config.fix_commit, "--", f],
-                cwd=config.repo_path, capture_output=True, text=True
-            ).stdout
+                cwd=config.repo_path,
+            )
 
-            # Extract added/removed lines to use as search anchors
             search_terms = []
             for line in diff_lines.splitlines():
                 stripped = line[1:].strip()
@@ -111,14 +130,12 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
                 if len(search_terms) >= 5:
                     break
 
-            # Get the file on the target branch and extract relevant sections
-            full_file = subprocess.run(
-                ["git", "show", f"origin/{result.branch}:{f}"],
-                cwd=config.repo_path, capture_output=True, text=True
-            ).stdout
+            _, full_file, _ = _run(
+                ["git", "show", f"{ref}:{f}"],
+                cwd=config.repo_path,
+            )
 
             if search_terms and full_file:
-                # Find lines in the file that are near the changed code
                 lines = full_file.splitlines()
                 relevant_lines: list[tuple[int, str]] = []
                 for i, line in enumerate(lines):
@@ -130,7 +147,6 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
                                 relevant_lines.append((j + 1, lines[j]))
                             break
 
-                # Deduplicate while preserving order
                 seen: set[int] = set()
                 unique_lines = []
                 for lineno, content in relevant_lines:
@@ -138,21 +154,21 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
                         seen.add(lineno)
                         unique_lines.append(f"{lineno:5d}: {content}")
 
-                section = "\n".join(unique_lines[:150])  # cap at 150 lines
+                section = "\n".join(unique_lines[:150])
             else:
                 section = full_file[:6000]
 
-            branch_content += f"\n\n--- {f} on {result.branch} (relevant sections) ---\n{section}"
+            ref_content += f"\n\n--- {f} on {result.branch} (relevant sections) ---\n{section}"
 
-        prompt = f"""You are a code review expert. I need to determine if a bug fix has already been applied to a branch.
+        prompt = f"""You are a code review expert. I need to determine if a bug fix has already been applied to a {ref_label}.
 
 FIX COMMIT DIFF (what the fix adds/removes):
 {fix_diff}
 
-CURRENT STATE OF CHANGED FILES ON BRANCH '{result.branch}':
-{branch_content}
+CURRENT STATE OF CHANGED FILES ON {ref_type_upper} '{result.branch}':
+{ref_content}
 
-Question: Is the fix already applied on branch '{result.branch}'?
+Question: Is the fix already applied on {ref_label}?
 Answer with exactly one of:
 - FIXED: The fix or its equivalent is already present
 - NEEDS_FIX: The fix is NOT present and needs to be applied
@@ -168,9 +184,10 @@ Provide a one-sentence explanation after your answer."""
         answer = response.content[0].text.strip()
         log.info("LLM answer for %s: %s", result.branch, answer[:120])
 
-        if "NEEDS_FIX" in answer.upper():
+        first_token = answer.split()[0].rstrip(":").upper() if answer.split() else ""
+        if first_token == "NEEDS_FIX":
             new_status = FixStatus.NEEDS_FIX
-        elif "FIXED" in answer.upper():
+        elif first_token == "FIXED":
             new_status = FixStatus.LIKELY_PRESENT
         else:
             new_status = FixStatus.AMBIGUOUS
@@ -181,6 +198,7 @@ Provide a one-sentence explanation after your answer."""
             method="LLM semantic check",
             detail=answer,
             changed_files=result.changed_files,
+            ref_type=result.ref_type,
         )
 
     except Exception as e:
@@ -190,11 +208,13 @@ Provide a one-sentence explanation after your answer."""
 
 def run_scan(config: ScanConfig) -> ScanReport:
     """
-    Main entry point. Scans all branches and returns a ScanReport.
+    Main entry point. Scans all branches and tags, returns a ScanReport.
     """
     branches = resolve_branches(config)
-    if not branches:
-        log.error("No branches found to scan.")
+    tags = resolve_tags(config)
+
+    if not branches and not tags:
+        log.error("No branches or tags found to scan.")
         return ScanReport(
             repo=str(config.repo_path),
             fix_commit=config.fix_commit,
@@ -207,19 +227,20 @@ def run_scan(config: ScanConfig) -> ScanReport:
         fix_description=config.fix_description,
     )
 
-    for branch in branches:
-        log.info("Checking branch: %s", branch)
-        result = check_branch(
-            config.repo_path, branch, config.fix_commit,
-            vuln_commit=config.vuln_commit,
+    refs_to_scan = [(b, "branch") for b in branches] + [(t, "tag") for t in tags]
+
+    for name, ref_type in refs_to_scan:
+        log.info("Checking %s: %s", ref_type, name)
+        result = check_ref(
+            config.repo_path, name, config.fix_commit,
+            vuln_commit=config.vuln_commit, ref_type=ref_type,
         )
 
-        # Always resolve ambiguous cases with LLM
         if result.status == FixStatus.AMBIGUOUS:
-            log.info("Running LLM check for ambiguous result on %s", branch)
+            log.info("Running LLM check for ambiguous result on %s %s", ref_type, name)
             result = _llm_check(result, config)
 
-        log.info("  %s → %s (%s)", branch, result.status.value, result.method)
+        log.info("  %s → %s (%s)", name, result.status.value, result.method)
         report.results.append(result)
 
     return report
