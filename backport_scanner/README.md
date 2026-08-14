@@ -39,20 +39,18 @@ flowchart TD
 
     L4 -- "≥85% present" --> LIKELY[~ LIKELY FIXED<br/>file diff heuristic]
     L4 -- "0% present" --> NEEDS[✗ NEEDS FIX]
-    L4 -- "Partial / inconclusive" --> L5{Level 5: LLM semantic check<br/>enabled?}
+    L4 -- "Partial / inconclusive" --> L5[Level 5: LLM semantic check]
 
-    L5 -- Yes --> LLM[Claude analyzes fix diff<br/>vs. ref file contents]
+    L5 --> LLM[Claude analyzes fix diff<br/>vs. ref file contents]
     LLM --> LLM_FIXED[✓ FIXED]
     LLM --> LLM_NEEDS[✗ NEEDS FIX]
     LLM --> LLM_UNC[? UNCERTAIN]
-    L5 -- No --> AMB[? AMBIGUOUS<br/>recommend LLM check]
 
     style EXACT fill:#2d6a4f,color:#fff
     style EQUIV fill:#2d6a4f,color:#fff
     style LIKELY fill:#52796f,color:#fff
     style NOTAFF fill:#6c757d,color:#fff
     style NEEDS fill:#d32f2f,color:#fff
-    style AMB fill:#f9a825,color:#000
     style LLM_FIXED fill:#2d6a4f,color:#fff
     style LLM_NEEDS fill:#d32f2f,color:#fff
     style LLM_UNC fill:#f9a825,color:#000
@@ -68,7 +66,7 @@ For each ref (branch or tag), a 5-level detection cascade runs in order — the 
 | 2 | `forward_patch_id_check()` | Same patch content, different SHA (e.g. manual cherry-pick) |
 | 3 | `backward_patch_id_check()` | Ref predates the bug — never affected |
 | 4 | File diff heuristic | 85%+ of the fix's added lines present in ref's files |
-| 5 *(optional)* | LLM semantic check | Claude resolves remaining `AMBIGUOUS` cases |
+| 5 | LLM semantic check | Claude resolves remaining `AMBIGUOUS` cases |
 
 **Possible results per ref:**
 
@@ -79,7 +77,7 @@ For each ref (branch or tag), a 5-level detection cascade runs in order — the 
 | `—  NOT AFFECTED` | Ref predates the bug — no fix needed |
 | `~  LIKELY FIXED` | Fix lines found via heuristic — verify manually |
 | `✗  NEEDS FIX` | Fix is absent — backport needed |
-| `?  AMBIGUOUS` | Inconclusive — LLM semantic check will resolve |
+| `?  AMBIGUOUS` | Inconclusive — LLM could not resolve; manual review needed |
 
 ---
 
