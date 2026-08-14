@@ -153,13 +153,27 @@ TEST: python -m pytest"""
 
 # ── YAML template ─────────────────────────────────────────────────────────────
 
-def _parse_target_ref(raw: str) -> tuple[str, str]:
-    """Infer (bare_name, ref_type) from a stored target string."""
+def _parse_target_entry(entry) -> tuple[str, str, dict]:
+    """Parse a target entry from branches.targets.
+
+    Entries can be:
+      - a plain string: "origin/release-1.33" or "refs/tags/v6.1.120"
+      - a mapping with per-target overrides: {"branch": "origin/release-1.33", "issue_id": "..."}
+
+    Returns (bare_name, ref_type, overrides_dict).
+    """
+    overrides: dict = {}
+    if isinstance(entry, dict):
+        raw = str(entry.get("branch", ""))
+        overrides = {k: v for k, v in entry.items() if k != "branch"}
+    else:
+        raw = str(entry)
+
     if raw.startswith("refs/tags/"):
-        return raw.removeprefix("refs/tags/"), "tag"
+        return raw.removeprefix("refs/tags/"), "tag", overrides
     if raw.startswith("origin/"):
-        return raw.removeprefix("origin/"), "branch"
-    return raw, "tag"
+        return raw.removeprefix("origin/"), "branch", overrides
+    return raw, "tag", overrides
 
 
 def _format_target_ref(name: str, ref_type: str) -> str:
@@ -294,27 +308,29 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
     with open(existing_yaml) as f:
         existing = yaml.safe_load(f)
 
-    # Collect branches already in the existing YAML (supports both
-    # singular "target" and plural "targets" forms).  Track ref_type so
-    # existing tags are not silently rewritten as origin/<tag>.
+    # Collect refs already in the existing YAML (supports both singular
+    # "target" and plural "targets" forms, and both string and mapping
+    # entries).  Key by (ref_type, name) so a branch and tag with the
+    # same bare name don't collide.
     branches_section = existing.get("branches", {})
     existing_target = branches_section.get("targets") or branches_section.get("target", "")
-    ref_type_map: dict[str, str] = {}
+    # (ref_type, name) -> original entry (preserves per-target overrides)
+    existing_refs: dict[tuple[str, str], object] = {}
     if isinstance(existing_target, str):
-        name, rtype = _parse_target_ref(existing_target)
-        ref_type_map[name] = rtype
+        name, rtype, _ = _parse_target_entry(existing_target)
+        existing_refs[(rtype, name)] = existing_target
     elif isinstance(existing_target, list):
         for entry in existing_target:
-            name, rtype = _parse_target_ref(entry)
-            ref_type_map[name] = rtype
+            name, rtype, _ = _parse_target_entry(entry)
+            existing_refs[(rtype, name)] = entry
 
-    existing_branches = set(ref_type_map.keys())
-    log.info("Existing YAML already covers: %s", sorted(existing_branches))
+    existing_names = {name for _, name in existing_refs}
+    log.info("Existing YAML already covers: %s", sorted(existing_names))
 
     report = run_scan(config)
     new_branches = [
         r for r in report.needs_fix
-        if r.branch not in existing_branches
+        if (r.ref_type, r.branch) not in existing_refs
     ]
 
     if not new_branches:
@@ -323,12 +339,9 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
         return
 
     for r in new_branches:
-        ref_type_map[r.branch] = r.ref_type
-    all_targets = sorted(existing_branches | {r.branch for r in new_branches})
-    existing["branches"]["targets"] = [
-        _format_target_ref(name, ref_type_map.get(name, "branch"))
-        for name in all_targets
-    ]
+        existing_refs[(r.ref_type, r.branch)] = _format_target_ref(r.branch, r.ref_type)
+    all_keys = sorted(existing_refs.keys(), key=lambda k: k[1])
+    existing["branches"]["targets"] = [existing_refs[k] for k in all_keys]
     existing["branches"].pop("target", None)
 
     with open(existing_yaml, "w") as f:
@@ -362,11 +375,11 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
     existing_target = branches_section.get("targets") or branches_section.get("target", "")
     ref_type_map: dict[str, str] = {}
     if isinstance(existing_target, str):
-        name, rtype = _parse_target_ref(existing_target)
+        name, rtype, _ = _parse_target_entry(existing_target)
         ref_type_map[name] = rtype
     elif isinstance(existing_target, list):
         for entry in existing_target:
-            name, rtype = _parse_target_ref(entry)
+            name, rtype, _ = _parse_target_entry(entry)
             ref_type_map[name] = rtype
     else:
         log.error("Could not parse branches.target/targets from YAML")

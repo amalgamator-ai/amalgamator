@@ -208,3 +208,50 @@ def test_mode_add_no_new_branches(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "up to date" in out
+
+
+def test_mode_add_preserves_mapping_entries(tmp_path, capsys):
+    """Mapping entries with per-target overrides must survive mode_add."""
+    existing = tmp_path / "fix.yaml"
+    existing.write_text(yaml.dump({
+        "fix": {"commit": "abc123"},
+        "branches": {
+            "source": "origin/main",
+            "targets": [
+                {"branch": "origin/release-1.33", "issue_id": "fix-to-1.33", "build_command": "make -j4"},
+            ],
+        },
+        "issue_id": "test",
+    }))
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = ScanConfig(repo_path=repo, fix_commit="abc123", branch_pattern="release-1.*")
+
+    new_branch_result = BranchCheckResult(
+        branch="release-1.34",
+        status=FixStatus.NEEDS_FIX,
+        method="git cherry",
+        detail="not found",
+        changed_files=[],
+    )
+
+    mock_report = MagicMock()
+    mock_report.needs_fix = [new_branch_result]
+    mock_report.results = [new_branch_result]
+
+    with patch("backport_scanner.generate_config.run_scan", return_value=mock_report):
+        from backport_scanner.generate_config import mode_add
+        mode_add(cfg, existing)
+
+    updated = yaml.safe_load(existing.read_text())
+    targets = updated["branches"]["targets"]
+    assert len(targets) == 2
+    # The mapping entry should be preserved with its overrides
+    mapping_entry = next(t for t in targets if isinstance(t, dict))
+    assert mapping_entry["branch"] == "origin/release-1.33"
+    assert mapping_entry["issue_id"] == "fix-to-1.33"
+    assert mapping_entry["build_command"] == "make -j4"
+    # The new string entry should be added
+    string_entries = [t for t in targets if isinstance(t, str)]
+    assert "origin/release-1.34" in string_entries

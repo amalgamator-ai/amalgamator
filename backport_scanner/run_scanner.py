@@ -92,6 +92,12 @@ def main():
     if report.errors:
         log.error("%d ref(s) failed validation — see report above", len(report.errors))
         sys.exit(2)
+    if report.ambiguous:
+        log.warning(
+            "%d ref(s) remain AMBIGUOUS after LLM check — manual review needed",
+            len(report.ambiguous),
+        )
+        sys.exit(3)
     sys.exit(0 if not report.needs_fix else 1)
 
 
