@@ -1,16 +1,16 @@
 """
-generate_config.py — bridge between branch scanner and auto_bug_fix YAML configs.
+generate_config.py — bridge between backport scanner and auto_bug_fix YAML configs.
 
 Three modes (Alessandro's three cases from design meeting):
 
-  generate  — scan branches → produce one auto_bug_fix YAML per NEEDS_FIX branch
-  add       — scan branches → append newly-found NEEDS_FIX branches to existing YAML
-  verify    — check branches listed in existing YAML still need the fix
+  generate  — scan branches/tags → produce one auto_bug_fix YAML per NEEDS_FIX ref
+  add       — scan → append newly-found NEEDS_FIX refs to existing YAML
+  verify    — check refs listed in existing YAML still need the fix
 
 Usage:
-    python -m branch_scanner.generate_config --config scan.yaml --mode generate --output-dir ./out/
-    python -m branch_scanner.generate_config --config scan.yaml --mode add     --existing-yaml fix.yaml
-    python -m branch_scanner.generate_config --config scan.yaml --mode verify  --existing-yaml fix.yaml
+    python -m backport_scanner.generate_config --config scan.yaml --mode generate --output-dir ./out/
+    python -m backport_scanner.generate_config --config scan.yaml --mode add     --existing-yaml fix.yaml
+    python -m backport_scanner.generate_config --config scan.yaml --mode verify  --existing-yaml fix.yaml
 """
 
 import argparse
@@ -22,9 +22,10 @@ from pathlib import Path
 import yaml
 
 from auto_bug_fix.git_tools import git_show_files
-from .triage import FixStatus, check_branch
+from .triage import FixStatus, check_ref
 from .run_scanner import load_config
 from .scanner import ScanConfig, run_scan
+from .report import print_report
 
 log = logging.getLogger(__name__)
 
@@ -152,29 +153,75 @@ TEST: python -m pytest"""
 
 # ── YAML template ─────────────────────────────────────────────────────────────
 
+def _parse_target_entry(entry) -> tuple[str, str, dict]:
+    """Parse a target entry from branches.targets.
+
+    Entries can be:
+      - a plain string: "origin/release-1.33" or "refs/tags/v6.1.120"
+      - a mapping with per-target overrides: {"branch": "origin/release-1.33", "issue_id": "..."}
+
+    Returns (bare_name, ref_type, overrides_dict).
+    """
+    overrides: dict = {}
+    if isinstance(entry, dict):
+        raw = str(entry.get("branch", ""))
+        overrides = {k: v for k, v in entry.items() if k != "branch"}
+    else:
+        raw = str(entry)
+
+    if raw.startswith("refs/tags/"):
+        return raw.removeprefix("refs/tags/"), "tag", overrides
+    if raw.startswith("origin/"):
+        return raw.removeprefix("origin/"), "branch", overrides
+    return raw, "tag", overrides
+
+
+def _format_target_ref(name: str, ref_type: str) -> str:
+    """Format a bare ref name for YAML output."""
+    if ref_type == "tag":
+        return f"refs/tags/{name}"
+    return f"origin/{name}"
+
+
+def _safe_name(target_name: str, ref_type: str) -> str:
+    """Compute a collision-resistant safe name with a prefix for tags.
+
+    Appends a short hash of the original name so that refs whose names
+    collapse under the / → - and . → - substitution (e.g. a/b.c vs a-b.c)
+    still produce distinct filenames and workdirs.
+    """
+    import hashlib
+    prefix = "tag-" if ref_type == "tag" else ""
+    safe = target_name.replace("/", "-").replace(".", "-")
+    short_hash = hashlib.sha256(target_name.encode()).hexdigest()[:6]
+    return f"{prefix}{safe}-{short_hash}"
+
+
 def _make_bug_fix_yaml(
     repo_path: Path,
     fix_commit: str,
     fix_description: str,
-    target_branch: str,
+    target_name: str,
     changed_files: list[str],
     build_command: str = "",
     test_command: str = "",
     default_branch: str = "main",
+    ref_type: str = "branch",
 ) -> dict:
-    """Produce an auto_bug_fix-compatible YAML dict for one target branch."""
+    """Produce an auto_bug_fix-compatible YAML dict for one target ref."""
     short = fix_commit[:10]
-    safe_branch = target_branch.replace("/", "-").replace(".", "-")
+    safe = _safe_name(target_name, ref_type)
+    target_ref = _format_target_ref(target_name, ref_type)
     return {
-        "issue_id": f"scan-{safe_branch}-{short}",
-        "bug_description": fix_description or f"Backport fix {short} to {target_branch}",
+        "issue_id": f"scan-{safe}-{short}",
+        "bug_description": fix_description or f"Backport fix {short} to {target_name}",
         "repository": {
             "source_path": str(repo_path),
-            "workdir": f"/tmp/bugfix-{safe_branch}-{short}",
+            "workdir": f"/tmp/bugfix-{safe}-{short}",
         },
         "branches": {
             "source": f"origin/{default_branch}",
-            "target": f"origin/{target_branch}",
+            "target": target_ref,
         },
         "fix": {
             "commit": fix_commit,
@@ -184,16 +231,15 @@ def _make_bug_fix_yaml(
             "test_command": test_command,
         },
         "model": "claude-opus-4-6",
-        "_changed_files": changed_files,  # informational, not used by pipeline
+        "changed_files": changed_files,
+        "ref_type": ref_type,
     }
 
 
 def _write_yaml(data: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Remove private keys before writing
-    clean = {k: v for k, v in data.items() if not k.startswith("_")}
     with open(path, "w") as f:
-        yaml.dump(clean, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
     log.info("  Written: %s", path)
 
 
@@ -228,14 +274,14 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
             repo_path=config.repo_path,
             fix_commit=config.fix_commit,
             fix_description=config.fix_description,
-            target_branch=result.branch,
+            target_name=result.branch,
             changed_files=changed_files,
             build_command=build_cmd,
             test_command=test_cmd,
             default_branch=default_branch,
+            ref_type=result.ref_type,
         )
-        safe = result.branch.replace("/", "-").replace(".", "-")
-        out_path = output_dir / f"{safe}.yaml"
+        out_path = output_dir / f"{_safe_name(result.branch, result.ref_type)}.yaml"
         _write_yaml(data, out_path)
 
     print(f"\nGenerated {len(report.needs_fix)} YAML config(s) in {output_dir}/")
@@ -246,7 +292,7 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
     else:
         print("  build.command and build.test_command are empty — fill in manually.")
     print("  Run: python -m auto_bug_fix.run_bug_fix --config <yaml>")
-    _print_summary(report)
+    print_report(report)
 
 
 # ── Mode: add ──────────────────────────────────────────────────────────────────
@@ -262,31 +308,41 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
     with open(existing_yaml) as f:
         existing = yaml.safe_load(f)
 
-    # Collect branches already in the existing YAML
-    existing_target = existing.get("branches", {}).get("target", "")
-    existing_branches: set[str] = set()
+    # Collect refs already in the existing YAML (supports both singular
+    # "target" and plural "targets" forms, and both string and mapping
+    # entries).  Key by (ref_type, name) so a branch and tag with the
+    # same bare name don't collide.
+    branches_section = existing.get("branches", {})
+    existing_target = branches_section.get("targets") or branches_section.get("target", "")
+    # (ref_type, name) -> original entry (preserves per-target overrides)
+    existing_refs: dict[tuple[str, str], object] = {}
     if isinstance(existing_target, str):
-        # single target — normalize (strip "origin/")
-        existing_branches.add(existing_target.removeprefix("origin/"))
+        name, rtype, _ = _parse_target_entry(existing_target)
+        existing_refs[(rtype, name)] = existing_target
     elif isinstance(existing_target, list):
-        existing_branches = {b.removeprefix("origin/") for b in existing_target}
+        for entry in existing_target:
+            name, rtype, _ = _parse_target_entry(entry)
+            existing_refs[(rtype, name)] = entry
 
-    log.info("Existing YAML already covers: %s", sorted(existing_branches))
+    existing_names = {name for _, name in existing_refs}
+    log.info("Existing YAML already covers: %s", sorted(existing_names))
 
     report = run_scan(config)
     new_branches = [
         r for r in report.needs_fix
-        if r.branch not in existing_branches
+        if (r.ref_type, r.branch) not in existing_refs
     ]
 
     if not new_branches:
         print("\nNo new branches to add — existing YAML is up to date.")
-        _print_summary(report)
+        print_report(report)
         return
 
-    # Append new branches as additional target entries (list form)
-    all_targets = sorted(existing_branches | {r.branch for r in new_branches})
-    existing["branches"]["target"] = [f"origin/{b}" for b in all_targets]
+    for r in new_branches:
+        existing_refs[(r.ref_type, r.branch)] = _format_target_ref(r.branch, r.ref_type)
+    all_keys = sorted(existing_refs.keys(), key=lambda k: k[1])
+    existing["branches"]["targets"] = [existing_refs[k] for k in all_keys]
+    existing["branches"].pop("target", None)
 
     with open(existing_yaml, "w") as f:
         yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
@@ -294,14 +350,19 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
     print(f"\nAdded {len(new_branches)} new branch(es) to {existing_yaml}:")
     for r in new_branches:
         print(f"  + {r.branch}")
-    _print_summary(report)
+    print_report(report)
 
 
 # ── Mode: verify ───────────────────────────────────────────────────────────────
 
+_ALREADY_FIXED_STATUSES = frozenset({
+    FixStatus.EXACT_MATCH, FixStatus.EQUIVALENT, FixStatus.LIKELY_PRESENT,
+})
+
+
 def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
-    """Check each branch in an existing YAML to confirm it still needs the fix."""
-    log.info("Mode: verify — checking branches in %s", existing_yaml)
+    """Check each ref in an existing YAML to confirm it still needs the fix."""
+    log.info("Mode: verify — checking refs in %s", existing_yaml)
 
     if not existing_yaml.exists():
         log.error("Existing YAML not found: %s", existing_yaml)
@@ -310,44 +371,51 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
     with open(existing_yaml) as f:
         existing = yaml.safe_load(f)
 
-    existing_target = existing.get("branches", {}).get("target", "")
+    branches_section = existing.get("branches", {})
+    existing_target = branches_section.get("targets") or branches_section.get("target", "")
+    ref_type_map: dict[str, str] = {}
     if isinstance(existing_target, str):
-        branches_to_check = [existing_target.removeprefix("origin/")]
+        name, rtype, _ = _parse_target_entry(existing_target)
+        ref_type_map[name] = rtype
     elif isinstance(existing_target, list):
-        branches_to_check = [b.removeprefix("origin/") for b in existing_target]
+        for entry in existing_target:
+            name, rtype, _ = _parse_target_entry(entry)
+            ref_type_map[name] = rtype
     else:
-        log.error("Could not parse branches.target from YAML")
+        log.error("Could not parse branches.target/targets from YAML")
         sys.exit(1)
 
+    refs_to_check = list(ref_type_map.keys())
     fix_commit = existing.get("fix", {}).get("commit") or config.fix_commit
-    log.info("Verifying %d branch(es) for commit %s", len(branches_to_check), fix_commit)
+    log.info("Verifying %d ref(s) for commit %s", len(refs_to_check), fix_commit)
 
     still_needs: list[str] = []
     already_fixed: list[str] = []
     not_affected: list[str] = []
     ambiguous: list[str] = []
 
-    for branch in branches_to_check:
-        result = check_branch(
-            config.repo_path, branch, fix_commit,
+    for name in refs_to_check:
+        result = check_ref(
+            config.repo_path, name, fix_commit,
             vuln_commit=config.vuln_commit,
+            ref_type=ref_type_map[name],
         )
         if result.status == FixStatus.NEEDS_FIX:
-            still_needs.append(branch)
-        elif result.status in (FixStatus.EXACT_MATCH, FixStatus.EQUIVALENT, FixStatus.LIKELY_PRESENT):
-            already_fixed.append(branch)
+            still_needs.append(name)
+        elif result.status in _ALREADY_FIXED_STATUSES:
+            already_fixed.append(name)
         elif result.status == FixStatus.NOT_AFFECTED:
-            not_affected.append(branch)
+            not_affected.append(name)
         else:
-            ambiguous.append(branch)
-        log.info("  %s → %s", branch, result.status.value)
+            ambiguous.append(name)
+        log.info("  %s → %s", name, result.status.value)
 
     print("\n" + "=" * 60)
     print("  VERIFY REPORT")
     print("=" * 60)
     print(f"  Config:      {existing_yaml}")
     print(f"  Fix commit:  {fix_commit}")
-    print(f"  Checked:     {len(branches_to_check)} branch(es)")
+    print(f"  Checked:     {len(refs_to_check)} ref(s)")
     print()
 
     if still_needs:
@@ -359,7 +427,7 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
         for b in already_fixed:
             print(f"      - {b}")
     if not_affected:
-        print(f"  ~ Not affected ({len(not_affected)}) — branch predates the bug, may have been incorrectly included:")
+        print(f"  ~ Not affected ({len(not_affected)}) — ref predates the bug, may have been incorrectly included:")
         for b in not_affected:
             print(f"      - {b}")
     if ambiguous:
@@ -370,32 +438,9 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
     print("=" * 60)
 
     if already_fixed:
-        print("\nTip: Remove already-fixed branches from the YAML to avoid redundant runs.")
+        print("\nTip: Remove already-fixed refs from the YAML to avoid redundant runs.")
     if not_affected:
-        print("\nTip: NOT_AFFECTED branches may have been incorrectly added — review and remove if so.")
-
-
-# ── Shared helpers ─────────────────────────────────────────────────────────────
-
-def _print_summary(report) -> None:
-    print()
-    print(f"  Scanned {len(report.results)} branch(es) total:")
-    if report.needs_fix:
-        print(f"    NEEDS FIX    : {len(report.needs_fix)}")
-        for r in report.needs_fix:
-            print(f"      ✗ {r.branch}")
-    if report.already_fixed:
-        print(f"    ALREADY FIXED: {len(report.already_fixed)}")
-        for r in report.already_fixed:
-            print(f"      ✓ {r.branch}")
-    if report.not_affected:
-        print(f"    NOT AFFECTED : {len(report.not_affected)}")
-        for r in report.not_affected:
-            print(f"      — {r.branch}")
-    if report.ambiguous:
-        print(f"    AMBIGUOUS    : {len(report.ambiguous)} (run with llm.enabled: true to resolve)")
-        for r in report.ambiguous:
-            print(f"      ? {r.branch}")
+        print("\nTip: NOT_AFFECTED refs may have been incorrectly added — review and remove if so.")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
