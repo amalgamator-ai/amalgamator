@@ -59,6 +59,8 @@ claude_run = _run_llm
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.git_tools import (
+    COAUTHOR_TRAILERS as _COAUTHOR_TRAILERS,
+    _run_git,
     git_cherry_pick,
     git_cherry_pick_abort,
     git_status_porcelain,
@@ -75,7 +77,6 @@ from auto_bug_fix.git_tools import (
     git_is_ancestor,
     git_cat_file_exists,
     is_merge_commit,
-    git_worktree_add,
 )
 from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
 from auto_bug_fix.signature import capture_output
@@ -102,8 +103,9 @@ from auto_bug_fix.evidence import (
 )
 from auto_bug_fix.allowlist import derive_seed, resolve_renames, enforce_allowlist, enforce_test_file_veto
 from auto_bug_fix.baseline import check_regression, run_test_suite, parse_test_failures, TIMEOUT_EXIT_CODE
-from auto_bug_fix.worktree import cleanup_worktree
-from auto_bug_fix.config_loader import load_multi_target_config, TargetSpec, _sanitize_ref
+from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
+from auto_bug_fix.config_loader import load_multi_target_config, TargetSpec, _sanitize_ref, ConfigError
+from auto_bug_fix.ingest import ingest_patch, IngestError, PATCH_TRAILER_KEY
 from auto_bug_fix.range_diff import run_range_diff, parse_equivalence
 from auto_bug_fix.dossier import Dossier, build_trailers, format_dossier
 from auto_bug_fix.tracker import Tracker
@@ -140,9 +142,6 @@ _PIPELINE_ARTIFACTS = (
 )
 
 log = logging.getLogger(__name__)
-
-_COAUTHOR_TRAILERS = {"Co-authored-by": "amalgamator <amalgamator@redhat.com>"}
-
 
 def _sanitize_branch_slug(raw: str) -> str:
     """Make *raw* safe for use inside a git branch name (``git check-ref-format``)."""
@@ -2093,6 +2092,12 @@ def run_pipeline(
         from auto_bug_fix.bug_fix_config import claude_config as _default
         claude_config = _default
 
+    if not config.source_fix_commit:
+        raise ConfigError(
+            "source_fix_commit is empty. In patch mode, run ingest_patch() "
+            "before calling run_pipeline."
+        )
+
     tracker = Tracker(
         issue_id=config.issue_id,
         config_dict=asdict(config),
@@ -2130,6 +2135,17 @@ def _run_pipeline_phases(
     tracker: Tracker,
 ) -> tuple[Dossier, Tracker]:
     """Execute all pipeline phases. Separated from run_pipeline for try/finally tracker saving."""
+    if config.fix_patch:
+        msg = _run_git(config.repo_path, ["log", "-1", "--format=%B", config.source_fix_commit])
+        trailer_match = [l for l in msg.stdout.splitlines() if l.startswith(f"{PATCH_TRAILER_KEY}:")]
+        ingest_lines = [
+            f"Patch file: {config.fix_patch}",
+            f"Source fix commit (synthetic): {config.source_fix_commit}",
+        ]
+        if trailer_match:
+            ingest_lines.append(f"Trailer: {trailer_match[0]}")
+        state.dossier.add("Patch ingest", "\n".join(ingest_lines), "Phase -1 — Ingest")
+
     with tracker.phase("Phase 0 — Triage"):
         triage_gates = phase_0_triage(config, claude_config, state)
         state.dossier.add("Triage result", str(triage_gates), "Phase 0")
@@ -2141,10 +2157,11 @@ def _run_pipeline_phases(
                 # With source == target (fix commit passed separately, e.g.
                 # unrelated-history setups) the scan would walk the target's
                 # entire history for upstream follow-ups — wrong corpus.
+                followup_ref = config.fix_upstream_ref or config.source_fix_commit
                 if git_rev_parse(config.repo_path, config.source_branch) != \
                         git_rev_parse(config.repo_path, config.target_branch):
                     state.followup_fixes = scan_followup_fixes(
-                        config.repo_path, config.source_fix_commit, config.source_branch)
+                        config.repo_path, followup_ref, config.source_branch)
                 if state.followup_fixes:
                     state.followup_fixes_commit = git_rev_parse(
                         config.repo_path, config.source_fix_commit)
@@ -2654,15 +2671,12 @@ def run_targets(
 
         try:
             # --- Worktree setup ---
-            cleanup_worktree(source_path, worktree_path)
-            if os.path.exists(worktree_path):
-                shutil.rmtree(worktree_path)
-
             print(f"Creating worktree at {worktree_path} on {spec.branch}...")
-            wt_result = git_worktree_add(source_path, worktree_path, spec.branch)
-            if not wt_result.success:
-                print(f"ERROR: git worktree add failed: {wt_result.stderr.strip()}")
-                log.warning("Target %s: worktree creation failed: %s", spec.branch, wt_result.stderr)
+            try:
+                create_fresh_worktree(source_path, worktree_path, spec.branch)
+            except RuntimeError as e:
+                print(f"ERROR: {e}")
+                log.warning("Target %s: worktree creation failed: %s", spec.branch, e)
                 results.append(TargetResult(
                     target_branch=spec.branch,
                     issue_id=target_config.issue_id,
@@ -2671,7 +2685,7 @@ def run_targets(
                     cost_usd=0.0,
                     dossier_path="",
                     tracker_path="",
-                    error=f"git worktree add failed: {wt_result.stderr.strip()}",
+                    error=str(e),
                 ))
                 continue
             worktree_created = True
@@ -2811,7 +2825,35 @@ if __name__ == "__main__":
             build_subdir = os.path.relpath(base_config.build_dir, base_config.repo_path)
 
             run_warnings = [fetch_warning] if fetch_warning else []
+
+            if base_config.fix_patch:
+                print(f"Phase -1: ingesting patch {base_config.fix_patch}...")
+                ingest_result = ingest_patch(
+                    source_path, base_config.fix_patch,
+                    base_config.source_branch, base_config.issue_id,
+                    base_config.bug_description, workdir,
+                )
+                base_config.source_fix_commit = ingest_result.synthetic_commit
+                print(f"Patch ingested as {ingest_result.synthetic_commit[:12]} "
+                      f"(method={ingest_result.method}, base={ingest_result.base_sha[:12]})")
+                ingest_path = os.path.join(parent_run_dir, "ingest.json")
+                with open(ingest_path, "w") as f:
+                    json.dump({
+                        "synthetic_commit": ingest_result.synthetic_commit,
+                        "base_ref": ingest_result.base_ref,
+                        "base_sha": ingest_result.base_sha,
+                        "method": ingest_result.method,
+                        "patch_sha256": ingest_result.patch_sha256,
+                        "patch_path": base_config.fix_patch,
+                        "warnings": ingest_result.warnings,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }, f, indent=2)
+                run_warnings.extend(ingest_result.warnings)
+
             results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir, run_warnings=run_warnings)
+        except IngestError as e:
+            print(f"INGEST ERROR: {e}")
+            sys.exit(1)
         finally:
             sys.stdout = original_stdout
             log_file.close()

@@ -18,7 +18,6 @@ from auto_bug_fix.run_bug_fix import (
     _COAUTHOR_TRAILERS,
 )
 from auto_bug_fix.config_loader import TargetSpec, _sanitize_ref
-from auto_bug_fix.git_tools import GitResult
 from auto_bug_fix.dossier import Dossier
 from auto_bug_fix.baseline import TIMEOUT_EXIT_CODE
 
@@ -344,7 +343,7 @@ _BASE_CFG = dict(
 
 
 @patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
-@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.create_fresh_worktree")
 @patch("auto_bug_fix.run_bug_fix.run_pipeline")
 def test_run_targets_continues_on_failure(mock_pipeline, mock_wt_add, mock_cleanup, tmp_path):
     """Headline test: failure on target 1 must not prevent target 2 from running."""
@@ -361,7 +360,7 @@ def test_run_targets_continues_on_failure(mock_pipeline, mock_wt_add, mock_clean
         return _make_dossier(config.issue_id), MagicMock(outcome="success")
 
     mock_pipeline.side_effect = pipeline_side_effect
-    mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
+    mock_wt_add.return_value = None
 
     targets = [
         TargetSpec(branch="branch-a", issue_id="fix-a"),
@@ -397,7 +396,7 @@ def test_run_targets_continues_on_failure(mock_pipeline, mock_wt_add, mock_clean
 
 
 @patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
-@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.create_fresh_worktree")
 @patch("auto_bug_fix.run_bug_fix.run_pipeline")
 def test_run_targets_single_target(mock_pipeline, mock_wt_add, mock_cleanup, tmp_path):
     """Single-element list produces correct directory structure."""
@@ -408,7 +407,7 @@ def test_run_targets_single_target(mock_pipeline, mock_wt_add, mock_cleanup, tmp
         return _make_dossier(config.issue_id), MagicMock(outcome="success")
 
     mock_pipeline.side_effect = pipeline_side_effect
-    mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
+    mock_wt_add.return_value = None
 
     targets = [TargetSpec(branch="release-1.34")]
     parent_run_dir = str(tmp_path / "runs" / "single")
@@ -429,7 +428,7 @@ def test_run_targets_single_target(mock_pipeline, mock_wt_add, mock_cleanup, tmp
 
 
 @patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
-@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.create_fresh_worktree")
 @patch("auto_bug_fix.run_bug_fix.run_pipeline")
 def test_run_targets_cost_recovery_on_failure(mock_pipeline, mock_wt_add, mock_cleanup, tmp_path):
     """TargetResult.cost_usd is populated from tracker JSON even when run_pipeline raises."""
@@ -440,7 +439,7 @@ def test_run_targets_cost_recovery_on_failure(mock_pipeline, mock_wt_add, mock_c
         raise PipelineStop("already fixed")
 
     mock_pipeline.side_effect = pipeline_side_effect
-    mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
+    mock_wt_add.return_value = None
 
     targets = [TargetSpec(branch="target-1")]
     parent_run_dir = str(tmp_path / "runs" / "cost")
@@ -459,7 +458,7 @@ def test_run_targets_cost_recovery_on_failure(mock_pipeline, mock_wt_add, mock_c
 
 
 @patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
-@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.create_fresh_worktree")
 @patch("auto_bug_fix.run_bug_fix.run_pipeline")
 def test_run_targets_worktree_failure_continues(mock_pipeline, mock_wt_add, mock_cleanup, tmp_path):
     """Worktree failure on target 1 records worktree_error and target 2 still runs."""
@@ -467,11 +466,10 @@ def test_run_targets_worktree_failure_continues(mock_pipeline, mock_wt_add, mock
 
     call_count = [0]
 
-    def wt_add_side_effect(source_path, worktree_path, branch):
+    def wt_add_side_effect(source_path, worktree_path, ref):
         call_count[0] += 1
         if call_count[0] == 1:
-            return GitResult(exit_code=1, stdout="", stderr="fatal: invalid ref: bad-branch")
-        return GitResult(exit_code=0, stdout="", stderr="")
+            raise RuntimeError("git worktree add failed: fatal: invalid ref: bad-branch")
 
     mock_wt_add.side_effect = wt_add_side_effect
 
@@ -657,7 +655,7 @@ def test_red_triage_integration_not_vulnerable_raises_stop(mock_claude, mock_cap
 
 
 @patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
-@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.create_fresh_worktree")
 @patch("auto_bug_fix.run_bug_fix.run_pipeline")
 def test_run_targets_records_fetch_warning_in_summary(
     mock_pipeline, mock_wt_add, mock_cleanup, tmp_path,
@@ -665,7 +663,7 @@ def test_run_targets_records_fetch_warning_in_summary(
     """A git fetch failure must be recorded in summary.json, not crash."""
     base_config = BugFixConfig(**_BASE_CFG)
     mock_pipeline.return_value = (_make_dossier("fix-1"), MagicMock(outcome="success"))
-    mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
+    mock_wt_add.return_value = None
 
     targets = [TargetSpec(branch="branch-a", issue_id="fix-1")]
     claude_cfg = MagicMock()
@@ -956,7 +954,7 @@ def test_completeness_regenerated_skip_file_counts_as_ported(tmp_path):
 
 
 @patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
-@patch("auto_bug_fix.run_bug_fix.git_worktree_add")
+@patch("auto_bug_fix.run_bug_fix.create_fresh_worktree")
 @patch("auto_bug_fix.run_bug_fix.run_pipeline")
 def test_run_targets_propagates_partial_success(mock_pipeline, mock_wt_add, mock_cleanup, tmp_path):
     """A tracker-downgraded outcome must reach TargetResult (and the exit code)."""
@@ -967,7 +965,7 @@ def test_run_targets_propagates_partial_success(mock_pipeline, mock_wt_add, mock
         return _make_dossier(config.issue_id), MagicMock(outcome="partial_success")
 
     mock_pipeline.side_effect = pipeline_side_effect
-    mock_wt_add.return_value = GitResult(exit_code=0, stdout="", stderr="")
+    mock_wt_add.return_value = None
 
     targets = [TargetSpec(branch="release-1.34")]
     parent_run_dir = str(tmp_path / "runs" / "partial")
