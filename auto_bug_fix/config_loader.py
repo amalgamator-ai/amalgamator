@@ -130,7 +130,15 @@ def _require_mapping(config: dict, key: str) -> dict:
     return val
 
 
-def validate_config(config: dict[str, Any]) -> None:
+def _resolve_patch_path(raw: str, config_dir: str) -> str:
+    """Expand and resolve a patch path, making relative paths relative to config_dir."""
+    expanded = expand_path(raw)
+    if not os.path.isabs(expanded) and config_dir:
+        expanded = os.path.join(config_dir, expanded)
+    return os.path.normpath(os.path.abspath(expanded))
+
+
+def validate_config(config: dict[str, Any], config_dir: str = "") -> None:
     """Validate configuration structure and required fields."""
     required = ["issue_id", "bug_description", "repository", "branches", "fix", "build"]
     missing = [f for f in required if f not in config]
@@ -142,14 +150,30 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("repository.source_path is required")
 
     branches = _require_mapping(config, "branches")
-    if branches.get("source") is None:
-        raise ConfigError("branches.source is required")
     if branches.get("target") is None:
         raise ConfigError("branches.target is required")
 
     fix = _require_mapping(config, "fix")
-    if fix.get("commit") is None:
-        raise ConfigError("fix.commit is required")
+    has_commit = fix.get("commit") is not None
+    has_patch = fix.get("patch") is not None
+
+    if has_commit and has_patch:
+        raise ConfigError("fix.commit and fix.patch are mutually exclusive — specify one, not both")
+    if not has_commit and not has_patch:
+        raise ConfigError("fix.commit or fix.patch is required")
+
+    if has_patch:
+        resolved = _resolve_patch_path(str(fix["patch"]), config_dir)
+        if not os.path.isfile(resolved):
+            raise ConfigError(f"fix.patch file not found: {resolved}")
+        if branches.get("source") is None:
+            branches["source"] = "origin/main"
+            log.info("branches.source defaulting to 'origin/main' in patch mode")
+    else:
+        if branches.get("source") is None:
+            raise ConfigError("branches.source is required")
+        if fix.get("upstream_ref") is not None:
+            log.warning("fix.upstream_ref is only used in patch mode — ignored in commit mode")
 
     _require_mapping(config, "build")
 
@@ -161,9 +185,12 @@ def expand_path(path: str | None, default: str = "") -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
-def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str]:
+def parse_bug_fix_config(
+    config: dict[str, Any],
+    config_dir: str = "",
+) -> tuple[BugFixConfig, str, str]:
     """Parse YAML/JSON config into BugFixConfig dataclass."""
-    validate_config(config)
+    validate_config(config, config_dir=config_dir)
 
     source_path = os.path.normpath(expand_path(config["repository"]["source_path"]))
     workdir = expand_path(config["repository"].get("workdir"), "/tmp/bugfix-workdir")
@@ -188,12 +215,25 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
         else None
     )
 
+    fix = config["fix"]
+    is_patch_mode = fix.get("patch") is not None
+
+    fix_patch = ""
+    fix_upstream_ref = ""
+    source_fix_commit = ""
+
+    if is_patch_mode:
+        fix_patch = _resolve_patch_path(str(fix["patch"]), config_dir)
+        fix_upstream_ref = str(fix.get("upstream_ref", "") or "")
+    else:
+        source_fix_commit = str(fix["commit"])
+
     bug_fix_config = BugFixConfig(
         repo_path=repo_path,
         build_dir=build_dir,
         source_branch=str(config["branches"]["source"]),
         target_branch=str(config["branches"]["target"]),
-        source_fix_commit=str(config["fix"]["commit"]),
+        source_fix_commit=source_fix_commit,
         bug_description=str(config["bug_description"]),
         issue_id=str(config["issue_id"]),
         build_command=config["build"].get("command", ""),
@@ -216,6 +256,8 @@ def parse_bug_fix_config(config: dict[str, Any]) -> tuple[BugFixConfig, str, str
             minimum=0.0, maximum=1.0),
         phase_4b_model=advanced_str(
             advanced, "phase_4b_model", "claude-opus-4-6"),
+        fix_patch=fix_patch,
+        fix_upstream_ref=fix_upstream_ref,
     )
 
     return bug_fix_config, workdir, source_path
@@ -239,12 +281,13 @@ def parse_claude_config(config: dict[str, Any], output_dir: str) -> ClaudeConfig
 def load_pipeline_config(config_path: str) -> tuple[BugFixConfig, ClaudeConfig, str, str]:
     """Load and parse full pipeline configuration."""
     config = load_config_file(config_path)
+    config_dir = str(Path(config_path).resolve().parent)
     output_section = config.get("output", {})
     if not isinstance(output_section, dict):
         output_section = {}
     output_dir = expand_path(output_section.get("directory"), "./runs")
 
-    bug_fix_config, workdir, source_path = parse_bug_fix_config(config)
+    bug_fix_config, workdir, source_path = parse_bug_fix_config(config, config_dir=config_dir)
     claude_config = parse_claude_config(config, output_dir)
 
     return bug_fix_config, claude_config, workdir, source_path
@@ -343,6 +386,7 @@ def load_multi_target_config(
     to satisfy the required field.
     """
     config = load_config_file(config_path)
+    config_dir = str(Path(config_path).resolve().parent)
 
     targets = parse_targets(config)
 
@@ -358,7 +402,7 @@ def load_multi_target_config(
         output_section = {}
     output_dir = expand_path(output_section.get("directory"), "./runs")
 
-    bug_fix_config, workdir, source_path = parse_bug_fix_config(config)
+    bug_fix_config, workdir, source_path = parse_bug_fix_config(config, config_dir=config_dir)
     claude_config = parse_claude_config(config, output_dir)
 
     return targets, bug_fix_config, claude_config, workdir, source_path
