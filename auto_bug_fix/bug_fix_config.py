@@ -59,3 +59,8 @@ class BugFixConfig:
     # Optional per-file check run over touched files after resolution,
     # e.g. "gcc -fsyntax-only {file}". {file} is replaced with the absolute path.
     file_check_command: str = ""
+
+    # Patch-file ingest (Phase -1). Mutually exclusive with source_fix_commit
+    # at config time; source_fix_commit is filled in after ingest.
+    fix_patch: str = ""
+    fix_upstream_ref: str = ""

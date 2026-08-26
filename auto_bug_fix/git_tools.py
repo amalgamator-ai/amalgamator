@@ -16,6 +16,11 @@ class GitResult:
         return self.exit_code == 0
 
 
+# Trailer identifying commits authored by the pipeline. Single source of
+# truth for run_bug_fix, dossier.build_trailers, and ingest.
+COAUTHOR_TRAILERS = {"Co-authored-by": "amalgamator <amalgamator@redhat.com>"}
+
+
 def _run_git(repo_path: str, args: list[str], **kwargs) -> GitResult:
     """Execute a git command in repo_path and return a GitResult.
 

@@ -118,6 +118,54 @@ def test_validate_config_missing_nested():
         validate_config(config)
 
 
+def _fix_cfg(fix, branches=None):
+    """Minimal valid config with the given fix section (and optional branches override)."""
+    return {
+        "issue_id": "CVE-2026-1234",
+        "bug_description": "Test",
+        "repository": {"source_path": "/tmp/test-repo", "workdir": "/tmp/workdir"},
+        "branches": {"source": "main", "target": "v1.0"} if branches is None else branches,
+        "fix": fix,
+        "build": {},
+    }
+
+
+def _write_patch(directory) -> str:
+    patch_file = directory / "fix.patch"
+    patch_file.write_text("diff content")
+    return str(patch_file)
+
+
+def test_validate_config_fix_commit_xor_patch_both(tmp_path):
+    config = _fix_cfg({"commit": "abc123", "patch": _write_patch(tmp_path)})
+    with pytest.raises(ConfigError, match="mutually exclusive"):
+        validate_config(config)
+
+
+def test_validate_config_fix_neither():
+    config = _fix_cfg({})
+    with pytest.raises(ConfigError, match="fix.commit or fix.patch is required"):
+        validate_config(config)
+
+
+def test_validate_config_patch_mode_defaults_source(tmp_path):
+    config = _fix_cfg({"patch": _write_patch(tmp_path)}, branches={"target": "v1.0"})
+    validate_config(config)
+    assert config["branches"]["source"] == "origin/main"
+
+
+def test_validate_config_commit_mode_requires_source():
+    config = _fix_cfg({"commit": "abc123"}, branches={"target": "v1.0"})
+    with pytest.raises(ConfigError, match="branches.source is required"):
+        validate_config(config)
+
+
+def test_validate_config_patch_not_found():
+    config = _fix_cfg({"patch": "/nonexistent/fix.patch"}, branches={"target": "v1.0"})
+    with pytest.raises(ConfigError, match="not found"):
+        validate_config(config)
+
+
 def test_expand_path():
     os.environ["TEST_VAR"] = "/test/path"
     assert expand_path("~/foo") == os.path.expanduser("~/foo")
@@ -549,3 +597,35 @@ def test_phase_4b_model_unusable_value_falls_back(bad, caplog):
     cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({"phase_4b_model": bad}))
     assert cfg.phase_4b_model == "claude-opus-4-6"
     assert "non-empty string" in caplog.text
+
+
+# --- patch mode in parse_bug_fix_config ---
+
+def test_parse_patch_mode_populates_fix_patch(tmp_path):
+    patch = _write_patch(tmp_path)
+    cfg, _, _ = parse_bug_fix_config(_fix_cfg({"patch": patch}))
+    assert cfg.fix_patch == patch
+    assert cfg.source_fix_commit == ""
+    assert cfg.fix_upstream_ref == ""
+
+
+def test_parse_patch_mode_upstream_ref(tmp_path):
+    patch = _write_patch(tmp_path)
+    cfg, _, _ = parse_bug_fix_config(
+        _fix_cfg({"patch": patch, "upstream_ref": "deadbeef1234"}))
+    assert cfg.fix_upstream_ref == "deadbeef1234"
+
+
+def test_parse_patch_mode_relative_path_resolves_against_config_dir(tmp_path):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    patch = _write_patch(config_dir)
+    cfg, _, _ = parse_bug_fix_config(
+        _fix_cfg({"patch": "fix.patch"}), config_dir=str(config_dir))
+    assert cfg.fix_patch == patch
+
+
+def test_parse_commit_mode_leaves_patch_empty():
+    cfg, _, _ = parse_bug_fix_config(_fix_cfg({"commit": "abc123"}))
+    assert cfg.fix_patch == ""
+    assert cfg.source_fix_commit == "abc123"

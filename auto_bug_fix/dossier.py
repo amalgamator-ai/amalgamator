@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from auto_bug_fix.git_tools import COAUTHOR_TRAILERS
+
 
 @dataclass
 class DossierItem:
@@ -53,7 +55,7 @@ def build_trailers(
     trailers = {
         "AutoBugFix-Phase": phase,
         "AutoBugFix-Model": model,
-        "Co-authored-by": "amalgamator <amalgamator@redhat.com>",
+        **COAUTHOR_TRAILERS,
     }
     if resolved_hunks:
         trailers["AutoBugFix-Resolved-Hunks"] = resolved_hunks
