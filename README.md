@@ -48,6 +48,8 @@ Worked examples with full analysis results:
 ```
 ai_auto_analyze/
 ├── common/                             # Shared utilities
+│   ├── llm_client.py                   #   Model-agnostic LLM completion (LiteLLM)
+│   ├── agent_runner.py                 #   Agent dispatch: Claude SDK or LiteLLM tool loop
 │   ├── claude_utils.py                 #   Claude Agent SDK wrapper
 │   ├── utils.py                        #   Logging, directory cleanup, output dir helpers
 │   └── convert_nsys_to_sqlite.sh       #   NSYS trace format converter
@@ -107,10 +109,11 @@ ai_auto_analyze/
 
 ## Prerequisites
 
-- Python 3.10+
-- [Claude Agent Python SDK](https://pypi.org/project/claude-agent-sdk/) (`pip install claude-agent-sdk`)
-- Framework source code (clean git repos for each framework being analyzed)
-- GPU trace files (PyTorch Chrome traces or NSYS traces)
+- Python 3.14+ (use [uv](https://docs.astral.sh/uv/) for version management)
+- Dependencies: `uv sync` (installs `claude-agent-sdk`, `litellm`, `colorama`, `pyyaml`)
+- An LLM endpoint — Claude via Vertex AI, a local Ollama instance, a
+  self-hosted vLLM server, or an OpenAI API key
+- For GPU analysis: framework source code and GPU trace files
 
 ## Quick Start
 
@@ -251,13 +254,158 @@ This orchestrates:
 
 Use `run_all_scheduled.sh` to schedule execution at a future time with GPU availability checks.
 
-## Claude Agent Integration
+## Model-Agnostic LLM Support
 
-All AI-driven steps use the Claude Agent SDK via `common/claude_utils.py`:
+The backporting pipeline was originally built to work only with Claude
+(Anthropic) models. It now supports **any LLM provider** — Claude,
+open-weight models like Qwen and Llama (via Ollama or vLLM), OpenAI GPT,
+and any OpenAI-compatible API server.
+
+### What changed
+
+The pipeline logic (phases 0–5, git operations, cherry-pick, build-test-fix)
+is **unchanged**. What changed is the layer that talks to the LLM:
+
+- A unified completion layer (`common/llm_client.py`) routes all LLM calls
+  through [LiteLLM](https://github.com/BerriAI/litellm), which handles
+  provider differences automatically.
+- An agent runner (`common/agent_runner.py`) provides a tool-use loop for
+  non-Claude models, giving them the same `read_file`, `write_file`, and
+  `bash` capabilities that the Claude Agent SDK provides.
+- The YAML config now accepts `model_params` (temperature, top_p, etc.)
+  and `api_key_file` (path to an API key on disk), so you can tune model
+  behavior and manage credentials without editing code or environment variables.
+
+To switch models, you only change the config YAML — **no code changes required**.
+
+### Before vs After
+
+**Before** (Claude-only):
+
+```yaml
+model: "claude-opus-4-6"
+# temperature, api keys, etc. were hardcoded or set via env vars
+```
+
+**After** (any model, with optional tuning):
+
+```yaml
+model: "openai/Qwen3-27B"
+api_base: "http://your-server:8000/v1"
+model_params:
+  temperature: 0
+  top_p: 0.95
+api_key_file: "~/.keys/vllm"
+```
+
+Existing Claude configs continue to work with zero changes.
+
+### Supported Providers
+
+| Provider | YAML `model:` value | `api_base:` needed? | Cost tracking |
+|----------|---------------------|---------------------|---------------|
+| **Claude via Vertex AI** | `claude-opus-4-6` | No (uses `CLAUDE_CODE_USE_VERTEX` env var) | Per-token cloud pricing |
+| **Claude direct API** | `claude-opus-4-6` | No (uses `ANTHROPIC_API_KEY` env var) | Per-token cloud pricing |
+| **Ollama (local)** | `ollama/qwen3:14b` | No (default `localhost:11434`) | $0.00 (self-hosted) |
+| **vLLM / TGI (remote)** | `openai/<model-name>` | **Yes** | $0.00 (self-hosted) |
+| **OpenAI** | `gpt-4o` | No | Per-token cloud pricing |
+
+### Config Examples
+
+**Claude via Vertex AI** (default — no changes needed from existing configs):
+
+```yaml
+model: "claude-opus-4-6"
+```
+
+Set `CLAUDE_CODE_USE_VERTEX=1` and authenticate via `gcloud auth login`.
+
+**Self-hosted vLLM / TGI server:**
+
+```yaml
+model: "openai/Inferact/Qwen3.8-27B-NVFP4"
+api_base: "http://your-server:8000/v1"
+```
+
+Set `OPENAI_API_KEY=dummy` (required by the client library, but not
+validated by self-hosted servers). The `api_base` can also be set via
+the `OPENAI_API_BASE` environment variable.
+
+**Self-hosted vLLM with tuned parameters:**
+
+```yaml
+model: "openai/Qwen3-27B"
+api_base: "http://your-server:8000/v1"
+model_params:
+  temperature: 0
+  max_tokens: 16384
+  top_p: 0.95
+api_key_file: "~/.keys/vllm"
+```
+
+**Local Ollama:**
+
+```yaml
+model: "ollama/qwen3:14b"
+```
+
+Ensure Ollama is running (`ollama serve`). Thinking-mode tags are
+automatically stripped for models that emit them (Qwen 3, DeepSeek-R1).
+
+### Config Reference
+
+All fields below are set at the **top level** of the pipeline YAML config.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `model` | string | No | LiteLLM model identifier (see provider table above). Defaults to `claude-sonnet-4-6`. |
+| `api_base` | string | No | Base URL for OpenAI-compatible endpoints (vLLM, TGI). Can also be set via `OPENAI_API_BASE` env var. |
+| `model_params` | mapping | No | Parameters merged into every LLM call. Supports any key the provider accepts: `temperature`, `top_p`, `max_tokens`, `reasoning_effort`, etc. |
+| `api_key` | string | No | Explicit API key. Overrides the `OPENAI_API_KEY` environment variable. |
+| `api_key_file` | string | No | Path to a file containing the API key. Supports `~` expansion (e.g. `~/.keys/vllm`). The file contents are read and trimmed at startup. |
+| `claude.allowed_tools` | list | No | Tools available to the Claude Agent SDK (default: `["Read", "Write", "Bash"]`). |
+| `claude.perm_mode` | string | No | Claude Agent SDK permission mode (default: `"acceptEdits"`). |
+| `advanced.phase_4b_model` | string | No | Override model for the Phase 4b escalation loop. Defaults to the pipeline `model`. |
+
+**Precedence rules:**
+- **Model parameters:** Explicit arguments in code > `model_params` from YAML > hardcoded defaults.
+- **API keys:** `api_key` / `api_key_file` from YAML > `OPENAI_API_KEY` env var.
+- **API base:** `api_base` from YAML > `OPENAI_API_BASE` env var.
+
+### How It Works
+
+The pipeline routes models through two paths:
+
+1. **Claude models** (`claude-*`, `vertex_ai/claude-*`) →
+   Claude Agent SDK for autonomous multi-step tool use.
+2. **Everything else** (`ollama/*`, `openai/*`, `gpt-*`) →
+   LiteLLM-powered tool-use loop with `read_file`, `write_file`, and
+   `bash` tools, loop detection, and malformed-argument normalization.
+
+Dispatch is automatic based on the model name. All pipeline phases
+(semantic triage, conflict resolution, test porting, Phase 4b
+build-test-fix loop) use the same model unless overridden:
+
+```yaml
+advanced:
+  phase_4b_model: "claude-sonnet-4-6"  # override just Phase 4b
+```
+
+If `phase_4b_model` is not set, it defaults to the pipeline `model`.
+
+### Cost Tracking
+
+Self-hosted models (Ollama, vLLM via `api_base`) report $0.00.
+Cloud models use published per-token pricing. The cost summary
+appears at the end of each pipeline run.
+
+### Claude Agent SDK Integration (legacy)
+
+For Claude models, the pipeline uses the Claude Agent SDK directly:
 
 | Parameter | Value |
 |-----------|-------|
-| Model | `claude-opus-4-6[1m]` (1M context) |
+| Model | Configurable via YAML |
 | Allowed tools | `Read`, `Write`, `Bash` |
 | Permission mode | `acceptEdits` |
 | Thinking mode | Adaptive |

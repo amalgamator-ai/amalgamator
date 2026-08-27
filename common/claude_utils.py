@@ -16,9 +16,12 @@ from colorama import Fore, Style
 
 
 def make_anthropic_client():
-    """
-    Create a raw Anthropic client for simple one-shot API calls.
-    Uses Vertex AI if CLAUDE_CODE_USE_VERTEX is set, otherwise direct API key.
+    """Create a raw Anthropic client for simple one-shot API calls.
+
+    .. deprecated::
+        Use :func:`common.llm_client.completion` instead. This function
+        is kept for backward compatibility with callers that directly use
+        the Anthropic ``messages.create`` interface.
     """
     import anthropic
     if os.environ.get("CLAUDE_CODE_USE_VERTEX"):
@@ -405,3 +408,18 @@ async def claude_run(
             ))
 
     return step_timings
+
+
+# ── Model-agnostic dispatch ──────────────────────────────────────────────────
+# Import here (not at module top) to avoid circular deps since agent_runner
+# imports PipelineStep and print_claude_config from this module.
+
+async def agent_run(config, steps, resume=False):
+    """Model-agnostic agent entry point.
+
+    Dispatches to the Claude Agent SDK for Claude models, or to a LiteLLM
+    tool-use loop for everything else.  Drop-in replacement for
+    ``claude_run()`` — same async signature, same return type.
+    """
+    from common.agent_runner import agent_run as _agent_run
+    return await _agent_run(config, steps, resume=resume)

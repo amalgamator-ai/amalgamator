@@ -255,7 +255,8 @@ def parse_bug_fix_config(
             advanced, "partial_success_skip_ratio", 0.5,
             minimum=0.0, maximum=1.0),
         phase_4b_model=advanced_str(
-            advanced, "phase_4b_model", "claude-opus-4-6"),
+            advanced, "phase_4b_model",
+            config.get("model") or "claude-opus-4-6"),
         fix_patch=fix_patch,
         fix_upstream_ref=fix_upstream_ref,
     )
@@ -263,12 +264,65 @@ def parse_bug_fix_config(
     return bug_fix_config, workdir, source_path
 
 
+def _resolve_api_key(config: dict[str, Any]) -> str | None:
+    """Resolve the API key from ``api_key`` or ``api_key_file`` in config.
+
+    ``api_key_file`` supports ``~`` expansion.
+    Returns *None* if neither field is present.
+    """
+    explicit = config.get("api_key")
+    if explicit:
+        return str(explicit)
+
+    key_file = config.get("api_key_file")
+    if key_file:
+        resolved = os.path.expanduser(str(key_file))
+        try:
+            return Path(resolved).read_text().strip()
+        except OSError as e:
+            log.warning("Cannot read api_key_file %s: %s", resolved, e)
+    return None
+
+
 def parse_claude_config(config: dict[str, Any], output_dir: str) -> ClaudeConfig:
-    """Parse Claude configuration section."""
+    """Parse model/agent configuration section.
+
+    Reads the model name from ``model:`` (top-level) or ``claude.model:``.
+    If ``api_base:`` is present, configures the LLM client to route
+    ``openai/`` prefixed models to that endpoint (e.g. a vLLM server).
+
+    Additional optional fields:
+
+    * ``model_params:`` — free-form dict merged into every LLM call
+      (temperature, top_p, reasoning_effort, …).
+    * ``api_key:`` / ``api_key_file:`` — explicit API key or path to a
+      key file (``~`` expansion supported).
+    """
     claude = config.get("claude", {})
     if not isinstance(claude, dict):
         claude = {}
     model = claude.get("model") or config.get("model") or "claude-sonnet-4-6"
+
+    api_base = config.get("api_base") or claude.get("api_base")
+    api_key = _resolve_api_key(config) or _resolve_api_key(claude)
+
+    model_params = config.get("model_params")
+    if model_params is not None and not isinstance(model_params, dict):
+        log.warning("model_params must be a mapping, ignoring: %r", model_params)
+        model_params = None
+
+    from common.llm_client import configure
+    configure(
+        api_base=str(api_base) if api_base else None,
+        api_key=api_key,
+        model_params=model_params,
+    )
+    if api_base:
+        log.info("LLM api_base configured: %s", api_base)
+    if api_key:
+        log.info("LLM api_key configured from config")
+    if model_params:
+        log.info("LLM model_params configured: %s", list(model_params.keys()))
 
     return BugFixClaudeConfig(
         model=model,

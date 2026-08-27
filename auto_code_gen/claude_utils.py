@@ -15,6 +15,7 @@ from common.claude_utils import (
     ClaudeConfig,
     PipelineStep,
     _all_steps_complete,
+    agent_run,
     claude_run,
     print_claude_config,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "ClaudeConfig",
     "PipelineStep",
     "_all_steps_complete",
+    "agent_run",
     "claude_run",
     "print_claude_config",
 ]

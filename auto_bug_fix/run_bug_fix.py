@@ -24,14 +24,20 @@ from auto_bug_fix.claude_utils import (
     BugFixClaudeConfig,
     ClaudeConfig,
     PipelineStep,
+    agent_run as _agent_run,
     claude_run as _claude_run,
 )
 
 
 async def _run_llm(claude_config, prompts, tracker=None):
-    """Compatibility wrapper: call claude_run and feed timings into tracker."""
+    """Compatibility wrapper: call agent_run and feed timings into tracker.
+
+    Uses the model-agnostic ``agent_run`` dispatcher which routes to the
+    Claude Agent SDK for Claude models and to a LiteLLM tool-use loop
+    for everything else.
+    """
     batch_start = time.time()
-    step_timings = await _claude_run(claude_config, prompts)
+    step_timings = await _agent_run(claude_config, prompts)
 
     if tracker and step_timings:
         cursor = batch_start
@@ -1136,7 +1142,7 @@ def phase_4b_run_and_fix(
         sys.stdout = Tee(_prev_stdout, _4b_log_file)
 
     try:
-        timings = asyncio.run(_claude_run(ext_claude_config, steps))
+        timings = asyncio.run(_agent_run(ext_claude_config, steps))
     finally:
         if phase_4b_log_path:
             sys.stdout = _prev_stdout

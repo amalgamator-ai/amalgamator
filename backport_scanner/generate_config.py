@@ -77,7 +77,7 @@ def _discover_commands(repo_path: Path, model: str) -> tuple[str, str]:
     Returns:
         (build_command, test_command) — empty strings if discovery fails.
     """
-    from common.claude_utils import make_anthropic_client
+    from common.llm_client import completion as llm_completion
 
     # Gather file contents
     sections: list[str] = []
@@ -128,13 +128,12 @@ BUILD: pip install -e .
 TEST: python -m pytest"""
 
     try:
-        client = make_anthropic_client()
-        response = client.messages.create(
+        result_obj = llm_completion(
             model=model,
-            max_tokens=256,
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=256,
         )
-        text = response.content[0].text.strip()
+        text = result_obj.text.strip()
         log.info("Command discovery response: %s", text)
 
         build_cmd = ""
