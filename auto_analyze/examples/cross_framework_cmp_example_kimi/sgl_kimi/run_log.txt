@@ -1,349 +1,0 @@
-RUN-CMD: env CUDA_VISIBLE_DEVICES=0\,1\,2\,3\,4\,5\,6\,7 python -m sglang.bench_one_batch --model-path nvidia/Kimi-K2.5-NVFP4 --tp 8 --batch-size 1 --input-len 4 --output-len 1024 --result-filename /app/ai_auto_analyze/auto_profile/results/sgl/nvidia__Kimi-K2.5-NVFP4/test-sgl-nvidia__Kimi-K2.5-NVFP4-tp_8-isl_4-osl_1024-b_1-mode_kimi_k25_nvfp4_b200/bench-sgl-nvidia__Kimi-K2.5-NVFP4-tp_8-isl_4-osl_1024-b_1-mode_kimi_k25_nvfp4_b200.json --trust-remote-code --dist-timeout 1800 --cuda-graph-max-bs=64 --mem-fraction-static=0.9 --kv-cache-dtype fp8_e4m3
-DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
-TensorRT-LLM MLA only supports page_size of 32 or 64, changing page_size from None to 64.
-FlashInfer TRTLLM MoE is enabled. --disable-shared-experts-fusion is automatically set.
-[2026-05-13 19:35:59 TP7] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
-[2026-05-13 19:35:59 TP7] Init torch distributed begin.
-[2026-05-13 19:36:01 TP3] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
-[2026-05-13 19:36:01 TP3] Init torch distributed begin.
-[2026-05-13 19:36:01 TP4] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
-[2026-05-13 19:36:01 TP4] Init torch distributed begin.
-[2026-05-13 19:36:01 TP5] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
-[2026-05-13 19:36:01 TP5] Init torch distributed begin.
-[2026-05-13 19:36:01 TP0] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
-[2026-05-13 19:36:01 TP0] Init torch distributed begin.
-[2026-05-13 19:36:01 TP6] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
-[2026-05-13 19:36:01 TP6] Init torch distributed begin.
-[2026-05-13 19:36:01 TP2] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
-[2026-05-13 19:36:01 TP2] Init torch distributed begin.
-[2026-05-13 19:36:01 TP1] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
-[2026-05-13 19:36:01 TP1] Init torch distributed begin.
-[2026-05-13 19:36:05 TP0] sglang is using nccl==2.28.9
-[2026-05-13 19:36:08 TP0] Init torch distributed ends. elapsed=6.36 s, mem usage=1.48 GB
-[2026-05-13 19:36:08 TP7] Init torch distributed ends. elapsed=8.69 s, mem usage=1.23 GB
-[2026-05-13 19:36:08 TP6] Init torch distributed ends. elapsed=6.31 s, mem usage=1.54 GB
-[2026-05-13 19:36:08 TP5] Init torch distributed ends. elapsed=6.43 s, mem usage=1.54 GB
-[2026-05-13 19:36:08 TP4] Init torch distributed ends. elapsed=6.43 s, mem usage=1.54 GB
-[2026-05-13 19:36:08 TP2] Init torch distributed ends. elapsed=6.27 s, mem usage=1.54 GB
-[2026-05-13 19:36:08 TP3] Init torch distributed ends. elapsed=6.59 s, mem usage=1.54 GB
-[2026-05-13 19:36:08 TP1] Init torch distributed ends. elapsed=6.13 s, mem usage=1.54 GB
-[2026-05-13 19:36:09 TP6] Load weight begin. avail mem=176.13 GB
-[2026-05-13 19:36:09 TP6] Using ModelOptModelLoader due to ModelOpt quantization config.
-[2026-05-13 19:36:09 TP6] ModelOptModelLoader: Loading base model...
-[2026-05-13 19:36:09 TP6] Model is already quantized, loading directly...
-[2026-05-13 19:36:09 TP6] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
-[2026-05-13 19:36:09 TP5] Load weight begin. avail mem=176.13 GB
-[2026-05-13 19:36:09 TP5] Using ModelOptModelLoader due to ModelOpt quantization config.
-[2026-05-13 19:36:09 TP5] ModelOptModelLoader: Loading base model...
-[2026-05-13 19:36:09 TP5] Model is already quantized, loading directly...
-[2026-05-13 19:36:09 TP5] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
-[2026-05-13 19:36:09 TP7] Load weight begin. avail mem=176.44 GB
-[2026-05-13 19:36:09 TP7] Using ModelOptModelLoader due to ModelOpt quantization config.
-[2026-05-13 19:36:09 TP7] ModelOptModelLoader: Loading base model...
-[2026-05-13 19:36:09 TP7] Model is already quantized, loading directly...
-[2026-05-13 19:36:09 TP7] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
-[2026-05-13 19:36:09 TP3] Load weight begin. avail mem=176.13 GB
-[2026-05-13 19:36:09 TP3] Using ModelOptModelLoader due to ModelOpt quantization config.
-[2026-05-13 19:36:09 TP3] ModelOptModelLoader: Loading base model...
-[2026-05-13 19:36:09 TP3] Model is already quantized, loading directly...
-[2026-05-13 19:36:09 TP3] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
-[2026-05-13 19:36:09 TP1] Load weight begin. avail mem=176.13 GB
-[2026-05-13 19:36:09 TP4] Load weight begin. avail mem=176.13 GB
-[2026-05-13 19:36:09 TP1] Using ModelOptModelLoader due to ModelOpt quantization config.
-[2026-05-13 19:36:09 TP1] ModelOptModelLoader: Loading base model...
-[2026-05-13 19:36:09 TP4] Using ModelOptModelLoader due to ModelOpt quantization config.
-[2026-05-13 19:36:09 TP1] Model is already quantized, loading directly...
-[2026-05-13 19:36:09 TP4] ModelOptModelLoader: Loading base model...
-[2026-05-13 19:36:09 TP4] Model is already quantized, loading directly...
-[2026-05-13 19:36:09 TP4] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
-[2026-05-13 19:36:09 TP1] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
-[2026-05-13 19:36:09 TP0] Load weight begin. avail mem=176.19 GB
-[2026-05-13 19:36:09 TP2] Load weight begin. avail mem=176.13 GB
-[2026-05-13 19:36:09 TP0] Using ModelOptModelLoader due to ModelOpt quantization config.
-[2026-05-13 19:36:09 TP0] ModelOptModelLoader: Loading base model...
-[2026-05-13 19:36:09 TP0] Model is already quantized, loading directly...
-[2026-05-13 19:36:09 TP0] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
-[2026-05-13 19:36:09 TP2] Using ModelOptModelLoader due to ModelOpt quantization config.
-[2026-05-13 19:36:09 TP2] ModelOptModelLoader: Loading base model...
-[2026-05-13 19:36:09 TP2] Model is already quantized, loading directly...
-[2026-05-13 19:36:09 TP2] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
-[2026-05-13 19:36:10 TP6] Multimodal attention backend not set. Use fa4.
-[2026-05-13 19:36:10 TP6] Using fa4 as multimodal attention backend.
-[2026-05-13 19:36:10 TP5] Multimodal attention backend not set. Use fa4.
-[2026-05-13 19:36:10 TP5] Using fa4 as multimodal attention backend.
-[2026-05-13 19:36:10 TP7] Multimodal attention backend not set. Use fa4.
-[2026-05-13 19:36:10 TP7] Using fa4 as multimodal attention backend.
-[2026-05-13 19:36:10 TP3] Multimodal attention backend not set. Use fa4.
-[2026-05-13 19:36:10 TP3] Using fa4 as multimodal attention backend.
-[2026-05-13 19:36:10 TP4] Multimodal attention backend not set. Use fa4.
-[2026-05-13 19:36:10 TP4] Using fa4 as multimodal attention backend.
-[2026-05-13 19:36:10 TP0] Multimodal attention backend not set. Use fa4.
-[2026-05-13 19:36:10 TP0] Using fa4 as multimodal attention backend.
-[2026-05-13 19:36:10 TP2] Multimodal attention backend not set. Use fa4.
-[2026-05-13 19:36:10 TP2] Using fa4 as multimodal attention backend.
-[2026-05-13 19:36:10 TP1] Multimodal attention backend not set. Use fa4.
-[2026-05-13 19:36:10 TP1] Using fa4 as multimodal attention backend.
-[2026-05-13 19:36:11 TP0] Found local HF snapshot for nvidia/Kimi-K2.5-NVFP4 at /app/hf_hub_cache/models--nvidia--Kimi-K2.5-NVFP4/snapshots/c0285e649c34d4386b01e38abca642c06cbe014e; skipping download.
-Multi-thread loading shards:   0% Completed | 0/119 [00:00<?, ?it/s]Multi-thread loading shards:   1% Completed | 1/119 [00:01<02:54,  1.48s/it]Multi-thread loading shards:   3% Completed | 3/119 [00:01<00:57,  2.01it/s]Multi-thread loading shards:   3% Completed | 4/119 [00:01<00:45,  2.55it/s]Multi-thread loading shards:   4% Completed | 5/119 [00:02<00:50,  2.28it/s]Multi-thread loading shards:   5% Completed | 6/119 [00:02<00:39,  2.83it/s]Multi-thread loading shards:   6% Completed | 7/119 [00:02<00:38,  2.93it/s]Multi-thread loading shards:   7% Completed | 8/119 [00:03<00:31,  3.51it/s]Multi-thread loading shards:   8% Completed | 9/119 [00:04<00:59,  1.86it/s]Multi-thread loading shards:   8% Completed | 10/119 [00:16<07:39,  4.21s/it]Multi-thread loading shards:   9% Completed | 11/119 [00:22<08:21,  4.64s/it]Multi-thread loading shards:  10% Completed | 12/119 [00:24<06:43,  3.77s/it]Multi-thread loading shards:  11% Completed | 13/119 [00:25<05:30,  3.12s/it]Multi-thread loading shards:  12% Completed | 14/119 [00:27<04:37,  2.64s/it]Multi-thread loading shards:  13% Completed | 15/119 [00:28<03:57,  2.28s/it]Multi-thread loading shards:  13% Completed | 16/119 [00:30<03:30,  2.04s/it]Multi-thread loading shards:  14% Completed | 17/119 [00:31<03:07,  1.84s/it]Multi-thread loading shards:  15% Completed | 18/119 [00:33<02:52,  1.70s/it]Multi-thread loading shards:  16% Completed | 19/119 [00:34<02:54,  1.75s/it]Multi-thread loading shards:  17% Completed | 20/119 [00:36<02:43,  1.65s/it]Multi-thread loading shards:  18% Completed | 21/119 [00:37<02:35,  1.59s/it]Multi-thread loading shards:  18% Completed | 22/119 [00:39<02:34,  1.59s/it]Multi-thread loading shards:  19% Completed | 23/119 [00:39<01:52,  1.18s/it]Multi-thread loading shards:  20% Completed | 24/119 [00:39<01:23,  1.14it/s]Multi-thread loading shards:  21% Completed | 25/119 [00:39<01:02,  1.52it/s]Multi-thread loading shards:  22% Completed | 26/119 [00:40<00:49,  1.87it/s]Multi-thread loading shards:  23% Completed | 27/119 [00:40<00:38,  2.38it/s]Multi-thread loading shards:  24% Completed | 28/119 [00:40<00:33,  2.73it/s]Multi-thread loading shards:  24% Completed | 29/119 [00:40<00:27,  3.27it/s]Multi-thread loading shards:  25% Completed | 30/119 [00:41<00:39,  2.23it/s]Multi-thread loading shards:  26% Completed | 31/119 [00:41<00:33,  2.59it/s]Multi-thread loading shards:  27% Completed | 32/119 [00:59<07:57,  5.49s/it]Multi-thread loading shards:  28% Completed | 33/119 [01:00<06:00,  4.19s/it]Multi-thread loading shards:  29% Completed | 34/119 [01:01<04:48,  3.39s/it]Multi-thread loading shards:  29% Completed | 35/119 [01:03<03:52,  2.77s/it]Multi-thread loading shards:  30% Completed | 36/119 [01:04<03:21,  2.43s/it]Multi-thread loading shards:  31% Completed | 37/119 [01:06<02:57,  2.16s/it]Multi-thread loading shards:  32% Completed | 38/119 [01:07<02:41,  1.99s/it]Multi-thread loading shards:  33% Completed | 39/119 [01:09<02:22,  1.78s/it]Multi-thread loading shards:  34% Completed | 40/119 [01:11<02:21,  1.79s/it]Multi-thread loading shards:  34% Completed | 41/119 [01:12<02:05,  1.61s/it]Multi-thread loading shards:  35% Completed | 42/119 [01:13<01:56,  1.51s/it]Multi-thread loading shards:  36% Completed | 43/119 [01:15<01:55,  1.53s/it]Multi-thread loading shards:  37% Completed | 44/119 [01:16<01:56,  1.56s/it]Multi-thread loading shards:  38% Completed | 45/119 [01:18<01:54,  1.55s/it]Multi-thread loading shards:  39% Completed | 46/119 [01:19<01:49,  1.50s/it]Multi-thread loading shards:  39% Completed | 47/119 [01:20<01:42,  1.42s/it]Multi-thread loading shards:  40% Completed | 48/119 [01:22<01:40,  1.42s/it]Multi-thread loading shards:  41% Completed | 49/119 [01:23<01:40,  1.43s/it]Multi-thread loading shards:  42% Completed | 50/119 [01:25<01:41,  1.46s/it]Multi-thread loading shards:  43% Completed | 51/119 [01:26<01:39,  1.46s/it]Multi-thread loading shards:  44% Completed | 52/119 [01:28<01:40,  1.49s/it]Multi-thread loading shards:  45% Completed | 53/119 [01:30<01:47,  1.63s/it]Multi-thread loading shards:  45% Completed | 54/119 [01:31<01:44,  1.61s/it]Multi-thread loading shards:  46% Completed | 55/119 [01:33<01:38,  1.54s/it]Multi-thread loading shards:  47% Completed | 56/119 [01:33<01:12,  1.16s/it]Multi-thread loading shards:  48% Completed | 57/119 [01:33<00:53,  1.15it/s]Multi-thread loading shards:  49% Completed | 58/119 [01:33<00:40,  1.50it/s]Multi-thread loading shards:  50% Completed | 59/119 [01:34<00:31,  1.91it/s]Multi-thread loading shards:  50% Completed | 60/119 [01:34<00:24,  2.41it/s]Multi-thread loading shards:  51% Completed | 61/119 [01:34<00:20,  2.86it/s]Multi-thread loading shards:  52% Completed | 62/119 [01:34<00:18,  3.10it/s]Multi-thread loading shards:  53% Completed | 63/119 [01:34<00:16,  3.50it/s]Multi-thread loading shards:  54% Completed | 64/119 [01:34<00:13,  4.08it/s]Multi-thread loading shards:  55% Completed | 65/119 [01:52<04:49,  5.37s/it]Multi-thread loading shards:  55% Completed | 66/119 [01:53<03:43,  4.22s/it]Multi-thread loading shards:  56% Completed | 67/119 [01:55<02:54,  3.35s/it]Multi-thread loading shards:  57% Completed | 68/119 [01:57<02:30,  2.96s/it]Multi-thread loading shards:  58% Completed | 69/119 [01:58<02:04,  2.48s/it]Multi-thread loading shards:  59% Completed | 70/119 [01:58<01:28,  1.80s/it]Multi-thread loading shards:  60% Completed | 71/119 [01:59<01:03,  1.33s/it]Multi-thread loading shards:  61% Completed | 73/119 [01:59<00:36,  1.25it/s]Multi-thread loading shards:  62% Completed | 74/119 [01:59<00:28,  1.60it/s]Multi-thread loading shards:  63% Completed | 75/119 [01:59<00:22,  1.92it/s]Multi-thread loading shards:  64% Completed | 76/119 [01:59<00:17,  2.42it/s]Multi-thread loading shards:  65% Completed | 77/119 [02:00<00:15,  2.73it/s]Multi-thread loading shards:  66% Completed | 78/119 [02:00<00:12,  3.29it/s]Multi-thread loading shards:  66% Completed | 79/119 [02:16<03:18,  4.97s/it]Multi-thread loading shards:  67% Completed | 80/119 [02:18<02:34,  3.97s/it]Multi-thread loading shards:  68% Completed | 81/119 [02:19<02:02,  3.24s/it]Multi-thread loading shards:  69% Completed | 82/119 [02:21<01:39,  2.69s/it]Multi-thread loading shards:  70% Completed | 83/119 [02:22<01:23,  2.32s/it]Multi-thread loading shards:  71% Completed | 84/119 [02:23<01:12,  2.07s/it]Multi-thread loading shards:  71% Completed | 85/119 [02:26<01:12,  2.14s/it]Multi-thread loading shards:  72% Completed | 86/119 [02:27<01:03,  1.93s/it]Multi-thread loading shards:  73% Completed | 87/119 [02:28<00:54,  1.71s/it]Multi-thread loading shards:  74% Completed | 88/119 [02:29<00:46,  1.50s/it]Multi-thread loading shards:  75% Completed | 89/119 [02:30<00:40,  1.36s/it]Multi-thread loading shards:  76% Completed | 90/119 [02:32<00:37,  1.31s/it]Multi-thread loading shards:  76% Completed | 91/119 [02:33<00:38,  1.38s/it]Multi-thread loading shards:  77% Completed | 92/119 [02:33<00:27,  1.03s/it]Multi-thread loading shards:  78% Completed | 93/119 [02:34<00:20,  1.29it/s]Multi-thread loading shards:  79% Completed | 94/119 [02:34<00:14,  1.67it/s]Multi-thread loading shards:  80% Completed | 95/119 [02:34<00:11,  2.13it/s]Multi-thread loading shards:  81% Completed | 96/119 [02:34<00:08,  2.62it/s]Multi-thread loading shards:  82% Completed | 97/119 [02:34<00:06,  3.24it/s]Multi-thread loading shards:  82% Completed | 98/119 [02:34<00:05,  3.63it/s]Multi-thread loading shards:  83% Completed | 99/119 [02:35<00:04,  4.05it/s]Multi-thread loading shards:  84% Completed | 100/119 [02:37<00:18,  1.02it/s]Multi-thread loading shards:  85% Completed | 101/119 [02:50<01:23,  4.62s/it]Multi-thread loading shards:  86% Completed | 102/119 [02:52<01:01,  3.61s/it]Multi-thread loading shards:  87% Completed | 103/119 [02:52<00:41,  2.57s/it]Multi-thread loading shards:  87% Completed | 104/119 [02:52<00:27,  1.86s/it]Multi-thread loading shards:  88% Completed | 105/119 [02:52<00:18,  1.34s/it]Multi-thread loading shards:  89% Completed | 106/119 [02:53<00:15,  1.21s/it]Multi-thread loading shards:  90% Completed | 107/119 [02:53<00:10,  1.12it/s]Multi-thread loading shards:  91% Completed | 108/119 [02:53<00:07,  1.45it/s]Multi-thread loading shards:  92% Completed | 109/119 [02:54<00:05,  1.88it/s]Multi-thread loading shards:  92% Completed | 110/119 [02:54<00:04,  2.24it/s]Multi-thread loading shards:  94% Completed | 112/119 [03:10<00:28,  4.01s/it]Multi-thread loading shards:  95% Completed | 113/119 [03:12<00:20,  3.38s/it]Multi-thread loading shards:  96% Completed | 114/119 [03:13<00:14,  2.87s/it]Multi-thread loading shards:  97% Completed | 116/119 [03:13<00:05,  1.69s/it]Multi-thread loading shards:  99% Completed | 118/119 [03:14<00:01,  1.10s/it]Multi-thread loading shards: 100% Completed | 119/119 [03:14<00:00,  1.63s/it]
-[2026-05-13 19:39:31 TP6] w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.
-[2026-05-13 19:39:33 TP6] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
-[2026-05-13 19:39:33 TP6] Load weight end. elapsed=203.20 s, type=KimiK25ForConditionalGeneration, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=97.18 GB, mem usage=78.95 GB.
-[2026-05-13 19:39:33 TP0] w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.
-[2026-05-13 19:39:34 TP0] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
-[2026-05-13 19:39:34 TP0] Load weight end. elapsed=204.98 s, type=KimiK25ForConditionalGeneration, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=97.24 GB, mem usage=78.95 GB.
-[2026-05-13 19:39:36 TP2] w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.
-[2026-05-13 19:39:38 TP2] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
-[2026-05-13 19:39:38 TP2] Load weight end. elapsed=208.23 s, type=KimiK25ForConditionalGeneration, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=97.18 GB, mem usage=78.95 GB.
-[2026-05-13 19:39:54 TP3] w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.
-[2026-05-13 19:39:56 TP3] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
-[2026-05-13 19:39:56 TP3] Load weight end. elapsed=226.63 s, type=KimiK25ForConditionalGeneration, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=97.18 GB, mem usage=78.95 GB.
-[2026-05-13 19:40:07 TP4] w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.
-[2026-05-13 19:40:09 TP4] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
-[2026-05-13 19:40:09 TP4] Load weight end. elapsed=239.30 s, type=KimiK25ForConditionalGeneration, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=97.18 GB, mem usage=78.95 GB.
-[2026-05-13 19:40:22 TP7] w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.
-[2026-05-13 19:40:24 TP7] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
-[2026-05-13 19:40:24 TP7] Load weight end. elapsed=254.29 s, type=KimiK25ForConditionalGeneration, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=97.49 GB, mem usage=78.95 GB.
-[2026-05-13 19:40:32 TP5] w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.
-[2026-05-13 19:40:33 TP5] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
-[2026-05-13 19:40:33 TP5] Load weight end. elapsed=264.01 s, type=KimiK25ForConditionalGeneration, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=97.18 GB, mem usage=78.95 GB.
-[2026-05-13 19:40:34 TP1] w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.
-[2026-05-13 19:40:36 TP1] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
-[2026-05-13 19:40:36 TP1] Load weight end. elapsed=266.13 s, type=KimiK25ForConditionalGeneration, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=97.18 GB, mem usage=78.95 GB.
-[2026-05-13 19:40:36 TP0] Using KV cache dtype: torch.float8_e4m3fn
-[2026-05-13 19:40:36 TP4] KV Cache is allocated. #tokens: 2431168, KV size: 79.56 GB
-[2026-05-13 19:40:36 TP4] Memory pool end. avail mem=13.59 GB
-[2026-05-13 19:40:36 TP1] KV Cache is allocated. #tokens: 2431168, KV size: 79.56 GB
-[2026-05-13 19:40:36 TP1] Memory pool end. avail mem=13.59 GB
-[2026-05-13 19:40:36 TP2] KV Cache is allocated. #tokens: 2431168, KV size: 79.56 GB
-[2026-05-13 19:40:36 TP6] KV Cache is allocated. #tokens: 2431168, KV size: 79.56 GB
-[2026-05-13 19:40:36 TP2] Memory pool end. avail mem=13.59 GB
-[2026-05-13 19:40:36 TP6] Memory pool end. avail mem=13.59 GB
-[2026-05-13 19:40:36 TP0] KV Cache is allocated. #tokens: 2431168, KV size: 79.56 GB
-[2026-05-13 19:40:36 TP0] Memory pool end. avail mem=13.65 GB
-[2026-05-13 19:40:36 TP7] KV Cache is allocated. #tokens: 2431168, KV size: 79.56 GB
-[2026-05-13 19:40:36 TP7] Memory pool end. avail mem=13.90 GB
-[2026-05-13 19:40:36 TP3] KV Cache is allocated. #tokens: 2431168, KV size: 79.56 GB
-[2026-05-13 19:40:36 TP5] KV Cache is allocated. #tokens: 2431168, KV size: 79.56 GB
-[2026-05-13 19:40:36 TP3] Memory pool end. avail mem=13.59 GB
-[2026-05-13 19:40:36 TP5] Memory pool end. avail mem=13.59 GB
-[2026-05-13 19:40:36 TP0] Running FlashInfer autotune...
-2026-05-13 19:40:36,318 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
-[2026-05-13 19:40:36 TP2] Running FlashInfer autotune...
-2026-05-13 19:40:36,329 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
-[2026-05-13 19:40:36 TP3] Running FlashInfer autotune...
-2026-05-13 19:40:36,330 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
-[2026-05-13 19:40:36 TP4] Running FlashInfer autotune...
-2026-05-13 19:40:36,333 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
-[2026-05-13 19:40:36 TP6] Running FlashInfer autotune...
-2026-05-13 19:40:36,336 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
-[2026-05-13 19:40:36 TP7] Running FlashInfer autotune...
-2026-05-13 19:40:36,339 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
-[2026-05-13 19:40:36 TP1] Running FlashInfer autotune...
-2026-05-13 19:40:36,362 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
-[2026-05-13 19:40:36 TP5] Running FlashInfer autotune...
-2026-05-13 19:40:36,367 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
-2026-05-13 19:40:39,098 - CUTE_DSL - WARNING - [handle_import_error] - Unexpected error during package walk: cutlass.cute.experimental
-[2026-05-13 19:40:39 TP4] Unexpected error during package walk: cutlass.cute.experimental
-2026-05-13 19:40:39,098 - CUTE_DSL - WARNING - [handle_import_error] - Unexpected error during package walk: cutlass.cute.experimental
-[2026-05-13 19:40:39 TP7] Unexpected error during package walk: cutlass.cute.experimental
-2026-05-13 19:40:39,098 - CUTE_DSL - WARNING - [handle_import_error] - Unexpected error during package walk: cutlass.cute.experimental
-[2026-05-13 19:40:39 TP6] Unexpected error during package walk: cutlass.cute.experimental
-2026-05-13 19:40:39,098 - CUTE_DSL - WARNING - [handle_import_error] - Unexpected error during package walk: cutlass.cute.experimental
-2026-05-13 19:40:39,098 - CUTE_DSL - WARNING - [handle_import_error] - Unexpected error during package walk: cutlass.cute.experimental
-[2026-05-13 19:40:39 TP1] Unexpected error during package walk: cutlass.cute.experimental
-[2026-05-13 19:40:39 TP5] Unexpected error during package walk: cutlass.cute.experimental
-2026-05-13 19:40:39,098 - CUTE_DSL - WARNING - [handle_import_error] - Unexpected error during package walk: cutlass.cute.experimental
-[2026-05-13 19:40:39 TP2] Unexpected error during package walk: cutlass.cute.experimental
-2026-05-13 19:40:39,101 - CUTE_DSL - WARNING - [handle_import_error] - Unexpected error during package walk: cutlass.cute.experimental
-[2026-05-13 19:40:39 TP0] Unexpected error during package walk: cutlass.cute.experimental
-2026-05-13 19:40:39,105 - CUTE_DSL - WARNING - [handle_import_error] - Unexpected error during package walk: cutlass.cute.experimental
-[2026-05-13 19:40:39 TP3] Unexpected error during package walk: cutlass.cute.experimental
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:  62%|██████▏   | 8/13 [00:00<00:00, 72.64profile/s][AutoTuner]: Tuning fp4_gemm:  54%|█████▍    | 7/13 [00:00<00:00, 69.20profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:  54%|█████▍    | 7/13 [00:00<00:00, 68.57profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:  54%|█████▍    | 7/13 [00:00<00:00, 68.66profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 68.08profile/s]
-[AutoTuner]: Tuning fp4_gemm:  62%|██████▏   | 8/13 [00:00<00:00, 73.19profile/s][AutoTuner]: Tuning fp4_gemm:  54%|█████▍    | 7/13 [00:00<00:00, 67.51profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 67.03profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 67.29profile/s]
-[AutoTuner]: Tuning fp4_gemm:  54%|█████▍    | 7/13 [00:00<00:00, 69.44profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 66.92profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 68.47profile/s]
-[AutoTuner]: Tuning fp4_gemm:  62%|██████▏   | 8/13 [00:00<00:00, 72.84profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 66.64profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 67.95profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 66.33profile/s]
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 104.53profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 100.54profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 94.80profile/s] 
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 91.74profile/s] 
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:  77%|███████▋  | 10/13 [00:00<00:00, 97.56profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 100.59profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 100.01profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 100.85profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 89.79profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 91.87profile/s] 
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 91.49profile/s] 
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 92.19profile/s] 
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 104.86profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 95.16profile/s] 
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 103.52profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 93.81profile/s] 
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   8%|▊         | 1/13 [00:00<00:02,  5.32profile/s][AutoTuner]: Tuning fp4_gemm:   8%|▊         | 1/13 [00:00<00:01,  8.81profile/s][AutoTuner]: Tuning fp4_gemm:   8%|▊         | 1/13 [00:00<00:03,  3.50profile/s][AutoTuner]: Tuning fp4_gemm:   8%|▊         | 1/13 [00:00<00:02,  4.80profile/s][AutoTuner]: Tuning fp4_gemm:   8%|▊         | 1/13 [00:00<00:02,  5.07profile/s][AutoTuner]: Tuning fp4_gemm:   8%|▊         | 1/13 [00:00<00:02,  4.84profile/s][AutoTuner]: Tuning fp4_gemm:   8%|▊         | 1/13 [00:00<00:03,  3.66profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 104.01profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 36.51profile/s][AutoTuner]: Tuning fp4_gemm:  92%|█████████▏| 12/13 [00:00<00:00, 38.33profile/s][AutoTuner]: Tuning fp4_gemm:  92%|█████████▏| 12/13 [00:00<00:00, 63.22profile/s][AutoTuner]: Tuning fp4_gemm:  92%|█████████▏| 12/13 [00:00<00:00, 49.34profile/s][AutoTuner]: Tuning fp4_gemm:  92%|█████████▏| 12/13 [00:00<00:00, 47.34profile/s][AutoTuner]: Tuning fp4_gemm:  92%|█████████▏| 12/13 [00:00<00:00, 45.80profile/s][AutoTuner]: Tuning fp4_gemm:  92%|█████████▏| 12/13 [00:00<00:00, 45.91profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 32.41profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 56.71profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 42.81profile/s]
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 103.41profile/s]
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 41.01profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 39.58profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 39.71profile/s]
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 32.83profile/s]
-[AutoTuner]: Tuning fp4_gemm:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 108.02profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 107.21profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 105.37profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 106.53profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 104.40profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 103.62profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 103.28profile/s][AutoTuner]: Tuning fp4_gemm:  85%|████████▍ | 11/13 [00:00<00:00, 100.88profile/s][AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 107.22profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 106.50profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 104.93profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 105.76profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 102.04profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 102.06profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 102.52profile/s]
-[AutoTuner]: Tuning fp4_gemm: 100%|██████████| 13/13 [00:00<00:00, 100.22profile/s]
-[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/13 [00:00<?, ?profile/s][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   8%|▊         | 1/13 [00:01<00:16,  1.36s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   8%|▊         | 1/13 [00:01<00:17,  1.42s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   8%|▊         | 1/13 [00:01<00:16,  1.41s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   8%|▊         | 1/13 [00:01<00:17,  1.43s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   8%|▊         | 1/13 [00:01<00:17,  1.42s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   8%|▊         | 1/13 [00:01<00:17,  1.42s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   8%|▊         | 1/13 [00:01<00:17,  1.42s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   8%|▊         | 1/13 [00:01<00:17,  1.49s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 2/13 [00:03<00:18,  1.65s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 2/13 [00:03<00:18,  1.71s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 2/13 [00:03<00:18,  1.69s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 2/13 [00:03<00:18,  1.69s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 2/13 [00:03<00:19,  1.73s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 2/13 [00:03<00:18,  1.72s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 2/13 [00:03<00:18,  1.69s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 2/13 [00:03<00:18,  1.72s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  23%|██▎       | 3/13 [00:04<00:16,  1.65s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  23%|██▎       | 3/13 [00:04<00:16,  1.68s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  23%|██▎       | 3/13 [00:05<00:17,  1.71s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  23%|██▎       | 3/13 [00:04<00:16,  1.68s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  23%|██▎       | 3/13 [00:04<00:16,  1.66s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  23%|██▎       | 3/13 [00:05<00:17,  1.70s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  23%|██▎       | 3/13 [00:05<00:17,  1.73s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  23%|██▎       | 3/13 [00:05<00:17,  1.71s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  31%|███       | 4/13 [00:06<00:15,  1.69s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  31%|███       | 4/13 [00:06<00:15,  1.72s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  31%|███       | 4/13 [00:06<00:15,  1.72s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  31%|███       | 4/13 [00:06<00:15,  1.74s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  31%|███       | 4/13 [00:06<00:15,  1.70s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  31%|███       | 4/13 [00:06<00:15,  1.74s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  31%|███       | 4/13 [00:06<00:15,  1.77s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  31%|███       | 4/13 [00:06<00:15,  1.74s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  38%|███▊      | 5/13 [00:08<00:13,  1.73s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  38%|███▊      | 5/13 [00:08<00:13,  1.73s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  38%|███▊      | 5/13 [00:08<00:14,  1.76s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  38%|███▊      | 5/13 [00:08<00:14,  1.75s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  38%|███▊      | 5/13 [00:08<00:14,  1.77s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  38%|███▊      | 5/13 [00:08<00:14,  1.77s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  38%|███▊      | 5/13 [00:08<00:14,  1.80s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  38%|███▊      | 5/13 [00:08<00:14,  1.77s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  46%|████▌     | 6/13 [00:10<00:12,  1.79s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  46%|████▌     | 6/13 [00:10<00:12,  1.79s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  46%|████▌     | 6/13 [00:10<00:12,  1.81s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  46%|████▌     | 6/13 [00:10<00:12,  1.82s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  46%|████▌     | 6/13 [00:10<00:12,  1.83s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  46%|████▌     | 6/13 [00:10<00:12,  1.82s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  46%|████▌     | 6/13 [00:10<00:12,  1.85s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  46%|████▌     | 6/13 [00:10<00:12,  1.83s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  54%|█████▍    | 7/13 [00:12<00:11,  1.88s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  54%|█████▍    | 7/13 [00:12<00:11,  1.88s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  54%|█████▍    | 7/13 [00:12<00:11,  1.92s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  54%|█████▍    | 7/13 [00:12<00:11,  1.92s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  54%|█████▍    | 7/13 [00:12<00:11,  1.95s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  54%|█████▍    | 7/13 [00:12<00:11,  1.93s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  54%|█████▍    | 7/13 [00:12<00:11,  1.96s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  54%|█████▍    | 7/13 [00:12<00:11,  1.93s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  62%|██████▏   | 8/13 [00:14<00:09,  2.00s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  62%|██████▏   | 8/13 [00:14<00:09,  2.00s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  62%|██████▏   | 8/13 [00:14<00:10,  2.03s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  62%|██████▏   | 8/13 [00:14<00:10,  2.04s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  62%|██████▏   | 8/13 [00:15<00:10,  2.04s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  62%|██████▏   | 8/13 [00:15<00:10,  2.06s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  62%|██████▏   | 8/13 [00:15<00:10,  2.08s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  62%|██████▏   | 8/13 [00:15<00:10,  2.05s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  69%|██████▉   | 9/13 [00:16<00:08,  2.09s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  69%|██████▉   | 9/13 [00:16<00:08,  2.08s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  69%|██████▉   | 9/13 [00:17<00:08,  2.12s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  69%|██████▉   | 9/13 [00:17<00:08,  2.12s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  69%|██████▉   | 9/13 [00:17<00:08,  2.13s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  69%|██████▉   | 9/13 [00:17<00:08,  2.15s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  69%|██████▉   | 9/13 [00:17<00:08,  2.16s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  69%|██████▉   | 9/13 [00:17<00:08,  2.14s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  77%|███████▋  | 10/13 [00:19<00:06,  2.30s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  77%|███████▋  | 10/13 [00:19<00:06,  2.29s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  77%|███████▋  | 10/13 [00:19<00:06,  2.32s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  77%|███████▋  | 10/13 [00:20<00:07,  2.34s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  77%|███████▋  | 10/13 [00:20<00:07,  2.34s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  77%|███████▋  | 10/13 [00:20<00:07,  2.35s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  77%|███████▋  | 10/13 [00:20<00:07,  2.36s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  77%|███████▋  | 10/13 [00:20<00:07,  2.36s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▍ | 11/13 [00:22<00:04,  2.31s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▍ | 11/13 [00:22<00:04,  2.31s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▍ | 11/13 [00:22<00:04,  2.34s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▍ | 11/13 [00:22<00:04,  2.34s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▍ | 11/13 [00:22<00:04,  2.35s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▍ | 11/13 [00:22<00:04,  2.37s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▍ | 11/13 [00:22<00:04,  2.37s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▍ | 11/13 [00:22<00:04,  2.39s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  92%|█████████▏| 12/13 [00:23<00:02,  2.09s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:23<00:00,  1.52s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:23<00:00,  1.83s/profile]
-[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  92%|█████████▏| 12/13 [00:23<00:02,  2.10s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  92%|█████████▏| 12/13 [00:23<00:02,  2.11s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:23<00:00,  1.53s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:23<00:00,  1.84s/profile]
-[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  92%|█████████▏| 12/13 [00:24<00:02,  2.12s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  92%|█████████▏| 12/13 [00:24<00:02,  2.12s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  92%|█████████▏| 12/13 [00:24<00:02,  2.13s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.54s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.86s/profile]
-[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.54s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.86s/profile]
-[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.54s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.87s/profile]
-[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.55s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.88s/profile]
-[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  92%|█████████▏| 12/13 [00:24<00:02,  2.12s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  92%|█████████▏| 12/13 [00:24<00:02,  2.15s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.54s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.88s/profile]
-[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.55s/profile][AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 13/13 [00:24<00:00,  1.90s/profile]
-2026-05-13 19:41:15,949 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
-[2026-05-13 19:41:15 TP7] FlashInfer autotune completed.
-2026-05-13 19:41:15,949 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
-[2026-05-13 19:41:15 TP2] FlashInfer autotune completed.
-2026-05-13 19:41:15,950 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
-[2026-05-13 19:41:15 TP6] FlashInfer autotune completed.
-2026-05-13 19:41:15,950 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
-[2026-05-13 19:41:15 TP4] FlashInfer autotune completed.
-2026-05-13 19:41:15,951 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
-[2026-05-13 19:41:15 TP1] FlashInfer autotune completed.
-2026-05-13 19:41:15,951 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
-2026-05-13 19:41:15,951 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
-[2026-05-13 19:41:15 TP0] FlashInfer autotune completed.
-[2026-05-13 19:41:15 TP5] FlashInfer autotune completed.
-2026-05-13 19:41:15,967 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
-[2026-05-13 19:41:15 TP3] FlashInfer autotune completed.
-[2026-05-13 19:41:15 TP0] [SymmDeviceMemory] Rank: 0, Group size: 8, device_idx: 0, Signal pad offset: 234881024
-[2026-05-13 19:41:15 TP7] [SymmDeviceMemory] Rank: 7, Group size: 8, device_idx: 7, Signal pad offset: 234881024
-[2026-05-13 19:41:15 TP6] [SymmDeviceMemory] Rank: 6, Group size: 8, device_idx: 6, Signal pad offset: 234881024
-[2026-05-13 19:41:15 TP4] [SymmDeviceMemory] Rank: 4, Group size: 8, device_idx: 4, Signal pad offset: 234881024
-[2026-05-13 19:41:15 TP5] [SymmDeviceMemory] Rank: 5, Group size: 8, device_idx: 5, Signal pad offset: 234881024
-[2026-05-13 19:41:15 TP2] [SymmDeviceMemory] Rank: 2, Group size: 8, device_idx: 2, Signal pad offset: 234881024
-[2026-05-13 19:41:15 TP3] [SymmDeviceMemory] Rank: 3, Group size: 8, device_idx: 3, Signal pad offset: 234881024
-[2026-05-13 19:41:15 TP1] [SymmDeviceMemory] Rank: 1, Group size: 8, device_idx: 1, Signal pad offset: 234881024
-/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
-  return func(*args, **kwargs)
-[2026-05-13 19:41:17 TP7] [SymmDeviceMemory] Rank: 7, Group size: 8, device_idx: 7, Signal pad offset: 2097152
-[2026-05-13 19:41:17 TP4] [SymmDeviceMemory] Rank: 4, Group size: 8, device_idx: 4, Signal pad offset: 2097152
-[2026-05-13 19:41:17 TP1] [SymmDeviceMemory] Rank: 1, Group size: 8, device_idx: 1, Signal pad offset: 2097152
-[2026-05-13 19:41:17 TP5] [SymmDeviceMemory] Rank: 5, Group size: 8, device_idx: 5, Signal pad offset: 2097152
-[2026-05-13 19:41:17 TP0] [SymmDeviceMemory] Rank: 0, Group size: 8, device_idx: 0, Signal pad offset: 2097152
-[2026-05-13 19:41:17 TP3] [SymmDeviceMemory] Rank: 3, Group size: 8, device_idx: 3, Signal pad offset: 2097152
-[2026-05-13 19:41:17 TP6] [SymmDeviceMemory] Rank: 6, Group size: 8, device_idx: 6, Signal pad offset: 2097152
-[2026-05-13 19:41:17 TP2] [SymmDeviceMemory] Rank: 2, Group size: 8, device_idx: 2, Signal pad offset: 2097152
-[2026-05-13 19:41:17 TP7] [SymmDeviceMemory] Rank: 7, Group size: 8, device_idx: 7, Signal pad offset: 704643072
-[2026-05-13 19:41:17 TP5] [SymmDeviceMemory] Rank: 5, Group size: 8, device_idx: 5, Signal pad offset: 704643072
-[2026-05-13 19:41:17 TP3] [SymmDeviceMemory] Rank: 3, Group size: 8, device_idx: 3, Signal pad offset: 704643072
-[2026-05-13 19:41:17 TP4] [SymmDeviceMemory] Rank: 4, Group size: 8, device_idx: 4, Signal pad offset: 704643072
-[2026-05-13 19:41:17 TP0] [SymmDeviceMemory] Rank: 0, Group size: 8, device_idx: 0, Signal pad offset: 704643072
-[2026-05-13 19:41:17 TP6] [SymmDeviceMemory] Rank: 6, Group size: 8, device_idx: 6, Signal pad offset: 704643072
-[2026-05-13 19:41:17 TP1] [SymmDeviceMemory] Rank: 1, Group size: 8, device_idx: 1, Signal pad offset: 704643072
-[2026-05-13 19:41:17 TP2] [SymmDeviceMemory] Rank: 2, Group size: 8, device_idx: 2, Signal pad offset: 704643072
-[2026-05-13 19:41:17 TP4] FlashInfer workspace initialized for rank 4, world_size 8, backend trtllm
-[2026-05-13 19:41:17 TP6] FlashInfer workspace initialized for rank 6, world_size 8, backend trtllm
-[2026-05-13 19:41:17 TP7] FlashInfer workspace initialized for rank 7, world_size 8, backend trtllm
-[2026-05-13 19:41:17 TP0] FlashInfer workspace initialized for rank 0, world_size 8, backend trtllm
-[2026-05-13 19:41:17 TP1] FlashInfer workspace initialized for rank 1, world_size 8, backend trtllm
-[2026-05-13 19:41:17 TP2] FlashInfer workspace initialized for rank 2, world_size 8, backend trtllm
-[2026-05-13 19:41:17 TP3] FlashInfer workspace initialized for rank 3, world_size 8, backend trtllm
-[2026-05-13 19:41:17 TP5] FlashInfer workspace initialized for rank 5, world_size 8, backend trtllm
-[2026-05-13 19:41:17 TP0] FlashInfer workspace preflight: cuMemCreate probe failed on at least one rank. Skipping allreduce fusion to avoid cross-rank desync inside the flashinfer collective.
-[2026-05-13 19:41:17 TP7] FlashInfer workspace preflight: cuMemCreate probe failed on at least one rank. Skipping allreduce fusion to avoid cross-rank desync inside the flashinfer collective.
-[2026-05-13 19:41:17 TP6] FlashInfer workspace preflight: cuMemCreate probe failed on at least one rank. Skipping allreduce fusion to avoid cross-rank desync inside the flashinfer collective.
-[2026-05-13 19:41:17 TP5] FlashInfer workspace preflight: cuMemCreate probe failed on at least one rank. Skipping allreduce fusion to avoid cross-rank desync inside the flashinfer collective.
-[2026-05-13 19:41:17 TP4] FlashInfer workspace preflight: cuMemCreate probe failed on at least one rank. Skipping allreduce fusion to avoid cross-rank desync inside the flashinfer collective.
-[2026-05-13 19:41:17 TP3] FlashInfer workspace preflight: cuMemCreate probe failed on at least one rank. Skipping allreduce fusion to avoid cross-rank desync inside the flashinfer collective.
-[2026-05-13 19:41:17 TP2] FlashInfer workspace preflight: cuMemCreate probe failed on at least one rank. Skipping allreduce fusion to avoid cross-rank desync inside the flashinfer collective.
-[2026-05-13 19:41:17 TP1] FlashInfer workspace preflight: cuMemCreate probe failed on at least one rank. Skipping allreduce fusion to avoid cross-rank desync inside the flashinfer collective.
-[2026-05-13 19:41:17 TP6] Capture cuda graph begin. This can take up to several minutes. avail mem=8.81 GB
-[2026-05-13 19:41:17 TP2] Capture cuda graph begin. This can take up to several minutes. avail mem=8.81 GB
-[2026-05-13 19:41:17 TP1] Capture cuda graph begin. This can take up to several minutes. avail mem=8.81 GB
-[2026-05-13 19:41:17 TP0] Capture cuda graph begin. This can take up to several minutes. avail mem=9.00 GB
-[2026-05-13 19:41:17 TP0] Capture cuda graph bs [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64]
-[2026-05-13 19:41:17 TP7] Capture cuda graph begin. This can take up to several minutes. avail mem=9.75 GB
-[2026-05-13 19:41:17 TP4] Capture cuda graph begin. This can take up to several minutes. avail mem=8.81 GB
-[2026-05-13 19:41:17 TP5] Capture cuda graph begin. This can take up to several minutes. avail mem=8.81 GB
-[2026-05-13 19:41:17 TP3] Capture cuda graph begin. This can take up to several minutes. avail mem=8.81 GB
-  0%|          | 0/12 [00:00<?, ?it/s]Capturing batches (bs=64 avail_mem=8.90 GB):   0%|          | 0/12 [00:00<?, ?it/s]Capturing batches (bs=64 avail_mem=8.90 GB):   8%|▊         | 1/12 [00:00<00:08,  1.36it/s]Capturing batches (bs=56 avail_mem=8.74 GB):   8%|▊         | 1/12 [00:00<00:08,  1.36it/s]Capturing batches (bs=56 avail_mem=8.74 GB):  17%|█▋        | 2/12 [00:01<00:05,  1.94it/s]Capturing batches (bs=48 avail_mem=8.72 GB):  17%|█▋        | 2/12 [00:01<00:05,  1.94it/s]Capturing batches (bs=48 avail_mem=8.72 GB):  25%|██▌       | 3/12 [00:01<00:03,  2.29it/s]Capturing batches (bs=40 avail_mem=8.71 GB):  25%|██▌       | 3/12 [00:01<00:03,  2.29it/s]Capturing batches (bs=40 avail_mem=8.71 GB):  33%|███▎      | 4/12 [00:01<00:03,  2.57it/s]Capturing batches (bs=32 avail_mem=8.70 GB):  33%|███▎      | 4/12 [00:01<00:03,  2.57it/s]Capturing batches (bs=32 avail_mem=8.70 GB):  42%|████▏     | 5/12 [00:02<00:02,  2.76it/s]Capturing batches (bs=24 avail_mem=8.68 GB):  42%|████▏     | 5/12 [00:02<00:02,  2.76it/s]Capturing batches (bs=24 avail_mem=8.68 GB):  50%|█████     | 6/12 [00:02<00:02,  2.88it/s]Capturing batches (bs=16 avail_mem=8.67 GB):  50%|█████     | 6/12 [00:02<00:02,  2.88it/s]Capturing batches (bs=16 avail_mem=8.67 GB):  58%|█████▊    | 7/12 [00:02<00:01,  3.03it/s]Capturing batches (bs=12 avail_mem=8.66 GB):  58%|█████▊    | 7/12 [00:02<00:01,  3.03it/s]Capturing batches (bs=12 avail_mem=8.66 GB):  67%|██████▋   | 8/12 [00:02<00:01,  3.12it/s]Capturing batches (bs=8 avail_mem=8.64 GB):  67%|██████▋   | 8/12 [00:02<00:01,  3.12it/s] Capturing batches (bs=8 avail_mem=8.64 GB):  75%|███████▌  | 9/12 [00:03<00:00,  3.22it/s]Capturing batches (bs=4 avail_mem=8.63 GB):  75%|███████▌  | 9/12 [00:03<00:00,  3.22it/s]Capturing batches (bs=4 avail_mem=8.63 GB):  83%|████████▎ | 10/12 [00:03<00:00,  3.27it/s]Capturing batches (bs=2 avail_mem=8.62 GB):  83%|████████▎ | 10/12 [00:03<00:00,  3.27it/s]Capturing batches (bs=2 avail_mem=8.62 GB):  92%|█████████▏| 11/12 [00:03<00:00,  3.31it/s]Capturing batches (bs=1 avail_mem=8.61 GB):  92%|█████████▏| 11/12 [00:03<00:00,  3.31it/s]Capturing batches (bs=1 avail_mem=8.61 GB): 100%|██████████| 12/12 [00:04<00:00,  1.84it/s]Capturing batches (bs=1 avail_mem=8.61 GB): 100%|██████████| 12/12 [00:04<00:00,  2.42it/s]
-[2026-05-13 19:41:23 TP0] Registering 1476 cuda graph addresses
-[2026-05-13 19:41:23 TP1] Capture cuda graph end. Time elapsed: 5.92 s. mem usage=0.40 GB. avail mem=8.41 GB.
-[2026-05-13 19:41:23 TP1] Disable piecewise CUDA graph because --disable-piecewise-cuda-graph is set
-[2026-05-13 19:41:23 TP3] Capture cuda graph end. Time elapsed: 5.94 s. mem usage=0.45 GB. avail mem=8.37 GB.
-[2026-05-13 19:41:23 TP3] Disable piecewise CUDA graph because --disable-piecewise-cuda-graph is set
-[2026-05-13 19:41:23 TP6] Capture cuda graph end. Time elapsed: 5.96 s. mem usage=0.40 GB. avail mem=8.41 GB.
-[2026-05-13 19:41:23 TP6] Disable piecewise CUDA graph because --disable-piecewise-cuda-graph is set
-[2026-05-13 19:41:23 TP4] Capture cuda graph end. Time elapsed: 5.96 s. mem usage=0.49 GB. avail mem=8.33 GB.
-[2026-05-13 19:41:23 TP4] Disable piecewise CUDA graph because --disable-piecewise-cuda-graph is set
-[2026-05-13 19:41:23 TP7] Capture cuda graph end. Time elapsed: 6.04 s. mem usage=0.40 GB. avail mem=9.35 GB.
-[2026-05-13 19:41:23 TP7] Disable piecewise CUDA graph because --disable-piecewise-cuda-graph is set
-[2026-05-13 19:41:23 TP2] Capture cuda graph end. Time elapsed: 6.05 s. mem usage=0.40 GB. avail mem=8.41 GB.
-[2026-05-13 19:41:23 TP2] Disable piecewise CUDA graph because --disable-piecewise-cuda-graph is set
-[2026-05-13 19:41:23 TP0] Capture cuda graph end. Time elapsed: 6.07 s. mem usage=0.40 GB. avail mem=8.60 GB.
-[2026-05-13 19:41:23 TP0] Disable piecewise CUDA graph because --disable-piecewise-cuda-graph is set
-[transformers] A new version of the following files was downloaded from https://huggingface.co/nvidia/Kimi-K2.5-NVFP4:
-- tool_declaration_ts.py
-. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
-[2026-05-13 19:41:23 TP5] Capture cuda graph end. Time elapsed: 6.14 s. mem usage=0.45 GB. avail mem=8.37 GB.
-[2026-05-13 19:41:23 TP5] Disable piecewise CUDA graph because --disable-piecewise-cuda-graph is set
-[2026-05-13 19:41:23 TP1] Reloaded tiktoken model from /app/hf_hub_cache/models--nvidia--Kimi-K2.5-NVFP4/snapshots/c0285e649c34d4386b01e38abca642c06cbe014e/tiktoken.model
-[2026-05-13 19:41:23 TP1] #words: 163840 - BOS ID: 163584 - EOS ID: 163585
-[2026-05-13 19:41:23 TP3] Reloaded tiktoken model from /app/hf_hub_cache/models--nvidia--Kimi-K2.5-NVFP4/snapshots/c0285e649c34d4386b01e38abca642c06cbe014e/tiktoken.model
-[2026-05-13 19:41:23 TP3] #words: 163840 - BOS ID: 163584 - EOS ID: 163585
-[2026-05-13 19:41:23 TP6] Reloaded tiktoken model from /app/hf_hub_cache/models--nvidia--Kimi-K2.5-NVFP4/snapshots/c0285e649c34d4386b01e38abca642c06cbe014e/tiktoken.model
-[2026-05-13 19:41:23 TP6] #words: 163840 - BOS ID: 163584 - EOS ID: 163585
-[2026-05-13 19:41:23 TP4] Reloaded tiktoken model from /app/hf_hub_cache/models--nvidia--Kimi-K2.5-NVFP4/snapshots/c0285e649c34d4386b01e38abca642c06cbe014e/tiktoken.model
-[2026-05-13 19:41:23 TP4] #words: 163840 - BOS ID: 163584 - EOS ID: 163585
-[2026-05-13 19:41:23 TP7] Reloaded tiktoken model from /app/hf_hub_cache/models--nvidia--Kimi-K2.5-NVFP4/snapshots/c0285e649c34d4386b01e38abca642c06cbe014e/tiktoken.model
-[2026-05-13 19:41:23 TP7] #words: 163840 - BOS ID: 163584 - EOS ID: 163585
-/sgl-workspace/sglang/python/sglang/srt/utils/hf_transformers/tokenizer.py:423: UserWarning: Using a slow tokenizer. This might cause a significant slowdown. Consider using a fast tokenizer instead.
-  warnings.warn(
-[2026-05-13 19:41:23 TP1] Applying special tokens cache patch for Kimi tokenizer: <class 'transformers_modules.nvidia.Kimi_hyphen_K2_dot_5_hyphen_NVFP4.c0285e649c34d4386b01e38abca642c06cbe014e.tokenization_kimi.TikTokenTokenizer'>
-[2026-05-13 19:41:24 TP2] Reloaded tiktoken model from /app/hf_hub_cache/models--nvidia--Kimi-K2.5-NVFP4/snapshots/c0285e649c34d4386b01e38abca642c06cbe014e/tiktoken.model
-[2026-05-13 19:41:24 TP2] #words: 163840 - BOS ID: 163584 - EOS ID: 163585
-[2026-05-13 19:41:24 TP0] Reloaded tiktoken model from /app/hf_hub_cache/models--nvidia--Kimi-K2.5-NVFP4/snapshots/c0285e649c34d4386b01e38abca642c06cbe014e/tiktoken.model
-[2026-05-13 19:41:24 TP0] #words: 163840 - BOS ID: 163584 - EOS ID: 163585
-/sgl-workspace/sglang/python/sglang/srt/utils/hf_transformers/tokenizer.py:423: UserWarning: Using a slow tokenizer. This might cause a significant slowdown. Consider using a fast tokenizer instead.
-  warnings.warn(
-[2026-05-13 19:41:24 TP3] Applying special tokens cache patch for Kimi tokenizer: <class 'transformers_modules.nvidia.Kimi_hyphen_K2_dot_5_hyphen_NVFP4.c0285e649c34d4386b01e38abca642c06cbe014e.tokenization_kimi.TikTokenTokenizer'>
-/sgl-workspace/sglang/python/sglang/srt/utils/hf_transformers/tokenizer.py:423: UserWarning: Using a slow tokenizer. This might cause a significant slowdown. Consider using a fast tokenizer instead.
-  warnings.warn(
-[2026-05-13 19:41:24 TP6] Applying special tokens cache patch for Kimi tokenizer: <class 'transformers_modules.nvidia.Kimi_hyphen_K2_dot_5_hyphen_NVFP4.c0285e649c34d4386b01e38abca642c06cbe014e.tokenization_kimi.TikTokenTokenizer'>
-/sgl-workspace/sglang/python/sglang/srt/utils/hf_transformers/tokenizer.py:423: UserWarning: Using a slow tokenizer. This might cause a significant slowdown. Consider using a fast tokenizer instead.
-  warnings.warn(
-[2026-05-13 19:41:24 TP4] Applying special tokens cache patch for Kimi tokenizer: <class 'transformers_modules.nvidia.Kimi_hyphen_K2_dot_5_hyphen_NVFP4.c0285e649c34d4386b01e38abca642c06cbe014e.tokenization_kimi.TikTokenTokenizer'>
-[2026-05-13 19:41:24 TP5] Reloaded tiktoken model from /app/hf_hub_cache/models--nvidia--Kimi-K2.5-NVFP4/snapshots/c0285e649c34d4386b01e38abca642c06cbe014e/tiktoken.model
-[2026-05-13 19:41:24 TP5] #words: 163840 - BOS ID: 163584 - EOS ID: 163585
-/sgl-workspace/sglang/python/sglang/srt/utils/hf_transformers/tokenizer.py:423: UserWarning: Using a slow tokenizer. This might cause a significant slowdown. Consider using a fast tokenizer instead.
-  warnings.warn(
-[2026-05-13 19:41:24 TP7] Applying special tokens cache patch for Kimi tokenizer: <class 'transformers_modules.nvidia.Kimi_hyphen_K2_dot_5_hyphen_NVFP4.c0285e649c34d4386b01e38abca642c06cbe014e.tokenization_kimi.TikTokenTokenizer'>
-/sgl-workspace/sglang/python/sglang/srt/utils/hf_transformers/tokenizer.py:423: UserWarning: Using a slow tokenizer. This might cause a significant slowdown. Consider using a fast tokenizer instead.
-  warnings.warn(
-[2026-05-13 19:41:24 TP2] Applying special tokens cache patch for Kimi tokenizer: <class 'transformers_modules.nvidia.Kimi_hyphen_K2_dot_5_hyphen_NVFP4.c0285e649c34d4386b01e38abca642c06cbe014e.tokenization_kimi.TikTokenTokenizer'>
-/sgl-workspace/sglang/python/sglang/srt/utils/hf_transformers/tokenizer.py:423: UserWarning: Using a slow tokenizer. This might cause a significant slowdown. Consider using a fast tokenizer instead.
-  warnings.warn(
-[2026-05-13 19:41:24 TP0] Applying special tokens cache patch for Kimi tokenizer: <class 'transformers_modules.nvidia.Kimi_hyphen_K2_dot_5_hyphen_NVFP4.c0285e649c34d4386b01e38abca642c06cbe014e.tokenization_kimi.TikTokenTokenizer'>
-/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
-  return func(*args, **kwargs)
-/sgl-workspace/sglang/python/sglang/srt/utils/hf_transformers/tokenizer.py:423: UserWarning: Using a slow tokenizer. This might cause a significant slowdown. Consider using a fast tokenizer instead.
-  warnings.warn(
-[2026-05-13 19:41:24 TP5] Applying special tokens cache patch for Kimi tokenizer: <class 'transformers_modules.nvidia.Kimi_hyphen_K2_dot_5_hyphen_NVFP4.c0285e649c34d4386b01e38abca642c06cbe014e.tokenization_kimi.TikTokenTokenizer'>
-max_total_num_tokens=2431168
-Warmup ...
-Prefill. latency: 6.21344 s, throughput:      0.64 token/s
-Decode 0. Batch size: 1, latency: 4.70254 s, throughput:      0.21 token/s
-Decode 1. Batch size: 1, latency: 0.00685 s, throughput:    145.93 token/s
-Decode 2. Batch size: 1, latency: 0.00587 s, throughput:    170.29 token/s
-Decode 3. Batch size: 1, latency: 0.00582 s, throughput:    171.83 token/s
-Decode 4. Batch size: 1, latency: 0.00576 s, throughput:    173.54 token/s
-Decode.  median latency: 0.00576 s, median throughput:    173.76 token/s
-Total. latency: 11.094 s, throughput:      3.25 token/s
-Benchmark ...
-Prefill. latency: 0.09935 s, throughput:     40.26 token/s
-Decode 0. Batch size: 1, latency: 0.00610 s, throughput:    163.98 token/s
-Decode 1. Batch size: 1, latency: 0.00574 s, throughput:    174.25 token/s
-Decode 2. Batch size: 1, latency: 0.00575 s, throughput:    174.03 token/s
-Decode 3. Batch size: 1, latency: 0.00571 s, throughput:    175.02 token/s
-Decode 4. Batch size: 1, latency: 0.00574 s, throughput:    174.34 token/s
-Decode.  median latency: 0.00575 s, median throughput:    173.80 token/s
-Total. latency:  6.044 s, throughput:    170.09 token/s
