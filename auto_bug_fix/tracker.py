@@ -15,12 +15,29 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     "claude-opus-4-7":   {"input": 5.0,  "output": 25.0},
     "claude-sonnet-4-6": {"input": 3.0,  "output": 15.0},
     "claude-haiku-4-5":  {"input": 1.0,  "output": 5.0},
+    "gpt-4o":            {"input": 2.5,  "output": 10.0},
 }
+
+_LOCAL_MODEL_PRICING: dict[str, float] = {"input": 0.0, "output": 0.0}
+
+_FALLBACK_PRICING: dict[str, float] = {"input": 5.0, "output": 25.0}
 
 
 def compute_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Compute USD cost from token counts using per-model pricing."""
-    pricing = MODEL_PRICING.get(model, MODEL_PRICING["claude-opus-4-6"])
+    """Compute USD cost from token counts using per-model pricing.
+
+    Self-hosted models (Ollama, vLLM via api_base, etc.) are free.
+    Known cloud models use their published pricing.
+    Unknown cloud models fall back to Claude Opus pricing as a
+    conservative estimate.
+    """
+    from common.llm_client import is_self_hosted
+
+    if is_self_hosted(model):
+        pricing = _LOCAL_MODEL_PRICING
+    else:
+        stripped = model.removeprefix("vertex_ai/").removeprefix("anthropic/")
+        pricing = MODEL_PRICING.get(stripped, _FALLBACK_PRICING)
     return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 
 
