@@ -133,17 +133,21 @@ def completion(
     custom ``api_base`` for self-hosted endpoints.
 
     Global ``model_params`` (set via :func:`configure`) are merged as
-    defaults — explicit *kwargs* take precedence.
+    defaults — explicit *kwargs* take precedence.  The caller's
+    *max_tokens* is used only when neither *kwargs* nor *model_params*
+    supply it, avoiding a ``TypeError`` on duplicate keyword arguments.
     """
     import litellm
 
     effective_model = _resolve_model(model)
 
-    # Merge global model_params as defaults; caller kwargs win.
+    # Merge: model_params (lowest) → caller kwargs (highest).
+    # max_tokens from the function signature is the fallback.
     merged = {**_model_params, **kwargs}
+    merged.setdefault("max_tokens", max_tokens)
 
-    log.debug("LLM completion: model=%s (effective=%s), max_tokens=%d",
-              model, effective_model, max_tokens)
+    log.debug("LLM completion: model=%s (effective=%s), max_tokens=%s",
+              model, effective_model, merged.get("max_tokens"))
 
     if _is_ollama_model(effective_model):
         merged.setdefault("extra_body", {})
@@ -157,7 +161,6 @@ def completion(
     response = litellm.completion(
         model=effective_model,
         messages=messages,
-        max_tokens=max_tokens,
         **merged,
     )
 

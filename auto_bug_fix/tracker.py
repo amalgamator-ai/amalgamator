@@ -36,7 +36,10 @@ def compute_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     if is_self_hosted(model):
         pricing = _LOCAL_MODEL_PRICING
     else:
-        stripped = model.removeprefix("vertex_ai/").removeprefix("anthropic/")
+        stripped = (model
+                    .removeprefix("vertex_ai/")
+                    .removeprefix("anthropic/")
+                    .removeprefix("openai/"))
         pricing = MODEL_PRICING.get(stripped, _FALLBACK_PRICING)
     return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 

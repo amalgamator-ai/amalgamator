@@ -75,6 +75,7 @@ class ClaudeConfig:
     effort: str = "max"
     max_thinking_tokens: int = 1048576
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    command_timeout: int | None = None
 
 
 @dataclass

@@ -26,13 +26,19 @@ from colorama import Fore, Style
 
 log = logging.getLogger(__name__)
 
-MAX_AGENT_ITERATIONS = 50
-BASH_TIMEOUT_SECONDS = 300
+MAX_AGENT_ITERATIONS = 100
+DEFAULT_BASH_TIMEOUT = 600
 
 
 # ── Tool definitions (OpenAI function-calling schema) ────────────────────────
 
-TOOL_SCHEMAS = [
+_CLAUDE_TO_LITELLM_TOOL = {
+    "Read": "read_file",
+    "Write": "write_file",
+    "Bash": "bash",
+}
+
+ALL_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
@@ -91,6 +97,20 @@ TOOL_SCHEMAS = [
 ]
 
 
+def _filter_tools(allowed_tools: list[str] | None) -> list[dict]:
+    """Return tool schemas filtered by the config's allowed_tools list.
+
+    Maps Claude SDK names (Read, Write, Bash) to LiteLLM names
+    (read_file, write_file, bash).  Returns all tools if the allowlist
+    is empty or None.
+    """
+    if not allowed_tools:
+        return ALL_TOOL_SCHEMAS
+    allowed = {_CLAUDE_TO_LITELLM_TOOL.get(t, t) for t in allowed_tools}
+    filtered = [s for s in ALL_TOOL_SCHEMAS if s["function"]["name"] in allowed]
+    return filtered or ALL_TOOL_SCHEMAS
+
+
 # ── Tool execution ───────────────────────────────────────────────────────────
 
 def _normalize_args(name: str, arguments: dict) -> dict:
@@ -104,7 +124,8 @@ def _normalize_args(name: str, arguments: dict) -> dict:
     return arguments
 
 
-def _execute_tool(name: str, arguments: dict, cwd: str) -> str:
+def _execute_tool(name: str, arguments: dict, cwd: str,
+                   bash_timeout: int = DEFAULT_BASH_TIMEOUT) -> str:
     """Execute a single tool call and return the result as a string."""
     arguments = _normalize_args(name, arguments)
     try:
@@ -113,7 +134,7 @@ def _execute_tool(name: str, arguments: dict, cwd: str) -> str:
         elif name == "write_file":
             return _tool_write_file(arguments["path"], arguments["content"], cwd)
         elif name == "bash":
-            return _tool_bash(arguments["command"], cwd)
+            return _tool_bash(arguments["command"], cwd, timeout=bash_timeout)
         else:
             return f"Error: unknown tool '{name}'"
     except KeyError as e:
@@ -150,7 +171,7 @@ def _tool_write_file(path: str, content: str, cwd: str) -> str:
         return f"Error writing {resolved}: {e}"
 
 
-def _tool_bash(command: str, cwd: str) -> str:
+def _tool_bash(command: str, cwd: str, timeout: int = DEFAULT_BASH_TIMEOUT) -> str:
     try:
         result = subprocess.run(
             command,
@@ -158,7 +179,7 @@ def _tool_bash(command: str, cwd: str) -> str:
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=BASH_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
         output = ""
         if result.stdout:
@@ -171,7 +192,7 @@ def _tool_bash(command: str, cwd: str) -> str:
             output = output[:30000] + "\n\n[... truncated at 30000 chars]"
         return output or "(no output)"
     except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {BASH_TIMEOUT_SECONDS}s"
+        return f"Error: command timed out after {timeout}s"
     except Exception as e:
         return f"Error running command: {e}"
 
@@ -266,6 +287,8 @@ class LiteLLMAgentRunner(AgentRunner):
                 system_prompt=config.system_prompt,
                 user_prompt=prompt,
                 cwd=config.cwd,
+                allowed_tools=getattr(config, "allowed_tools", None),
+                bash_timeout=getattr(config, "command_timeout", None),
             )
             timing.name = step.name
 
@@ -293,6 +316,8 @@ class LiteLLMAgentRunner(AgentRunner):
         system_prompt: str,
         user_prompt: str,
         cwd: str,
+        allowed_tools: list[str] | None = None,
+        bash_timeout: int | None = None,
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
 
@@ -307,6 +332,8 @@ class LiteLLMAgentRunner(AgentRunner):
 
         # Start with global model_params, then layer on transport config.
         extra_kwargs: dict = {**get_model_params()}
+        extra_kwargs.setdefault("max_tokens", 16384)
+
         if _is_ollama_model(model):
             extra_kwargs.setdefault("extra_body", {})
             extra_kwargs["extra_body"].setdefault("think", False)
@@ -315,6 +342,10 @@ class LiteLLMAgentRunner(AgentRunner):
         if api_base and model.startswith("openai/"):
             extra_kwargs.setdefault("api_base", api_base)
             extra_kwargs.setdefault("api_key", get_api_key() or "dummy")
+
+        tools = _filter_tools(allowed_tools)
+        allowed_names = {t["function"]["name"] for t in tools}
+        effective_timeout = bash_timeout or DEFAULT_BASH_TIMEOUT
 
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
@@ -335,8 +366,7 @@ class LiteLLMAgentRunner(AgentRunner):
                 response = litellm.completion(
                     model=model,
                     messages=messages,
-                    tools=TOOL_SCHEMAS,
-                    max_tokens=16384,
+                    tools=tools,
                     **extra_kwargs,
                 )
             except Exception as e:
@@ -393,9 +423,10 @@ class LiteLLMAgentRunner(AgentRunner):
                                    "answer now based on the information you have gathered.",
                     })
                     try:
+                        final_kwargs = {**extra_kwargs, "max_tokens": 4096}
                         final = litellm.completion(
-                            model=model, messages=messages, max_tokens=4096,
-                            **extra_kwargs,
+                            model=model, messages=messages,
+                            **final_kwargs,
                         )
                         final_text = _strip_thinking(
                             final.choices[0].message.content or "")
@@ -418,8 +449,13 @@ class LiteLLMAgentRunner(AgentRunner):
                 except json.JSONDecodeError:
                     fn_args = {}
 
+                if fn_name not in allowed_names:
+                    log.warning("Rejecting tool call %s — not in allowed_tools", fn_name)
+                    result = f"Error: tool '{fn_name}' is not allowed by the pipeline configuration."
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                    continue
                 print(f"{Fore.YELLOW}  Tool: {fn_name}({_summarize_args(fn_args)}){Style.RESET_ALL}")
-                result = _execute_tool(fn_name, fn_args, cwd)
+                result = _execute_tool(fn_name, fn_args, cwd, bash_timeout=effective_timeout)
                 print(f"  Result: {result[:200]}{'...' if len(result) > 200 else ''}")
 
                 messages.append({
