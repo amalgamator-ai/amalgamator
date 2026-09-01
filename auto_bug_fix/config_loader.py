@@ -185,6 +185,26 @@ def expand_path(path: str | None, default: str = "") -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
+def _phase_4b_default(config: dict[str, Any]) -> str:
+    """Determine the default model for Phase 4b escalation.
+
+    For Claude pipelines, keep the deliberately-stronger ``claude-opus-4-6``
+    so the escalation gate remains meaningful.  For non-Claude pipelines
+    (Ollama, vLLM, etc.), default to the pipeline model — calling Anthropic
+    from a self-hosted run would fail or surprise the user.
+    """
+    from common.llm_client import is_claude_model
+
+    pipeline_model = (
+        config.get("claude", {}).get("model")
+        or config.get("model")
+        or ""
+    )
+    if not pipeline_model or is_claude_model(pipeline_model):
+        return "claude-opus-4-6"
+    return pipeline_model
+
+
 def parse_bug_fix_config(
     config: dict[str, Any],
     config_dir: str = "",
@@ -256,7 +276,7 @@ def parse_bug_fix_config(
             minimum=0.0, maximum=1.0),
         phase_4b_model=advanced_str(
             advanced, "phase_4b_model",
-            config.get("model") or "claude-opus-4-6"),
+            _phase_4b_default(config)),
         fix_patch=fix_patch,
         fix_upstream_ref=fix_upstream_ref,
     )
@@ -311,6 +331,9 @@ def parse_claude_config(config: dict[str, Any], output_dir: str) -> ClaudeConfig
         log.warning("model_params must be a mapping, ignoring: %r", model_params)
         model_params = None
 
+    # Side effect: sets module-level state in llm_client that all downstream
+    # completion()/agent_run() calls inherit.  Must be called before the first
+    # LLM call.
     from common.llm_client import configure
     configure(
         api_base=str(api_base) if api_base else None,
@@ -343,6 +366,7 @@ def load_pipeline_config(config_path: str) -> tuple[BugFixConfig, ClaudeConfig, 
 
     bug_fix_config, workdir, source_path = parse_bug_fix_config(config, config_dir=config_dir)
     claude_config = parse_claude_config(config, output_dir)
+    claude_config.command_timeout = bug_fix_config.command_timeout
 
     return bug_fix_config, claude_config, workdir, source_path
 
@@ -458,5 +482,6 @@ def load_multi_target_config(
 
     bug_fix_config, workdir, source_path = parse_bug_fix_config(config, config_dir=config_dir)
     claude_config = parse_claude_config(config, output_dir)
+    claude_config.command_timeout = bug_fix_config.command_timeout
 
     return targets, bug_fix_config, claude_config, workdir, source_path

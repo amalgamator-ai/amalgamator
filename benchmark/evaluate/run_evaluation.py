@@ -184,7 +184,7 @@ def ensure_repo(project: str, cfg: dict) -> Path:
         repos_root.mkdir(parents=True, exist_ok=True)
         cmd = ["git", "clone", "--filter=blob:none"]
         if shallow:
-            cmd += ["--depth", "2000"]
+            cmd += ["--depth", "2000", "--no-single-branch"]
         cmd += [url, str(repo_path)]
         subprocess.run(cmd, check=True)
 
@@ -358,39 +358,6 @@ def run_raw_claude(
 # ---------------------------------------------------------------------------
 # Evaluator: Amalgamator Pipeline
 # ---------------------------------------------------------------------------
-
-def _write_pipeline_config(
-    case: dict,
-    repo_path: Path,
-    target_worktree: Path,
-    template_path: str,
-    model: str,
-    config_out: Path,
-) -> None:
-    """Fill in benchmark_template.yaml for this specific case."""
-    with open(template_path) as f:
-        cfg_data = yaml.safe_load(f)
-
-    orig_sha      = case["Original Commit"]
-    target_branch = case["Backport Version"]
-    project       = case["Project"]
-
-    cfg_data["issue_id"]                   = f"{project}-{orig_sha[:12]}"
-    cfg_data["model"]                      = model
-    cfg_data["repository"]["source_path"]  = str(repo_path)
-    cfg_data["repository"]["workdir"]      = str(target_worktree)
-    cfg_data["branches"]["source"]         = f"origin/{case['Original Version']}"
-    cfg_data["branches"]["target"]         = f"origin/{target_branch}"
-    cfg_data["fix"]["commit"]              = orig_sha
-    cfg_data["bug_description"]            = (
-        f"Benchmark case: backport {orig_sha[:12]} onto {target_branch}. "
-        f"Complexity: {case['Type']}."
-    )
-
-    config_out.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_out, "w") as f:
-        yaml.dump(cfg_data, f)
-
 
 def run_pipeline(
     case: dict,
@@ -602,7 +569,8 @@ def evaluate_case(
     result.latency_s     = latency
     result.input_tokens  = in_tok
     result.output_tokens = out_tok
-    result.cost_usd      = estimate_cost(in_tok, out_tok)
+    eval_model = eval_cfg.get("model", "claude-opus-4-6")
+    result.cost_usd      = estimate_cost(in_tok, out_tok, model=eval_model)
 
     if err:
         result.error_msg = err
@@ -632,7 +600,7 @@ def evaluate_case(
         result.judge_reasoning = reasoning
         result.input_tokens  += j_in
         result.output_tokens += j_out
-        result.cost_usd      += estimate_cost(j_in, j_out)
+        result.cost_usd      += estimate_cost(j_in, j_out, model=judge_model)
     except Exception as e:
         result.semantic_equiv  = "uncertain"
         result.judge_reasoning = f"Judge failed: {e}"

@@ -7,7 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "claude-agent-sdk>=0.2.87",
     "colorama>=0.4.6",
-    "litellm>=1.40.0",
+    "litellm>=1.67.0",
     "pyyaml>=6.0",
 ]
 

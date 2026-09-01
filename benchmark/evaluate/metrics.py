@@ -39,8 +39,6 @@ Metrics computed per case, then aggregated across the run:
 
 from __future__ import annotations
 
-import os
-import re
 import logging
 import time
 from dataclasses import dataclass, field, asdict
@@ -48,9 +46,6 @@ from typing import Literal
 
 log = logging.getLogger(__name__)
 
-# Claude Opus pricing (per million tokens, as of mid-2026)
-_INPUT_COST_PER_M  = 15.0   # USD
-_OUTPUT_COST_PER_M = 75.0   # USD
 
 
 SemanticVerdict = Literal["yes", "no", "uncertain", "error"]
@@ -112,9 +107,11 @@ class AggregatedMetrics:
         return asdict(self)
 
 
-def estimate_cost(input_tokens: int, output_tokens: int) -> float:
-    return (input_tokens / 1_000_000) * _INPUT_COST_PER_M + \
-           (output_tokens / 1_000_000) * _OUTPUT_COST_PER_M
+def estimate_cost(input_tokens: int, output_tokens: int,
+                   model: str = "claude-opus-4-6") -> float:
+    """Compute cost using the pipeline's canonical pricing table."""
+    from auto_bug_fix.tracker import compute_cost
+    return compute_cost(model, input_tokens, output_tokens)
 
 
 def normalize_diff(diff: str) -> str:

@@ -84,7 +84,6 @@ evaluators:
     strategy: "pipeline"
     model: "claude-opus-4-6"
     amalgamator_path: "/Users/supathak/Ai-code-perf-amalgamation/amalgamator"
-    config_template: "/Users/supathak/Ai-code-perf-amalgamation/amalgamator/auto_bug_fix/configs/benchmark_template.yaml"
 
   raw_claude_opus:
     enabled: true
@@ -123,4 +122,3 @@ output:
 judge:
   # Model used to evaluate semantic equivalence of generated vs ground-truth diffs
   model: "claude-opus-4-6"
-  confidence_threshold: 0.8
