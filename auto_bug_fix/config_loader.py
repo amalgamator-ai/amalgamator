@@ -266,6 +266,7 @@ def parse_bug_fix_config(
         forward_patch_id_lookback=advanced.get("forward_patch_id_lookback", "12 months"),
         allowlist_rename_expansion_cap=advanced.get("allowlist_rename_expansion_cap", 3),
         command_timeout=command_timeout,
+        context_length=advanced.get("context_length"),
         mechanical_resolution=bool(advanced.get("mechanical_resolution", True)),
         snapback=bool(advanced.get("snapback", True)),
         evidence_checks=bool(advanced.get("evidence_checks", True)),
@@ -367,6 +368,7 @@ def load_pipeline_config(config_path: str) -> tuple[BugFixConfig, ClaudeConfig, 
     bug_fix_config, workdir, source_path = parse_bug_fix_config(config, config_dir=config_dir)
     claude_config = parse_claude_config(config, output_dir)
     claude_config.command_timeout = bug_fix_config.command_timeout
+    claude_config.context_length = bug_fix_config.context_length
 
     return bug_fix_config, claude_config, workdir, source_path
 
@@ -483,5 +485,6 @@ def load_multi_target_config(
     bug_fix_config, workdir, source_path = parse_bug_fix_config(config, config_dir=config_dir)
     claude_config = parse_claude_config(config, output_dir)
     claude_config.command_timeout = bug_fix_config.command_timeout
+    claude_config.context_length = bug_fix_config.context_length
 
     return targets, bug_fix_config, claude_config, workdir, source_path

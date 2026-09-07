@@ -76,6 +76,7 @@ class ClaudeConfig:
     max_thinking_tokens: int = 1048576
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     command_timeout: int | None = None
+    context_length: int | None = None
 
 
 @dataclass
@@ -122,11 +123,19 @@ def _find_resume_index(steps: list[PipelineStep], output_dir: str) -> int:
 
 
 def print_claude_config(config: ClaudeConfig) -> None:
-    class_name = config.__class__.__name__
-    print(f"{class_name}:")
+    from common.llm_client import is_claude_model
 
-    for field in fields(config):
-        name = field.name
+    class_name = config.__class__.__name__
+    is_claude = is_claude_model(config.model)
+
+    # Fields only relevant to Claude — suppress for other models.
+    _claude_only = {"thinking", "max_thinking_tokens"}
+
+    print(f"{class_name}:")
+    for f in fields(config):
+        name = f.name
+        if not is_claude and name in _claude_only:
+            continue
         value = getattr(config, name)
         print(f"  {name}: {value}")
 
