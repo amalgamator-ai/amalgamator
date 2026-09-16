@@ -186,23 +186,16 @@ def expand_path(path: str | None, default: str = "") -> str:
 
 
 def _phase_4b_default(config: dict[str, Any]) -> str:
-    """Determine the default model for Phase 4b escalation.
+    """Return the pipeline model for Phase 4b (same model, no escalation).
 
-    For Claude pipelines, keep the deliberately-stronger ``claude-opus-4-6``
-    so the escalation gate remains meaningful.  For non-Claude pipelines
-    (Ollama, vLLM, etc.), default to the pipeline model — calling Anthropic
-    from a self-hosted run would fail or surprise the user.
+    Phase 4b uses the same model as the rest of the pipeline so that
+    benchmark results reflect a single model's end-to-end capability.
     """
-    from common.llm_client import is_claude_model
-
-    pipeline_model = (
+    return (
         config.get("claude", {}).get("model")
         or config.get("model")
-        or ""
+        or "claude-opus-4-6"
     )
-    if not pipeline_model or is_claude_model(pipeline_model):
-        return "claude-opus-4-6"
-    return pipeline_model
 
 
 def parse_bug_fix_config(
