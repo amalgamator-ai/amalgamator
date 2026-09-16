@@ -17,6 +17,13 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     "claude-sonnet-4-6": {"input": 3.0,  "output": 15.0},
     "claude-haiku-4-5":  {"input": 1.0,  "output": 5.0},
     "gpt-4o":            {"input": 2.5,  "output": 10.0},
+    # Standard short-context tier (<=272K input tokens). Long-context
+    # requests (>272K) are billed at 2x input / 1.5x output by OpenAI —
+    # not modeled here, so costs for very large prompts are a slight
+    # underestimate. Verified 2026-08: https://developers.openai.com/api/docs/pricing
+    "gpt-5.6-luna":      {"input": 0.20, "output": 1.20},
+    "gpt-5.6-terra":     {"input": 2.0,  "output": 12.0},
+    "gpt-5.6-sol":       {"input": 4.0,  "output": 20.0},
 }
 
 _LOCAL_MODEL_PRICING: dict[str, float] = {"input": 0.0, "output": 0.0}
