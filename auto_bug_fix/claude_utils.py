@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from common.claude_utils import (
     ClaudeConfig,
     PipelineStep,
+    agent_run,
     claude_run,
     print_claude_config,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "BugFixClaudeConfig",
     "ClaudeConfig",
     "PipelineStep",
+    "agent_run",
     "claude_run",
     "print_claude_config",
 ]

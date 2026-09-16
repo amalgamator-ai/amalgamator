@@ -24,14 +24,46 @@ from auto_bug_fix.claude_utils import (
     BugFixClaudeConfig,
     ClaudeConfig,
     PipelineStep,
+    agent_run as _agent_run,
     claude_run as _claude_run,
 )
 
 
+def _phase_config(
+    claude_config: ClaudeConfig,
+    config: "BugFixConfig",
+    *,
+    model: str | None = None,
+    thinking: dict | None = None,
+    effort: str | None = None,
+) -> BugFixClaudeConfig:
+    """Create a per-phase ClaudeConfig that inherits transport settings.
+
+    Copies ``command_timeout`` and ``context_length`` from the parent
+    config so that context window management stays active across all
+    pipeline phases.
+    """
+    return BugFixClaudeConfig(
+        model=model or claude_config.model,
+        allowed_tools=claude_config.allowed_tools,
+        perm_mode=claude_config.perm_mode,
+        cwd=config.repo_path,
+        command_timeout=claude_config.command_timeout,
+        context_length=claude_config.context_length,
+        thinking=thinking,
+        effort=effort or claude_config.effort,
+    )
+
+
 async def _run_llm(claude_config, prompts, tracker=None):
-    """Compatibility wrapper: call claude_run and feed timings into tracker."""
+    """Compatibility wrapper: call agent_run and feed timings into tracker.
+
+    Uses the model-agnostic ``agent_run`` dispatcher which routes to the
+    Claude Agent SDK for Claude models and to a LiteLLM tool-use loop
+    for everything else.
+    """
     batch_start = time.time()
-    step_timings = await _claude_run(claude_config, prompts)
+    step_timings = await _agent_run(claude_config, prompts)
 
     if tracker and step_timings:
         cursor = batch_start
@@ -462,12 +494,7 @@ def phase_0_5_semantic_triage(
         seed_files=state.seed,
     )
 
-    claude_config_triage = BugFixClaudeConfig(
-        model=claude_config.model,
-        allowed_tools=claude_config.allowed_tools,
-        perm_mode=claude_config.perm_mode,
-        cwd=config.repo_path,
-    )
+    claude_config_triage = _phase_config(claude_config, config)
 
     asyncio.run(claude_run(claude_config_triage, [prompt.prompt()], tracker=tracker))
 
@@ -539,12 +566,7 @@ def phase_0_5c_test_port(
         diff_command=diff_command,
     )
 
-    claude_config_test = BugFixClaudeConfig(
-        model=claude_config.model,
-        allowed_tools=claude_config.allowed_tools,
-        perm_mode=claude_config.perm_mode,
-        cwd=config.repo_path,
-    )
+    claude_config_test = _phase_config(claude_config, config)
 
     asyncio.run(claude_run(claude_config_test, [prompt.prompt()], tracker=tracker))
 
@@ -648,12 +670,7 @@ def phase_1_5_red_triage(
         triage_assessment=triage_json,
     )
 
-    claude_config_triage = BugFixClaudeConfig(
-        model=claude_config.model,
-        allowed_tools=claude_config.allowed_tools,
-        perm_mode=claude_config.perm_mode,
-        cwd=config.repo_path,
-    )
+    claude_config_triage = _phase_config(claude_config, config)
 
     asyncio.run(claude_run(claude_config_triage, [prompt.prompt()], tracker=tracker))
 
@@ -920,12 +937,7 @@ def phase_4a_build_recovery(
     """Agent-assisted build/test error recovery. Adapts code to the target branch API."""
     context = create_context_str(claude_config, config)
 
-    claude_config_4a = BugFixClaudeConfig(
-        model=claude_config.model,
-        allowed_tools=claude_config.allowed_tools,
-        perm_mode=claude_config.perm_mode,
-        cwd=config.repo_path,
-    )
+    claude_config_4a = _phase_config(claude_config, config)
 
     for attempt in range(1, config.max_build_test_retries + 1):
         build_exit, build_stdout, build_stderr = run_test_suite(
@@ -1050,15 +1062,13 @@ def phase_4b_run_and_fix(
 </semantic_triage>
 """
 
-    ext_claude_config = BugFixClaudeConfig(
+    ext_claude_config = _phase_config(
+        claude_config, config,
         model=config.phase_4b_model,
-        allowed_tools=claude_config.allowed_tools,
-        perm_mode=claude_config.perm_mode,
-        cwd=config.repo_path,
         thinking={"type": "adaptive"},
         effort="max",
-        max_thinking_tokens=1048576,
     )
+    ext_claude_config.max_thinking_tokens = 1048576
     # Named explicitly: 4b is meant to run a stronger model than the rest of
     # the pipeline, and it is now configurable — the run log should say which
     # one actually escalated.
@@ -1136,7 +1146,7 @@ def phase_4b_run_and_fix(
         sys.stdout = Tee(_prev_stdout, _4b_log_file)
 
     try:
-        timings = asyncio.run(_claude_run(ext_claude_config, steps))
+        timings = asyncio.run(_agent_run(ext_claude_config, steps))
     finally:
         if phase_4b_log_path:
             sys.stdout = _prev_stdout
@@ -1352,12 +1362,7 @@ def cherry_pick_and_resolve(
     context = create_context_str(claude_config, config)
     priority = state.priority_files if state.priority_files else state.allowed_modules
 
-    claude_config_resolve = BugFixClaudeConfig(
-        model=claude_config.model,
-        allowed_tools=claude_config.allowed_tools,
-        perm_mode=claude_config.perm_mode,
-        cwd=config.repo_path,
-    )
+    claude_config_resolve = _phase_config(claude_config, config)
 
     if config.mechanical_resolution:
         try:

@@ -185,6 +185,19 @@ def expand_path(path: str | None, default: str = "") -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
+def _phase_4b_default(config: dict[str, Any]) -> str:
+    """Return the pipeline model for Phase 4b (same model, no escalation).
+
+    Phase 4b uses the same model as the rest of the pipeline so that
+    benchmark results reflect a single model's end-to-end capability.
+    """
+    return (
+        config.get("claude", {}).get("model")
+        or config.get("model")
+        or "claude-opus-4-6"
+    )
+
+
 def parse_bug_fix_config(
     config: dict[str, Any],
     config_dir: str = "",
@@ -246,6 +259,7 @@ def parse_bug_fix_config(
         forward_patch_id_lookback=advanced.get("forward_patch_id_lookback", "12 months"),
         allowlist_rename_expansion_cap=advanced.get("allowlist_rename_expansion_cap", 3),
         command_timeout=command_timeout,
+        context_length=advanced.get("context_length"),
         mechanical_resolution=bool(advanced.get("mechanical_resolution", True)),
         snapback=bool(advanced.get("snapback", True)),
         evidence_checks=bool(advanced.get("evidence_checks", True)),
@@ -255,7 +269,8 @@ def parse_bug_fix_config(
             advanced, "partial_success_skip_ratio", 0.5,
             minimum=0.0, maximum=1.0),
         phase_4b_model=advanced_str(
-            advanced, "phase_4b_model", "claude-opus-4-6"),
+            advanced, "phase_4b_model",
+            _phase_4b_default(config)),
         fix_patch=fix_patch,
         fix_upstream_ref=fix_upstream_ref,
     )
@@ -263,12 +278,68 @@ def parse_bug_fix_config(
     return bug_fix_config, workdir, source_path
 
 
+def _resolve_api_key(config: dict[str, Any]) -> str | None:
+    """Resolve the API key from ``api_key`` or ``api_key_file`` in config.
+
+    ``api_key_file`` supports ``~`` expansion.
+    Returns *None* if neither field is present.
+    """
+    explicit = config.get("api_key")
+    if explicit:
+        return str(explicit)
+
+    key_file = config.get("api_key_file")
+    if key_file:
+        resolved = os.path.expanduser(str(key_file))
+        try:
+            return Path(resolved).read_text().strip()
+        except OSError as e:
+            log.warning("Cannot read api_key_file %s: %s", resolved, e)
+    return None
+
+
 def parse_claude_config(config: dict[str, Any], output_dir: str) -> ClaudeConfig:
-    """Parse Claude configuration section."""
+    """Parse model/agent configuration section.
+
+    Reads the model name from ``model:`` (top-level) or ``claude.model:``.
+    If ``api_base:`` is present, configures the LLM client to route
+    ``openai/`` prefixed models to that endpoint (e.g. a vLLM server).
+
+    Additional optional fields:
+
+    * ``model_params:`` — free-form dict merged into every LLM call
+      (temperature, top_p, reasoning_effort, …).
+    * ``api_key:`` / ``api_key_file:`` — explicit API key or path to a
+      key file (``~`` expansion supported).
+    """
     claude = config.get("claude", {})
     if not isinstance(claude, dict):
         claude = {}
     model = claude.get("model") or config.get("model") or "claude-sonnet-4-6"
+
+    api_base = config.get("api_base") or claude.get("api_base")
+    api_key = _resolve_api_key(config) or _resolve_api_key(claude)
+
+    model_params = config.get("model_params")
+    if model_params is not None and not isinstance(model_params, dict):
+        log.warning("model_params must be a mapping, ignoring: %r", model_params)
+        model_params = None
+
+    # Side effect: sets module-level state in llm_client that all downstream
+    # completion()/agent_run() calls inherit.  Must be called before the first
+    # LLM call.
+    from common.llm_client import configure
+    configure(
+        api_base=str(api_base) if api_base else None,
+        api_key=api_key,
+        model_params=model_params,
+    )
+    if api_base:
+        log.info("LLM api_base configured: %s", api_base)
+    if api_key:
+        log.info("LLM api_key configured from config")
+    if model_params:
+        log.info("LLM model_params configured: %s", list(model_params.keys()))
 
     return BugFixClaudeConfig(
         model=model,
@@ -289,6 +360,8 @@ def load_pipeline_config(config_path: str) -> tuple[BugFixConfig, ClaudeConfig, 
 
     bug_fix_config, workdir, source_path = parse_bug_fix_config(config, config_dir=config_dir)
     claude_config = parse_claude_config(config, output_dir)
+    claude_config.command_timeout = bug_fix_config.command_timeout
+    claude_config.context_length = bug_fix_config.context_length
 
     return bug_fix_config, claude_config, workdir, source_path
 
@@ -404,5 +477,7 @@ def load_multi_target_config(
 
     bug_fix_config, workdir, source_path = parse_bug_fix_config(config, config_dir=config_dir)
     claude_config = parse_claude_config(config, output_dir)
+    claude_config.command_timeout = bug_fix_config.command_timeout
+    claude_config.context_length = bug_fix_config.context_length
 
     return targets, bug_fix_config, claude_config, workdir, source_path

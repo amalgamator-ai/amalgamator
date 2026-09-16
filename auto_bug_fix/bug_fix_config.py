@@ -35,6 +35,12 @@ class BugFixConfig:
     # the default is unbounded; a fired timeout is treated as a hard failure.
     command_timeout: int | None = None
 
+    # Maximum context window in tokens for the pipeline model. Used by the
+    # LiteLLM agent loop to trigger context compaction before a single call
+    # exceeds the model's limit. Set via YAML advanced.context_length.
+    # None = auto-detect from litellm model info, else default 128K.
+    context_length: int | None = None
+
     # Patch-ID
     forward_patch_id_lookback: str = "12 months"
 
