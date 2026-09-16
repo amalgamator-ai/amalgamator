@@ -102,8 +102,7 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
     asks the LLM whether the fix is present.
     """
     try:
-        from common.claude_utils import make_anthropic_client
-        client = make_anthropic_client()
+        from common.llm_client import completion as llm_completion
 
         ref = _resolve_ref(result.branch, result.ref_type)
         ref_label = f"tag '{result.branch}'" if result.ref_type == "tag" else f"branch '{result.branch}'"
@@ -176,12 +175,12 @@ Answer with exactly one of:
 
 Provide a one-sentence explanation after your answer."""
 
-        response = client.messages.create(
+        result_obj = llm_completion(
             model=config.llm_model,
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}]
         )
-        answer = response.content[0].text.strip()
+        answer = result_obj.text.strip()
         log.info("LLM answer for %s: %s", result.branch, answer[:120])
 
         first_token = answer.split()[0].rstrip(":").upper() if answer.split() else ""

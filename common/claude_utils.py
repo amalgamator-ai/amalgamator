@@ -16,9 +16,12 @@ from colorama import Fore, Style
 
 
 def make_anthropic_client():
-    """
-    Create a raw Anthropic client for simple one-shot API calls.
-    Uses Vertex AI if CLAUDE_CODE_USE_VERTEX is set, otherwise direct API key.
+    """Create a raw Anthropic client for simple one-shot API calls.
+
+    .. deprecated::
+        Use :func:`common.llm_client.completion` instead. This function
+        is kept for backward compatibility with callers that directly use
+        the Anthropic ``messages.create`` interface.
     """
     import anthropic
     if os.environ.get("CLAUDE_CODE_USE_VERTEX"):
@@ -72,6 +75,8 @@ class ClaudeConfig:
     effort: str = "max"
     max_thinking_tokens: int = 1048576
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    command_timeout: int | None = None
+    context_length: int | None = None
 
 
 @dataclass
@@ -118,11 +123,19 @@ def _find_resume_index(steps: list[PipelineStep], output_dir: str) -> int:
 
 
 def print_claude_config(config: ClaudeConfig) -> None:
-    class_name = config.__class__.__name__
-    print(f"{class_name}:")
+    from common.llm_client import is_claude_model
 
-    for field in fields(config):
-        name = field.name
+    class_name = config.__class__.__name__
+    is_claude = is_claude_model(config.model)
+
+    # Fields only relevant to Claude — suppress for other models.
+    _claude_only = {"thinking", "max_thinking_tokens"}
+
+    print(f"{class_name}:")
+    for f in fields(config):
+        name = f.name
+        if not is_claude and name in _claude_only:
+            continue
         value = getattr(config, name)
         print(f"  {name}: {value}")
 
@@ -405,3 +418,18 @@ async def claude_run(
             ))
 
     return step_timings
+
+
+# ── Model-agnostic dispatch ──────────────────────────────────────────────────
+# Import here (not at module top) to avoid circular deps since agent_runner
+# imports PipelineStep and print_claude_config from this module.
+
+async def agent_run(config, steps, resume=False):
+    """Model-agnostic agent entry point.
+
+    Dispatches to the Claude Agent SDK for Claude models, or to a LiteLLM
+    tool-use loop for everything else.  Drop-in replacement for
+    ``claude_run()`` — same async signature, same return type.
+    """
+    from common.agent_runner import agent_run as _agent_run
+    return await _agent_run(config, steps, resume=resume)

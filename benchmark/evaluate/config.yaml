@@ -1,0 +1,124 @@
+# ============================================================
+#  Backport Benchmark Evaluation Config
+#
+#  Two strategies × one model = initial comparison:
+#    1. pipeline    — cherry-pick + LLM conflict resolution + build-fix loop
+#    2. raw_claude  — single-shot Claude prompt, no iteration
+#
+#  To add more evaluators, duplicate any entry below and change
+#  the key, label, strategy, and/or model.
+# ============================================================
+
+# ---- Dataset ----------------------------------------------------------
+dataset:
+  csv_path: "/Users/supathak/Ai-code-perf-amalgamation/javabackports/dataset/all_projects_final.csv"
+
+  # Projects to include. [] = all projects.
+  projects:
+    - "crate"
+    - "grpc-java"
+    - "elasticsearch"
+    - "hadoop"
+
+  # Complexity types — mapped to difficulty:
+  #   Easy   → TYPE-I   (direct cherry-pick, no conflicts)
+  #   Medium → TYPE-II  (minor context differences)
+  #   Hard   → TYPE-V   (major architectural divergence)
+  types:
+    - "TYPE-I"
+    - "TYPE-II"
+    - "TYPE-V"
+
+  # 10 cases per type → 30 total samples (10 easy, 10 medium, 10 hard)
+  sample_per_type: 10
+
+  # Reproducible sampling
+  seed: 42
+
+# ---- Repositories -----------------------------------------------------
+repos:
+  root: "/Users/supathak/Ai-code-perf-amalgamation/benchmark-repos"
+
+  crate:
+    url: "https://github.com/crate/crate.git"
+    shallow: true
+
+  grpc-java:
+    url: "https://github.com/grpc/grpc-java.git"
+    shallow: true
+
+  elasticsearch:
+    url: "https://github.com/elastic/elasticsearch.git"
+    shallow: false
+
+  druid:
+    url: "https://github.com/apache/druid.git"
+    shallow: true
+
+  graylog:
+    url: "https://github.com/Graylog2/graylog2-server.git"
+    shallow: true
+
+  hadoop:
+    url: "https://github.com/apache/hadoop.git"
+    shallow: false  # full history needed: trunk + branch-3.x diverged far back
+
+  hbase:
+    url: "https://github.com/apache/hbase.git"
+    shallow: true
+
+# ---- Evaluators -------------------------------------------------------
+# Each entry = one row in the leaderboard.
+# Required fields:
+#   strategy  — "pipeline" (full cherry-pick loop) or "raw_claude" (single-shot)
+#   model     — any Claude model name
+#   enabled   — true/false
+#
+# Add more entries to compare models or strategies without changing code.
+evaluators:
+
+  pipeline_opus:
+    enabled: true
+    label: "Amalgamator Pipeline (claude-opus-4-6)"
+    description: "Cherry-pick + LLM conflict resolution + iterative build-fix loop"
+    strategy: "pipeline"
+    model: "claude-opus-4-6"
+    amalgamator_path: "/Users/supathak/Ai-code-perf-amalgamation/amalgamator"
+
+  raw_claude_opus:
+    enabled: true
+    label: "Raw Claude Single-Shot (claude-opus-4-6)"
+    description: "Single-shot prompt with original diff + target context; no iteration"
+    strategy: "raw_claude"
+    model: "claude-opus-4-6"
+    amalgamator_path: "/Users/supathak/Ai-code-perf-amalgamation/amalgamator"
+
+  # Uncomment to add more evaluators:
+  #
+  # raw_claude_sonnet:
+  #   enabled: false
+  #   label: "Raw Claude Single-Shot (claude-sonnet-4-6)"
+  #   description: "Single-shot Sonnet — faster and cheaper than Opus"
+  #   strategy: "raw_claude"
+  #   model: "claude-sonnet-4-6"
+  #   amalgamator_path: "/Users/supathak/Ai-code-perf-amalgamation/amalgamator"
+  #
+  # pipeline_sonnet:
+  #   enabled: false
+  #   label: "Amalgamator Pipeline (claude-sonnet-4-6)"
+  #   description: "Full pipeline running on Sonnet instead of Opus"
+  #   strategy: "pipeline"
+  #   model: "claude-sonnet-4-6"
+  #   amalgamator_path: "/Users/supathak/Ai-code-perf-amalgamation/amalgamator"
+  #   config_template: "/Users/supathak/Ai-code-perf-amalgamation/amalgamator/auto_bug_fix/configs/benchmark_template.yaml"
+
+# ---- Output -----------------------------------------------------------
+output:
+  root: "/Users/supathak/Ai-code-perf-amalgamation/benchmark-results"
+  save_diffs: true
+  leaderboard: true
+
+# ---- Semantic Judge ---------------------------------------------------
+judge:
+  # Model used to evaluate semantic equivalence of generated vs ground-truth diffs
+  model: "claude-opus-4-6"
