@@ -31,7 +31,7 @@ _LOCAL_MODEL_PRICING: dict[str, float] = {"input": 0.0, "output": 0.0}
 _FALLBACK_PRICING: dict[str, float] = {"input": 5.0, "output": 25.0}
 
 
-def compute_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+def compute_cost(model: str, input_tokens: int, output_tokens: int, profile=None) -> float:
     """Compute USD cost from token counts using per-model pricing.
 
     Self-hosted models (Ollama, vLLM via api_base, etc.) are free.
@@ -41,7 +41,7 @@ def compute_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """
     from common.llm_client import is_self_hosted
 
-    if is_self_hosted(model):
+    if is_self_hosted(model, profile=profile):
         pricing = _LOCAL_MODEL_PRICING
     else:
         stripped = (model

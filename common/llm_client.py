@@ -26,6 +26,10 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from common.model_registry import ModelProfile
 
 log = logging.getLogger(__name__)
 
@@ -108,12 +112,17 @@ class CompletionResult:
     model: str = ""
 
 
-def is_self_hosted(model: str) -> bool:
+def is_self_hosted(model: str, profile: "ModelProfile | None" = None) -> bool:
     """Return True when the model is running on self-hosted infrastructure.
 
     Self-hosted means no per-token cloud cost: local Ollama, a custom
     vLLM/TGI server reached via ``api_base``, etc.
+
+    When *profile* is provided, uses its api_base; otherwise falls back
+    to the global/env api_base.
     """
+    if profile:
+        return profile.is_self_hosted()
     if _is_ollama_model(model):
         return True
     if model.startswith("openai/") and get_api_base():
@@ -125,12 +134,16 @@ def completion(
     model: str,
     messages: list[dict],
     max_tokens: int = 4096,
+    *,
+    profile: "ModelProfile | None" = None,
     **kwargs,
 ) -> CompletionResult:
     """Model-agnostic completion via LiteLLM.
 
-    Handles Vertex AI routing, Ollama thinking-mode suppression, and
-    custom ``api_base`` for self-hosted endpoints.
+    When *profile* is provided, transport config (api_base, api_key, params)
+    comes from it — no global state is consulted.  When *profile* is None,
+    falls back to the module-level globals / env vars for backward
+    compatibility with callers that haven't adopted profiles yet.
 
     Global ``model_params`` (set via :func:`configure`) are merged as
     defaults — explicit *kwargs* take precedence.  The caller's
@@ -141,22 +154,29 @@ def completion(
 
     effective_model = _resolve_model(model)
 
-    # Merge: model_params (lowest) → caller kwargs (highest).
-    # max_tokens from the function signature is the fallback.
-    merged = {**_model_params, **kwargs}
+    if profile:
+        base_params = dict(profile.params)
+        p_api_base = profile.api_base
+        p_api_key = profile.api_key
+    else:
+        base_params = dict(_model_params)
+        p_api_base = get_api_base()
+        p_api_key = get_api_key()
+
+    merged = {**base_params, **kwargs}
     merged.setdefault("max_tokens", max_tokens)
 
-    log.debug("LLM completion: model=%s (effective=%s), max_tokens=%s",
-              model, effective_model, merged.get("max_tokens"))
+    log.debug("LLM completion: model=%s (effective=%s), max_tokens=%s, profile=%s",
+              model, effective_model, merged.get("max_tokens"),
+              profile.id if profile else "legacy")
 
     if _is_ollama_model(effective_model):
         merged.setdefault("extra_body", {})
         merged["extra_body"].setdefault("think", False)
 
-    api_base = get_api_base()
-    if api_base and effective_model.startswith("openai/"):
-        merged.setdefault("api_base", api_base)
-        merged.setdefault("api_key", get_api_key() or "dummy")
+    if p_api_base and effective_model.startswith("openai/"):
+        merged.setdefault("api_base", p_api_base)
+        merged.setdefault("api_key", p_api_key or "dummy")
 
     response = litellm.completion(
         model=effective_model,

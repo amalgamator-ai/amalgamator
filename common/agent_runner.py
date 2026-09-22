@@ -225,6 +225,7 @@ def _compact_messages(
     context_length: int,
     keep_recent_tokens: int = KEEP_RECENT_TOKENS,
     timing: StepTiming | None = None,
+    profile=None,
 ) -> list[dict]:
     """Compress the message history to fit within the context budget.
 
@@ -272,7 +273,7 @@ def _compact_messages(
 
     # ── 3. Summarize the stale middle ────────────────────────────────────
     summary_text = _summarize_stale(model, stale, context_length,
-                                    timing=timing)
+                                    timing=timing, profile=profile)
 
     if summary_text:
         compacted = head + [
@@ -299,6 +300,7 @@ def _summarize_stale(
     stale: list[dict],
     context_length: int,
     timing: StepTiming | None = None,
+    profile=None,
 ) -> str | None:
     """Call the LLM to summarize stale conversation turns.
 
@@ -354,10 +356,15 @@ def _summarize_stale(
         from common.llm_client import get_api_base, get_api_key
 
         extra = {}
-        api_base = get_api_base()
-        if api_base and model.startswith("openai/"):
-            extra["api_base"] = api_base
-            extra["api_key"] = get_api_key() or "dummy"
+        if profile:
+            if profile.api_base and model.startswith("openai/"):
+                extra["api_base"] = profile.api_base
+                extra["api_key"] = profile.api_key or "dummy"
+        else:
+            api_base = get_api_base()
+            if api_base and model.startswith("openai/"):
+                extra["api_base"] = api_base
+                extra["api_key"] = get_api_key() or "dummy"
 
         response = _litellm_completion_with_streaming(
             model=model,
@@ -603,6 +610,7 @@ class LiteLLMAgentRunner(AgentRunner):
                 allowed_tools=getattr(config, "allowed_tools", None),
                 bash_timeout=getattr(config, "command_timeout", None),
                 context_length=getattr(config, "context_length", None),
+                profile=getattr(config, "profile", None),
             )
             timing.name = step.name
 
@@ -633,8 +641,12 @@ class LiteLLMAgentRunner(AgentRunner):
         allowed_tools: list[str] | None = None,
         bash_timeout: int | None = None,
         context_length: int | None = None,
+        profile=None,
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
+
+        When *profile* is provided, transport config (api_base, api_key,
+        params) comes from it instead of the module-level globals.
 
         Includes:
         - Duplicate-call detection to break out of loops.
@@ -656,18 +668,24 @@ class LiteLLMAgentRunner(AgentRunner):
                  ctx_limit, ctx_budget, COMPACTION_THRESHOLD_PCT * 100,
                  read_cap, bash_cap)
 
-        # Start with global model_params, then layer on transport config.
-        extra_kwargs: dict = {**get_model_params()}
+        if profile:
+            extra_kwargs: dict = {**profile.params}
+            p_api_base = profile.api_base
+            p_api_key = profile.api_key
+        else:
+            extra_kwargs: dict = {**get_model_params()}
+            p_api_base = get_api_base()
+            p_api_key = get_api_key()
+
         extra_kwargs.setdefault("max_tokens", 16384)
 
         if _is_ollama_model(model):
             extra_kwargs.setdefault("extra_body", {})
             extra_kwargs["extra_body"].setdefault("think", False)
 
-        api_base = get_api_base()
-        if api_base and model.startswith("openai/"):
-            extra_kwargs.setdefault("api_base", api_base)
-            extra_kwargs.setdefault("api_key", get_api_key() or "dummy")
+        if p_api_base and model.startswith("openai/"):
+            extra_kwargs.setdefault("api_base", p_api_base)
+            extra_kwargs.setdefault("api_key", p_api_key or "dummy")
 
         tools = _filter_tools(allowed_tools)
         allowed_names = {t["function"]["name"] for t in tools}
@@ -705,6 +723,7 @@ class LiteLLMAgentRunner(AgentRunner):
                     model, messages, ctx_limit,
                     keep_recent_tokens=KEEP_RECENT_TOKENS,
                     timing=timing,
+                    profile=profile,
                 )
                 est_tokens = _estimate_tokens(model, messages)
                 log.info("Post-compaction: %d tokens, %d messages",
@@ -841,14 +860,22 @@ _litellm_runner = LiteLLMAgentRunner()
 
 
 async def agent_run(config, steps, resume=False):
-    """Dispatch to the correct runner based on the model name.
+    """Dispatch to the correct runner based on the model's provider.
 
-    Claude models → Claude Agent SDK (existing behaviour).
-    Everything else → LiteLLM tool-use loop.
+    When the config carries a profile, uses ``profile.provider`` for dispatch.
+    Otherwise falls back to the ``is_claude_model()`` heuristic.
+
+    ``provider: anthropic`` → Claude Agent SDK (existing behaviour).
+    ``provider: litellm``   → LiteLLM tool-use loop.
     """
-    from common.llm_client import is_claude_model
+    profile = getattr(config, "profile", None)
+    if profile:
+        use_claude = profile.provider == "anthropic"
+    else:
+        from common.llm_client import is_claude_model
+        use_claude = is_claude_model(config.model)
 
-    if is_claude_model(config.model):
+    if use_claude:
         log.info("Using Claude Agent SDK for model %s", config.model)
         return await _claude_runner.run(config, steps, resume=resume)
     else:

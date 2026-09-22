@@ -562,21 +562,21 @@ def test_skip_ratio_accepts_the_whole_unit_interval(good, expected):
 
 
 # --- phase_4b_model ---
-# Phase 4b is the last resort before escalating to a human and deliberately
-# runs a stronger model than the rest of the pipeline. Making that configurable
-# must not change the default, and must not let an unusable value through.
+# Phase 4b defaults to the pipeline model. If you want a different model for
+# 4b, set it explicitly via advanced.phase_4b_model or a profile id.
 
-def test_phase_4b_model_defaults_to_opus():
+def test_phase_4b_model_defaults_to_pipeline_model():
+    """When no phase_4b_model is set, 4b uses the pipeline model."""
     cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
-    assert cfg.phase_4b_model == "claude-opus-4-6"
+    assert cfg.phase_4b_model == "claude-sonnet-4-6"
 
 
-def test_phase_4b_model_is_independent_of_the_pipeline_model():
-    """Setting `model:` must not silently move the escalation model with it."""
+def test_phase_4b_model_follows_pipeline_model():
+    """Setting model: moves 4b with it (no independent escalation by default)."""
     config = _cfg_with_advanced({})
-    config["model"] = "claude-sonnet-4-6"
+    config["model"] = "openai/deepseek-r1"
     cfg, _, _ = parse_bug_fix_config(config)
-    assert cfg.phase_4b_model == "claude-opus-4-6"
+    assert cfg.phase_4b_model == "openai/deepseek-r1"
 
 
 def test_phase_4b_model_override_is_honoured():
@@ -595,7 +595,7 @@ def test_phase_4b_model_is_stripped():
 def test_phase_4b_model_unusable_value_falls_back(bad, caplog):
     """An empty model name would surface as an opaque API error inside 4b."""
     cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({"phase_4b_model": bad}))
-    assert cfg.phase_4b_model == "claude-opus-4-6"
+    assert cfg.phase_4b_model == "claude-sonnet-4-6"
     assert "non-empty string" in caplog.text
 
 
