@@ -1241,8 +1241,8 @@ def test_phase_4b_uses_the_configured_model(tmp_path):
     assert seen["model"] == "claude-opus-5"
 
 
-def test_phase_4b_model_defaults_to_opus_not_the_pipeline_model(tmp_path):
-    """Unconfigured, 4b escalates to Opus even though the pipeline runs Sonnet."""
+def test_phase_4b_model_defaults_to_pipeline_model(tmp_path):
+    """Unconfigured, 4b uses the pipeline model (no implicit escalation)."""
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     claude_cfg.model = "claude-sonnet-4-6"
@@ -1255,8 +1255,7 @@ def test_phase_4b_model_defaults_to_opus_not_the_pipeline_model(tmp_path):
 
     with patch("auto_bug_fix.run_bug_fix._agent_run", new=_capture):
         phase_4b_run_and_fix(config, claude_cfg, state, None)
-    assert seen["model"] == "claude-opus-4-6"
-    assert seen["model"] != claude_cfg.model
+    assert seen["model"] == "claude-sonnet-4-6"
 
 
 # --- review round 3: verification gate, relatedness strength, 4b artifacts ---

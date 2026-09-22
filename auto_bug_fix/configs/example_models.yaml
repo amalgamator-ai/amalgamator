@@ -1,0 +1,27 @@
+# Model profiles for the auto_bug_fix pipeline.
+#
+# Define named profiles here, reference them by id in backport configs.
+# Place this file next to your backport YAML, at ~/.config/amalgamator/models.yaml,
+# or pass it explicitly with --models.
+#
+# Profile ids are opaque — name them whatever you want.
+
+models:
+  m1:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+  m2:
+    provider: litellm
+    model: openai/deepseek-r1
+    api_base: http://localhost:8080/v1
+    # api_key_file: ~/.keys/deepseek.key
+    params:
+      temperature: 0.2
+
+  m3:
+    provider: anthropic
+    model: claude-opus-4-6
+    # api_key_file: ~/.keys/anthropic.key
+
+default: m1

@@ -12,7 +12,12 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING
+
 from colorama import Fore, Style
+
+if TYPE_CHECKING:
+    from common.model_registry import ModelProfile
 
 
 def make_anthropic_client():
@@ -77,6 +82,11 @@ class ClaudeConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     command_timeout: int | None = None
     context_length: int | None = None
+    profile: "ModelProfile | None" = None
+
+    def __post_init__(self):
+        if self.profile and not self.model:
+            self.model = self.profile.model
 
 
 @dataclass

@@ -36,15 +36,19 @@ def _phase_config(
     model: str | None = None,
     thinking: dict | None = None,
     effort: str | None = None,
+    profile=None,
 ) -> BugFixClaudeConfig:
     """Create a per-phase ClaudeConfig that inherits transport settings.
 
+    When *profile* is provided, overrides the model and transport config.
     Copies ``command_timeout`` and ``context_length`` from the parent
     config so that context window management stays active across all
     pipeline phases.
     """
+    effective_profile = profile or claude_config.profile
+    effective_model = model or (profile.model if profile else claude_config.model)
     return BugFixClaudeConfig(
-        model=model or claude_config.model,
+        model=effective_model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
         cwd=config.repo_path,
@@ -52,6 +56,7 @@ def _phase_config(
         context_length=claude_config.context_length,
         thinking=thinking,
         effort=effort or claude_config.effort,
+        profile=effective_profile,
     )
 
 
@@ -1062,18 +1067,18 @@ def phase_4b_run_and_fix(
 </semantic_triage>
 """
 
+    phase_4b_profile = config.phase_4b_profile or claude_config.profile
+    phase_4b_model = config.phase_4b_model or claude_config.model
     ext_claude_config = _phase_config(
         claude_config, config,
-        model=config.phase_4b_model,
+        model=phase_4b_model,
         thinking={"type": "adaptive"},
         effort="max",
+        profile=phase_4b_profile,
     )
     ext_claude_config.max_thinking_tokens = 1048576
-    # Named explicitly: 4b is meant to run a stronger model than the rest of
-    # the pipeline, and it is now configurable — the run log should say which
-    # one actually escalated.
-    log.info("Phase 4b: escalating to %s with deep thinking (last resort; "
-             "pipeline model is %s)", config.phase_4b_model, claude_config.model)
+    log.info("Phase 4b: recovery with %s (pipeline model is %s)",
+             phase_4b_model, claude_config.model)
 
     prompt = gen_RunAndFixPrompt(
         context=enriched_context,
