@@ -32,8 +32,12 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from colorama import Fore, Style
+
+if TYPE_CHECKING:
+    from common.model_registry import ModelProfile
 
 log = logging.getLogger(__name__)
 
@@ -225,7 +229,7 @@ def _compact_messages(
     context_length: int,
     keep_recent_tokens: int = KEEP_RECENT_TOKENS,
     timing: StepTiming | None = None,
-    profile=None,
+    profile: "ModelProfile | None" = None,
 ) -> list[dict]:
     """Compress the message history to fit within the context budget.
 
@@ -300,7 +304,7 @@ def _summarize_stale(
     stale: list[dict],
     context_length: int,
     timing: StepTiming | None = None,
-    profile=None,
+    profile: "ModelProfile | None" = None,
 ) -> str | None:
     """Call the LLM to summarize stale conversation turns.
 
@@ -641,7 +645,7 @@ class LiteLLMAgentRunner(AgentRunner):
         allowed_tools: list[str] | None = None,
         bash_timeout: int | None = None,
         context_length: int | None = None,
-        profile=None,
+        profile: "ModelProfile | None" = None,
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
 

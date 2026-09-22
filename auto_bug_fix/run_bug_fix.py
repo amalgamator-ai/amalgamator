@@ -18,6 +18,7 @@ import time
 import asyncio
 from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from common.utils import Tee
 from auto_bug_fix.claude_utils import (
@@ -28,6 +29,9 @@ from auto_bug_fix.claude_utils import (
     claude_run as _claude_run,
 )
 
+if TYPE_CHECKING:
+    from common.model_registry import ModelProfile
+
 
 def _phase_config(
     claude_config: ClaudeConfig,
@@ -36,17 +40,28 @@ def _phase_config(
     model: str | None = None,
     thinking: dict | None = None,
     effort: str | None = None,
-    profile=None,
+    profile: "ModelProfile | None" = None,
 ) -> BugFixClaudeConfig:
     """Create a per-phase ClaudeConfig that inherits transport settings.
 
     When *profile* is provided, overrides the model and transport config.
+    When *model* is explicitly passed and differs from the effective
+    profile's model, builds a legacy profile from the bare model string
+    so the profile and model stay consistent.
     Copies ``command_timeout`` and ``context_length`` from the parent
     config so that context window management stays active across all
     pipeline phases.
     """
+    from common.model_registry import build_legacy_profile
+
     effective_profile = profile or claude_config.profile
     effective_model = model or (profile.model if profile else claude_config.model)
+
+    # When an explicit model is passed that doesn't match the profile,
+    # build a legacy profile so the two stay consistent.
+    if model and effective_profile and effective_profile.model != effective_model:
+        effective_profile = build_legacy_profile(effective_model)
+
     return BugFixClaudeConfig(
         model=effective_model,
         allowed_tools=claude_config.allowed_tools,

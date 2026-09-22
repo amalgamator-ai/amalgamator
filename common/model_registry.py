@@ -26,7 +26,7 @@ class ModelProfile:
     provider: str
     model: str
     api_base: str | None = None
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     params: dict = field(default_factory=dict)
 
     def is_self_hosted(self) -> bool:

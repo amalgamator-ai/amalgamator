@@ -240,6 +240,10 @@ def parse_bug_fix_config(
     else:
         source_fix_commit = str(fix["commit"])
 
+    phase_4b_raw = advanced_str(
+        advanced, "phase_4b_model",
+        _pipeline_model_name(config))
+
     bug_fix_config = BugFixConfig(
         repo_path=repo_path,
         build_dir=build_dir,
@@ -267,12 +271,17 @@ def parse_bug_fix_config(
         partial_success_skip_ratio=advanced_float(
             advanced, "partial_success_skip_ratio", 0.5,
             minimum=0.0, maximum=1.0),
-        phase_4b_model=advanced_str(
-            advanced, "phase_4b_model",
-            _pipeline_model_name(config)),
+        phase_4b_model=phase_4b_raw,
         fix_patch=fix_patch,
         fix_upstream_ref=fix_upstream_ref,
     )
+
+    # Resolve phase_4b_model through the registry when one is present.
+    # The YAML value can be a profile id (e.g. "m3") or a bare model string.
+    if registry:
+        phase_4b_profile = registry.resolve(phase_4b_raw)
+        bug_fix_config.phase_4b_profile = phase_4b_profile
+        bug_fix_config.phase_4b_model = phase_4b_profile.model
 
     return bug_fix_config, workdir, source_path
 
