@@ -343,13 +343,32 @@ def phase_0_triage(
     return {"forward_patch_id": "not_found", "ancestry": ancestry_status}
 
 
+def _diff_char_caps(config: BugFixConfig) -> tuple[int, int]:
+    """Return (max_diff_chars, max_chunk_chars) scaled to the context budget.
+
+    Reserves ~12.5% of the context window for the full diff and ~3% for
+    per-chunk diffs, leaving headroom for the system prompt, tool results,
+    and later pipeline phases.  Floors at the legacy defaults (200K / 50K)
+    so smaller-context models are unaffected.
+    """
+    ctx = config.context_length or 128_000
+    chars_per_token = 4
+    max_diff = max(200_000, int(ctx * 0.125 * chars_per_token))
+    max_chunk = max(50_000, int(ctx * 0.03 * chars_per_token))
+    return max_diff, max_chunk
+
+
 def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files: list[str] | None = None) -> str:
     """Compute the fix diff with truncation for large commits.
 
     When for_files is provided, only include diffs for those specific files
     (used during chunked resolution to keep prompt size manageable).
+
+    Caps scale with ``config.context_length`` so large-context models get
+    the full diff instead of falling back to --stat.
     """
     sha = commit or config.source_fix_commit
+    max_diff_chars, max_chunk_chars = _diff_char_caps(config)
 
 
     if for_files:
@@ -372,8 +391,7 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
                 cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
         fix_diff = stat + "\n\n--- Diff for chunk files ---\n\n" + partial_diff
-        MAX_CHUNK_CHARS = 50_000
-        if len(fix_diff) > MAX_CHUNK_CHARS:
+        if len(fix_diff) > max_chunk_chars:
             fix_diff = stat + "\n\n[Chunk diffs too large — stat only. Agent must read files directly.]"
         return fix_diff
 
@@ -389,9 +407,9 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
             cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout
 
-    MAX_DIFF_CHARS = 200_000
-    if len(fix_diff) > MAX_DIFF_CHARS:
-        log.warning("fix_diff too large (%d chars), using --stat only", len(fix_diff))
+    if len(fix_diff) > max_diff_chars:
+        log.warning("fix_diff too large (%d chars, cap %d), using --stat only",
+                    len(fix_diff), max_diff_chars)
         if is_merge_commit(config.repo_path, sha):
             fix_diff = subprocess.run(
                 ["git", "diff", "--stat", f"{sha}^1..{sha}"],
@@ -1414,14 +1432,15 @@ def cherry_pick_and_resolve(
     if state.followup_fixes and _is_followup_target(config.repo_path, commit, state):
         followup_note = "\n".join(f"  - {f}" for f in state.followup_fixes)
 
-    CHUNK_SIZE = 30
+    _max_diff, max_chunk = _diff_char_caps(config)
+    CHUNK_SIZE = 30 if max_chunk <= 50_000 else 45
 
     for attempt in range(1, config.max_resolution_retries + 1):
         if len(uu_files) > CHUNK_SIZE:
             if len(uu_files) > 100:
-                chunk_size = 10
-            elif len(fix_diff) > 50_000:
-                chunk_size = 15
+                chunk_size = 10 if max_chunk <= 50_000 else 15
+            elif len(fix_diff) > max_chunk:
+                chunk_size = 15 if max_chunk <= 50_000 else 20
             else:
                 chunk_size = CHUNK_SIZE
             log.info("%s attempt %d/%d — resolving %d conflicts in chunks of %d",
