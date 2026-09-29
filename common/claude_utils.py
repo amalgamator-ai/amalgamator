@@ -85,7 +85,7 @@ class ClaudeConfig:
     profile: "ModelProfile | None" = None
 
     def __post_init__(self):
-        if self.profile and not self.model:
+        if self.profile:
             self.model = self.profile.model
 
 
