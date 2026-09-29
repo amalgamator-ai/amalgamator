@@ -13,6 +13,7 @@ from typing import Any
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.claude_utils import BugFixClaudeConfig, ClaudeConfig
+from common.model_registry import resolve_api_key as _resolve_api_key
 
 log = logging.getLogger(__name__)
 
@@ -284,26 +285,6 @@ def parse_bug_fix_config(
         bug_fix_config.phase_4b_model = phase_4b_profile.model
 
     return bug_fix_config, workdir, source_path
-
-
-def _resolve_api_key(config: dict[str, Any]) -> str | None:
-    """Resolve the API key from ``api_key`` or ``api_key_file`` in config.
-
-    ``api_key_file`` supports ``~`` expansion.
-    Returns *None* if neither field is present.
-    """
-    explicit = config.get("api_key")
-    if explicit:
-        return str(explicit)
-
-    key_file = config.get("api_key_file")
-    if key_file:
-        resolved = os.path.expanduser(str(key_file))
-        try:
-            return Path(resolved).read_text().strip()
-        except OSError as e:
-            log.warning("Cannot read api_key_file %s: %s", resolved, e)
-    return None
 
 
 def parse_claude_config(
