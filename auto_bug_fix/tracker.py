@@ -6,8 +6,10 @@ import os
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+from common.model_registry import public_config_snapshot
 
 
 MODEL_PRICING: dict[str, dict[str, float]] = {
@@ -104,7 +106,7 @@ class Tracker:
         self._run = PipelineRun(
             run_id=str(uuid.uuid4()),
             issue_id=issue_id,
-            config=config_dict,
+            config=public_config_snapshot(config_dict),
             start_time=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -214,7 +216,7 @@ class Tracker:
         path = os.path.join(self._output_dir, filename)
 
         with open(path, "w") as f:
-            json.dump(asdict(self._run), f, indent=2)
+            json.dump(public_config_snapshot(self._run), f, indent=2)
         return path
 
     def summary(self) -> str:
