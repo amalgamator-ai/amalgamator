@@ -17,6 +17,8 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from common.model_identity import is_claude_model, is_ollama_model
+
 log = logging.getLogger(__name__)
 
 
@@ -35,7 +37,7 @@ class ModelProfile:
         return {"id": self.id, "provider": self.provider, "model": self.model}
 
     def is_self_hosted(self) -> bool:
-        if self.model.startswith("ollama/") or self.model.startswith("ollama_chat/"):
+        if is_ollama_model(self.model):
             return True
         if self.model.startswith("openai/") and self.api_base:
             return True
@@ -65,11 +67,8 @@ def public_config_snapshot(value: Any) -> Any:
     return deepcopy(value)
 
 
-_CLAUDE_PREFIXES = ("claude-", "anthropic/", "vertex_ai/claude-")
-
-
 def _infer_provider(model: str) -> str:
-    if any(model.startswith(p) for p in _CLAUDE_PREFIXES):
+    if is_claude_model(model):
         return "anthropic"
     return "litellm"
 

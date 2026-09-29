@@ -28,6 +28,9 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+# Compatibility exports for existing callers.
+from common.model_identity import is_claude_model, is_ollama_model as _is_ollama_model
+
 if TYPE_CHECKING:
     from common.model_registry import ModelProfile
 
@@ -83,24 +86,6 @@ def get_api_key() -> str | None:
 def get_model_params() -> dict:
     """Return the configured model parameters dict (may be empty)."""
     return dict(_model_params)
-
-
-# ── Model classification ────────────────────────────────────────────────────
-
-_CLAUDE_PREFIXES = (
-    "claude-",
-    "anthropic/",
-    "vertex_ai/claude-",
-)
-
-
-def is_claude_model(model: str) -> bool:
-    """Return True if *model* refers to an Anthropic Claude model.
-
-    Used to decide between the native Claude Agent SDK path and the
-    generic LiteLLM agent loop.
-    """
-    return any(model.startswith(p) for p in _CLAUDE_PREFIXES)
 
 
 @dataclass
@@ -206,10 +191,6 @@ def _resolve_model(model: str) -> str:
     if os.environ.get("CLAUDE_CODE_USE_VERTEX") and model.startswith("claude-"):
         return f"vertex_ai/{model}"
     return model
-
-
-def _is_ollama_model(model: str) -> bool:
-    return model.startswith("ollama/") or model.startswith("ollama_chat/")
 
 
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
