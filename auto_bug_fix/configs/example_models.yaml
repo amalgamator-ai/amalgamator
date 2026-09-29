@@ -5,6 +5,12 @@
 # or pass it explicitly with --models.
 #
 # Profile ids are opaque — name them whatever you want.
+# provider: anthropic selects the Claude SDK; litellm selects its generic runner.
+# api_key/api_key_file and api_base apply per call for either runner.
+# params contains LiteLLM generation/provider options, not arbitrary SDK options.
+# Direct SDK transport rejects inherited Vertex/Bedrock/Foundry or token-auth
+# modes and disables user/project settings sources for that client. Profiles
+# without explicit transport retain SDK environment/login behavior.
 
 models:
   m1:
