@@ -1,6 +1,9 @@
 """Boundary tests for registry-backed and legacy pipeline configuration."""
 import pytest
 import yaml
+import sys
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from auto_bug_fix.config_loader import load_pipeline_config, load_multi_target_config
 from common import llm_client
@@ -78,3 +81,54 @@ def test_no_registry_defaults_to_legacy_sonnet(tmp_path, raw_config):
     bug, claude, *_ = load_pipeline_config(write_config(tmp_path, raw_config))
     assert claude.model == "claude-sonnet-4-6"
     assert bug.phase_4b_profile is claude.profile
+
+
+@pytest.mark.parametrize("loader", [load_pipeline_config, load_multi_target_config])
+def test_unrelated_registry_preserves_legacy_request(tmp_path, raw_config, loader, monkeypatch):
+    raw_config.update(model="openai/bare", api_base="http://localhost/v1", api_key="KEY",
+                      model_params={"temperature": 0.2})
+    path = write_config(tmp_path, raw_config)
+    before = loader(path)[-3].profile
+    write_config(tmp_path, raw_config, {"local": {"model": "gpt-4o"}})
+    bug, claude = loader(path)[-4:-2]
+    assert claude.profile == before
+    assert bug.phase_4b_profile is claude.profile
+    request = Mock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))], usage=None))
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=request))
+    llm_client.completion(claude.model, [], profile=claude.profile)
+    assert request.call_args.kwargs["api_base"] == before.api_base
+    assert request.call_args.kwargs["api_key"] == before.api_key
+    assert request.call_args.kwargs["temperature"] == 0.2
+
+
+@pytest.mark.parametrize("selection", [None, "local"])
+def test_named_selection_does_not_seed_globals_or_merge_inline(tmp_path, raw_config, monkeypatch, caplog, selection):
+    raw_config.update(api_base="https://SECRET_ENDPOINT", api_key="SECRET_KEY",
+                      model_params={"temperature": 0.8})
+    if selection:
+        raw_config["model"] = selection
+    configure = Mock()
+    monkeypatch.setattr(llm_client, "configure", configure)
+    _, claude, *_ = load_pipeline_config(write_config(tmp_path, raw_config, {
+        "local": {"model": "gpt-4o"},
+    }))
+    configure.assert_not_called()
+    assert claude.profile.api_base is None
+    assert claude.profile.api_key is None
+    assert claude.profile.params == {}
+    assert "ignores inline fields" in caplog.text
+    assert "SECRET_" not in caplog.text
+
+
+def test_different_bare_phase_uses_only_yaml_inline_transport(tmp_path, raw_config, caplog):
+    raw_config.update(model="local", api_key="INLINE_KEY", api_base="http://inline/v1",
+                      advanced={"phase_4b_model": "openai/other"})
+    bug, claude, *_ = load_pipeline_config(write_config(tmp_path, raw_config, {
+        "local": {"model": "openai/local", "api_key": "NAMED_KEY", "api_base": "http://named/v1"},
+    }))
+    assert claude.profile.api_key == "NAMED_KEY"
+    assert bug.phase_4b_profile.api_key == "INLINE_KEY"
+    assert bug.phase_4b_profile.api_base == "http://inline/v1"
+    assert "inherits inline fields" in caplog.text
+    assert "INLINE_KEY" not in caplog.text
