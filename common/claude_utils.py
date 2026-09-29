@@ -134,6 +134,7 @@ def _find_resume_index(steps: list[PipelineStep], output_dir: str) -> int:
 
 def print_claude_config(config: ClaudeConfig) -> None:
     from common.llm_client import is_claude_model
+    from common.model_registry import public_config_snapshot
 
     class_name = config.__class__.__name__
     is_claude = is_claude_model(config.model)
@@ -146,7 +147,7 @@ def print_claude_config(config: ClaudeConfig) -> None:
         name = f.name
         if not is_claude and name in _claude_only:
             continue
-        value = getattr(config, name)
+        value = public_config_snapshot(getattr(config, name))
         print(f"  {name}: {value}")
 
 

@@ -2142,9 +2142,11 @@ def run_pipeline(
             "before calling run_pipeline."
         )
 
+    from common.model_registry import public_config_snapshot
+
     tracker = Tracker(
         issue_id=config.issue_id,
-        config_dict=asdict(config),
+        config_dict=public_config_snapshot(config),
         model=claude_config.model,
         output_dir=output_dir,
     )

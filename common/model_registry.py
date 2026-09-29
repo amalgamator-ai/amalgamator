@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,9 +26,13 @@ class ModelProfile:
     id: str
     provider: str
     model: str
-    api_base: str | None = None
+    api_base: str | None = field(default=None, repr=False)
     api_key: str | None = field(default=None, repr=False)
-    params: dict = field(default_factory=dict)
+    params: dict = field(default_factory=dict, repr=False)
+
+    def public_snapshot(self) -> dict[str, str]:
+        """Allowlisted identity for logs and persistence; never runtime transport."""
+        return {"id": self.id, "provider": self.provider, "model": self.model}
 
     def is_self_hosted(self) -> bool:
         if self.model.startswith("ollama/") or self.model.startswith("ollama_chat/"):
@@ -39,6 +44,25 @@ class ModelProfile:
 
 class RegistryError(Exception):
     pass
+
+
+def public_config_snapshot(value: Any) -> Any:
+    """Copy configuration without serializing credential-bearing profiles.
+
+    Profile-shaped dictionaries are also sanitized, defending tracker callers
+    that have already used dataclasses.asdict(). Other fields keep their shape.
+    """
+    if isinstance(value, ModelProfile):
+        return value.public_snapshot()
+    if is_dataclass(value) and not isinstance(value, type):
+        return {f.name: public_config_snapshot(getattr(value, f.name)) for f in fields(value)}
+    if isinstance(value, dict):
+        if {"id", "provider", "model"} <= value.keys():
+            return {key: value[key] for key in ("id", "provider", "model")}
+        return {key: public_config_snapshot(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(public_config_snapshot(item) for item in value)
+    return deepcopy(value)
 
 
 _CLAUDE_PREFIXES = ("claude-", "anthropic/", "vertex_ai/claude-")
