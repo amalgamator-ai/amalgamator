@@ -3,7 +3,12 @@ import asyncio
 import os
 import sys
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+# This standalone subprocess must exercise the current checkout, even when the
+# project is not installed or another installation is on the import path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from claude_agent_sdk._internal.transport import subprocess_cli
 from common.claude_utils import ClaudeConfig, build_claude_options
