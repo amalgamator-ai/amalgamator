@@ -60,10 +60,21 @@ def test_environment_only_profile_preserves_sdk_defaults(claude_cfg, monkeypatch
     assert not hasattr(options, "setting_sources")
 
 
-def test_installed_sdk_subprocess_transport_smoke():
+def test_installed_sdk_subprocess_transport_smoke(tmp_path):
     # Fresh interpreter bypasses conftest's SDK import stubs. No CLI is spawned.
-    script = Path(__file__).with_name("sdk_transport_smoke.py")
-    result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True)
+    # Run outside the checkout with an unrelated common package on the import
+    # path, so an editable install cannot hide a missing checkout bootstrap.
+    external = tmp_path / "external"
+    (external / "common").mkdir(parents=True)
+    (external / "common" / "__init__.py").write_text(
+        "raise AssertionError('smoke check imported an external common package')\n"
+    )
+    script = Path(__file__).resolve().with_name("sdk_transport_smoke.py")
+    pythonpath = os.pathsep.join(filter(None, [str(external), os.environ.get("PYTHONPATH")]))
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True,
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": pythonpath},
+    )
     assert result.returncode == 0, result.stdout + result.stderr
 
 
