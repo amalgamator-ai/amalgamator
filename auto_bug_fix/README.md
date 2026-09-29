@@ -47,7 +47,7 @@ flowchart TD
 | 1.5 — RED triage | If RED unexpectedly passed: decides between *not vulnerable* (pipeline stops — no backport needed), *mitigated* (port anyway for defense-in-depth), or *bad test* (produce a replacement or escalate). |
 | 2+3a — Cherry-pick and resolve | `git cherry-pick` with a strategy ladder (default → patience → ort). Conflicted files first go through mechanical rungs (`git apply --ignore-whitespace`, `-C1` of the per-file patch onto the target side — byte-spliced, never regenerated). What remains goes to a narrowly-scoped LLM resolution loop. Finalization then runs the deterministic safety nets (below) and two review agents (3a.1 verification fed with computed evidence, 3a.2 triage-blind review). |
 | 3b — Regeneration | Runs the validated regeneration commands for generated files that were deliberately skipped, keeping the result only if the build still passes. |
-| 4 — Verify | Build + test. On failure, an agent diagnoses and repairs iteratively (4a); if unrecoverable, escalates to the autonomous build-test-fix loop (4b, `phase_4b.py`) as a last resort — a single long-running agent (strongest model, max effort) fed the full dossier, which writes `run_and_fix_success.txt` or `run_and_fix_failure.txt` to report back. Successful 4a/4b recovery edits are committed as a fixup so they reach the candidate patch and preserved branch. |
+| 4 — Verify | Build + test. On failure, an agent diagnoses and repairs iteratively (4a); if unrecoverable, escalates to the autonomous build-test-fix loop (4b, `phase_4b.py`) as a last resort — a single long-running agent using the pipeline profile or an explicit Phase 4b override, fed the full dossier, which writes `run_and_fix_success.txt` or `run_and_fix_failure.txt` to report back. Successful 4a/4b recovery edits are committed as a fixup so they reach the candidate patch and preserved branch. |
 | 4.5 — Semantic equivalence | `git range-diff` between the source fix and the backport (squashed into one synthetic commit, so test-port/review/recovery fixups don't skew the comparison), classified into an equivalence verdict. |
 | 5 — Dossier | Writes `dossier.md` — every decision, gate value, audit finding, and diff, organized for a human reviewer. |
 
@@ -69,23 +69,71 @@ Each is individually toggleable under `advanced:` so runs can ablate them.
 
 - Python ≥ 3.14
 - git (the pipeline works in a disposable `git worktree` of your repo)
-- Python packages: `claude-agent-sdk`, `pyyaml`, `colorama` (from the repo root: `pip install -e .`)
-- `ANTHROPIC_API_KEY` set in the environment
+- Python packages: `claude-agent-sdk`, `litellm`, `pyyaml`, `colorama` (from the repo root: `pip install -e .`)
+- A reachable model service with tool/function calling support and the credentials it requires. Configure keys in a model profile or use the provider's environment/login setup. Local unauthenticated servers do not require a cloud API key.
 
 ---
 
 ## Quickstart
 
-### 1. Write a config
+Use two files: **`models.yaml`** for reusable model profiles and **`case.yaml`**
+for the backport task. `case.yaml` is just an example filename; YAML, YML, and
+JSON case files are accepted.
 
-Copy [`configs/example_backport.yaml`](configs/example_backport.yaml) and fill in your values:
+### 1. Create models.yaml
+
+From the repository root, copy the paired templates:
+
+```bash
+mkdir -p my-backport
+cp auto_bug_fix/configs/example_models.yaml my-backport/models.yaml
+cp auto_bug_fix/configs/example_backport.yaml my-backport/case.yaml
+```
+
+Edit `my-backport/models.yaml` to describe your models. Profile IDs (`m1`, `m2`,
+`m3` here) are names you choose; the `model` inside each profile is the actual
+model identifier:
+
+```yaml
+models:
+  m1:
+    provider: anthropic
+    model: claude-sonnet-4-6
+    # api_key_file: ~/.keys/anthropic.key
+
+  m2:
+    provider: litellm
+    model: openai/deepseek-r1    # replace with the model name served by your endpoint
+    api_base: http://localhost:8080/v1
+    # api_key_file: ~/.keys/local-model.key
+    params:
+      temperature: 0.2
+      max_tokens: 16384
+
+  m3:
+    provider: anthropic
+    model: claude-opus-4-6
+    # api_key_file: ~/.keys/anthropic.key
+
+default: m1
+```
+
+For `m1`/`m3`, supply an Anthropic key file, set `ANTHROPIC_API_KEY`, or use your
+existing Claude SDK login/backend setup. Each profile supplies its own
+credentials; `m3` does not inherit `m1`'s key. For `m2`, start your model server
+and set its URL and served model name. Supply a key if that server requires one.
+
+### 2. Create case.yaml
+
+Edit `my-backport/case.yaml`, replacing the repository path, refs, commit, and
+commands with values for your project:
 
 ```yaml
 issue_id: "PROJ-1234"
 bug_description: "Fix null-pointer dereference in the connection teardown path"
 
 repository:
-  source_path: "/path/to/your/repo"       # local clone (never modified directly)
+  source_path: "/path/to/your/repo"       # existing local clone
   workdir: "/tmp/bugfix-workdir"          # disposable worktrees are created here
 
 branches:
@@ -99,22 +147,38 @@ build:
   command: "make -j$(nproc)"
   test_command: "make check -j$(nproc)"
 
-model: "claude-sonnet-4-6"
+model: m1                                # profile ID from models.yaml
+
+# Optional: use another complete profile for Phase 4b recovery.
+# advanced:
+#   phase_4b_model: m3
 ```
 
-### 2. Run it
+Use `model: m2` to run with the local server instead. Omitting `model` selects
+the registry's `default`. Omit `advanced.phase_4b_model` to use the same profile
+throughout the pipeline.
+
+### 3. Run it
 
 ```bash
 # From the repository root (the directory containing auto_bug_fix/):
-python -m auto_bug_fix.run_bug_fix path/to/my_backport.yaml
+python -m auto_bug_fix.run_bug_fix my-backport/case.yaml
+
+# Or select a registry stored elsewhere:
+python -m auto_bug_fix.run_bug_fix my-backport/case.yaml --models /path/to/shared-models.yaml
+
+python -m auto_bug_fix.run_bug_fix --help
 ```
 
-The config path is a positional argument. The pipeline fetches `origin`, creates a worktree per target under `repository.workdir`, runs all phases, and exits 0 only if every target succeeded.
+The case path is a required positional argument. The pipeline fetches remote
+refs, creates a worktree per target under `repository.workdir`, runs the phases,
+and exits 0 only if every target succeeded. CLI artifacts go under
+`runs/<case-filename-without-extension>_<timestamp>/` in the working directory.
 
-### 3. Review the result
+### 4. Review the result
 
 ```
-runs/my_backport_20260724_153000/
+runs/case_20260929_153000/
 ├── run_log.txt                  # full console log of the whole run
 └── release-1.0/                 # one directory per target branch
     ├── run_log.txt              # per-target log
@@ -128,7 +192,111 @@ The ported commits are also preserved as a branch in the worktree's repo, named 
 
 ---
 
-## YAML reference
+## Model registry reference
+
+### Discovery and file paths
+
+The loader uses the first selected registry, without merging files:
+
+1. `--models PATH`, if supplied.
+2. A file named exactly `models.yaml` in the case file's directory.
+3. `~/.config/amalgamator/models.yaml`.
+
+An explicitly supplied missing, unreadable, or invalid registry causes an error;
+the loader does not fall back to another file. `--models` supports `~`, and
+relative paths are resolved against the command's working directory. Programmatic
+callers can pass the same selection as `models_path=` to either config loader.
+
+Without a registry, bare model names and inline model settings are supported.
+If the case also omits `model`, the fallback is `claude-sonnet-4-6`.
+
+### Fields in models.yaml
+
+The top-level `models` mapping must be non-empty. A top-level **`default` is
+required** and must name one of its profiles, even when the case explicitly
+selects a model.
+
+| Profile field | Required | Meaning |
+|---|---|---|
+| `model` | Yes | Actual model identifier, such as `claude-sonnet-4-6`, `gpt-4o`, `ollama/qwen3:14b`, or `openai/<served-model-name>` |
+| `provider` | No | Runner: `anthropic` for Claude Agent SDK, `litellm` for the generic tool-use loop. When omitted, Claude names infer `anthropic`; other names infer `litellm`. An explicit value wins. |
+| `api_base` | No | Custom API endpoint, applied per call. For OpenAI-compatible servers, normally include `/v1`. |
+| `api_key` | No | Literal API key; takes precedence over `api_key_file`. |
+| `api_key_file` | No | File containing the key; contents are read and whitespace-trimmed. Supports `~`; relative paths use the command's working directory, not the registry directory. |
+| `params` | No | LiteLLM generation/provider options such as `temperature`, `top_p`, `max_tokens`, or `extra_body`. Also forwarded during context summarization. |
+
+Keep `model`, `provider`, `api_base`, `api_key`, and `api_key_file` at the profile
+level: those fields are rejected inside `params`. Request-specific options take
+precedence over profile parameters; profile output-token limits take precedence
+over the caller's default limit. Nested parameters are copied per request.
+
+Registry values are not environment-variable-interpolated. To use provider
+environment credentials, omit the key fields instead of writing
+`api_key: "${ANTHROPIC_API_KEY}"`. An unreadable key file produces a warning and
+leaves the explicit key unset, allowing the provider's normal credential lookup.
+
+**Additional provider examples:** add entries like these beneath `models`:
+
+```yaml
+openai_cloud:
+  provider: litellm
+  model: gpt-4o
+  api_key_file: ~/.keys/openai.key
+
+ollama_local:
+  provider: litellm
+  model: ollama/qwen3:14b
+  api_base: http://localhost:11434
+```
+
+Then select `model: openai_cloud` or `model: ollama_local` in the case. Official
+OpenAI needs no custom endpoint. Ollama must be running with the chosen model
+available. A custom `openai/` endpoint without a profile key uses `OPENAI_API_KEY`
+when present, or a dummy key otherwise; set a real key for authenticated servers.
+
+**Claude SDK profiles:** `api_key` and `api_base` become per-client
+`ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` overrides. Profiles without explicit
+transport preserve SDK login/environment behavior, including a configured
+Vertex backend. Explicit direct transport rejects inherited Vertex, Bedrock,
+Foundry, or conflicting token-auth modes and disables user/project settings
+sources for that client. `params` is a LiteLLM feature, not a mapping of arbitrary
+Claude SDK options; use `claude.allowed_tools` and `claude.perm_mode` in the case
+for those agent settings.
+
+### Model selection and legacy cases
+
+- `claude.model`, when supplied, takes precedence over top-level `model`.
+- A known profile ID selects its complete model, runner, transport, and parameters.
+  Inline `api_base`, `api_key`/`api_key_file`, and `model_params` in the case are
+  ignored for this selection, with a warning listing field names.
+- An unregistered string is treated as a **bare model name**, even when a
+  registry exists. A misspelled profile ID therefore does not produce an
+  unknown-profile error at load time. Check that case IDs match the registry.
+- With no model selection, the registry default wins; only the no-registry path
+  falls back to Sonnet.
+
+For older single-file cases, use these fields at the case's top level (alongside
+the required repository/fix/build sections):
+
+```yaml
+model: openai/deepseek-r1
+api_base: http://localhost:8080/v1
+api_key_file: ~/.keys/local-model.key
+model_params:
+  temperature: 0.2
+```
+
+The inline parameter key is **`model_params`**, while profiles use **`params`**.
+For bare-model cases, top-level endpoint/key settings take precedence over their
+legacy `claude` equivalents; discovering an unrelated registry preserves them.
+
+An omitted or unusable `advanced.phase_4b_model` inherits the full pipeline
+profile. A known override ID selects that profile; a bare override equal to the
+pipeline model inherits the pipeline profile. A different bare override uses
+only the case's legacy inline settings, with an inheritance warning when those
+fields exist. Use a named override to give Phase 4b its own endpoint and key.
+
+## Case YAML reference
 
 ### Required
 
@@ -137,9 +305,9 @@ The ported commits are also preserved as a branch in the worktree's repo, named 
 | `issue_id` | Identifier used in commit messages, branch name, and run artifacts |
 | `bug_description` | What the bug is and how the fix addresses it — given to the agents as context |
 | `repository.source_path` | Local clone of the repository (read-only; work happens in a worktree) |
-| `branches.source` | Ref that has the fix (e.g. `origin/main`) |
+| `branches.source` | Ref that has the fix (e.g. `origin/main`); defaults to `origin/main` in patch mode |
 | `branches.target` *or* `branches.targets` | Ref(s) that need the fix — exactly one of the two |
-| `fix.commit` | SHA of the fix commit on the source branch |
+| `fix.commit` *or* `fix.patch` | Exactly one: the source fix commit SHA, or a path to a patch file |
 | `build` | Section must exist; all keys inside it are optional |
 
 ### Optional
@@ -153,10 +321,14 @@ The ported commits are also preserved as a branch in the worktree's repo, named 
 | `build.lint_command` | `""` (skip) | Lint command |
 | `build.file_check_command` | `""` (skip) | Per-file check run over touched files after resolution, e.g. `"gcc -fsyntax-only {file}"` — `{file}` is replaced with the absolute path |
 | `build.auto_discover_tests` | `false` | Let the pipeline discover test commands |
-| `model` | `claude-sonnet-4-6` | Model for all agents except the Phase 4b escalation (use a stronger model for harder backports) |
-| `output.directory` | `./runs` | Parent directory for run artifacts |
+| `model` | Registry default, otherwise `claude-sonnet-4-6` | Profile ID or bare model name for the pipeline, including Phase 4b unless overridden |
+| `api_base`, `api_key`, `api_key_file`, `model_params` | Unset | Legacy inline model settings; see the selection rules above |
 | `claude.allowed_tools` | `[Read, Write, Bash]` | Tools available to the agents |
 | `claude.perm_mode` | `acceptEdits` | Agent permission mode |
+
+Repository paths support `~` and environment-variable expansion. Use absolute
+repository/workdir paths to make cases independent of the invocation directory;
+relative paths use the command's working directory.
 
 ### Advanced
 
@@ -168,19 +340,32 @@ advanced:
   post_resolution_check: true    # Phase 3a.1 verification agent
   blind_review: true             # Phase 3a.2 triage-blind review agent
   timeout_minutes: 0             # per-command timeout; 0/unset = unlimited
+  context_length: 128000          # optional token-window override for the LiteLLM runner
   max_build_test_retries: 3      # Phase 4a repair attempts
   max_resolution_retries: 3      # LLM resolution attempts per conflict round
   partial_success_skip_ratio: 0.5  # non-bugfix ports only: dropped-file fraction that downgrades success to partial_success
-  phase_4b_model: "claude-opus-4-6"  # model for the Phase 4b escalation
+  phase_4b_model: m3              # optional profile ID (from the quickstart registry)
   forward_patch_id_lookback: "12 months"   # window for the already-applied check
 ```
 
-`phase_4b_model` is deliberately stronger than `model:` — Phase 4b is the last
-resort before the run escalates to a human, and it runs one long autonomous
-build-test-fix session rather than a narrow scoped edit. Lowering it to the
-pipeline model weakens that gate. The model that actually escalated is named in
-the run log, alongside the pipeline model, so a changed value is visible after
-the fact.
+Phase 4b uses the pipeline profile by default. Set `phase_4b_model` explicitly
+when recovery should use a different model, endpoint, or credential. The selected
+model is named in the run log and each tracked query includes its profile ID.
+
+### Patch input
+
+To supply a patch instead of a source commit, replace the case's `fix` section:
+
+```yaml
+fix:
+  patch: ./fix.patch
+  # upstream_ref: abc123def456  # optional original commit for the follow-up-fix scan
+```
+
+`fix.patch` must exist when the case is loaded. Its relative path is resolved
+against the **case file's directory**; `~` and environment variables are expanded.
+Set exactly one of `fix.commit` and `fix.patch`. The pipeline ingests the patch
+into a synthetic source commit before running the normal phases.
 
 ### Multiple targets
 
@@ -217,11 +402,13 @@ The dossier is written in every case that reaches Phase 2; the tracker JSON is w
 
 ## What this package shares with the rest of the repository
 
-Two imports resolve outside `auto_bug_fix/`, both into `common/`:
+The model and runner infrastructure is shared through `common/`:
 
 | Import | Why it is shared, not copied |
 |---|---|
 | `common.claude_utils` | The agent runner, resume handling, message printing and token accounting are identical for every pipeline. `auto_bug_fix/claude_utils.py` is a ~45-line specialization that adds only the backport persona (`BugFixClaudeConfig`) and re-exports the common types. |
+| `common.agent_runner` / `common.llm_client` | Provider dispatch, generic tool-use loop, and shared per-call LiteLLM request options |
+| `common.model_registry` / `common.model_identity` | Profile loading, safe snapshots, credential resolution, and model classification |
 | `common.utils` (`Tee`) | A three-line log tee, byte-identical wherever it was copied. |
 
 Everything else — every phase, prompt, git helper and audit — lives inside the package.
@@ -231,13 +418,13 @@ To run it from another checkout, keep `common/` alongside it:
 ```bash
 cp -r auto_bug_fix/ common/ /new/home/
 cd /new/home/
-pip install claude-agent-sdk pyyaml colorama
+pip install 'claude-agent-sdk>=0.2.87' 'litellm>=1.67.0' pyyaml colorama
 python -m auto_bug_fix.run_bug_fix path/to/config.yaml
 ```
 
 Run from the directory *containing* `auto_bug_fix/` — the `-m` invocation needs the package on the path.
 
-Audit the external surface any time with `grep -rnE "^\s*(from|import) (common|auto_code_gen)" auto_bug_fix/*.py` — only the two `common` imports above should appear, and never `auto_code_gen`.
+Audit the external surface any time with `grep -rnE "^\s*(from|import) (common|auto_code_gen)" auto_bug_fix/*.py` — shared infrastructure comes from `common`, not `auto_code_gen`.
 
 ### Module map
 
