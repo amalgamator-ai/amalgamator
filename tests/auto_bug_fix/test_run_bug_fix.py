@@ -1258,6 +1258,33 @@ def test_phase_4b_model_defaults_to_pipeline_model(tmp_path):
     assert seen["model"] == "claude-sonnet-4-6"
 
 
+@pytest.mark.parametrize("reported", [None, 0.0, 0.25])
+def test_phase_4b_accounts_for_its_profile_and_reported_cost(tmp_path, reported):
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    from auto_bug_fix.tracker import Tracker, compute_cost
+    from common.model_registry import ModelProfile
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    main = ModelProfile("local", "litellm", "openai/local", api_base="http://local/v1")
+    switched = ModelProfile("cloud", "litellm", "gpt-4o", api_key="SWITCH_KEY")
+    claude_cfg.profile, claude_cfg.model = main, main.model
+    config.phase_4b_profile, config.phase_4b_model = switched, switched.model
+    output = tmp_path / "runs"
+    output.mkdir()
+    tracker = Tracker("profile-switch", {}, profile=main, output_dir=str(output))
+    async def capture(cfg, steps):
+        assert cfg.profile is switched
+        assert cfg.model == switched.model
+        (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
+        return [{"name": "4b", "duration": 1, "input_tokens": 1000, "output_tokens": 200,
+                 "cost_usd": reported}]
+    with tracker.phase("4b"), patch("auto_bug_fix.run_bug_fix._agent_run", new=capture):
+        phase_4b_run_and_fix(config, claude_cfg, state, tracker)
+    record = tracker._run.phases[0].queries[0]
+    expected = compute_cost(switched.model, 1000, 200, profile=switched) if reported is None else reported
+    assert record.cost_usd == pytest.approx(expected)
+    assert record.model == switched.model and record.profile_id == switched.id
+
+
 # --- review round 3: verification gate, relatedness strength, 4b artifacts ---
 
 def _verify_config(tmp_path, **kw):

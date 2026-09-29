@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from common.model_registry import public_config_snapshot
+from common.model_registry import ModelProfile, public_config_snapshot
 
 
 MODEL_PRICING: dict[str, dict[str, float]] = {
@@ -68,6 +68,9 @@ class QueryRecord:
     cache_read_tokens: int = 0
     cost_usd: float = 0.0
     is_error: bool = False
+    model: str = ""
+    profile_id: str | None = None
+    cost_source: str = "estimated"
 
 
 @dataclass
@@ -98,9 +101,10 @@ class PipelineRun:
 
 
 class Tracker:
-    def __init__(self, issue_id: str, config_dict: dict, model: str = "claude-opus-4-6", output_dir: str = "runs"):
+    def __init__(self, issue_id: str, config_dict: dict, model: str = "claude-opus-4-6", output_dir: str = "runs", *, profile: ModelProfile | None = None):
         """Initialize a new pipeline run tracker."""
-        self._model = model
+        self._profile = profile  # Runtime-only; never part of PipelineRun.
+        self._model = profile.model if profile else model
         self._output_dir = output_dir
         self._current_phase: PhaseRecord | None = None
         self._run = PipelineRun(
@@ -144,6 +148,9 @@ class Tracker:
         cache_read_tokens: int = 0,
         is_error: bool = False,
         sdk_cost_usd: float | None = None,
+        *,
+        model: str | None = None,
+        profile: ModelProfile | None = None,
     ) -> QueryRecord:
         """Record an LLM query with timing, token usage, and cost.
 
@@ -152,7 +159,13 @@ class Tracker:
         computed from token counts using MODEL_PRICING.
         """
         duration_s = round(end_time - start_time, 3)
-        cost = sdk_cost_usd if sdk_cost_usd is not None else compute_cost(self._model, input_tokens, output_tokens)
+        effective_profile = profile
+        if effective_profile is None and (model is None or model == self._model):
+            effective_profile = self._profile
+        effective_model = effective_profile.model if effective_profile else (model or self._model)
+        cost = sdk_cost_usd if sdk_cost_usd is not None else round(
+            compute_cost(effective_model, input_tokens, output_tokens, profile=effective_profile), 6,
+        )
 
         record = QueryRecord(
             phase=self._current_phase.phase if self._current_phase else "unknown",
@@ -165,8 +178,11 @@ class Tracker:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
-            cost_usd=round(cost, 6),
+            cost_usd=cost,
             is_error=is_error,
+            model=effective_model,
+            profile_id=effective_profile.id if effective_profile else None,
+            cost_source="reported" if sdk_cost_usd is not None else "estimated",
         )
 
         if self._current_phase is not None:

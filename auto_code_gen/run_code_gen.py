@@ -147,10 +147,20 @@ def _format_tokens(count):
     return str(count)
 
 
+def _sum_costs(costs):
+    """A total is unknown when any constituent provider cost is unreported."""
+    values = list(costs)
+    return None if any(cost is None for cost in values) else sum(values)
+
+
+def _format_cost(cost):
+    return "unknown" if cost is None else "${:.4f}".format(cost)
+
+
 def _print_detailed_table(all_step_timings, total_duration, output_dir=None):
     total_input = sum(s["input_tokens"] for s in all_step_timings)
     total_output = sum(s["output_tokens"] for s in all_step_timings)
-    total_cost = sum(s["cost_usd"] for s in all_step_timings)
+    total_cost = _sum_costs(s["cost_usd"] for s in all_step_timings)
 
     rows = []
     for s in all_step_timings:
@@ -160,7 +170,7 @@ def _print_detailed_table(all_step_timings, total_duration, output_dir=None):
             "dur_raw": raw, "dur_human": human,
             "input": _format_tokens(s["input_tokens"]),
             "output": _format_tokens(s["output_tokens"]),
-            "cost": "${:.4f}".format(s["cost_usd"]),
+            "cost": _format_cost(s["cost_usd"]),
         })
 
     total_raw, total_human = _format_duration(total_duration)
@@ -169,7 +179,7 @@ def _print_detailed_table(all_step_timings, total_duration, output_dir=None):
         "dur_raw": total_raw, "dur_human": total_human,
         "input": _format_tokens(total_input),
         "output": _format_tokens(total_output),
-        "cost": "${:.4f}".format(total_cost),
+        "cost": _format_cost(total_cost),
     })
 
     max_dur_len = max(len(r["dur_raw"]) for r in rows)
@@ -228,12 +238,12 @@ def _print_phase_summary(phase_results, all_step_timings, total_duration, output
                 phase_usage.setdefault(phase_name, {"input": 0, "output": 0, "cost": 0.0})
                 phase_usage[phase_name]["input"] += s["input_tokens"]
                 phase_usage[phase_name]["output"] += s["output_tokens"]
-                phase_usage[phase_name]["cost"] += s["cost_usd"]
+                phase_usage[phase_name]["cost"] = _sum_costs([phase_usage[phase_name]["cost"], s["cost_usd"]])
                 break
 
     total_input = sum(s["input_tokens"] for s in all_step_timings)
     total_output = sum(s["output_tokens"] for s in all_step_timings)
-    total_cost = sum(s["cost_usd"] for s in all_step_timings)
+    total_cost = _sum_costs(s["cost_usd"] for s in all_step_timings)
 
     rows = []
     for phase in phase_results:
@@ -252,7 +262,7 @@ def _print_phase_summary(phase_results, all_step_timings, total_duration, output
             "dur_raw": raw, "dur_human": human,
             "input": _format_tokens(usage["input"]),
             "output": _format_tokens(usage["output"]),
-            "cost": "${:.4f}".format(usage["cost"]),
+            "cost": _format_cost(usage["cost"]),
         })
 
     total_raw, total_human = _format_duration(total_duration)
@@ -261,7 +271,7 @@ def _print_phase_summary(phase_results, all_step_timings, total_duration, output
         "dur_raw": total_raw, "dur_human": total_human,
         "input": _format_tokens(total_input),
         "output": _format_tokens(total_output),
-        "cost": "${:.4f}".format(total_cost),
+        "cost": _format_cost(total_cost),
     })
 
     max_dur_len = max(len(r["dur_raw"]) for r in rows)
