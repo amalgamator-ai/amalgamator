@@ -123,15 +123,21 @@ def build_request_kwargs(
     default_max_tokens: int,
     overrides: dict | None = None,
 ) -> dict:
-    """Build isolated per-call options; explicit transport is provider-independent."""
+    """Build isolated per-call options.
+
+    Profile transport is provider-independent. Legacy transport globals apply
+    only to custom ``openai/`` endpoints, preserving the pre-profile behavior.
+    """
     if profile is not None:
         merged = deepcopy(profile.params)
         api_base, api_key = profile.api_base, profile.api_key
     else:
         merged = deepcopy(_model_params)
-        api_base, api_key = _api_base, _api_key
+        api_base = api_key = None
         if model.startswith("openai/"):
-            api_base, api_key = get_api_base(), get_api_key()
+            api_base = get_api_base()
+            if api_base:
+                api_key = get_api_key()
     if api_base:
         merged["api_base"] = api_base
     if api_key:

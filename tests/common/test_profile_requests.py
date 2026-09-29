@@ -22,23 +22,56 @@ def capture_request(monkeypatch, tmp_path):
     monkeypatch.setattr(llm_client, "_api_base", "http://stale-global/v1")
     monkeypatch.setattr(llm_client, "_api_key", "STALE_KEY")
     monkeypatch.setattr(llm_client, "_model_params", {"temperature": 0.99})
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX", raising=False)
 
-    def capture(path, profile):
+    def capture(path, profile=None, *, model=None):
+        model = profile.model if profile else model
         request.reset_mock()
         if path == "completion":
-            llm_client.completion(profile.model, [], profile=profile)
+            llm_client.completion(model, [], profile=profile)
         elif path == "agent":
             asyncio.run(agent_runner.LiteLLMAgentRunner()._agent_loop(
-                model=profile.model, system_prompt="s", user_prompt="u", cwd=str(tmp_path),
+                model=model, system_prompt="s", user_prompt="u", cwd=str(tmp_path),
                 context_length=128000, profile=profile,
             ))
         else:
-            agent_runner._summarize_stale(profile.model, [], 128000, profile=profile)
+            agent_runner._summarize_stale(model, [], 128000, profile=profile)
         request.assert_called_once()
         return request.call_args.kwargs
     return capture
+
+
+@pytest.mark.parametrize("path", ["completion", "agent", "summary"])
+@pytest.mark.parametrize("model", ["gpt-4o", "anthropic/claude-sonnet-4-6", "vertex_ai/claude-sonnet-4-6",
+                                  "ollama_chat/example", "openai/local"])
+@pytest.mark.parametrize("source", ["configured", "environment"])
+def test_legacy_transport_is_scoped_to_custom_openai(capture_request, monkeypatch, path, model, source):
+    endpoint, key = "http://local-vllm.invalid/v1", "LOCAL_FAKE_KEY"
+    if source == "configured":
+        llm_client.configure(api_base=endpoint, api_key=key)
+    else:
+        monkeypatch.setattr(llm_client, "_api_base", None)
+        monkeypatch.setattr(llm_client, "_api_key", None)
+        monkeypatch.setenv("OPENAI_API_BASE", endpoint)
+        monkeypatch.setenv("OPENAI_API_KEY", key)
+    sent = capture_request(path, model=model)
+    if model.startswith("openai/"):
+        assert sent["api_base"] == endpoint
+        assert sent["api_key"] == key
+    else:
+        assert "api_base" not in sent
+        assert "api_key" not in sent
+    assert sent["temperature"] == 0.99
+
+
+@pytest.mark.parametrize("path", ["completion", "agent", "summary"])
+def test_legacy_key_without_endpoint_uses_provider_defaults(capture_request, monkeypatch, path):
+    monkeypatch.setattr(llm_client, "_api_base", None)
+    sent = capture_request(path, model="openai/gpt-4o")
+    assert "api_base" not in sent
+    assert "api_key" not in sent
 
 
 @pytest.mark.parametrize("path", ["completion", "agent", "summary"])
