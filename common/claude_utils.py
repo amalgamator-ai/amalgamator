@@ -420,15 +420,16 @@ async def claude_run(
                 )
             )
             await client.query(prompt)
-            step_usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+            step_usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": None}
             async for msg in client.receive_response():
                 print_Message(msg)
                 if isinstance(msg, ResultMessage):
                     if msg.usage:
                         step_usage["input_tokens"] += msg.usage.get("input_tokens", 0)
                         step_usage["output_tokens"] += msg.usage.get("output_tokens", 0)
-                    if msg.total_cost_usd:
-                        step_usage["cost_usd"] += msg.total_cost_usd
+                    if msg.total_cost_usd is not None:
+                        previous_cost = step_usage["cost_usd"]
+                        step_usage["cost_usd"] = (previous_cost if previous_cost is not None else 0.0) + msg.total_cost_usd
                 print(
                     "{}--------------------------------------------{}".format(
                         Fore.CYAN, Style.RESET_ALL

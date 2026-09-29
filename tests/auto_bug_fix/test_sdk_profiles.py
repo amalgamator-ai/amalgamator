@@ -65,3 +65,33 @@ def test_installed_sdk_subprocess_transport_smoke():
     script = Path(__file__).with_name("sdk_transport_smoke.py")
     result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("reported", [None, 0.0, 0.125])
+def test_sdk_timing_distinguishes_unknown_and_reported_zero(claude_cfg, monkeypatch, reported):
+    class Result:
+        usage = {"input_tokens": 10, "output_tokens": 20}
+        total_cost_usd = reported
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def query(self, prompt): pass
+        async def receive_response(self): yield Result()
+    monkeypatch.setattr(claude_utils, "ClaudeAgentOptions", SimpleNamespace)
+    monkeypatch.setattr(claude_utils, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(claude_utils, "ResultMessage", Result)
+    monkeypatch.setattr(claude_utils, "print_Message", lambda msg: None)
+    timings = asyncio.run(claude_utils.claude_run(claude_cfg, ["prompt"]))
+    assert timings[0]["cost_usd"] == reported
+
+
+def test_generic_agent_timing_has_unknown_cost(claude_cfg, monkeypatch):
+    from unittest.mock import Mock
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="done", tool_calls=None))], usage=None)
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace())
+    monkeypatch.setattr(agent_runner, "_litellm_completion_with_streaming", Mock(return_value=response))
+    claude_cfg.profile = ModelProfile("generic", "litellm", "gpt-4o")
+    claude_cfg.model, claude_cfg.context_length = "gpt-4o", 128000
+    timings = asyncio.run(agent_runner.agent_run(claude_cfg, ["prompt"]))
+    assert timings[0]["cost_usd"] is None
