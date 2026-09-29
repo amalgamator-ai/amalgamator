@@ -361,9 +361,12 @@ def _summarize_stale(
 
         extra = {}
         if profile:
-            if profile.api_base and model.startswith("openai/"):
+            if profile.api_base:
                 extra["api_base"] = profile.api_base
-                extra["api_key"] = profile.api_key or "dummy"
+            if profile.api_key:
+                extra["api_key"] = profile.api_key
+            elif profile.api_base and model.startswith("openai/"):
+                extra["api_key"] = os.environ.get("OPENAI_API_KEY") or "dummy"
         else:
             api_base = get_api_base()
             if api_base and model.startswith("openai/"):
@@ -581,7 +584,7 @@ class LiteLLMAgentRunner(AgentRunner):
         steps = wrapped_steps
 
         print_claude_config(config)
-        effective_model = _resolve_model(config.model)
+        effective_model = _resolve_model(config.model, profile=config.profile)
 
         step_timings = []
 
@@ -659,8 +662,7 @@ class LiteLLMAgentRunner(AgentRunner):
         """
         import litellm
         from common.llm_client import (
-            _is_ollama_model, _strip_thinking,
-            get_api_base, get_api_key, get_model_params,
+            _strip_thinking, build_request_kwargs,
         )
 
         # ── Resolve context budget ───────────────────────────────────────
@@ -672,24 +674,7 @@ class LiteLLMAgentRunner(AgentRunner):
                  ctx_limit, ctx_budget, COMPACTION_THRESHOLD_PCT * 100,
                  read_cap, bash_cap)
 
-        if profile:
-            extra_kwargs: dict = {**profile.params}
-            p_api_base = profile.api_base
-            p_api_key = profile.api_key
-        else:
-            extra_kwargs: dict = {**get_model_params()}
-            p_api_base = get_api_base()
-            p_api_key = get_api_key()
-
-        extra_kwargs.setdefault("max_tokens", 16384)
-
-        if _is_ollama_model(model):
-            extra_kwargs.setdefault("extra_body", {})
-            extra_kwargs["extra_body"].setdefault("think", False)
-
-        if p_api_base and model.startswith("openai/"):
-            extra_kwargs.setdefault("api_base", p_api_base)
-            extra_kwargs.setdefault("api_key", p_api_key or "dummy")
+        extra_kwargs = build_request_kwargs(model, profile=profile, default_max_tokens=16384)
 
         tools = _filter_tools(allowed_tools)
         allowed_names = {t["function"]["name"] for t in tools}
