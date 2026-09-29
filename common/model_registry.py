@@ -82,6 +82,15 @@ def _resolve_api_key_file(path_str: str) -> str | None:
         return None
 
 
+def resolve_api_key(config: dict[str, Any]) -> str | None:
+    """Resolve an inline key first, then a whitespace-stripped key file."""
+    if config.get("api_key"):
+        return str(config["api_key"])
+    if config.get("api_key_file"):
+        return _resolve_api_key_file(str(config["api_key_file"]))
+    return None
+
+
 def _parse_profile(profile_id: str, raw: dict[str, Any]) -> ModelProfile:
     model = raw.get("model")
     if not model or not isinstance(model, str):
@@ -102,11 +111,7 @@ def _parse_profile(profile_id: str, raw: dict[str, Any]) -> ModelProfile:
     if api_base:
         api_base = str(api_base).rstrip("/")
 
-    api_key = None
-    if raw.get("api_key"):
-        api_key = str(raw["api_key"])
-    elif raw.get("api_key_file"):
-        api_key = _resolve_api_key_file(str(raw["api_key_file"]))
+    api_key = resolve_api_key(raw)
 
     params = raw.get("params", {})
     if not isinstance(params, dict):
