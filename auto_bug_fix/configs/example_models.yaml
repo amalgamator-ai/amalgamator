@@ -1,8 +1,10 @@
 # Model profiles for the auto_bug_fix pipeline.
 #
 # Define named profiles here, reference them by id in backport configs.
-# Place this file next to your backport YAML, at ~/.config/amalgamator/models.yaml,
-# or pass it explicitly with --models.
+# Save as models.yaml next to your backport YAML, or at
+# ~/.config/amalgamator/models.yaml. Alternatively pass --models PATH;
+# explicit paths are relative to the working directory (~ is expanded) and
+# take precedence over discovery. Missing/invalid explicit files are errors.
 #
 # Profile ids are opaque — name them whatever you want.
 # provider: anthropic selects the Claude SDK; litellm selects its generic runner.
