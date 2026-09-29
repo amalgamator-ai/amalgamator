@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -115,6 +116,37 @@ def is_self_hosted(model: str, profile: "ModelProfile | None" = None) -> bool:
     return False
 
 
+def build_request_kwargs(
+    model: str,
+    *,
+    profile: "ModelProfile | None" = None,
+    default_max_tokens: int,
+    overrides: dict | None = None,
+) -> dict:
+    """Build isolated per-call options; explicit transport is provider-independent."""
+    if profile is not None:
+        merged = deepcopy(profile.params)
+        api_base, api_key = profile.api_base, profile.api_key
+    else:
+        merged = deepcopy(_model_params)
+        api_base, api_key = _api_base, _api_key
+        if model.startswith("openai/"):
+            api_base, api_key = get_api_base(), get_api_key()
+    if api_base:
+        merged["api_base"] = api_base
+    if api_key:
+        merged["api_key"] = api_key
+    merged.update(deepcopy(overrides or {}))
+    if merged.get("api_base") and model.startswith("openai/") and not merged.get("api_key"):
+        merged["api_key"] = os.environ.get("OPENAI_API_KEY") or "dummy"
+    if not any(key in merged for key in ("max_tokens", "max_completion_tokens", "max_output_tokens")):
+        merged["max_tokens"] = default_max_tokens
+    if _is_ollama_model(model):
+        merged.setdefault("extra_body", {})
+        merged["extra_body"].setdefault("think", False)
+    return merged
+
+
 def completion(
     model: str,
     messages: list[dict],
@@ -137,31 +169,14 @@ def completion(
     """
     import litellm
 
-    effective_model = _resolve_model(model)
-
-    if profile:
-        base_params = dict(profile.params)
-        p_api_base = profile.api_base
-        p_api_key = profile.api_key
-    else:
-        base_params = dict(_model_params)
-        p_api_base = get_api_base()
-        p_api_key = get_api_key()
-
-    merged = {**base_params, **kwargs}
-    merged.setdefault("max_tokens", max_tokens)
+    effective_model = _resolve_model(profile.model if profile else model, profile=profile)
+    merged = build_request_kwargs(
+        effective_model, profile=profile, default_max_tokens=max_tokens, overrides=kwargs,
+    )
 
     log.debug("LLM completion: model=%s (effective=%s), max_tokens=%s, profile=%s",
               model, effective_model, merged.get("max_tokens"),
               profile.id if profile else "legacy")
-
-    if _is_ollama_model(effective_model):
-        merged.setdefault("extra_body", {})
-        merged["extra_body"].setdefault("think", False)
-
-    if p_api_base and effective_model.startswith("openai/"):
-        merged.setdefault("api_base", p_api_base)
-        merged.setdefault("api_key", p_api_key or "dummy")
 
     response = litellm.completion(
         model=effective_model,
@@ -181,14 +196,16 @@ def completion(
     )
 
 
-def _resolve_model(model: str) -> str:
+def _resolve_model(model: str, profile: "ModelProfile | None" = None) -> str:
     """Translate legacy env-var conventions into a LiteLLM model string.
 
     If ``CLAUDE_CODE_USE_VERTEX`` is set and the caller passes a bare
     Claude model name (e.g. ``claude-opus-4-6``), prepend
     ``vertex_ai/`` so LiteLLM routes through Vertex.
     """
-    if os.environ.get("CLAUDE_CODE_USE_VERTEX") and model.startswith("claude-"):
+    explicit_transport = profile is not None and (profile.api_key or profile.api_base)
+    if (not explicit_transport and os.environ.get("CLAUDE_CODE_USE_VERTEX", "").lower() in ("1", "true")
+            and model.startswith("claude-")):
         return f"vertex_ai/{model}"
     return model
 

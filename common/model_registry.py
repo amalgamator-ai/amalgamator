@@ -32,6 +32,13 @@ class ModelProfile:
     api_key: str | None = field(default=None, repr=False)
     params: dict = field(default_factory=dict, repr=False)
 
+    def __post_init__(self):
+        reserved = {"model", "provider", "api_base", "api_key", "api_key_file"} & self.params.keys()
+        if reserved:
+            raise RegistryError(
+                "Profile params must use top-level fields for: " + ", ".join(sorted(reserved))
+            )
+
     def public_snapshot(self) -> dict[str, str]:
         """Allowlisted identity for logs and persistence; never runtime transport."""
         return {"id": self.id, "provider": self.provider, "model": self.model}
