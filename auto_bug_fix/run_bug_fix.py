@@ -45,22 +45,16 @@ def _phase_config(
     """Create a per-phase ClaudeConfig that inherits transport settings.
 
     When *profile* is provided, overrides the model and transport config.
-    When *model* is explicitly passed and differs from the effective
-    profile's model, builds a legacy profile from the bare model string
-    so the profile and model stay consistent.
+    Explicit model changes must carry the corresponding resolved profile.
     Copies ``command_timeout`` and ``context_length`` from the parent
     config so that context window management stays active across all
     pipeline phases.
     """
-    from common.model_registry import build_legacy_profile
-
     effective_profile = profile or claude_config.profile
     effective_model = model or (profile.model if profile else claude_config.model)
 
-    # When an explicit model is passed that doesn't match the profile,
-    # build a legacy profile so the two stay consistent.
     if model and effective_profile and effective_profile.model != effective_model:
-        effective_profile = build_legacy_profile(effective_model)
+        raise ConfigError("Phase model does not match its profile; supply a resolved profile")
 
     return BugFixClaudeConfig(
         model=effective_model,
@@ -1100,8 +1094,15 @@ def phase_4b_run_and_fix(
 </semantic_triage>
 """
 
-    phase_4b_profile = config.phase_4b_profile or claude_config.profile
-    phase_4b_model = config.phase_4b_model or claude_config.model
+    phase_4b_profile = config.phase_4b_profile
+    if phase_4b_profile is None:
+        # Compatibility for programmatic configs that have not resolved profiles.
+        if config.phase_4b_model and config.phase_4b_model != claude_config.model:
+            from common.model_registry import build_legacy_profile
+            phase_4b_profile = build_legacy_profile(config.phase_4b_model)
+        else:
+            phase_4b_profile = claude_config.profile
+    phase_4b_model = phase_4b_profile.model if phase_4b_profile else claude_config.model
     ext_claude_config = _phase_config(
         claude_config, config,
         model=phase_4b_model,

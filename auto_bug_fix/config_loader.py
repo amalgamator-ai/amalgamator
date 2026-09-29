@@ -14,6 +14,7 @@ from typing import Any
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.claude_utils import BugFixClaudeConfig, ClaudeConfig
 from common.model_registry import resolve_api_key as _resolve_api_key
+from common.model_registry import ModelProfile, ModelRegistry, build_legacy_profile
 
 log = logging.getLogger(__name__)
 
@@ -186,23 +187,61 @@ def expand_path(path: str | None, default: str = "") -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
-def _pipeline_model_name(config: dict[str, Any]) -> str:
-    """Extract the raw model name string from config (for legacy fallback)."""
+def _pipeline_model_name(config: dict[str, Any]) -> str | None:
+    """Read the selection before applying registry or legacy defaults."""
     claude = config.get("claude", {})
     if isinstance(claude, dict):
         m = claude.get("model")
         if m:
             return str(m)
-    return str(config.get("model") or "claude-sonnet-4-6")
+    return str(config["model"]) if config.get("model") else None
+
+
+def _legacy_profile(config: dict[str, Any], model: str) -> ModelProfile:
+    claude = config.get("claude", {})
+    if not isinstance(claude, dict):
+        claude = {}
+    api_base = config.get("api_base") or claude.get("api_base")
+    params = config.get("model_params")
+    if params is not None and not isinstance(params, dict):
+        log.warning("model_params must be a mapping, ignoring")
+        params = None
+    return build_legacy_profile(
+        model, api_base=str(api_base) if api_base else None,
+        api_key=_resolve_api_key(config) or _resolve_api_key(claude), params=params,
+    )
+
+
+def resolve_pipeline_profiles(
+    config: dict[str, Any], registry: ModelRegistry | None,
+) -> tuple[ModelProfile, ModelProfile]:
+    """Resolve the pipeline and Phase 4b together, inheriting whole profiles."""
+    model = _pipeline_model_name(config)
+    pipeline = registry.resolve(model) if registry else _legacy_profile(
+        config, model or "claude-sonnet-4-6")
+    advanced = config.get("advanced", {})
+    if not isinstance(advanced, dict):
+        advanced = {}
+    override = advanced_str(advanced, "phase_4b_model", "")
+    if not override:
+        phase_4b = pipeline
+    elif registry and override in registry.profiles:
+        phase_4b = registry.resolve(override)
+    elif override == pipeline.model:
+        phase_4b = pipeline
+    else:
+        phase_4b = registry.resolve(override) if registry else _legacy_profile(config, override)
+    return pipeline, phase_4b
 
 
 def parse_bug_fix_config(
     config: dict[str, Any],
     config_dir: str = "",
     registry: "ModelRegistry | None" = None,
+    *,
+    profiles: tuple[ModelProfile, ModelProfile] | None = None,
 ) -> tuple[BugFixConfig, str, str]:
     """Parse YAML/JSON config into BugFixConfig dataclass."""
-    from common.model_registry import ModelRegistry
     validate_config(config, config_dir=config_dir)
 
     source_path = os.path.normpath(expand_path(config["repository"]["source_path"]))
@@ -241,9 +280,7 @@ def parse_bug_fix_config(
     else:
         source_fix_commit = str(fix["commit"])
 
-    phase_4b_raw = advanced_str(
-        advanced, "phase_4b_model",
-        _pipeline_model_name(config))
+    _, phase_4b_profile = profiles or resolve_pipeline_profiles(config, registry)
 
     bug_fix_config = BugFixConfig(
         repo_path=repo_path,
@@ -272,17 +309,11 @@ def parse_bug_fix_config(
         partial_success_skip_ratio=advanced_float(
             advanced, "partial_success_skip_ratio", 0.5,
             minimum=0.0, maximum=1.0),
-        phase_4b_model=phase_4b_raw,
+        phase_4b_model=phase_4b_profile.model,
+        phase_4b_profile=phase_4b_profile,
         fix_patch=fix_patch,
         fix_upstream_ref=fix_upstream_ref,
     )
-
-    # Resolve phase_4b_model through the registry when one is present.
-    # The YAML value can be a profile id (e.g. "m3") or a bare model string.
-    if registry:
-        phase_4b_profile = registry.resolve(phase_4b_raw)
-        bug_fix_config.phase_4b_profile = phase_4b_profile
-        bug_fix_config.phase_4b_model = phase_4b_profile.model
 
     return bug_fix_config, workdir, source_path
 
@@ -291,6 +322,8 @@ def parse_claude_config(
     config: dict[str, Any],
     output_dir: str,
     registry: "ModelRegistry | None" = None,
+    *,
+    profiles: tuple[ModelProfile, ModelProfile] | None = None,
 ) -> ClaudeConfig:
     """Parse model/agent configuration section.
 
@@ -308,12 +341,10 @@ def parse_claude_config(
     * ``api_key:`` / ``api_key_file:`` — explicit API key or path to a
       key file (``~`` expansion supported).
     """
-    from common.model_registry import ModelRegistry, build_legacy_profile
-
     claude = config.get("claude", {})
     if not isinstance(claude, dict):
         claude = {}
-    model_str = claude.get("model") or config.get("model") or "claude-sonnet-4-6"
+    profile, _ = profiles or resolve_pipeline_profiles(config, registry)
 
     api_base = config.get("api_base") or claude.get("api_base")
     api_key = _resolve_api_key(config) or _resolve_api_key(claude)
@@ -322,16 +353,6 @@ def parse_claude_config(
     if model_params is not None and not isinstance(model_params, dict):
         log.warning("model_params must be a mapping, ignoring: %r", model_params)
         model_params = None
-
-    if registry:
-        profile = registry.resolve(model_str)
-    else:
-        profile = build_legacy_profile(
-            model_str,
-            api_base=str(api_base) if api_base else None,
-            api_key=api_key,
-            params=model_params,
-        )
 
     # Deprecated: set module-level state in llm_client for callers that
     # haven't adopted profiles yet (backport_scanner, benchmark).
@@ -372,11 +393,12 @@ def load_pipeline_config(
     output_dir = expand_path(output_section.get("directory"), "./runs")
 
     registry = find_registry(config_dir=config_dir, explicit_path=models_path)
+    profiles = resolve_pipeline_profiles(config, registry)
 
     bug_fix_config, workdir, source_path = parse_bug_fix_config(
-        config, config_dir=config_dir, registry=registry,
+        config, config_dir=config_dir, registry=registry, profiles=profiles,
     )
-    claude_config = parse_claude_config(config, output_dir, registry=registry)
+    claude_config = parse_claude_config(config, output_dir, registry=registry, profiles=profiles)
     claude_config.command_timeout = bug_fix_config.command_timeout
     claude_config.context_length = bug_fix_config.context_length
 
@@ -496,11 +518,12 @@ def load_multi_target_config(
     output_dir = expand_path(output_section.get("directory"), "./runs")
 
     registry = find_registry(config_dir=config_dir, explicit_path=models_path)
+    profiles = resolve_pipeline_profiles(config, registry)
 
     bug_fix_config, workdir, source_path = parse_bug_fix_config(
-        config, config_dir=config_dir, registry=registry,
+        config, config_dir=config_dir, registry=registry, profiles=profiles,
     )
-    claude_config = parse_claude_config(config, output_dir, registry=registry)
+    claude_config = parse_claude_config(config, output_dir, registry=registry, profiles=profiles)
     claude_config.command_timeout = bug_fix_config.command_timeout
     claude_config.context_length = bug_fix_config.context_length
 
