@@ -356,22 +356,12 @@ def _summarize_stale(
         + joined
     )
     try:
-        import litellm
-        from common.llm_client import get_api_base, get_api_key
+        from common.llm_client import build_request_kwargs
 
-        extra = {}
-        if profile:
-            if profile.api_base:
-                extra["api_base"] = profile.api_base
-            if profile.api_key:
-                extra["api_key"] = profile.api_key
-            elif profile.api_base and model.startswith("openai/"):
-                extra["api_key"] = os.environ.get("OPENAI_API_KEY") or "dummy"
-        else:
-            api_base = get_api_base()
-            if api_base and model.startswith("openai/"):
-                extra["api_base"] = api_base
-                extra["api_key"] = get_api_key() or "dummy"
+        extra = build_request_kwargs(model, profile=profile, default_max_tokens=32768)
+        # Compaction produces text, never new tool calls.
+        for key in ("tools", "tool_choice", "parallel_tool_calls"):
+            extra.pop(key, None)
 
         response = _litellm_completion_with_streaming(
             model=model,
@@ -379,7 +369,6 @@ def _summarize_stale(
                 {"role": "system", "content": "You are a precise summarizer."},
                 {"role": "user", "content": summarize_prompt},
             ],
-            max_tokens=32768,
             **extra,
         )
         if timing and response.usage:

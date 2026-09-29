@@ -76,3 +76,47 @@ def test_explicit_claude_transport_does_not_inherit_vertex(capture_request, monk
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
     profile = ModelProfile("direct", "litellm", "claude-sonnet-4-6", api_key="DIRECT")
     assert capture_request("completion", profile)["model"] == profile.model
+
+
+@pytest.mark.parametrize("path,default", [("completion", 4096), ("agent", 16384), ("summary", 32768)])
+@pytest.mark.parametrize("limit", [None, "max_tokens", "max_completion_tokens"])
+def test_shared_parameters_and_output_limits(capture_request, path, default, limit):
+    params = {"temperature": 0.2, "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+    if limit:
+        params[limit] = 512
+    profile = ModelProfile("test", "litellm", "openai/test", api_base="http://local/v1", params=params)
+    sent = capture_request(path, profile)
+    assert sent["temperature"] == 0.2
+    assert sent["extra_body"] == params["extra_body"]
+    assert sent[limit or "max_tokens"] == (512 if limit else default)
+    if limit == "max_completion_tokens":
+        assert "max_tokens" not in sent
+    if path == "summary":
+        assert "tools" not in sent
+    sent["extra_body"]["chat_template_kwargs"]["enable_thinking"] = True
+    assert profile.params["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+
+
+@pytest.mark.parametrize("path", ["completion", "agent", "summary"])
+def test_ollama_defaults_do_not_mutate_nested_params(capture_request, path):
+    profile = ModelProfile("test", "litellm", "ollama/test", params={"extra_body": {"nested": []}})
+    sent = capture_request(path, profile)
+    assert sent["extra_body"]["think"] is False
+    sent["extra_body"]["nested"].append("changed")
+    assert profile.params == {"extra_body": {"nested": []}}
+
+
+def test_request_override_precedence_and_isolation(monkeypatch):
+    monkeypatch.setattr(llm_client, "_model_params", {"extra_body": {"think": True}})
+    overrides = {"temperature": 0.9, "api_key": "OVERRIDE", "extra_body": {"think": True}}
+    profile = ModelProfile("test", "litellm", "ollama/test", api_key="PROFILE",
+                           params={"temperature": 0.1, "max_tokens": 100})
+    sent = llm_client.build_request_kwargs(profile.model, profile=profile, default_max_tokens=200, overrides=overrides)
+    assert sent["api_key"] == "OVERRIDE"
+    assert sent["temperature"] == 0.9
+    assert sent["max_tokens"] == 100
+    sent["extra_body"]["think"] = False
+    assert overrides["extra_body"]["think"] is True
+    legacy = llm_client.build_request_kwargs("ollama/test", default_max_tokens=200)
+    legacy["extra_body"]["think"] = False
+    assert llm_client.get_model_params()["extra_body"]["think"] is True
