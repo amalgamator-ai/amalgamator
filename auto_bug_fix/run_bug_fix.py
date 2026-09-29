@@ -2835,127 +2835,85 @@ def run_targets(
     return results
 
 
-if __name__ == "__main__":
+def main(argv=None) -> int:
+    import argparse
+    from common.model_registry import RegistryError
+
+    parser = argparse.ArgumentParser(description="Port a bug fix using a pipeline configuration.")
+    parser.add_argument("config", help="Pipeline YAML/JSON configuration")
+    parser.add_argument("--models", metavar="PATH", help="Explicit model registry (overrides discovery)")
+    args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
+    try:
+        targets, base_config, claude_config, workdir, source_path = load_multi_target_config(
+            args.config, models_path=args.models,
+        )
+    except (ConfigError, RegistryError, OSError) as e:
+        parser.error(str(e))
 
-        targets, base_config, claude_config, workdir, source_path = load_multi_target_config(config_path)
+    yaml_basename = os.path.splitext(os.path.basename(args.config))[0]
+    run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    parent_run_dir = os.path.join("runs", f"{yaml_basename}_{run_timestamp}")
+    os.makedirs(parent_run_dir, exist_ok=True)
 
-        yaml_basename = os.path.splitext(os.path.basename(config_path))[0]
-        run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        parent_run_dir = os.path.join("runs", f"{yaml_basename}_{run_timestamp}")
-        os.makedirs(parent_run_dir, exist_ok=True)
+    log_path = os.path.join(parent_run_dir, "run_log.txt")
+    log_file = open(log_path, "w", encoding="utf-8")
+    original_stdout = sys.stdout
+    sys.stdout = Tee(original_stdout, log_file)
 
-        log_path = os.path.join(parent_run_dir, "run_log.txt")
-        log_file = open(log_path, "w", encoding="utf-8")
-        original_stdout = sys.stdout
-        sys.stdout = Tee(original_stdout, log_file)
-
-        try:
-            print(f"Run directory: {parent_run_dir}")
-
-            print("Fetching latest refs from origin...")
-            fetch_result = subprocess.run(
-                ["git", "fetch", "--all", "--quiet"],
-                cwd=source_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    try:
+        print(f"Run directory: {parent_run_dir}")
+        print("Fetching latest refs from origin...")
+        fetch_result = subprocess.run(
+            ["git", "fetch", "--all", "--quiet"],
+            cwd=source_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        fetch_warning = ""
+        if fetch_result.returncode != 0:
+            fetch_warning = (
+                f"git fetch --all failed (exit {fetch_result.returncode}): "
+                f"{(fetch_result.stderr or '').strip()[:500]}"
             )
-            fetch_warning = ""
-            if fetch_result.returncode != 0:
-                fetch_warning = (
-                    f"git fetch --all failed (exit {fetch_result.returncode}): "
-                    f"{(fetch_result.stderr or '').strip()[:500]}"
-                )
-                log.warning(fetch_warning)
-                print(f"WARNING: {fetch_warning} — continuing with local refs")
-            build_subdir = os.path.relpath(base_config.build_dir, base_config.repo_path)
+            log.warning(fetch_warning)
+            print(f"WARNING: {fetch_warning} — continuing with local refs")
+        build_subdir = os.path.relpath(base_config.build_dir, base_config.repo_path)
+        run_warnings = [fetch_warning] if fetch_warning else []
 
-            run_warnings = [fetch_warning] if fetch_warning else []
-
-            if base_config.fix_patch:
-                print(f"Phase -1: ingesting patch {base_config.fix_patch}...")
-                ingest_result = ingest_patch(
-                    source_path, base_config.fix_patch,
-                    base_config.source_branch, base_config.issue_id,
-                    base_config.bug_description, workdir,
-                )
-                base_config.source_fix_commit = ingest_result.synthetic_commit
-                print(f"Patch ingested as {ingest_result.synthetic_commit[:12]} "
-                      f"(method={ingest_result.method}, base={ingest_result.base_sha[:12]})")
-                ingest_path = os.path.join(parent_run_dir, "ingest.json")
-                with open(ingest_path, "w") as f:
-                    json.dump({
-                        "synthetic_commit": ingest_result.synthetic_commit,
-                        "base_ref": ingest_result.base_ref,
-                        "base_sha": ingest_result.base_sha,
-                        "method": ingest_result.method,
-                        "patch_sha256": ingest_result.patch_sha256,
-                        "patch_path": base_config.fix_patch,
-                        "warnings": ingest_result.warnings,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }, f, indent=2)
-                run_warnings.extend(ingest_result.warnings)
-
-            results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir, run_warnings=run_warnings)
-        except IngestError as e:
-            print(f"INGEST ERROR: {e}")
-            sys.exit(1)
-        finally:
-            sys.stdout = original_stdout
-            log_file.close()
-
-        sys.exit(0 if all(r.outcome == "success" for r in results) else 1)
-    else:
-        from auto_bug_fix.bug_fix_config import claude_config, bug_fix_config
-        run_dir = "runs"
-        os.makedirs(run_dir, exist_ok=True)
-        log_path = os.path.join(run_dir, "run_log.txt")
-        log_file = open(log_path, "w", encoding="utf-8")
-        original_stdout = sys.stdout
-        sys.stdout = Tee(original_stdout, log_file)
-
-        start_time = time.time()
-        try:
-            dossier, tracker = run_pipeline(bug_fix_config, claude_config, output_dir=run_dir)
-
-            dossier_text = format_dossier(dossier)
-            dossier_path = os.path.join(run_dir, DOSSIER_FILE)
-            with open(dossier_path, "w", encoding="utf-8") as f:
-                f.write(dossier_text)
-            print(f"Dossier written to {dossier_path}")
-
-            slug = _sanitize_branch_slug(
-                bug_fix_config.issue_id
-                or f"{bug_fix_config.source_fix_commit[:12]}-to-{_sanitize_ref(bug_fix_config.target_branch)}"
+        if base_config.fix_patch:
+            print(f"Phase -1: ingesting patch {base_config.fix_patch}...")
+            ingest_result = ingest_patch(
+                source_path, base_config.fix_patch,
+                base_config.source_branch, base_config.issue_id,
+                base_config.bug_description, workdir,
             )
-            branch_name = f"amalgamator/{slug}"
-            result = subprocess.run(
-                ["git", "branch", "-f", branch_name, "HEAD"],
-                cwd=bug_fix_config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            )
-            if result.returncode == 0:
-                print(f"Commits preserved on branch {branch_name}")
-            else:
-                log.warning("git branch failed: %s", result.stderr.strip())
+            base_config.source_fix_commit = ingest_result.synthetic_commit
+            print(f"Patch ingested as {ingest_result.synthetic_commit[:12]} "
+                  f"(method={ingest_result.method}, base={ingest_result.base_sha[:12]})")
+            ingest_path = os.path.join(parent_run_dir, "ingest.json")
+            with open(ingest_path, "w") as f:
+                json.dump({
+                    "synthetic_commit": ingest_result.synthetic_commit,
+                    "base_ref": ingest_result.base_ref,
+                    "base_sha": ingest_result.base_sha,
+                    "method": ingest_result.method,
+                    "patch_sha256": ingest_result.patch_sha256,
+                    "patch_path": base_config.fix_patch,
+                    "warnings": ingest_result.warnings,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }, f, indent=2)
+            run_warnings.extend(ingest_result.warnings)
 
-        except PipelineStop as e:
-            print(f"PIPELINE STOP: {e}")
-            exit_code = 1
-        except PipelineEscalation as e:
-            print(f"PIPELINE ESCALATION: {e}")
-            exit_code = 1
-        except Exception as e:
-            print(f"PIPELINE ERROR: {type(e).__name__}: {e}")
-            exit_code = 1
-        else:
-            exit_code = 0 if tracker.outcome == "success" else 1
-        finally:
-            duration = time.time() - start_time
-            print(f"FINISHED: total_duration = {duration:.1f}s")
-            print(f"All outputs in: {run_dir}")
-            if sys.stdout is not original_stdout:
-                sys.stdout = original_stdout
-            log_file.close()
+        results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir, run_warnings=run_warnings)
+    except IngestError as e:
+        print(f"INGEST ERROR: {e}")
+        return 1
+    finally:
+        sys.stdout = original_stdout
+        log_file.close()
 
-        sys.exit(exit_code)
+    return 0 if all(r.outcome == "success" for r in results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

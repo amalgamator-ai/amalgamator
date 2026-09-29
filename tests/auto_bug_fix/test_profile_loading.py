@@ -132,3 +132,24 @@ def test_different_bare_phase_uses_only_yaml_inline_transport(tmp_path, raw_conf
     assert bug.phase_4b_profile.api_base == "http://inline/v1"
     assert "inherits inline fields" in caplog.text
     assert "INLINE_KEY" not in caplog.text
+
+
+@pytest.mark.parametrize("loader", [load_pipeline_config, load_multi_target_config])
+@pytest.mark.parametrize("invalid", [False, True])
+def test_explicit_registry_never_falls_back(tmp_path, raw_config, loader, invalid):
+    from common.model_registry import RegistryError
+    path = write_config(tmp_path, raw_config, {"local": {"model": "gpt-4o"}})
+    explicit = tmp_path / "explicit.yaml"
+    if invalid:
+        explicit.write_text("models: []")
+    with pytest.raises(RegistryError):
+        loader(path, models_path=str(explicit))
+
+
+@pytest.mark.parametrize("loader", [load_pipeline_config, load_multi_target_config])
+@pytest.mark.parametrize("explicit", ["~/explicit.yaml", "explicit.yaml"])
+def test_explicit_registry_precedence_and_expansion(tmp_path, raw_config, loader, explicit, monkeypatch):
+    path = write_config(tmp_path, raw_config, {"local": {"model": "gpt-4o"}})
+    (tmp_path / "explicit.yaml").write_text("models:\n  chosen:\n    model: openai/explicit\ndefault: chosen\n")
+    monkeypatch.chdir(tmp_path)
+    assert loader(path, models_path=explicit)[-3].profile.id == "chosen"

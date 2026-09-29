@@ -242,11 +242,16 @@ def find_registry(
     1. explicit_path (--models flag)
     2. models.yaml in config_dir (same directory as the pipeline config)
     3. ~/.config/amalgamator/models.yaml
+
+    An explicit path is mandatory when supplied: failure never falls back to
+    discovery. Relative paths use the caller's working directory.
     """
     candidates: list[Path] = []
 
-    if explicit_path:
-        candidates.append(Path(explicit_path))
+    if explicit_path is not None:
+        path = Path(explicit_path).expanduser()
+        log.info("Loading explicit model registry from %s", path)
+        return load_registry(path)
     if config_dir:
         candidates.append(Path(config_dir) / "models.yaml")
     candidates.append(Path("~/.config/amalgamator/models.yaml").expanduser())
