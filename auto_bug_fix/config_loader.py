@@ -217,8 +217,14 @@ def resolve_pipeline_profiles(
 ) -> tuple[ModelProfile, ModelProfile]:
     """Resolve the pipeline and Phase 4b together, inheriting whole profiles."""
     model = _pipeline_model_name(config)
-    pipeline = registry.resolve(model) if registry else _legacy_profile(
-        config, model or "claude-sonnet-4-6")
+    named = registry is not None and (model is None or model in registry.profiles)
+    inline_fields = _inline_model_fields(config)
+    if named:
+        pipeline = registry.resolve(model)
+        if inline_fields:
+            log.warning("Named profile ignores inline fields: %s", ", ".join(inline_fields))
+    else:
+        pipeline = _legacy_profile(config, model or "claude-sonnet-4-6")
     advanced = config.get("advanced", {})
     if not isinstance(advanced, dict):
         advanced = {}
@@ -230,8 +236,23 @@ def resolve_pipeline_profiles(
     elif override == pipeline.model:
         phase_4b = pipeline
     else:
-        phase_4b = registry.resolve(override) if registry else _legacy_profile(config, override)
+        phase_4b = _legacy_profile(config, override)
+        if inline_fields:
+            log.warning(
+                "Different bare Phase 4b model inherits inline fields: %s; "
+                "prefer an explicit named profile for its endpoint",
+                ", ".join(inline_fields),
+            )
     return pipeline, phase_4b
+
+
+def _inline_model_fields(config: dict[str, Any]) -> list[str]:
+    """Field names only: warnings must not disclose transport values."""
+    names = [key for key in ("api_base", "api_key", "api_key_file", "model_params") if key in config]
+    claude = config.get("claude", {})
+    if isinstance(claude, dict):
+        names.extend(f"claude.{key}" for key in ("api_base", "api_key", "api_key_file") if key in claude)
+    return names
 
 
 def parse_bug_fix_config(
@@ -346,28 +367,12 @@ def parse_claude_config(
         claude = {}
     profile, _ = profiles or resolve_pipeline_profiles(config, registry)
 
-    api_base = config.get("api_base") or claude.get("api_base")
-    api_key = _resolve_api_key(config) or _resolve_api_key(claude)
-
-    model_params = config.get("model_params")
-    if model_params is not None and not isinstance(model_params, dict):
-        log.warning("model_params must be a mapping, ignoring: %r", model_params)
-        model_params = None
-
     # Deprecated: set module-level state in llm_client for callers that
-    # haven't adopted profiles yet (backport_scanner, benchmark).
-    from common.llm_client import configure
-    configure(
-        api_base=str(api_base) if api_base else None,
-        api_key=api_key,
-        model_params=model_params,
-    )
-    if api_base:
-        log.info("LLM api_base configured: %s", api_base)
-    if api_key:
-        log.info("LLM api_key configured from config")
-    if model_params:
-        log.info("LLM model_params configured: %s", list(model_params.keys()))
+    # haven't adopted profiles yet. Named selections never seed legacy globals.
+    model_ref = _pipeline_model_name(config)
+    if registry is None or (model_ref is not None and model_ref not in registry.profiles):
+        from common.llm_client import configure
+        configure(api_base=profile.api_base, api_key=profile.api_key, model_params=profile.params)
 
     return BugFixClaudeConfig(
         model=profile.model,
