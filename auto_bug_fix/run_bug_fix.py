@@ -1097,14 +1097,17 @@ def phase_4b_run_and_fix(
 """
 
     phase_4b_profile = config.phase_4b_profile
+    phase_4b_model = config.phase_4b_model or claude_config.model
     if phase_4b_profile is None:
-        # Compatibility for programmatic configs that have not resolved profiles.
-        if config.phase_4b_model and config.phase_4b_model != claude_config.model:
-            from common.model_registry import build_legacy_profile
-            phase_4b_profile = build_legacy_profile(config.phase_4b_model)
-        else:
+        if phase_4b_model == claude_config.model:
             phase_4b_profile = claude_config.profile
-    phase_4b_model = phase_4b_profile.model if phase_4b_profile else claude_config.model
+        elif claude_config.profile is not None:
+            # A bare override must not inherit an unrelated profile's credentials.
+            from common.model_registry import build_legacy_profile
+            phase_4b_profile = build_legacy_profile(phase_4b_model)
+        # Truly unprofiled programmatic callers retain legacy transport lookup.
+    if phase_4b_profile is not None:
+        phase_4b_model = phase_4b_profile.model
     ext_claude_config = _phase_config(
         claude_config, config,
         model=phase_4b_model,
