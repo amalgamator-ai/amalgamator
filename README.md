@@ -337,6 +337,14 @@ self-hosted with zero token cost, known cloud models use their pricing table,
 and unknown cloud models use a fallback estimate. The summary appears at the
 end of each run.
 
+### Large-context diff limits
+
+An explicit `advanced.context_length` scales diff limits above the historical
+200,000/50,000-character floors. Full-diff growth begins around 400K configured
+tokens; per-chunk growth begins around 416.7K. A 262K-token configuration retains
+both existing limits. See [context and diff budgets](auto_bug_fix/README.md#context-and-diff-budgets)
+for formulas and examples.
+
 ## Logging
 
 All pipeline steps log to `logs/run_{step_name}.log` with simultaneous stdout output.

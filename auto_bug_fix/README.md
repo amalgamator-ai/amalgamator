@@ -370,6 +370,29 @@ Phase 4b uses the pipeline profile by default. Set `phase_4b_model` explicitly
 when recovery should use a different model, endpoint, or credential. The selected
 model is named in the run log and each tracked query includes its profile ID.
 
+### Context and diff budgets
+
+`advanced.context_length` is a token-window override for the LiteLLM agent and
+also controls the full-diff and per-chunk character limits used in prompts:
+
+| Configured context (tokens) | Full-diff cap (characters) | Per-chunk cap (characters) |
+|---|---:|---:|
+| Unset (128,000 for diff sizing) | 200,000 | 50,000 |
+| 262,144 | 200,000 | 50,000 |
+| 524,288 | 262,144 | 62,914 |
+| 1,048,576 | 524,288 | 125,829 |
+
+The formulas are `max(200000, int(context * 0.125 * 4))` and
+`max(50000, int(context * 0.03 * 4))`. The historical floors mean full-diff
+scaling takes effect only above approximately **400K tokens**, and per-chunk
+scaling above approximately **416.7K tokens**. Conflict-resolution batches also
+grow once the per-chunk cap exceeds 50,000 characters.
+
+These limits use the configured value, not the model window auto-detected by
+the agent loop. Set `advanced.context_length` explicitly to use larger diff
+budgets. The floors preserve historical diff sizes; they are not hard bounds
+on the complete prompt's token count.
+
 ### Patch input
 
 To supply a patch instead of a source commit, replace the case's `fix` section:
