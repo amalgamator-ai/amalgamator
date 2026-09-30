@@ -12,7 +12,12 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING
+
 from colorama import Fore, Style
+
+if TYPE_CHECKING:
+    from common.model_registry import ModelProfile
 
 
 def make_anthropic_client():
@@ -77,6 +82,11 @@ class ClaudeConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     command_timeout: int | None = None
     context_length: int | None = None
+    profile: "ModelProfile | None" = None
+
+    def __post_init__(self):
+        if self.profile:
+            self.model = self.profile.model
 
 
 @dataclass
@@ -124,6 +134,7 @@ def _find_resume_index(steps: list[PipelineStep], output_dir: str) -> int:
 
 def print_claude_config(config: ClaudeConfig) -> None:
     from common.llm_client import is_claude_model
+    from common.model_registry import public_config_snapshot
 
     class_name = config.__class__.__name__
     is_claude = is_claude_model(config.model)
@@ -136,7 +147,7 @@ def print_claude_config(config: ClaudeConfig) -> None:
         name = f.name
         if not is_claude and name in _claude_only:
             continue
-        value = getattr(config, name)
+        value = public_config_snapshot(getattr(config, name))
         print(f"  {name}: {value}")
 
 
@@ -245,6 +256,47 @@ def print_Message(msg):
         raise Exception("Unexpected type(msg) = {}".format(type(msg)))
 
 
+def build_claude_options(config: ClaudeConfig):
+    """Apply profile transport only to this SDK client's child process."""
+    from common.model_registry import RegistryError
+
+    env = {
+        "ANTHROPIC_MODEL": config.model,
+        "MAX_THINKING_TOKENS": str(config.max_thinking_tokens),
+    }
+    extra = {}
+    profile = config.profile
+    if profile and (profile.api_key or profile.api_base):
+        backends = ("CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_FOUNDRY")
+        auth_modes = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                      "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR")
+        conflicts = [key for key in backends if os.environ.get(key, "").lower() in ("1", "true")]
+        conflicts.extend(key for key in auth_modes if os.environ.get(key))
+        if conflicts:
+            raise RegistryError(
+                "Explicit Anthropic profile transport conflicts with: " + ", ".join(conflicts)
+            )
+        if profile.model.startswith(("vertex_ai/", "bedrock/", "azure_ai/")):
+            raise RegistryError("Direct Anthropic transport requires a direct Anthropic model")
+        if profile.api_key:
+            env["ANTHROPIC_API_KEY"] = profile.api_key
+        if profile.api_base:
+            env["ANTHROPIC_BASE_URL"] = profile.api_base
+        # Explicit direct transport must not be rerouted by user/project settings.
+        extra["setting_sources"] = []
+    return ClaudeAgentOptions(
+        system_prompt=config.system_prompt,
+        allowed_tools=config.allowed_tools,
+        permission_mode=config.perm_mode,
+        cwd=config.cwd,
+        env=env,
+        model=config.model,
+        thinking=config.thinking or {"type": "adaptive"},
+        effort=config.effort,
+        **extra,
+    )
+
+
 async def claude_run(
     claude_config: ClaudeConfig,
     steps: list,
@@ -321,21 +373,7 @@ async def claude_run(
         print("\n{}=== END RESUME SUMMARY ==={}".format(Fore.YELLOW, Style.RESET_ALL))
         print()
 
-    thinking = claude_config.thinking if claude_config.thinking else {"type": "adaptive"}
-
-    options = ClaudeAgentOptions(
-        system_prompt=claude_config.system_prompt,
-        allowed_tools=claude_config.allowed_tools,
-        permission_mode=claude_config.perm_mode,
-        cwd=claude_config.cwd,
-        env={
-            "ANTHROPIC_MODEL": claude_config.model,
-            "MAX_THINKING_TOKENS": str(claude_config.max_thinking_tokens),
-        },
-        model=claude_config.model,
-        thinking=thinking,
-        effort=claude_config.effort,
-    )
+    options = build_claude_options(claude_config)
 
     step_timings = []
 
@@ -382,15 +420,16 @@ async def claude_run(
                 )
             )
             await client.query(prompt)
-            step_usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+            step_usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": None}
             async for msg in client.receive_response():
                 print_Message(msg)
                 if isinstance(msg, ResultMessage):
                     if msg.usage:
                         step_usage["input_tokens"] += msg.usage.get("input_tokens", 0)
                         step_usage["output_tokens"] += msg.usage.get("output_tokens", 0)
-                    if msg.total_cost_usd:
-                        step_usage["cost_usd"] += msg.total_cost_usd
+                    if msg.total_cost_usd is not None:
+                        previous_cost = step_usage["cost_usd"]
+                        step_usage["cost_usd"] = (previous_cost if previous_cost is not None else 0.0) + msg.total_cost_usd
                 print(
                     "{}--------------------------------------------{}".format(
                         Fore.CYAN, Style.RESET_ALL

@@ -32,8 +32,12 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from colorama import Fore, Style
+
+if TYPE_CHECKING:
+    from common.model_registry import ModelProfile
 
 log = logging.getLogger(__name__)
 
@@ -225,6 +229,7 @@ def _compact_messages(
     context_length: int,
     keep_recent_tokens: int = KEEP_RECENT_TOKENS,
     timing: StepTiming | None = None,
+    profile: "ModelProfile | None" = None,
 ) -> list[dict]:
     """Compress the message history to fit within the context budget.
 
@@ -272,7 +277,7 @@ def _compact_messages(
 
     # ── 3. Summarize the stale middle ────────────────────────────────────
     summary_text = _summarize_stale(model, stale, context_length,
-                                    timing=timing)
+                                    timing=timing, profile=profile)
 
     if summary_text:
         compacted = head + [
@@ -299,6 +304,7 @@ def _summarize_stale(
     stale: list[dict],
     context_length: int,
     timing: StepTiming | None = None,
+    profile: "ModelProfile | None" = None,
 ) -> str | None:
     """Call the LLM to summarize stale conversation turns.
 
@@ -350,14 +356,12 @@ def _summarize_stale(
         + joined
     )
     try:
-        import litellm
-        from common.llm_client import get_api_base, get_api_key
+        from common.llm_client import build_request_kwargs
 
-        extra = {}
-        api_base = get_api_base()
-        if api_base and model.startswith("openai/"):
-            extra["api_base"] = api_base
-            extra["api_key"] = get_api_key() or "dummy"
+        extra = build_request_kwargs(model, profile=profile, default_max_tokens=32768)
+        # Compaction produces text, never new tool calls.
+        for key in ("tools", "tool_choice", "parallel_tool_calls"):
+            extra.pop(key, None)
 
         response = _litellm_completion_with_streaming(
             model=model,
@@ -365,7 +369,6 @@ def _summarize_stale(
                 {"role": "system", "content": "You are a precise summarizer."},
                 {"role": "user", "content": summarize_prompt},
             ],
-            max_tokens=32768,
             **extra,
         )
         if timing and response.usage:
@@ -518,7 +521,7 @@ class StepTiming:
     duration: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
-    cost_usd: float = 0.0
+    cost_usd: float | None = None
 
 
 # ── Abstract base ────────────────────────────────────────────────────────────
@@ -570,7 +573,7 @@ class LiteLLMAgentRunner(AgentRunner):
         steps = wrapped_steps
 
         print_claude_config(config)
-        effective_model = _resolve_model(config.model)
+        effective_model = _resolve_model(config.model, profile=config.profile)
 
         step_timings = []
 
@@ -603,6 +606,7 @@ class LiteLLMAgentRunner(AgentRunner):
                 allowed_tools=getattr(config, "allowed_tools", None),
                 bash_timeout=getattr(config, "command_timeout", None),
                 context_length=getattr(config, "context_length", None),
+                profile=getattr(config, "profile", None),
             )
             timing.name = step.name
 
@@ -633,8 +637,12 @@ class LiteLLMAgentRunner(AgentRunner):
         allowed_tools: list[str] | None = None,
         bash_timeout: int | None = None,
         context_length: int | None = None,
+        profile: "ModelProfile | None" = None,
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
+
+        When *profile* is provided, transport config (api_base, api_key,
+        params) comes from it instead of the module-level globals.
 
         Includes:
         - Duplicate-call detection to break out of loops.
@@ -643,8 +651,7 @@ class LiteLLMAgentRunner(AgentRunner):
         """
         import litellm
         from common.llm_client import (
-            _is_ollama_model, _strip_thinking,
-            get_api_base, get_api_key, get_model_params,
+            _strip_thinking, build_request_kwargs,
         )
 
         # ── Resolve context budget ───────────────────────────────────────
@@ -656,18 +663,7 @@ class LiteLLMAgentRunner(AgentRunner):
                  ctx_limit, ctx_budget, COMPACTION_THRESHOLD_PCT * 100,
                  read_cap, bash_cap)
 
-        # Start with global model_params, then layer on transport config.
-        extra_kwargs: dict = {**get_model_params()}
-        extra_kwargs.setdefault("max_tokens", 16384)
-
-        if _is_ollama_model(model):
-            extra_kwargs.setdefault("extra_body", {})
-            extra_kwargs["extra_body"].setdefault("think", False)
-
-        api_base = get_api_base()
-        if api_base and model.startswith("openai/"):
-            extra_kwargs.setdefault("api_base", api_base)
-            extra_kwargs.setdefault("api_key", get_api_key() or "dummy")
+        extra_kwargs = build_request_kwargs(model, profile=profile, default_max_tokens=16384)
 
         tools = _filter_tools(allowed_tools)
         allowed_names = {t["function"]["name"] for t in tools}
@@ -705,6 +701,7 @@ class LiteLLMAgentRunner(AgentRunner):
                     model, messages, ctx_limit,
                     keep_recent_tokens=KEEP_RECENT_TOKENS,
                     timing=timing,
+                    profile=profile,
                 )
                 est_tokens = _estimate_tokens(model, messages)
                 log.info("Post-compaction: %d tokens, %d messages",
@@ -841,14 +838,22 @@ _litellm_runner = LiteLLMAgentRunner()
 
 
 async def agent_run(config, steps, resume=False):
-    """Dispatch to the correct runner based on the model name.
+    """Dispatch to the correct runner based on the model's provider.
 
-    Claude models → Claude Agent SDK (existing behaviour).
-    Everything else → LiteLLM tool-use loop.
+    When the config carries a profile, uses ``profile.provider`` for dispatch.
+    Otherwise falls back to the ``is_claude_model()`` heuristic.
+
+    ``provider: anthropic`` → Claude Agent SDK (existing behaviour).
+    ``provider: litellm``   → LiteLLM tool-use loop.
     """
-    from common.llm_client import is_claude_model
+    profile = getattr(config, "profile", None)
+    if profile:
+        use_claude = profile.provider == "anthropic"
+    else:
+        from common.llm_client import is_claude_model
+        use_claude = is_claude_model(config.model)
 
-    if is_claude_model(config.model):
+    if use_claude:
         log.info("Using Claude Agent SDK for model %s", config.model)
         return await _claude_runner.run(config, steps, resume=resume)
     else:

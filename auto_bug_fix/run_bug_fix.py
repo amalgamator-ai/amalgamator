@@ -18,6 +18,7 @@ import time
 import asyncio
 from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from common.utils import Tee
 from auto_bug_fix.claude_utils import (
@@ -28,6 +29,9 @@ from auto_bug_fix.claude_utils import (
     claude_run as _claude_run,
 )
 
+if TYPE_CHECKING:
+    from common.model_registry import ModelProfile
+
 
 def _phase_config(
     claude_config: ClaudeConfig,
@@ -36,15 +40,24 @@ def _phase_config(
     model: str | None = None,
     thinking: dict | None = None,
     effort: str | None = None,
+    profile: "ModelProfile | None" = None,
 ) -> BugFixClaudeConfig:
     """Create a per-phase ClaudeConfig that inherits transport settings.
 
+    When *profile* is provided, overrides the model and transport config.
+    Explicit model changes must carry the corresponding resolved profile.
     Copies ``command_timeout`` and ``context_length`` from the parent
     config so that context window management stays active across all
     pipeline phases.
     """
+    effective_profile = profile or claude_config.profile
+    effective_model = model or (profile.model if profile else claude_config.model)
+
+    if model and effective_profile and effective_profile.model != effective_model:
+        raise ConfigError("Phase model does not match its profile; supply a resolved profile")
+
     return BugFixClaudeConfig(
-        model=model or claude_config.model,
+        model=effective_model,
         allowed_tools=claude_config.allowed_tools,
         perm_mode=claude_config.perm_mode,
         cwd=config.repo_path,
@@ -52,6 +65,7 @@ def _phase_config(
         context_length=claude_config.context_length,
         thinking=thinking,
         effort=effort or claude_config.effort,
+        profile=effective_profile,
     )
 
 
@@ -70,18 +84,20 @@ async def _run_llm(claude_config, prompts, tracker=None):
         for st in step_timings:
             dur = st.get("duration", 0)
             sdk_cost = st.get("cost_usd")
-            tracker.record_query(
+            record = tracker.record_query(
                 prompt_name=st.get("name", "query"),
                 start_time=cursor,
                 end_time=cursor + dur,
                 input_tokens=st.get("input_tokens", 0),
                 output_tokens=st.get("output_tokens", 0),
-                sdk_cost_usd=sdk_cost if sdk_cost else None,
+                sdk_cost_usd=sdk_cost,
+                model=claude_config.model,
+                profile=claude_config.profile,
             )
             log.info("LLM query %s: duration=%.1fs, tokens=%d/%d, cost=$%.4f (sdk=$%s)",
                      st.get("name", "query"), dur,
                      st.get("input_tokens", 0), st.get("output_tokens", 0),
-                     sdk_cost or 0, sdk_cost)
+                     record.cost_usd, sdk_cost)
             cursor += dur
 
     return step_timings
@@ -323,13 +339,34 @@ def phase_0_triage(
     return {"forward_patch_id": "not_found", "ancestry": ancestry_status}
 
 
+def _diff_char_caps(config: BugFixConfig) -> tuple[int, int]:
+    """Return (max_diff_chars, max_chunk_chars) scaled to the context budget.
+
+    Floors at the legacy defaults (200K / 50K characters). With an estimate
+    of 4 characters/token, full-diff growth starts above ~400K configured
+    tokens and chunk growth above ~416.7K. Above those floors, the caps use
+    ~12.5% / ~3% of the configured window. A 262,144-token window therefore
+    retains both legacy caps. Unset context_length uses 128K here; the agent
+    loop's model-window auto-detection does not change these diff limits.
+    """
+    ctx = config.context_length or 128_000
+    chars_per_token = 4
+    max_diff = max(200_000, int(ctx * 0.125 * chars_per_token))
+    max_chunk = max(50_000, int(ctx * 0.03 * chars_per_token))
+    return max_diff, max_chunk
+
+
 def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files: list[str] | None = None) -> str:
     """Compute the fix diff with truncation for large commits.
 
     When for_files is provided, only include diffs for those specific files
     (used during chunked resolution to keep prompt size manageable).
+
+    Caps scale with ``config.context_length`` so large-context models get
+    the full diff instead of falling back to --stat.
     """
     sha = commit or config.source_fix_commit
+    max_diff_chars, max_chunk_chars = _diff_char_caps(config)
 
 
     if for_files:
@@ -352,8 +389,7 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
                 cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
             ).stdout
         fix_diff = stat + "\n\n--- Diff for chunk files ---\n\n" + partial_diff
-        MAX_CHUNK_CHARS = 50_000
-        if len(fix_diff) > MAX_CHUNK_CHARS:
+        if len(fix_diff) > max_chunk_chars:
             fix_diff = stat + "\n\n[Chunk diffs too large — stat only. Agent must read files directly.]"
         return fix_diff
 
@@ -369,9 +405,9 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
             cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
         ).stdout
 
-    MAX_DIFF_CHARS = 200_000
-    if len(fix_diff) > MAX_DIFF_CHARS:
-        log.warning("fix_diff too large (%d chars), using --stat only", len(fix_diff))
+    if len(fix_diff) > max_diff_chars:
+        log.warning("fix_diff too large (%d chars, cap %d), using --stat only",
+                    len(fix_diff), max_diff_chars)
         if is_merge_commit(config.repo_path, sha):
             fix_diff = subprocess.run(
                 ["git", "diff", "--stat", f"{sha}^1..{sha}"],
@@ -1062,18 +1098,28 @@ def phase_4b_run_and_fix(
 </semantic_triage>
 """
 
+    phase_4b_profile = config.phase_4b_profile
+    phase_4b_model = config.phase_4b_model or claude_config.model
+    if phase_4b_profile is None:
+        if phase_4b_model == claude_config.model:
+            phase_4b_profile = claude_config.profile
+        elif claude_config.profile is not None:
+            # A bare override must not inherit an unrelated profile's credentials.
+            from common.model_registry import build_legacy_profile
+            phase_4b_profile = build_legacy_profile(phase_4b_model)
+        # Truly unprofiled programmatic callers retain legacy transport lookup.
+    if phase_4b_profile is not None:
+        phase_4b_model = phase_4b_profile.model
     ext_claude_config = _phase_config(
         claude_config, config,
-        model=config.phase_4b_model,
+        model=phase_4b_model,
         thinking={"type": "adaptive"},
         effort="max",
+        profile=phase_4b_profile,
     )
     ext_claude_config.max_thinking_tokens = 1048576
-    # Named explicitly: 4b is meant to run a stronger model than the rest of
-    # the pipeline, and it is now configurable — the run log should say which
-    # one actually escalated.
-    log.info("Phase 4b: escalating to %s with deep thinking (last resort; "
-             "pipeline model is %s)", config.phase_4b_model, claude_config.model)
+    log.info("Phase 4b: recovery with %s (pipeline model is %s)",
+             phase_4b_model, claude_config.model)
 
     prompt = gen_RunAndFixPrompt(
         context=enriched_context,
@@ -1155,23 +1201,26 @@ def phase_4b_run_and_fix(
 
     _4b_end = time.time()
 
+    query_records = []
     if tracker and timings:
         for st in timings:
             dur = st.get("duration", _4b_end - _4b_start)
             sdk_cost = st.get("cost_usd")
-            tracker.record_query(
+            query_records.append(tracker.record_query(
                 prompt_name=st.get("name", "phase_4b"),
                 start_time=_4b_start,
                 end_time=_4b_start + dur,
                 input_tokens=st.get("input_tokens", 0),
                 output_tokens=st.get("output_tokens", 0),
-                sdk_cost_usd=sdk_cost if sdk_cost else None,
-            )
+                sdk_cost_usd=sdk_cost,
+                model=ext_claude_config.model,
+                profile=ext_claude_config.profile,
+            ))
 
     if tracker and phase_4b_json_path:
         phase_4b_data["duration_seconds"] = _4b_end - _4b_start
         if timings:
-            phase_4b_data["cost_usd"] = sum(st.get("cost_usd", 0) for st in timings)
+            phase_4b_data["cost_usd"] = sum(record.cost_usd for record in query_records)
             phase_4b_data["input_tokens"] = sum(st.get("input_tokens", 0) for st in timings)
             phase_4b_data["output_tokens"] = sum(st.get("output_tokens", 0) for st in timings)
 
@@ -1394,14 +1443,15 @@ def cherry_pick_and_resolve(
     if state.followup_fixes and _is_followup_target(config.repo_path, commit, state):
         followup_note = "\n".join(f"  - {f}" for f in state.followup_fixes)
 
-    CHUNK_SIZE = 30
+    _max_diff, max_chunk = _diff_char_caps(config)
+    CHUNK_SIZE = 30 if max_chunk <= 50_000 else 45
 
     for attempt in range(1, config.max_resolution_retries + 1):
         if len(uu_files) > CHUNK_SIZE:
             if len(uu_files) > 100:
-                chunk_size = 10
-            elif len(fix_diff) > 50_000:
-                chunk_size = 15
+                chunk_size = 10 if max_chunk <= 50_000 else 15
+            elif len(fix_diff) > max_chunk:
+                chunk_size = 15 if max_chunk <= 50_000 else 20
             else:
                 chunk_size = CHUNK_SIZE
             log.info("%s attempt %d/%d — resolving %d conflicts in chunks of %d",
@@ -2103,10 +2153,13 @@ def run_pipeline(
             "before calling run_pipeline."
         )
 
+    from common.model_registry import public_config_snapshot
+
     tracker = Tracker(
         issue_id=config.issue_id,
-        config_dict=asdict(config),
+        config_dict=public_config_snapshot(config),
         model=claude_config.model,
+        profile=claude_config.profile,
         output_dir=output_dir,
     )
 
@@ -2793,127 +2846,85 @@ def run_targets(
     return results
 
 
-if __name__ == "__main__":
+def main(argv=None) -> int:
+    import argparse
+    from common.model_registry import RegistryError
+
+    parser = argparse.ArgumentParser(description="Port a bug fix using a pipeline configuration.")
+    parser.add_argument("config", help="Pipeline YAML/JSON configuration")
+    parser.add_argument("--models", metavar="PATH", help="Explicit model registry (overrides discovery)")
+    args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
+    try:
+        targets, base_config, claude_config, workdir, source_path = load_multi_target_config(
+            args.config, models_path=args.models,
+        )
+    except (ConfigError, RegistryError, OSError) as e:
+        parser.error(str(e))
 
-        targets, base_config, claude_config, workdir, source_path = load_multi_target_config(config_path)
+    yaml_basename = os.path.splitext(os.path.basename(args.config))[0]
+    run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    parent_run_dir = os.path.join("runs", f"{yaml_basename}_{run_timestamp}")
+    os.makedirs(parent_run_dir, exist_ok=True)
 
-        yaml_basename = os.path.splitext(os.path.basename(config_path))[0]
-        run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        parent_run_dir = os.path.join("runs", f"{yaml_basename}_{run_timestamp}")
-        os.makedirs(parent_run_dir, exist_ok=True)
+    log_path = os.path.join(parent_run_dir, "run_log.txt")
+    log_file = open(log_path, "w", encoding="utf-8")
+    original_stdout = sys.stdout
+    sys.stdout = Tee(original_stdout, log_file)
 
-        log_path = os.path.join(parent_run_dir, "run_log.txt")
-        log_file = open(log_path, "w", encoding="utf-8")
-        original_stdout = sys.stdout
-        sys.stdout = Tee(original_stdout, log_file)
-
-        try:
-            print(f"Run directory: {parent_run_dir}")
-
-            print("Fetching latest refs from origin...")
-            fetch_result = subprocess.run(
-                ["git", "fetch", "--all", "--quiet"],
-                cwd=source_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    try:
+        print(f"Run directory: {parent_run_dir}")
+        print("Fetching latest refs from origin...")
+        fetch_result = subprocess.run(
+            ["git", "fetch", "--all", "--quiet"],
+            cwd=source_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        fetch_warning = ""
+        if fetch_result.returncode != 0:
+            fetch_warning = (
+                f"git fetch --all failed (exit {fetch_result.returncode}): "
+                f"{(fetch_result.stderr or '').strip()[:500]}"
             )
-            fetch_warning = ""
-            if fetch_result.returncode != 0:
-                fetch_warning = (
-                    f"git fetch --all failed (exit {fetch_result.returncode}): "
-                    f"{(fetch_result.stderr or '').strip()[:500]}"
-                )
-                log.warning(fetch_warning)
-                print(f"WARNING: {fetch_warning} — continuing with local refs")
-            build_subdir = os.path.relpath(base_config.build_dir, base_config.repo_path)
+            log.warning(fetch_warning)
+            print(f"WARNING: {fetch_warning} — continuing with local refs")
+        build_subdir = os.path.relpath(base_config.build_dir, base_config.repo_path)
+        run_warnings = [fetch_warning] if fetch_warning else []
 
-            run_warnings = [fetch_warning] if fetch_warning else []
-
-            if base_config.fix_patch:
-                print(f"Phase -1: ingesting patch {base_config.fix_patch}...")
-                ingest_result = ingest_patch(
-                    source_path, base_config.fix_patch,
-                    base_config.source_branch, base_config.issue_id,
-                    base_config.bug_description, workdir,
-                )
-                base_config.source_fix_commit = ingest_result.synthetic_commit
-                print(f"Patch ingested as {ingest_result.synthetic_commit[:12]} "
-                      f"(method={ingest_result.method}, base={ingest_result.base_sha[:12]})")
-                ingest_path = os.path.join(parent_run_dir, "ingest.json")
-                with open(ingest_path, "w") as f:
-                    json.dump({
-                        "synthetic_commit": ingest_result.synthetic_commit,
-                        "base_ref": ingest_result.base_ref,
-                        "base_sha": ingest_result.base_sha,
-                        "method": ingest_result.method,
-                        "patch_sha256": ingest_result.patch_sha256,
-                        "patch_path": base_config.fix_patch,
-                        "warnings": ingest_result.warnings,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }, f, indent=2)
-                run_warnings.extend(ingest_result.warnings)
-
-            results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir, run_warnings=run_warnings)
-        except IngestError as e:
-            print(f"INGEST ERROR: {e}")
-            sys.exit(1)
-        finally:
-            sys.stdout = original_stdout
-            log_file.close()
-
-        sys.exit(0 if all(r.outcome == "success" for r in results) else 1)
-    else:
-        from auto_bug_fix.bug_fix_config import claude_config, bug_fix_config
-        run_dir = "runs"
-        os.makedirs(run_dir, exist_ok=True)
-        log_path = os.path.join(run_dir, "run_log.txt")
-        log_file = open(log_path, "w", encoding="utf-8")
-        original_stdout = sys.stdout
-        sys.stdout = Tee(original_stdout, log_file)
-
-        start_time = time.time()
-        try:
-            dossier, tracker = run_pipeline(bug_fix_config, claude_config, output_dir=run_dir)
-
-            dossier_text = format_dossier(dossier)
-            dossier_path = os.path.join(run_dir, DOSSIER_FILE)
-            with open(dossier_path, "w", encoding="utf-8") as f:
-                f.write(dossier_text)
-            print(f"Dossier written to {dossier_path}")
-
-            slug = _sanitize_branch_slug(
-                bug_fix_config.issue_id
-                or f"{bug_fix_config.source_fix_commit[:12]}-to-{_sanitize_ref(bug_fix_config.target_branch)}"
+        if base_config.fix_patch:
+            print(f"Phase -1: ingesting patch {base_config.fix_patch}...")
+            ingest_result = ingest_patch(
+                source_path, base_config.fix_patch,
+                base_config.source_branch, base_config.issue_id,
+                base_config.bug_description, workdir,
             )
-            branch_name = f"amalgamator/{slug}"
-            result = subprocess.run(
-                ["git", "branch", "-f", branch_name, "HEAD"],
-                cwd=bug_fix_config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            )
-            if result.returncode == 0:
-                print(f"Commits preserved on branch {branch_name}")
-            else:
-                log.warning("git branch failed: %s", result.stderr.strip())
+            base_config.source_fix_commit = ingest_result.synthetic_commit
+            print(f"Patch ingested as {ingest_result.synthetic_commit[:12]} "
+                  f"(method={ingest_result.method}, base={ingest_result.base_sha[:12]})")
+            ingest_path = os.path.join(parent_run_dir, "ingest.json")
+            with open(ingest_path, "w") as f:
+                json.dump({
+                    "synthetic_commit": ingest_result.synthetic_commit,
+                    "base_ref": ingest_result.base_ref,
+                    "base_sha": ingest_result.base_sha,
+                    "method": ingest_result.method,
+                    "patch_sha256": ingest_result.patch_sha256,
+                    "patch_path": base_config.fix_patch,
+                    "warnings": ingest_result.warnings,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }, f, indent=2)
+            run_warnings.extend(ingest_result.warnings)
 
-        except PipelineStop as e:
-            print(f"PIPELINE STOP: {e}")
-            exit_code = 1
-        except PipelineEscalation as e:
-            print(f"PIPELINE ESCALATION: {e}")
-            exit_code = 1
-        except Exception as e:
-            print(f"PIPELINE ERROR: {type(e).__name__}: {e}")
-            exit_code = 1
-        else:
-            exit_code = 0 if tracker.outcome == "success" else 1
-        finally:
-            duration = time.time() - start_time
-            print(f"FINISHED: total_duration = {duration:.1f}s")
-            print(f"All outputs in: {run_dir}")
-            if sys.stdout is not original_stdout:
-                sys.stdout = original_stdout
-            log_file.close()
+        results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir, run_warnings=run_warnings)
+    except IngestError as e:
+        print(f"INGEST ERROR: {e}")
+        return 1
+    finally:
+        sys.stdout = original_stdout
+        log_file.close()
 
-        sys.exit(exit_code)
+    return 0 if all(r.outcome == "success" for r in results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
