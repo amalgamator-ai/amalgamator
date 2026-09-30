@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from common.model_registry import ModelProfile
+
 from .triage import (
     BranchCheckResult, FixStatus, check_ref,
     get_remote_branches, get_tags, _run, _resolve_ref,
@@ -31,6 +33,15 @@ class ScanConfig:
     fix_description: str = ""
     vuln_commit: str | None = None
     discover_commands: bool = False
+    profile: ModelProfile | None = field(default=None, repr=False)
+    model_ref: str | None = None
+    models_path: Path | None = None
+
+    def __post_init__(self):
+        if self.profile is not None:
+            self.llm_model = self.profile.model
+            if self.model_ref is None:
+                self.model_ref = self.profile.id
 
 
 @dataclass
@@ -102,8 +113,7 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
     asks the LLM whether the fix is present.
     """
     try:
-        from common.claude_utils import make_anthropic_client
-        client = make_anthropic_client()
+        from common.llm_client import completion as llm_completion
 
         ref = _resolve_ref(result.branch, result.ref_type)
         ref_label = f"tag '{result.branch}'" if result.ref_type == "tag" else f"branch '{result.branch}'"
@@ -176,12 +186,13 @@ Answer with exactly one of:
 
 Provide a one-sentence explanation after your answer."""
 
-        response = client.messages.create(
+        result_obj = llm_completion(
             model=config.llm_model,
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}]
+            profile=config.profile,
         )
-        answer = response.content[0].text.strip()
+        answer = result_obj.text.strip()
         log.info("LLM answer for %s: %s", result.branch, answer[:120])
 
         first_token = answer.split()[0].rstrip(":").upper() if answer.split() else ""

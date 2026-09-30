@@ -1,6 +1,11 @@
-"""Configuration dataclass and default instance for the auto_bug_fix pipeline."""
+"""Configuration dataclass for the auto_bug_fix pipeline."""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from common.model_registry import ModelProfile
 
 
 @dataclass
@@ -35,6 +40,12 @@ class BugFixConfig:
     # the default is unbounded; a fired timeout is treated as a hard failure.
     command_timeout: int | None = None
 
+    # Maximum context window in tokens for the pipeline model. Used by the
+    # LiteLLM agent loop to trigger context compaction before a single call
+    # exceeds the model's limit. Set via YAML advanced.context_length.
+    # None = auto-detect from litellm model info, else default 128K.
+    context_length: int | None = None
+
     # Patch-ID
     forward_patch_id_lookback: str = "12 months"
 
@@ -52,10 +63,10 @@ class BugFixConfig:
     # (skipped and never regenerated) before the outcome is downgraded from
     # success to partial_success.
     partial_success_skip_ratio: float = 0.5
-    # Model for the Phase 4b escalation. Deliberately stronger than the model
-    # the rest of the pipeline runs on: 4b is the last resort, a single long
-    # autonomous build-test-fix session. Lowering it weakens that gate.
-    phase_4b_model: str = "claude-opus-4-6"
+    # Model for Phase 4b recovery. Defaults to the pipeline model.
+    # Set a different profile id in models.yaml to use a stronger model.
+    phase_4b_model: str = ""
+    phase_4b_profile: "ModelProfile | None" = None
     # Optional per-file check run over touched files after resolution,
     # e.g. "gcc -fsyntax-only {file}". {file} is replaced with the absolute path.
     file_check_command: str = ""

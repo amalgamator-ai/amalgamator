@@ -6,21 +6,51 @@ import os
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+from common.model_registry import ModelProfile, public_config_snapshot
 
 
 MODEL_PRICING: dict[str, dict[str, float]] = {
     "claude-opus-4-6":   {"input": 5.0,  "output": 25.0},
     "claude-opus-4-7":   {"input": 5.0,  "output": 25.0},
+    "claude-opus-4-8":   {"input": 5.0,  "output": 25.0},
     "claude-sonnet-4-6": {"input": 3.0,  "output": 15.0},
     "claude-haiku-4-5":  {"input": 1.0,  "output": 5.0},
+    "gpt-4o":            {"input": 2.5,  "output": 10.0},
+    # Standard short-context tier (<=272K input tokens). Long-context
+    # requests (>272K) are billed at 2x input / 1.5x output by OpenAI —
+    # not modeled here, so costs for very large prompts are a slight
+    # underestimate. Verified 2026-08: https://developers.openai.com/api/docs/pricing
+    "gpt-5.6-luna":      {"input": 0.20, "output": 1.20},
+    "gpt-5.6-terra":     {"input": 2.0,  "output": 12.0},
+    "gpt-5.6-sol":       {"input": 4.0,  "output": 20.0},
 }
 
+_LOCAL_MODEL_PRICING: dict[str, float] = {"input": 0.0, "output": 0.0}
 
-def compute_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Compute USD cost from token counts using per-model pricing."""
-    pricing = MODEL_PRICING.get(model, MODEL_PRICING["claude-opus-4-6"])
+_FALLBACK_PRICING: dict[str, float] = {"input": 5.0, "output": 25.0}
+
+
+def compute_cost(model: str, input_tokens: int, output_tokens: int, profile=None) -> float:
+    """Compute USD cost from token counts using per-model pricing.
+
+    Self-hosted models (Ollama, vLLM via api_base, etc.) are free.
+    Known cloud models use their published pricing.
+    Unknown cloud models fall back to Claude Opus pricing as a
+    conservative estimate.
+    """
+    from common.llm_client import is_self_hosted
+
+    if is_self_hosted(model, profile=profile):
+        pricing = _LOCAL_MODEL_PRICING
+    else:
+        stripped = (model
+                    .removeprefix("vertex_ai/")
+                    .removeprefix("anthropic/")
+                    .removeprefix("openai/"))
+        pricing = MODEL_PRICING.get(stripped, _FALLBACK_PRICING)
     return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 
 
@@ -38,6 +68,9 @@ class QueryRecord:
     cache_read_tokens: int = 0
     cost_usd: float = 0.0
     is_error: bool = False
+    model: str = ""
+    profile_id: str | None = None
+    cost_source: str = "estimated"
 
 
 @dataclass
@@ -68,15 +101,16 @@ class PipelineRun:
 
 
 class Tracker:
-    def __init__(self, issue_id: str, config_dict: dict, model: str = "claude-opus-4-6", output_dir: str = "runs"):
+    def __init__(self, issue_id: str, config_dict: dict, model: str = "claude-opus-4-6", output_dir: str = "runs", *, profile: ModelProfile | None = None):
         """Initialize a new pipeline run tracker."""
-        self._model = model
+        self._profile = profile  # Runtime-only; never part of PipelineRun.
+        self._model = profile.model if profile else model
         self._output_dir = output_dir
         self._current_phase: PhaseRecord | None = None
         self._run = PipelineRun(
             run_id=str(uuid.uuid4()),
             issue_id=issue_id,
-            config=config_dict,
+            config=public_config_snapshot(config_dict),
             start_time=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -114,6 +148,9 @@ class Tracker:
         cache_read_tokens: int = 0,
         is_error: bool = False,
         sdk_cost_usd: float | None = None,
+        *,
+        model: str | None = None,
+        profile: ModelProfile | None = None,
     ) -> QueryRecord:
         """Record an LLM query with timing, token usage, and cost.
 
@@ -122,7 +159,13 @@ class Tracker:
         computed from token counts using MODEL_PRICING.
         """
         duration_s = round(end_time - start_time, 3)
-        cost = sdk_cost_usd if sdk_cost_usd is not None else compute_cost(self._model, input_tokens, output_tokens)
+        effective_profile = profile
+        if effective_profile is None and (model is None or model == self._model):
+            effective_profile = self._profile
+        effective_model = effective_profile.model if effective_profile else (model or self._model)
+        cost = sdk_cost_usd if sdk_cost_usd is not None else round(
+            compute_cost(effective_model, input_tokens, output_tokens, profile=effective_profile), 6,
+        )
 
         record = QueryRecord(
             phase=self._current_phase.phase if self._current_phase else "unknown",
@@ -135,8 +178,11 @@ class Tracker:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
-            cost_usd=round(cost, 6),
+            cost_usd=cost,
             is_error=is_error,
+            model=effective_model,
+            profile_id=effective_profile.id if effective_profile else None,
+            cost_source="reported" if sdk_cost_usd is not None else "estimated",
         )
 
         if self._current_phase is not None:
@@ -186,7 +232,7 @@ class Tracker:
         path = os.path.join(self._output_dir, filename)
 
         with open(path, "w") as f:
-            json.dump(asdict(self._run), f, indent=2)
+            json.dump(public_config_snapshot(self._run), f, indent=2)
         return path
 
     def summary(self) -> str:
