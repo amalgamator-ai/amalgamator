@@ -342,10 +342,12 @@ def phase_0_triage(
 def _diff_char_caps(config: BugFixConfig) -> tuple[int, int]:
     """Return (max_diff_chars, max_chunk_chars) scaled to the context budget.
 
-    Reserves ~12.5% of the context window for the full diff and ~3% for
-    per-chunk diffs, leaving headroom for the system prompt, tool results,
-    and later pipeline phases.  Floors at the legacy defaults (200K / 50K)
-    so smaller-context models are unaffected.
+    Floors at the legacy defaults (200K / 50K characters). With an estimate
+    of 4 characters/token, full-diff growth starts above ~400K configured
+    tokens and chunk growth above ~416.7K. Above those floors, the caps use
+    ~12.5% / ~3% of the configured window. A 262,144-token window therefore
+    retains both legacy caps. Unset context_length uses 128K here; the agent
+    loop's model-window auto-detection does not change these diff limits.
     """
     ctx = config.context_length or 128_000
     chars_per_token = 4
