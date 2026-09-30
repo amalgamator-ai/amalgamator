@@ -441,6 +441,28 @@ The dossier is written in every case that reaches Phase 2; the tracker JSON is w
 
 ---
 
+## Tests
+
+From the repository root:
+
+```bash
+python -m pip install -e '.[test]'
+python -m pytest tests/common tests/auto_bug_fix tests/backport_scanner -q
+```
+
+The test extra pins `claude-agent-sdk` to the version used by the SDK subprocess
+smoke check. That check deliberately inspects private SDK transport internals,
+stopping before a CLI process or model API request is started. When updating
+the test SDK pin, review and rerun the canary for private-API changes:
+
+```bash
+python -m pytest tests/auto_bug_fix/test_sdk_profiles.py -k subprocess_transport_smoke -q
+```
+
+The normal runtime dependency continues to accept the supported SDK version range.
+
+---
+
 ## What this package shares with the rest of the repository
 
 The model and runner infrastructure is shared through `common/`:
