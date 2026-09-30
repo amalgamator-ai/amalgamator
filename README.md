@@ -48,6 +48,8 @@ Worked examples with full analysis results:
 ```
 ai_auto_analyze/
 ├── common/                             # Shared utilities
+│   ├── llm_client.py                   #   Model-agnostic LLM completion (LiteLLM)
+│   ├── agent_runner.py                 #   Agent dispatch: Claude SDK or LiteLLM tool loop
 │   ├── claude_utils.py                 #   Claude Agent SDK wrapper
 │   ├── utils.py                        #   Logging, directory cleanup, output dir helpers
 │   └── convert_nsys_to_sqlite.sh       #   NSYS trace format converter
@@ -107,10 +109,11 @@ ai_auto_analyze/
 
 ## Prerequisites
 
-- Python 3.10+
-- [Claude Agent Python SDK](https://pypi.org/project/claude-agent-sdk/) (`pip install claude-agent-sdk`)
-- Framework source code (clean git repos for each framework being analyzed)
-- GPU trace files (PyTorch Chrome traces or NSYS traces)
+- Python 3.14+ (use [uv](https://docs.astral.sh/uv/) for version management)
+- Dependencies: `uv sync` (installs `claude-agent-sdk`, `litellm`, `colorama`, `pyyaml`)
+- An LLM endpoint — Claude via Vertex AI, a local Ollama instance, a
+  self-hosted vLLM server, or an OpenAI API key
+- For GPU analysis: framework source code and GPU trace files
 
 ## Quick Start
 
@@ -251,17 +254,101 @@ This orchestrates:
 
 Use `run_all_scheduled.sh` to schedule execution at a future time with GPU availability checks.
 
-## Claude Agent Integration
+## Model-Agnostic LLM Support
 
-All AI-driven steps use the Claude Agent SDK via `common/claude_utils.py`:
+The bug-fix pipeline supports Claude, OpenAI, Ollama, and OpenAI-compatible
+servers such as vLLM through named model profiles:
 
-| Parameter | Value |
-|-----------|-------|
-| Model | `claude-opus-4-6[1m]` (1M context) |
-| Allowed tools | `Read`, `Write`, `Bash` |
-| Permission mode | `acceptEdits` |
-| Thinking mode | Adaptive |
-| Effort | Max |
+- **`models.yaml`** defines reusable model IDs, runner selection, endpoints,
+  credentials, and parameters.
+- **`case.yaml`** describes the repository, fix, target branches, and commands,
+  then selects a profile by ID. The case file can have any `.yaml`, `.yml`, or
+  `.json` filename.
+
+### Create the two configuration files
+
+From the repository root:
+
+```bash
+mkdir -p my-backport
+cp auto_bug_fix/configs/example_models.yaml my-backport/models.yaml
+cp auto_bug_fix/configs/example_backport.yaml my-backport/case.yaml
+# Edit models.yaml for your provider and case.yaml for your repository and fix.
+python -m auto_bug_fix.run_bug_fix my-backport/case.yaml
+```
+
+The templates use `m1` for Claude Sonnet, `m2` for a local OpenAI-compatible
+server, and `m3` for Claude Opus. Change the case selection to use another profile:
+
+```yaml
+model: m2
+advanced:
+  phase_4b_model: m3  # optional: use a different complete profile for recovery
+```
+
+See the **[complete models.yaml and case.yaml guide](auto_bug_fix/README.md#quickstart)**
+for full examples, authentication, field references, patch input, and multiple targets.
+
+### Discovery and defaults
+
+The first registry selected is used; registries are not merged:
+
+1. An explicit `--models PATH`.
+2. A file named exactly `models.yaml` beside the case file.
+3. `~/.config/amalgamator/models.yaml`.
+
+```bash
+python -m auto_bug_fix.run_bug_fix my-backport/case.yaml --models /path/to/shared-models.yaml
+```
+
+An explicit missing or invalid registry is an error. If the case omits `model`,
+the registry's required `default` profile is selected. Without a registry, the
+fallback is `claude-sonnet-4-6`. Phase 4b inherits the pipeline's complete profile
+unless `advanced.phase_4b_model` overrides it.
+
+Add top-level `strict: true` to `models.yaml` to reject unregistered model/profile
+selections at load time, including Phase 4b overrides. By default, unregistered
+strings remain supported as bare model names and produce a warning.
+
+### Provider routing and compatibility
+
+`provider: anthropic` selects the Claude Agent SDK. `provider: litellm` selects
+the generic tool-use runner, including when calling an Anthropic model through
+LiteLLM. Use a model that supports tool/function calling for the generic runner.
+Credentials are specific to the selected provider; Anthropic credentials are
+needed only when using that provider.
+
+Profiles put generation options under **`params`**. These apply to LiteLLM calls,
+including context summarization; they are not arbitrary Claude SDK options.
+Keep `model`, `provider`, `api_base`, `api_key`, and `api_key_file` beside `params`.
+
+Older cases with a bare model name and inline `api_base`, `api_key`/`api_key_file`,
+and **`model_params`** remain supported. Named selections use the profile's own
+settings and warn when inline model settings are ignored. See
+[selection and compatibility rules](auto_bug_fix/README.md#model-selection-and-legacy-cases)
+for precedence and Phase 4b overrides.
+
+The [backport scanner](backport_scanner/README.md#model-selection) also supports
+the shared registry and `--models`. Select its profile with `llm.model`; semantic
+checks and command discovery use that profile, and generated cases retain the
+selection with a command pointing to the same registry.
+
+### Cost Tracking
+
+Each query records its effective model and profile ID. A provider-reported cost,
+including zero, takes precedence. Otherwise, the tracker estimates from token
+counts: Ollama and `openai/` profiles with a custom endpoint are classified as
+self-hosted with zero token cost, known cloud models use their pricing table,
+and unknown cloud models use a fallback estimate. The summary appears at the
+end of each run.
+
+### Large-context diff limits
+
+An explicit `advanced.context_length` scales diff limits above the historical
+200,000/50,000-character floors. Full-diff growth begins around 400K configured
+tokens; per-chunk growth begins around 416.7K. A 262K-token configuration retains
+both existing limits. See [context and diff budgets](auto_bug_fix/README.md#context-and-diff-budgets)
+for formulas and examples.
 
 ## Logging
 
@@ -277,14 +364,14 @@ All pipeline steps log to `logs/run_{step_name}.log` with simultaneous stdout ou
 
 ## Bug Fix Porting
 
-Backport a bug fix from one branch to another using Claude as the AI engine. Works for any project with a git repository and shell-invokable build and test commands (tested on Go and C codebases).
+Backport a bug fix from one branch to another using a configured model profile. Works for any project with a git repository and shell-invokable build and test commands (tested on Go and C codebases).
 
 See **[auto_bug_fix/README.md](auto_bug_fix/README.md)** for the full setup and usage guide.
 
 **Quick start:**
 
 ```bash
-# 1. Create a YAML config (see auto_bug_fix/configs/example_backport.yaml)
+# 1. Create models.yaml and case.yaml (see the paired templates above)
 # 2. Run
-python -m auto_bug_fix.run_bug_fix <path_to_config.yaml>
+python -m auto_bug_fix.run_bug_fix path/to/case.yaml
 ```

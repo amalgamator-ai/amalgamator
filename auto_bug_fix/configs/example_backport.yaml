@@ -1,6 +1,8 @@
 ---
 # Example: backport a bug fix from one branch to another
-# Copy this file and fill in your project-specific values.
+# Copy this file to case.yaml and fill in your project-specific values.
+# Also copy example_models.yaml to models.yaml beside it, or use --models PATH.
+# Run from the project root: python -m auto_bug_fix.run_bug_fix path/to/case.yaml
 
 issue_id: "example-fix-id"
 
@@ -22,11 +24,10 @@ build:
   test_command: "make check -j$(nproc)"         # test command
   # file_check_command: "gcc -fsyntax-only {file}"  # optional per-file check after resolution
 
-model: "claude-sonnet-4-6"     # or claude-opus-4-6 for harder backports
+model: m1                      # profile id from models.yaml (or a bare model name)
 
 # Optional:
-# output:
-#   directory: "runs/my-backport"
+# CLI artifacts are written to runs/<case-filename>_<timestamp>/.
 # advanced:
 #   mechanical_resolution: true   # git-apply rungs before the LLM (ablation flag)
 #   snapback: true                # snap LLM-drifted lines back to source bytes
@@ -36,7 +37,4 @@ model: "claude-sonnet-4-6"     # or claude-opus-4-6 for harder backports
 #   partial_success_skip_ratio: 0.5  # non-bugfix ports: fraction of the fix's files
 #                                    # that may be dropped before the outcome is
 #                                    # downgraded to partial_success (0.0-1.0)
-#   phase_4b_model: "claude-opus-4-6"  # model for the Phase 4b escalation. Kept
-#                                      # stronger than `model:` above on purpose —
-#                                      # 4b is the last resort before escalating to
-#                                      # a human. Lowering it weakens that gate.
+#   phase_4b_model: m3            # profile id for Phase 4b recovery (defaults to model)

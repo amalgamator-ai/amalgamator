@@ -794,7 +794,7 @@ def test_phase_4b_success_file_accepted(tmp_path):
     assert not config.build_command and not config.test_command
     head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
         phase_4b_run_and_fix(config, claude_cfg, state, None)  # must not raise
     # Marker-only session: nothing to commit, no empty fixup created.
     assert _git_4b(tmp_path, "rev-parse", "HEAD") == head_before
@@ -811,7 +811,7 @@ def test_phase_4b_success_commits_recovery_edits(tmp_path):
         (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\nRetries: 1/3\n")
         return []
 
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=session):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=session):
         phase_4b_run_and_fix(config, claude_cfg, state, None)
 
     assert _git_4b(tmp_path, "rev-parse", "HEAD") != head_before
@@ -863,7 +863,7 @@ def test_phase_4b_stale_success_file_is_ignored(tmp_path):
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS from a previous run\n")
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_fake_claude_run):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=_fake_claude_run):
         try:
             phase_4b_run_and_fix(config, claude_cfg, state, None)
             assert False, "expected PipelineEscalation despite the stale success file"
@@ -875,7 +875,7 @@ def test_phase_4b_missing_result_file_escalates(tmp_path):
     """A session that ends without writing either marker must not count as success."""
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_fake_claude_run):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=_fake_claude_run):
         try:
             phase_4b_run_and_fix(config, claude_cfg, state, None)
             assert False, "expected PipelineEscalation when no result file is written"
@@ -1055,7 +1055,7 @@ def test_phase_4b_success_rejected_while_escalating_command_fails(tmp_path):
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix, PipelineEscalation
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
         with pytest.raises(PipelineEscalation, match="extended verification still"):
             phase_4b_run_and_fix(config, claude_cfg, state, None,
                                  extra_verification=["exit 1"])
@@ -1065,7 +1065,7 @@ def test_phase_4b_success_accepted_when_escalating_command_passes(tmp_path):
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
         phase_4b_run_and_fix(config, claude_cfg, state, None,
                              extra_verification=["true"])  # must not raise
 
@@ -1081,7 +1081,7 @@ def test_phase_4b_names_the_escalating_commands_to_the_agent(tmp_path):
         (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
         return []
 
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_capture):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=_capture):
         phase_4b_run_and_fix(config, claude_cfg, state, None,
                              extra_verification=["echo golangci-lint-stand-in"])
     assert "echo golangci-lint-stand-in" in seen["prompt"]
@@ -1119,7 +1119,7 @@ def test_phase_4b_success_rejected_when_build_still_fails(tmp_path):
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     config.build_command = "exit 1"
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
         with pytest.raises(PipelineEscalation, match="build/test still fails"):
             phase_4b_run_and_fix(config, claude_cfg, state, None)
 
@@ -1130,7 +1130,7 @@ def test_phase_4b_success_accepted_when_build_passes(tmp_path):
     config.build_command = "true"
     config.test_command = "true"
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
         phase_4b_run_and_fix(config, claude_cfg, state, None)  # must not raise
 
 
@@ -1236,13 +1236,13 @@ def test_phase_4b_uses_the_configured_model(tmp_path):
         (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
         return []
 
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_capture):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=_capture):
         phase_4b_run_and_fix(config, claude_cfg, state, None)
     assert seen["model"] == "claude-opus-5"
 
 
-def test_phase_4b_model_defaults_to_opus_not_the_pipeline_model(tmp_path):
-    """Unconfigured, 4b escalates to Opus even though the pipeline runs Sonnet."""
+def test_phase_4b_model_defaults_to_pipeline_model(tmp_path):
+    """Unconfigured, 4b uses the pipeline model (no implicit escalation)."""
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     claude_cfg.model = "claude-sonnet-4-6"
@@ -1253,10 +1253,88 @@ def test_phase_4b_model_defaults_to_opus_not_the_pipeline_model(tmp_path):
         (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
         return []
 
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=_capture):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=_capture):
         phase_4b_run_and_fix(config, claude_cfg, state, None)
-    assert seen["model"] == "claude-opus-4-6"
-    assert seen["model"] != claude_cfg.model
+    assert seen["model"] == "claude-sonnet-4-6"
+
+
+@pytest.mark.parametrize("selection", ["legacy", "named", "explicit"])
+def test_phase_4b_transport_for_programmatic_callers(tmp_path, monkeypatch, selection):
+    import sys
+    from types import SimpleNamespace
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    from common import llm_client
+    from common.model_registry import ModelProfile
+
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    claude_cfg.model = "openai/main"
+    config.phase_4b_model = "openai/recovery"
+    monkeypatch.setattr(llm_client, "_api_base", "http://legacy/v1")
+    monkeypatch.setattr(llm_client, "_api_key", "LEGACY_KEY")
+    monkeypatch.setattr(llm_client, "_model_params", {"temperature": 0.2})
+    if selection != "legacy":
+        claude_cfg.profile = ModelProfile(
+            "main", "litellm", claude_cfg.model, api_base="http://main/v1", api_key="MAIN_KEY",
+        )
+    if selection == "explicit":
+        config.phase_4b_profile = ModelProfile(
+            "recovery", "litellm", config.phase_4b_model,
+            api_base="http://recovery/v1", api_key="RECOVERY_KEY", params={"temperature": 0.1},
+        )
+
+    request = MagicMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="done"))], usage=None,
+    ))
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=request))
+
+    async def capture(cfg, steps):
+        llm_client.completion(cfg.model, [], profile=cfg.profile)
+        (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
+        return []
+
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=capture):
+        phase_4b_run_and_fix(config, claude_cfg, state, None)
+    sent = request.call_args.kwargs
+    assert sent["model"] == config.phase_4b_model
+    if selection == "legacy":
+        assert sent["api_base"] == "http://legacy/v1"
+        assert sent["api_key"] == "LEGACY_KEY"
+        assert sent["temperature"] == 0.2
+    elif selection == "explicit":
+        assert sent["api_base"] == "http://recovery/v1"
+        assert sent["api_key"] == "RECOVERY_KEY"
+        assert sent["temperature"] == 0.1
+    else:
+        assert "api_base" not in sent
+        assert "api_key" not in sent
+        assert "temperature" not in sent
+
+
+@pytest.mark.parametrize("reported", [None, 0.0, 0.25])
+def test_phase_4b_accounts_for_its_profile_and_reported_cost(tmp_path, reported):
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    from auto_bug_fix.tracker import Tracker, compute_cost
+    from common.model_registry import ModelProfile
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    main = ModelProfile("local", "litellm", "openai/local", api_base="http://local/v1")
+    switched = ModelProfile("cloud", "litellm", "gpt-4o", api_key="SWITCH_KEY")
+    claude_cfg.profile, claude_cfg.model = main, main.model
+    config.phase_4b_profile, config.phase_4b_model = switched, switched.model
+    output = tmp_path / "runs"
+    output.mkdir()
+    tracker = Tracker("profile-switch", {}, profile=main, output_dir=str(output))
+    async def capture(cfg, steps):
+        assert cfg.profile is switched
+        assert cfg.model == switched.model
+        (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
+        return [{"name": "4b", "duration": 1, "input_tokens": 1000, "output_tokens": 200,
+                 "cost_usd": reported}]
+    with tracker.phase("4b"), patch("auto_bug_fix.run_bug_fix._agent_run", new=capture):
+        phase_4b_run_and_fix(config, claude_cfg, state, tracker)
+    record = tracker._run.phases[0].queries[0]
+    expected = compute_cost(switched.model, 1000, 200, profile=switched) if reported is None else reported
+    assert record.cost_usd == pytest.approx(expected)
+    assert record.model == switched.model and record.profile_id == switched.id
 
 
 # --- review round 3: verification gate, relatedness strength, 4b artifacts ---
@@ -1307,7 +1385,7 @@ def test_phase_4b_verification_gate_rejects_a_failing_test_command(tmp_path):
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     config.test_command = "exit 1"
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
         with pytest.raises(PipelineEscalation, match="build/test still fails"):
             phase_4b_run_and_fix(config, claude_cfg, state, None)
 
@@ -1360,7 +1438,7 @@ def test_phase_4b_artifact_does_not_claim_success_before_verification(tmp_path):
     tracker._output_dir = str(tmp_path / "out")
     os.makedirs(tracker._output_dir, exist_ok=True)
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
         with pytest.raises(PipelineEscalation):
             phase_4b_run_and_fix(config, claude_cfg, state, tracker)
     data = _json.loads((tmp_path / "out" / "phase_4b_input.json").read_text())
@@ -1378,7 +1456,7 @@ def test_phase_4b_artifact_records_success_only_after_verification(tmp_path):
     tracker._output_dir = str(tmp_path / "out")
     os.makedirs(tracker._output_dir, exist_ok=True)
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._claude_run", new=fake):
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
         phase_4b_run_and_fix(config, claude_cfg, state, tracker)
     data = _json.loads((tmp_path / "out" / "phase_4b_input.json").read_text())
     assert data["outcome"] == "success"
