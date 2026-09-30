@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -142,9 +143,14 @@ class ModelRegistry:
         self,
         profiles: dict[str, ModelProfile],
         default_id: str,
+        *,
+        strict: bool = False,
     ):
+        if not isinstance(strict, bool):
+            raise RegistryError("Registry 'strict' must be a boolean")
         self.profiles = dict(profiles)
         self.default_id = default_id
+        self.strict = strict
         if default_id not in self.profiles:
             raise RegistryError(
                 f"default '{default_id}' does not match any defined profile id "
@@ -159,12 +165,17 @@ class ModelRegistry:
         self,
         id_or_model: str | None,
         fallback: ModelProfile | None = None,
+        *,
+        legacy_factory: Callable[[str], ModelProfile] | None = None,
     ) -> ModelProfile:
         """Resolve a string to a ModelProfile.
 
         - Known profile id → that profile.
         - None → fallback if provided, else the default profile.
-        - Unknown string → synthetic profile built from the bare model name.
+        - Unknown string → error in strict mode, otherwise a synthetic profile.
+
+        The optional legacy_factory applies the caller's inline settings only
+        when a bare-model fallback is actually selected.
         """
         if id_or_model is None:
             return fallback if fallback is not None else self.default_profile
@@ -172,12 +183,19 @@ class ModelRegistry:
         if id_or_model in self.profiles:
             return self.profiles[id_or_model]
 
+        if self.strict:
+            raise RegistryError(
+                f"Unknown model profile '{id_or_model}' in strict registry "
+                f"(available: {', '.join(sorted(self.profiles))}). "
+                "Add a named profile or set strict: false to allow bare model names."
+            )
+
         log.warning(
             "Model '%s' is not a registered profile id — building a synthetic "
             "profile. Consider adding it to models.yaml.",
             id_or_model,
         )
-        return build_legacy_profile(id_or_model)
+        return (legacy_factory or build_legacy_profile)(id_or_model)
 
 
 def build_legacy_profile(
@@ -229,7 +247,7 @@ def load_registry(path: Path) -> ModelRegistry:
             raise RegistryError(f"Profile '{pid}' must be a mapping")
         profiles[pid] = _parse_profile(pid, praw)
 
-    return ModelRegistry(profiles=profiles, default_id=default_id)
+    return ModelRegistry(profiles=profiles, default_id=default_id, strict=raw.get("strict", False))
 
 
 def find_registry(

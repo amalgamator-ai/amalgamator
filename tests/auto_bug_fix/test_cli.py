@@ -53,3 +53,23 @@ def test_explicit_registry_error_precedes_pipeline_side_effects(tmp_path, monkey
     git.assert_not_called()
     pipeline.assert_not_called()
     assert not (tmp_path / "runs").exists()
+
+
+def test_strict_profile_typo_fails_before_pipeline_side_effects(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pipeline.json").write_text(json.dumps({
+        "issue_id": "cli", "bug_description": "test", "repository": {"source_path": str(tmp_path)},
+        "branches": {"source": "main", "target": "old"}, "fix": {"commit": "abc"}, "build": {},
+        "model": "snnet",
+    }))
+    (tmp_path / "models.yaml").write_text(
+        "models:\n  sonnet:\n    model: claude-sonnet-4-6\ndefault: sonnet\nstrict: true\n"
+    )
+    git = Mock()
+    monkeypatch.setattr(run_bug_fix.subprocess, "run", git)
+    with pytest.raises(SystemExit) as exc:
+        run_bug_fix.main(["pipeline.json"])
+    assert exc.value.code == 2
+    assert "Unknown model profile 'snnet'" in capsys.readouterr().err
+    git.assert_not_called()
+    assert not (tmp_path / "runs").exists()
