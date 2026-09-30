@@ -11,5 +11,13 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=9.0",
+    "pytest-mock>=3.16",
+    # The subprocess smoke test intentionally exercises private SDK machinery.
+    "claude-agent-sdk==0.2.161",
+]
+
 [tool.setuptools.packages.find]
 include = ["auto_bug_fix*", "auto_code_gen*", "auto_analyze*", "auto_profile*", "backport_scanner*", "common*"]

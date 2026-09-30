@@ -1,4 +1,12 @@
-"""Real SDK adapter smoke check; stop at process creation before any network I/O."""
+"""Real SDK adapter canary; stop at process creation before any network I/O.
+
+This deliberately imports the private SubprocessCLITransport implementation to
+inspect the environment actually passed to the CLI. SDK upgrades may require
+adapting these hooks even when its public API stays compatible. The project's
+``test`` extra pins the tested SDK version; update that pin and this canary
+together when validating a newer SDK. Normal runtime installs use the broader
+supported SDK requirement.
+"""
 import asyncio
 import os
 import sys
