@@ -25,7 +25,15 @@ from __future__ import annotations
 import logging
 import os
 import re
+from copy import deepcopy
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+# Compatibility exports for existing callers.
+from common.model_identity import is_claude_model, is_ollama_model as _is_ollama_model
+
+if TYPE_CHECKING:
+    from common.model_registry import ModelProfile
 
 log = logging.getLogger(__name__)
 
@@ -81,24 +89,6 @@ def get_model_params() -> dict:
     return dict(_model_params)
 
 
-# ── Model classification ────────────────────────────────────────────────────
-
-_CLAUDE_PREFIXES = (
-    "claude-",
-    "anthropic/",
-    "vertex_ai/claude-",
-)
-
-
-def is_claude_model(model: str) -> bool:
-    """Return True if *model* refers to an Anthropic Claude model.
-
-    Used to decide between the native Claude Agent SDK path and the
-    generic LiteLLM agent loop.
-    """
-    return any(model.startswith(p) for p in _CLAUDE_PREFIXES)
-
-
 @dataclass
 class CompletionResult:
     """Normalized result of a single LLM completion call."""
@@ -108,12 +98,17 @@ class CompletionResult:
     model: str = ""
 
 
-def is_self_hosted(model: str) -> bool:
+def is_self_hosted(model: str, profile: "ModelProfile | None" = None) -> bool:
     """Return True when the model is running on self-hosted infrastructure.
 
     Self-hosted means no per-token cloud cost: local Ollama, a custom
     vLLM/TGI server reached via ``api_base``, etc.
+
+    When *profile* is provided, uses its api_base; otherwise falls back
+    to the global/env api_base.
     """
+    if profile:
+        return profile.is_self_hosted()
     if _is_ollama_model(model):
         return True
     if model.startswith("openai/") and get_api_base():
@@ -121,16 +116,57 @@ def is_self_hosted(model: str) -> bool:
     return False
 
 
+def build_request_kwargs(
+    model: str,
+    *,
+    profile: "ModelProfile | None" = None,
+    default_max_tokens: int,
+    overrides: dict | None = None,
+) -> dict:
+    """Build isolated per-call options.
+
+    Profile transport is provider-independent. Legacy transport globals apply
+    only to custom ``openai/`` endpoints, preserving the pre-profile behavior.
+    """
+    if profile is not None:
+        merged = deepcopy(profile.params)
+        api_base, api_key = profile.api_base, profile.api_key
+    else:
+        merged = deepcopy(_model_params)
+        api_base = api_key = None
+        if model.startswith("openai/"):
+            api_base = get_api_base()
+            if api_base:
+                api_key = get_api_key()
+    if api_base:
+        merged["api_base"] = api_base
+    if api_key:
+        merged["api_key"] = api_key
+    merged.update(deepcopy(overrides or {}))
+    if merged.get("api_base") and model.startswith("openai/") and not merged.get("api_key"):
+        merged["api_key"] = os.environ.get("OPENAI_API_KEY") or "dummy"
+    if not any(key in merged for key in ("max_tokens", "max_completion_tokens", "max_output_tokens")):
+        merged["max_tokens"] = default_max_tokens
+    if _is_ollama_model(model):
+        merged.setdefault("extra_body", {})
+        merged["extra_body"].setdefault("think", False)
+    return merged
+
+
 def completion(
     model: str,
     messages: list[dict],
     max_tokens: int = 4096,
+    *,
+    profile: "ModelProfile | None" = None,
     **kwargs,
 ) -> CompletionResult:
     """Model-agnostic completion via LiteLLM.
 
-    Handles Vertex AI routing, Ollama thinking-mode suppression, and
-    custom ``api_base`` for self-hosted endpoints.
+    When *profile* is provided, transport config (api_base, api_key, params)
+    comes from it — no global state is consulted.  When *profile* is None,
+    falls back to the module-level globals / env vars for backward
+    compatibility with callers that haven't adopted profiles yet.
 
     Global ``model_params`` (set via :func:`configure`) are merged as
     defaults — explicit *kwargs* take precedence.  The caller's
@@ -139,24 +175,14 @@ def completion(
     """
     import litellm
 
-    effective_model = _resolve_model(model)
+    effective_model = _resolve_model(profile.model if profile else model, profile=profile)
+    merged = build_request_kwargs(
+        effective_model, profile=profile, default_max_tokens=max_tokens, overrides=kwargs,
+    )
 
-    # Merge: model_params (lowest) → caller kwargs (highest).
-    # max_tokens from the function signature is the fallback.
-    merged = {**_model_params, **kwargs}
-    merged.setdefault("max_tokens", max_tokens)
-
-    log.debug("LLM completion: model=%s (effective=%s), max_tokens=%s",
-              model, effective_model, merged.get("max_tokens"))
-
-    if _is_ollama_model(effective_model):
-        merged.setdefault("extra_body", {})
-        merged["extra_body"].setdefault("think", False)
-
-    api_base = get_api_base()
-    if api_base and effective_model.startswith("openai/"):
-        merged.setdefault("api_base", api_base)
-        merged.setdefault("api_key", get_api_key() or "dummy")
+    log.debug("LLM completion: model=%s (effective=%s), max_tokens=%s, profile=%s",
+              model, effective_model, merged.get("max_tokens"),
+              profile.id if profile else "legacy")
 
     response = litellm.completion(
         model=effective_model,
@@ -176,20 +202,18 @@ def completion(
     )
 
 
-def _resolve_model(model: str) -> str:
+def _resolve_model(model: str, profile: "ModelProfile | None" = None) -> str:
     """Translate legacy env-var conventions into a LiteLLM model string.
 
     If ``CLAUDE_CODE_USE_VERTEX`` is set and the caller passes a bare
     Claude model name (e.g. ``claude-opus-4-6``), prepend
     ``vertex_ai/`` so LiteLLM routes through Vertex.
     """
-    if os.environ.get("CLAUDE_CODE_USE_VERTEX") and model.startswith("claude-"):
+    explicit_transport = profile is not None and (profile.api_key or profile.api_base)
+    if (not explicit_transport and os.environ.get("CLAUDE_CODE_USE_VERTEX", "").lower() in ("1", "true")
+            and model.startswith("claude-")):
         return f"vertex_ai/{model}"
     return model
-
-
-def _is_ollama_model(model: str) -> bool:
-    return model.startswith("ollama/") or model.startswith("ollama_chat/")
 
 
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)

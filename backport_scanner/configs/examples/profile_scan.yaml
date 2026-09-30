@@ -1,0 +1,16 @@
+# From the repository root, edit this file and the model registry, then run:
+# python -m backport_scanner.run_scanner --config backport_scanner/configs/examples/profile_scan.yaml --models auto_bug_fix/configs/example_models.yaml
+# python -m backport_scanner.generate_config --config backport_scanner/configs/examples/profile_scan.yaml --models auto_bug_fix/configs/example_models.yaml --mode generate --output-dir generated/
+repository:
+  local_path: /path/to/your/repo
+
+fix:
+  commit: abc123def456
+  description: Fix the bug described here
+
+scan:
+  branch_pattern: release-*
+
+llm:
+  model: m2                    # profile ID from the selected models.yaml
+  discover_commands: true      # use that profile to suggest build/test commands

@@ -1,0 +1,38 @@
+# Model profiles for the auto_bug_fix pipeline.
+#
+# Define named profiles here, reference them by id in backport configs.
+# Save as models.yaml next to your backport YAML, or at
+# ~/.config/amalgamator/models.yaml. Alternatively pass --models PATH;
+# explicit paths are relative to the working directory (~ is expanded) and
+# take precedence over discovery. Missing/invalid explicit files are errors.
+#
+# Profile ids are opaque — name them whatever you want.
+# provider: anthropic selects the Claude SDK; litellm selects its generic runner.
+# api_key/api_key_file and api_base apply per call for either runner.
+# params contains LiteLLM generation/provider options, not arbitrary SDK options.
+# Direct SDK transport rejects inherited Vertex/Bedrock/Foundry or token-auth
+# modes and disables user/project settings sources for that client. Profiles
+# without explicit transport retain SDK environment/login behavior.
+
+models:
+  m1:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+  m2:
+    provider: litellm
+    model: openai/deepseek-r1
+    api_base: http://localhost:8080/v1
+    # api_key_file: ~/.keys/deepseek.key
+    params:
+      temperature: 0.2
+
+  m3:
+    provider: anthropic
+    model: claude-opus-4-6
+    # api_key_file: ~/.keys/anthropic.key
+
+default: m1
+
+# Optional: require registered IDs for model and advanced.phase_4b_model.
+# strict: true

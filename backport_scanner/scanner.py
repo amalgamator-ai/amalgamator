@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from common.model_registry import ModelProfile
+
 from .triage import (
     BranchCheckResult, FixStatus, check_ref,
     get_remote_branches, get_tags, _run, _resolve_ref,
@@ -31,6 +33,15 @@ class ScanConfig:
     fix_description: str = ""
     vuln_commit: str | None = None
     discover_commands: bool = False
+    profile: ModelProfile | None = field(default=None, repr=False)
+    model_ref: str | None = None
+    models_path: Path | None = None
+
+    def __post_init__(self):
+        if self.profile is not None:
+            self.llm_model = self.profile.model
+            if self.model_ref is None:
+                self.model_ref = self.profile.id
 
 
 @dataclass
@@ -179,6 +190,7 @@ Provide a one-sentence explanation after your answer."""
             model=config.llm_model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=4096,
+            profile=config.profile,
         )
         answer = result_obj.text.strip()
         log.info("LLM answer for %s: %s", result.branch, answer[:120])
