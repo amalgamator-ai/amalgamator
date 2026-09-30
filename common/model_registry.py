@@ -145,12 +145,14 @@ class ModelRegistry:
         default_id: str,
         *,
         strict: bool = False,
+        source_path: Path | None = None,
     ):
         if not isinstance(strict, bool):
             raise RegistryError("Registry 'strict' must be a boolean")
         self.profiles = dict(profiles)
         self.default_id = default_id
         self.strict = strict
+        self.source_path = source_path
         if default_id not in self.profiles:
             raise RegistryError(
                 f"default '{default_id}' does not match any defined profile id "
@@ -247,7 +249,10 @@ def load_registry(path: Path) -> ModelRegistry:
             raise RegistryError(f"Profile '{pid}' must be a mapping")
         profiles[pid] = _parse_profile(pid, praw)
 
-    return ModelRegistry(profiles=profiles, default_id=default_id, strict=raw.get("strict", False))
+    return ModelRegistry(
+        profiles=profiles, default_id=default_id, strict=raw.get("strict", False),
+        source_path=path.resolve(),
+    )
 
 
 def find_registry(
