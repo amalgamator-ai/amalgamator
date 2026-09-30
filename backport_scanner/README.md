@@ -41,7 +41,7 @@ flowchart TD
     L4 -- "0% present" --> NEEDS[✗ NEEDS FIX]
     L4 -- "Partial / inconclusive" --> L5[Level 5: LLM semantic check]
 
-    L5 --> LLM[Claude analyzes fix diff<br/>vs. ref file contents]
+    L5 --> LLM[Configured model analyzes fix diff<br/>vs. ref file contents]
     LLM --> LLM_FIXED[✓ FIXED]
     LLM --> LLM_NEEDS[✗ NEEDS FIX]
     LLM --> LLM_UNC[? UNCERTAIN]
@@ -66,7 +66,7 @@ For each ref (branch or tag), a 5-level detection cascade runs in order — the 
 | 2 | `forward_patch_id_check()` | Same patch content, different SHA (e.g. manual cherry-pick) |
 | 3 | `backward_patch_id_check()` | Ref predates the bug — never affected |
 | 4 | File diff heuristic | 85%+ of the fix's added lines present in ref's files |
-| 5 | LLM semantic check | Claude resolves remaining `AMBIGUOUS` cases |
+| 5 | LLM semantic check | The configured model resolves remaining `AMBIGUOUS` cases |
 
 **Possible results per ref:**
 
@@ -98,6 +98,18 @@ pip install -e .
 
 ### Step 1 — Write a scan config
 
+The scanner shares the [model registry](../auto_bug_fix/README.md#model-registry-reference)
+with the backport pipeline. Reuse your existing `models.yaml`, or copy the template
+beside your scan config and edit the provider/endpoint/credentials:
+
+```bash
+cp auto_bug_fix/configs/example_models.yaml models.yaml
+```
+
+The examples below select `m1` from that template. Set `llm.model: m2` for its
+OpenAI-compatible endpoint, or use another registered ID. A complete scanner
+example is available in [`configs/examples/profile_scan.yaml`](configs/examples/profile_scan.yaml).
+
 **Scan branches only:**
 
 ```yaml
@@ -113,7 +125,7 @@ scan:
   branch_pattern: "release-1.*"    # auto-discover matching branches
 
 llm:
-  model: "claude-opus-4-6"
+  model: m1                       # profile ID from models.yaml
 ```
 
 **Scan release tags only:**
@@ -131,7 +143,7 @@ scan:
   tag_pattern: "v6.*"              # auto-discover matching tags
 
 llm:
-  model: "claude-opus-4-6"
+  model: m1
 ```
 
 **Scan both branches and tags together:**
@@ -154,11 +166,36 @@ scan:
   # tags: ["v1.33.13", "v1.34.9"]
 
 llm:
-  model: "claude-opus-4-6"
+  model: m1
   discover_commands: false          # set true to auto-discover build/test commands
 ```
 
 > You can scan **branches only**, **tags only**, or **both** in a single config. The scanner runs the same 5-level cascade on each ref.
+
+#### Model selection
+
+- Discovery uses `--models PATH` first, then `models.yaml` beside the scan config,
+  then `~/.config/amalgamator/models.yaml`. Explicit missing/invalid files fail
+  before scanning. `--models` supports `~`; relative paths use the working directory.
+- Omitting `llm.model` selects the registry default. Without a registry, the
+  scanner's historical default is `claude-opus-4-6`.
+- `strict: true` in the registry rejects unregistered `llm.model` selections.
+  Permissive registries allow bare model names with a warning. Bare-model scanner
+  calls retain their legacy environment/global transport lookup.
+- Named profiles supply model, endpoint, credentials, and `params` per call.
+  Loading a scan config does not seed application-wide transport globals.
+- Semantic checks and optional build/test command discovery use one-shot
+  LiteLLM completions. The profile's `provider` runner selection is used when
+  the generated case later runs through the backport pipeline's agent steps.
+
+Claude scanner calls need credentials usable by LiteLLM, such as an Anthropic
+API key or a configured Vertex route. Claude SDK login is used by the SDK agent
+path, not by these one-shot scanner calls.
+
+For authenticated OpenAI-compatible endpoints, put `api_base`, an `openai/`-prefixed
+model name, and `api_key_file` in the profile. The key file contains the raw token;
+LiteLLM sends it as a Bearer token. See the
+[profile field reference](../auto_bug_fix/README.md#fields-in-modelsyaml) for details.
 
 ### Step 2 — Run the scanner
 
@@ -171,6 +208,9 @@ python -m backport_scanner.run_scanner --config my_scan.yaml --output report.jso
 
 # Verbose logging:
 python -m backport_scanner.run_scanner --config my_scan.yaml --verbose
+
+# Select a shared registry explicitly:
+python -m backport_scanner.run_scanner --config my_scan.yaml --models /path/to/models.yaml
 ```
 
 ### Step 3 — Generate Amalgamator configs and run the pipeline
@@ -228,6 +268,23 @@ python -m backport_scanner.generate_config \
   --output-dir ./generated/
 ```
 
+All three generator modes accept `--models PATH`, with the same discovery and
+strict-selection rules as the scanner.
+
+Generated cases retain the selected profile ID (including a registry default)
+or bare model name. Each file includes a runnable command in its header and the
+generator prints that command, using the selected registry's absolute path:
+
+```bash
+python -m auto_bug_fix.run_bug_fix /path/to/generated/case.yaml --models /path/to/models.yaml
+```
+
+Use the same working directory as generation so relative repository/key-file
+paths keep their meaning. Profile credentials and parameters are read from the
+original registry rather than copied into generated YAML. `add` and `verify`
+keep the existing case's model selection. Programmatic callers generating cases
+from a `ScanConfig.profile` must also supply its registry as `ScanConfig.models_path`.
+
 **Auto-discovering build and test commands**
 
 By default, `build.command` and `build.test_command` are left empty for you to fill in. Enable `discover_commands` to have the LLM read the repo's `README`, `Makefile`, CI workflows, and build files to suggest the right commands:
@@ -235,11 +292,14 @@ By default, `build.command` and `build.test_command` are left empty for you to f
 ```yaml
 llm:
   # LLM is always used for ambiguous cases (Level 5)
-  model: "claude-opus-4-6"
+  model: m1
   discover_commands: true   # LLM fills in build/test commands
 ```
 
 The LLM reads: `README.md`, `Makefile`, `go.mod`, `pom.xml`, `pyproject.toml`, `setup.py`, `.github/workflows/*.yml`
+
+Command discovery uses the same resolved profile, including credentials and
+generation parameters, as the semantic scan.
 
 > Always review discovered commands before running the pipeline.
 
@@ -314,3 +374,4 @@ python -m backport_scanner.generate_config \
 |---|---|---|
 | [`openssl_scan.yaml`](configs/examples/openssl_scan.yaml) | OpenSSL release branches | Branches |
 | [`kubernetes_scan.yaml`](configs/examples/kubernetes_scan.yaml) | Kubernetes release branches | Branches |
+| [`profile_scan.yaml`](configs/examples/profile_scan.yaml) | A selected model profile with optional command discovery | Branches |

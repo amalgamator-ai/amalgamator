@@ -328,6 +328,11 @@ settings and warn when inline model settings are ignored. See
 [selection and compatibility rules](auto_bug_fix/README.md#model-selection-and-legacy-cases)
 for precedence and Phase 4b overrides.
 
+The [backport scanner](backport_scanner/README.md#model-selection) also supports
+the shared registry and `--models`. Select its profile with `llm.model`; semantic
+checks and command discovery use that profile, and generated cases retain the
+selection with a command pointing to the same registry.
+
 ### Cost Tracking
 
 Each query records its effective model and profile ID. A provider-reported cost,

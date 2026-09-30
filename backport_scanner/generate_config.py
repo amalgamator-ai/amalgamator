@@ -15,11 +15,14 @@ Usage:
 
 import argparse
 import logging
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 import yaml
+
+from common.model_registry import ModelProfile, RegistryError
 
 from auto_bug_fix.git_tools import git_show_files
 from .triage import FixStatus, check_ref
@@ -67,12 +70,12 @@ _DISCOVERY_CI_GLOB = ".github/workflows/*.yml"
 _DISCOVERY_MAX_BYTES = 4000   # per file, to keep prompt manageable
 
 
-def _discover_commands(repo_path: Path, model: str) -> tuple[str, str]:
+def _discover_commands(repo_path: Path, model: str, *, profile: ModelProfile | None = None) -> tuple[str, str]:
     """
     Use an LLM to discover the build and test commands for a repository.
 
     Reads common project files (README, Makefile, CI workflows, build manifests)
-    and asks Claude to identify the correct commands.
+    and asks the selected model to identify the correct commands.
 
     Returns:
         (build_command, test_command) — empty strings if discovery fails.
@@ -132,6 +135,7 @@ TEST: python -m pytest"""
             model=model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=256,
+            profile=profile,
         )
         text = result_obj.text.strip()
         log.info("Command discovery response: %s", text)
@@ -206,6 +210,8 @@ def _make_bug_fix_yaml(
     test_command: str = "",
     default_branch: str = "main",
     ref_type: str = "branch",
+    *,
+    model: str,
 ) -> dict:
     """Produce an auto_bug_fix-compatible YAML dict for one target ref."""
     short = fix_commit[:10]
@@ -229,15 +235,19 @@ def _make_bug_fix_yaml(
             "command": build_command,
             "test_command": test_command,
         },
-        "model": "claude-opus-4-6",
+        "model": model,
         "changed_files": changed_files,
         "ref_type": ref_type,
     }
 
 
-def _write_yaml(data: dict, path: Path) -> None:
+def _write_yaml(data: dict, path: Path, *, run_command: str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
+        if run_command:
+            f.write("# Run from the Amalgamator environment, in the same working directory as generation:\n")
+            for line in run_command.splitlines():
+                f.write(f"# {line}\n")
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
     log.info("  Written: %s", path)
 
@@ -246,6 +256,8 @@ def _write_yaml(data: dict, path: Path) -> None:
 
 def mode_generate(config: ScanConfig, output_dir: Path) -> None:
     """Scan branches and generate one YAML per NEEDS_FIX branch."""
+    if config.profile is not None and config.models_path is None:
+        raise RegistryError("Profile-backed case generation requires models_path pointing to the profile's registry")
     log.info("Mode: generate — scanning branches and writing YAMLs to %s", output_dir)
 
     report = run_scan(config)
@@ -262,7 +274,7 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
     build_cmd, test_cmd = "", ""
     if config.discover_commands:
         log.info("Discovering build/test commands via LLM...")
-        build_cmd, test_cmd = _discover_commands(config.repo_path, config.llm_model)
+        build_cmd, test_cmd = _discover_commands(config.repo_path, config.llm_model, profile=config.profile)
         if build_cmd or test_cmd:
             log.info("Discovered — build: %r  test: %r", build_cmd, test_cmd)
         else:
@@ -279,9 +291,15 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
             test_command=test_cmd,
             default_branch=default_branch,
             ref_type=result.ref_type,
+            model=config.model_ref or config.llm_model,
         )
         out_path = output_dir / f"{_safe_name(result.branch, result.ref_type)}.yaml"
-        _write_yaml(data, out_path)
+        command = ["python", "-m", "auto_bug_fix.run_bug_fix", str(out_path.resolve())]
+        if config.models_path is not None:
+            command.extend(["--models", str(config.models_path.resolve())])
+        run_command = shlex.join(command)
+        _write_yaml(data, out_path, run_command=run_command)
+        print(f"  Run: {run_command}")
 
     print(f"\nGenerated {len(report.needs_fix)} YAML config(s) in {output_dir}/")
     if build_cmd or test_cmd:
@@ -290,7 +308,7 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
         print("  Review these commands before running the pipeline.")
     else:
         print("  build.command and build.test_command are empty — fill in manually.")
-    print("  Run: python -m auto_bug_fix.run_bug_fix --config <yaml>")
+    print("  Each generated file includes its run command, including --models when a registry was selected.")
     print_report(report)
 
 
@@ -444,7 +462,7 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Generate or update auto_bug_fix YAML configs from branch scan results."
     )
@@ -458,7 +476,8 @@ def main():
     parser.add_argument("--existing-yaml", "-e", type=Path,
                         help="Existing auto_bug_fix YAML to update (add/verify modes)")
     parser.add_argument("--verbose", "-v", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument("--models", type=Path, help="Explicit model registry (overrides discovery)")
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -466,18 +485,21 @@ def main():
         datefmt="%H:%M:%S",
     )
 
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config, models_path=args.models)
 
-    if args.mode == "generate":
-        mode_generate(config, args.output_dir)
-    elif args.mode == "add":
-        if not args.existing_yaml:
-            parser.error("--existing-yaml is required for 'add' mode")
-        mode_add(config, args.existing_yaml)
-    elif args.mode == "verify":
-        if not args.existing_yaml:
-            parser.error("--existing-yaml is required for 'verify' mode")
-        mode_verify(config, args.existing_yaml)
+        if args.mode == "generate":
+            mode_generate(config, args.output_dir)
+        elif args.mode == "add":
+            if not args.existing_yaml:
+                parser.error("--existing-yaml is required for 'add' mode")
+            mode_add(config, args.existing_yaml)
+        elif args.mode == "verify":
+            if not args.existing_yaml:
+                parser.error("--existing-yaml is required for 'verify' mode")
+            mode_verify(config, args.existing_yaml)
+    except (RegistryError, ValueError, OSError, yaml.YAMLError) as e:
+        parser.error(str(e))
 
 
 if __name__ == "__main__":
