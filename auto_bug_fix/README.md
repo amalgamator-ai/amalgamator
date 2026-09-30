@@ -296,6 +296,12 @@ pipeline model inherits the pipeline profile. A different bare override uses
 only the case's legacy inline settings, with an inheritance warning when those
 fields exist. Use a named override to give Phase 4b its own endpoint and key.
 
+Programmatic callers without profiles retain legacy `common.llm_client.configure()`
+transport lookup when changing the Phase 4b model. If the main configuration
+carries a profile, supply `BugFixConfig.phase_4b_profile` to select recovery
+transport explicitly; a different bare model does not inherit the main profile's
+credentials.
+
 ## Case YAML reference
 
 ### Required

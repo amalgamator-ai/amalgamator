@@ -1258,6 +1258,58 @@ def test_phase_4b_model_defaults_to_pipeline_model(tmp_path):
     assert seen["model"] == "claude-sonnet-4-6"
 
 
+@pytest.mark.parametrize("selection", ["legacy", "named", "explicit"])
+def test_phase_4b_transport_for_programmatic_callers(tmp_path, monkeypatch, selection):
+    import sys
+    from types import SimpleNamespace
+    from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+    from common import llm_client
+    from common.model_registry import ModelProfile
+
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    claude_cfg.model = "openai/main"
+    config.phase_4b_model = "openai/recovery"
+    monkeypatch.setattr(llm_client, "_api_base", "http://legacy/v1")
+    monkeypatch.setattr(llm_client, "_api_key", "LEGACY_KEY")
+    monkeypatch.setattr(llm_client, "_model_params", {"temperature": 0.2})
+    if selection != "legacy":
+        claude_cfg.profile = ModelProfile(
+            "main", "litellm", claude_cfg.model, api_base="http://main/v1", api_key="MAIN_KEY",
+        )
+    if selection == "explicit":
+        config.phase_4b_profile = ModelProfile(
+            "recovery", "litellm", config.phase_4b_model,
+            api_base="http://recovery/v1", api_key="RECOVERY_KEY", params={"temperature": 0.1},
+        )
+
+    request = MagicMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="done"))], usage=None,
+    ))
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=request))
+
+    async def capture(cfg, steps):
+        llm_client.completion(cfg.model, [], profile=cfg.profile)
+        (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
+        return []
+
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=capture):
+        phase_4b_run_and_fix(config, claude_cfg, state, None)
+    sent = request.call_args.kwargs
+    assert sent["model"] == config.phase_4b_model
+    if selection == "legacy":
+        assert sent["api_base"] == "http://legacy/v1"
+        assert sent["api_key"] == "LEGACY_KEY"
+        assert sent["temperature"] == 0.2
+    elif selection == "explicit":
+        assert sent["api_base"] == "http://recovery/v1"
+        assert sent["api_key"] == "RECOVERY_KEY"
+        assert sent["temperature"] == 0.1
+    else:
+        assert "api_base" not in sent
+        assert "api_key" not in sent
+        assert "temperature" not in sent
+
+
 @pytest.mark.parametrize("reported", [None, 0.0, 0.25])
 def test_phase_4b_accounts_for_its_profile_and_reported_cost(tmp_path, reported):
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
