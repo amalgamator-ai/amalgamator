@@ -27,11 +27,11 @@ def raw_config(tmp_path):
     }
 
 
-def write_config(tmp_path, raw_config, profiles=None, default="local"):
+def write_config(tmp_path, raw_config, profiles=None, default="local", *, strict=False):
     path = tmp_path / "pipeline.yaml"
     path.write_text(yaml.safe_dump(raw_config))
     if profiles is not None:
-        (tmp_path / "models.yaml").write_text(yaml.safe_dump({"models": profiles, "default": default}))
+        (tmp_path / "models.yaml").write_text(yaml.safe_dump({"models": profiles, "default": default, "strict": strict}))
     return str(path)
 
 
@@ -153,3 +153,41 @@ def test_explicit_registry_precedence_and_expansion(tmp_path, raw_config, loader
     (tmp_path / "explicit.yaml").write_text("models:\n  chosen:\n    model: openai/explicit\ndefault: chosen\n")
     monkeypatch.chdir(tmp_path)
     assert loader(path, models_path=explicit)[-3].profile.id == "chosen"
+
+
+@pytest.mark.parametrize("loader", [load_pipeline_config, load_multi_target_config])
+@pytest.mark.parametrize("phase_override", [False, True])
+@pytest.mark.parametrize("selection", ["snnet", "openai/local", "o3"])
+def test_strict_registry_rejects_unregistered_selections(tmp_path, raw_config, loader, phase_override, selection):
+    from common.model_registry import RegistryError
+    raw_config["model"] = "local" if phase_override else selection
+    if phase_override:
+        raw_config["advanced"] = {"phase_4b_model": selection}
+    path = write_config(tmp_path, raw_config, {"local": {"model": "openai/local"}}, strict=True)
+    with pytest.raises(RegistryError, match="Unknown model profile"):
+        loader(path)
+
+
+@pytest.mark.parametrize("loader", [load_pipeline_config, load_multi_target_config])
+@pytest.mark.parametrize("selection", [None, "local"])
+def test_strict_registry_accepts_default_and_named_profile(tmp_path, raw_config, loader, selection):
+    if selection:
+        raw_config["model"] = selection
+    # Strict mode validates references, not a hardcoded list of model families.
+    path = write_config(tmp_path, raw_config, {"local": {"model": "new-provider/custom-model"}}, strict=True)
+    bug, agent = loader(path)[-4:-2]
+    assert agent.profile.id == "local"
+    assert agent.model == "new-provider/custom-model"
+    assert bug.phase_4b_profile is agent.profile
+
+
+@pytest.mark.parametrize("loader", [load_pipeline_config, load_multi_target_config])
+@pytest.mark.parametrize("phase_override", [False, True])
+def test_permissive_registry_warns_for_bare_fallback(tmp_path, raw_config, loader, phase_override, caplog):
+    raw_config["model"] = "local" if phase_override else "snnet"
+    if phase_override:
+        raw_config["advanced"] = {"phase_4b_model": "snnet"}
+    path = write_config(tmp_path, raw_config, {"local": {"model": "gpt-4o"}})
+    bug, agent = loader(path)[-4:-2]
+    assert (bug.phase_4b_profile if phase_override else agent.profile).model == "snnet"
+    assert "not a registered profile id" in caplog.text

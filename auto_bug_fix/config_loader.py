@@ -216,27 +216,27 @@ def resolve_pipeline_profiles(
     config: dict[str, Any], registry: ModelRegistry | None,
 ) -> tuple[ModelProfile, ModelProfile]:
     """Resolve the pipeline and Phase 4b together, inheriting whole profiles."""
+    def legacy(model_name: str) -> ModelProfile:
+        return _legacy_profile(config, model_name)
+
     model = _pipeline_model_name(config)
     named = registry is not None and (model is None or model in registry.profiles)
     inline_fields = _inline_model_fields(config)
-    if named:
-        pipeline = registry.resolve(model)
-        if inline_fields:
-            log.warning("Named profile ignores inline fields: %s", ", ".join(inline_fields))
-    else:
-        pipeline = _legacy_profile(config, model or "claude-sonnet-4-6")
+    pipeline = registry.resolve(model, legacy_factory=legacy) if registry else legacy(model or "claude-sonnet-4-6")
+    if named and inline_fields:
+        log.warning("Named profile ignores inline fields: %s", ", ".join(inline_fields))
     advanced = config.get("advanced", {})
     if not isinstance(advanced, dict):
         advanced = {}
     override = advanced_str(advanced, "phase_4b_model", "")
     if not override:
         phase_4b = pipeline
-    elif registry and override in registry.profiles:
+    elif registry and (registry.strict or override in registry.profiles):
         phase_4b = registry.resolve(override)
     elif override == pipeline.model:
         phase_4b = pipeline
     else:
-        phase_4b = _legacy_profile(config, override)
+        phase_4b = registry.resolve(override, legacy_factory=legacy) if registry else legacy(override)
         if inline_fields:
             log.warning(
                 "Different bare Phase 4b model inherits inline fields: %s; "

@@ -33,3 +33,6 @@ models:
     # api_key_file: ~/.keys/anthropic.key
 
 default: m1
+
+# Optional: require registered IDs for model and advanced.phase_4b_model.
+# strict: true

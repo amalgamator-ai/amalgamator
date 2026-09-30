@@ -216,6 +216,17 @@ The top-level `models` mapping must be non-empty. A top-level **`default` is
 required** and must name one of its profiles, even when the case explicitly
 selects a model.
 
+An optional top-level **`strict: true`** requires registered profile IDs for
+explicit `model` and `advanced.phase_4b_model` selections. This catches typos
+before any pipeline work starts. The default is `strict: false`, which allows
+bare model names with a warning. Strict mode validates IDs, not model/provider
+prefixes: any supported model can be used by defining a profile for it.
+
+```yaml
+# At the same level as models and default:
+strict: true
+```
+
 | Profile field | Required | Meaning |
 |---|---|---|
 | `model` | Yes | Actual model identifier, such as `claude-sonnet-4-6`, `gpt-4o`, `ollama/qwen3:14b`, or `openai/<served-model-name>` |
@@ -269,9 +280,10 @@ for those agent settings.
 - A known profile ID selects its complete model, runner, transport, and parameters.
   Inline `api_base`, `api_key`/`api_key_file`, and `model_params` in the case are
   ignored for this selection, with a warning listing field names.
-- An unregistered string is treated as a **bare model name**, even when a
-  registry exists. A misspelled profile ID therefore does not produce an
-  unknown-profile error at load time. Check that case IDs match the registry.
+- With `strict: false` (the default), an unregistered string is treated as a
+  **bare model name**, with a warning when a registry exists. Enable `strict: true`
+  to turn unregistered selections into configuration errors. In strict mode,
+  even a Phase 4b override equal to the pipeline's raw model must use its profile ID.
 - With no model selection, the registry default wins; only the no-registry path
   falls back to Sonnet.
 

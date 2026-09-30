@@ -306,6 +306,10 @@ the registry's required `default` profile is selected. Without a registry, the
 fallback is `claude-sonnet-4-6`. Phase 4b inherits the pipeline's complete profile
 unless `advanced.phase_4b_model` overrides it.
 
+Add top-level `strict: true` to `models.yaml` to reject unregistered model/profile
+selections at load time, including Phase 4b overrides. By default, unregistered
+strings remain supported as bare model names and produce a warning.
+
 ### Provider routing and compatibility
 
 `provider: anthropic` selects the Claude Agent SDK. `provider: litellm` selects

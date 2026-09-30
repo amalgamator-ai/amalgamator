@@ -98,6 +98,15 @@ def _write_yaml(tmp_path: Path, content: str) -> Path:
 
 
 class TestLoadRegistry:
+    @pytest.mark.parametrize("strict", ["true", "false", "'false'", "null", "1"])
+    def test_strict_mode_requires_boolean(self, tmp_path, strict):
+        path = _write_yaml(tmp_path, f"models:\n  m1:\n    model: gpt-4o\ndefault: m1\nstrict: {strict}\n")
+        if strict in ("true", "false"):
+            assert load_registry(path).strict is (strict == "true")
+        else:
+            with pytest.raises(RegistryError, match="must be a boolean"):
+                load_registry(path)
+
     def test_load_simple_registry(self, tmp_path):
         path = _write_yaml(tmp_path, """
 models:
@@ -260,6 +269,15 @@ class TestModelRegistryResolve:
         assert p.id == "_legacy_gpt-4o"
         assert p.provider == "litellm"
         assert p.model == "gpt-4o"
+
+    def test_strict_validation_precedes_legacy_factory(self, registry):
+        from unittest.mock import Mock
+        strict = ModelRegistry(registry.profiles, registry.default_id, strict=True)
+        factory = Mock(side_effect=AssertionError("Must not read inline credentials"))
+        assert strict.resolve("m1", legacy_factory=factory) is strict.default_profile
+        with pytest.raises(RegistryError, match="Unknown model profile"):
+            strict.resolve("typo", legacy_factory=factory)
+        factory.assert_not_called()
 
     def test_id_match_wins_over_bare_string(self):
         reg = ModelRegistry(
