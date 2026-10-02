@@ -36,10 +36,11 @@ class SemanticTriagePrompt:
     source_branch: str
     target_branch: str
     seed_files: list[str]
+    external_context_section: str = ""
 
     prompt_template: ClassVar[str] = """\
 {context}
-
+{external_context_section}
 You are the Semantic Triage Agent (Phase 0.5). Before the pipeline attempts a cherry-pick, \
 you must analyze the commit to understand what the backport will involve.
 
@@ -197,6 +198,7 @@ Recommendation guidelines:
         """Render the Phase 0.5 semantic triage prompt."""
         return self.prompt_template.format(
             context=self.context,
+            external_context_section=self.external_context_section,
             fix_diff=self.fix_diff,
             source_branch=self.source_branch,
             target_branch=self.target_branch,
@@ -271,10 +273,11 @@ class NarrowResolutionAgentPrompt:
     target_branch: str = ""
     baseline_ref: str = ""
     followup_fixes: str = ""
+    external_context_section: str = ""
 
     prompt_template: ClassVar[str] = """\
 {context}
-
+{external_context_section}
 You are the Narrow Resolution Agent (Phase 3a). Cherry-pick produced conflicts in these files:
 {conflicted_files}
 
@@ -383,6 +386,7 @@ if a resolved region seems broken without one, note it in your final summary:
             )
         return self.prompt_template.format(
             context=self.context,
+            external_context_section=self.external_context_section,
             fix_diff=self.fix_diff,
             conflicted_files="\n".join(f"  - {f}" for f in self.conflicted_files),
             allowed_modules="\n".join(f"  - {f}" for f in self.allowed_modules),
@@ -402,10 +406,11 @@ class PostResolutionCheckPrompt:
     triage_assessment: str = ""
     evidence_report: str = ""
     baseline_ref: str = ""
+    external_context_section: str = ""
 
     prompt_template: ClassVar[str] = """\
 {context}
-
+{external_context_section}
 You are the Post-Resolution Verification Agent (Phase 3a.1). The conflict resolution agent has \
 resolved all cherry-pick conflicts and committed. Your job is to verify that the backport \
 correctly adapts upstream code to the target branch's API surface.
@@ -513,6 +518,7 @@ mined mechanically from the upstream-base vs target delta of the touched files.
         effective_baseline = self.baseline_ref or self.target_branch
         return self.prompt_template.format(
             context=self.context,
+            external_context_section=self.external_context_section,
             fix_diff=self.fix_diff,
             current_diff=self.current_diff,
             target_branch=self.target_branch,
