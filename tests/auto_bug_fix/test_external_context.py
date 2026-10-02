@@ -8,6 +8,7 @@ from auto_bug_fix.bug_fix_prompts import (
     NarrowResolutionAgentPrompt,
     PostResolutionCheckPrompt,
     SemanticTriagePrompt,
+    TriageBlindReviewPrompt,
 )
 from auto_bug_fix.config_loader import ConfigError, parse_bug_fix_config
 from auto_bug_fix.external_context import ExternalContext, load_external_context
@@ -144,6 +145,23 @@ class TestSectionRenderers:
         assert "Verification scope is NOT reduced" in s
         assert "dop_inodes" in s
 
+    def test_review_section_scoped_to_findings(self):
+        path = _write_md(VALID_MD)
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        s = ctx.render_review_section()
+        # findings + metadata are present...
+        assert "dop_inodes" in s
+        assert "synthmerge 0.3.15" in s
+        # ...but the trusted resolutions are withheld (independence)
+        assert "RESOLVED FILES" not in s
+        assert "xfs_attr.c" not in s
+        # and both mandates are stated
+        assert "wholesale revert" in s
+        assert "dead or undefined" in s
+
     def test_no_findings_renders_all_clear(self):
         path = _write_md("## Metadata\n- resolver: synthmerge\n")
         try:
@@ -199,6 +217,29 @@ class TestPromptInjection:
             external_context_section=ctx.render_verification_section(),
         )
         assert "Verification scope is NOT reduced" in p.prompt()
+
+    def test_review_prompt_includes_findings_not_resolutions(self):
+        ctx = self._ctx()
+        p = TriageBlindReviewPrompt(
+            context="CTX", fix_diff="D", current_diff="CD", target_branch="t",
+            baseline_ref="b",
+            external_context_section=ctx.render_review_section(),
+        )
+        rendered = p.prompt()
+        assert "external_resolver_context" in rendered
+        assert "SUSPECT FINDINGS" in rendered
+        assert "RESOLVED FILES" not in rendered
+
+    def test_review_prompt_restoration_rule_conditions_on_upstream(self):
+        p = TriageBlindReviewPrompt(
+            context="CTX", fix_diff="D", current_diff="CD", target_branch="t",
+        )
+        rendered = p.prompt()
+        # the old flawed rule must be gone...
+        assert "exists on the baseline but was removed from the port, the removal was wrong" not in rendered
+        # ...replaced by the upstream-conditioned rule
+        assert "the upstream fix itself removes the symbol" in rendered
+        assert "{external_context_section}" not in rendered
 
 
 class TestConfigLoader:

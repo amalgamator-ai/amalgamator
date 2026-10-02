@@ -152,6 +152,45 @@ class ExternalContext:
         parts.append("</external_resolver_context>\n\n")
         return "".join(parts)
 
+    def render_review_section(self) -> str:
+        """Phase 3a.2 — triage-blind independent review context.
+
+        Scoped injection: findings + metadata only. The trusted resolutions
+        are deliberately withheld so the reviewer stays independent of the
+        resolution agent's choices — it sees the mechanical evidence, not the
+        prior resolver's code. Two mandates are added:
+
+        1. Symbols flagged dead/undefined by the deterministic scans must not
+           be reintroduced by review corrections.
+        2. A wholesale revert of the port is out of mandate and necessarily
+           wrong here: it would restore the baseline state the checks
+           flagged (or undo a port that passed them).
+        """
+        if not self.active:
+            return ""
+        return (
+            "<external_resolver_context>\n"
+            "A prior automated resolver produced the initial resolution of "
+            "this backport, and deterministic post-resolution scans (git "
+            "grep based, no LLM) ran over its output; the resolution agent "
+            "then re-derived the flagged regions. You have NOT been given "
+            "the prior resolver's resolutions — review independently — but "
+            "you must treat the scan findings below as mechanical ground "
+            "truth:\n"
+            f"{self._metadata_block()}"
+            f"{self._findings_block()}"
+            "Review constraints:\n"
+            "- Do NOT reintroduce any symbol the findings flag as dead or "
+            "undefined; a correction that restores such a symbol is wrong "
+            "by definition.\n"
+            "- Your mandate is symbol-adaptation errors, not port-scope "
+            "decisions. A wholesale revert of the port (restoring files to "
+            "the baseline) is out of mandate: if you believe the port's "
+            "overall direction is wrong, report that in your final message "
+            "and change nothing.\n"
+            "</external_resolver_context>\n\n"
+        )
+
     def render_verification_section(self) -> str:
         """Phase 3a.1 — post-resolution verification context.
 

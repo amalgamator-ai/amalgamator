@@ -48,6 +48,7 @@ def _external_context_section(config: BugFixConfig, phase: str) -> str:
         "triage": ctx.render_triage_section,
         "resolution": ctx.render_resolution_section,
         "verification": ctx.render_verification_section,
+        "review": ctx.render_review_section,
     }
     renderer = renderers.get(phase)
     if renderer is None:
@@ -1844,6 +1845,7 @@ def _finalize_resolution(
                 current_diff=blind_diff,
                 target_branch=config.target_branch,
                 baseline_ref=base_head,
+                external_context_section=_external_context_section(config, "review"),
             )
             try:
                 asyncio.run(claude_run(

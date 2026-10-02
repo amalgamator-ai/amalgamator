@@ -536,10 +536,11 @@ class TriageBlindReviewPrompt:
     current_diff: str
     target_branch: str
     baseline_ref: str = ""
+    external_context_section: str = ""
 
     prompt_template: ClassVar[str] = """\
 {context}
-
+{external_context_section}
 You are an Independent Review Agent (Phase 3a.2). A previous agent resolved \
 cherry-pick conflicts and adapted the backport to the target branch. Your job \
 is to independently verify every symbol adaptation by checking the port baseline \
@@ -568,9 +569,14 @@ removed or changed in the applied diff, run \
 `git grep '<symbol>' {baseline_ref}` to check whether it actually exists on \
 the port baseline.
 
-If a symbol exists on the baseline but was removed from the port, the removal \
-was wrong — restore it. If a symbol genuinely does not exist on the baseline, \
-the adaptation was correct — leave it.
+If a symbol exists on the baseline, was removed by the port, and the UPSTREAM \
+FIX still uses or adds it (check the fix diff: the symbol appears in its added \
+or context lines), the removal was wrong — restore it. If the upstream fix \
+itself removes the symbol or its surrounding infrastructure (the symbol only \
+appears in the fix's removed lines), then removing it from the port is the \
+correct port — leave it out. A symbol existing on the baseline is NOT by itself \
+evidence that the port should keep it: the fix may exist precisely to remove \
+that infrastructure.
 
 When checking whether a class has a particular method, check the full \
 inheritance chain: find the class definition, read its parent class, and \
@@ -591,6 +597,7 @@ as available.
         effective_baseline = self.baseline_ref or self.target_branch
         return self.prompt_template.format(
             context=self.context,
+            external_context_section=self.external_context_section,
             fix_diff=self.fix_diff,
             current_diff=self.current_diff,
             target_branch=self.target_branch,
