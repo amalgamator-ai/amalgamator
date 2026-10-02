@@ -74,22 +74,68 @@ full verification later.
 
 ## Example end-to-end flow
 
+```mermaid
+flowchart TD
+    case["Case input<br/>(test-cases.json / CVE)"] --> orch["Orchestrator<br/>(hybrid backend / wrapper)"]
+
+    subgraph SM["synthmerge sandbox — isolated clone @ base, discarded after"]
+        cp["git cherry-pick &lt;upstream&gt;"]
+        resolve["LLM per-conflict resolution<br/>(~1s each, LMDB-cached)"]
+        smcommit["cherry-pick --continue<br/>→ EPHEMERAL commit"]
+        aidiff["extract ai.diff"]
+        cp --> resolve --> smcommit --> aidiff
+    end
+
+    orch --> cp
+    aidiff --> rebuild
+
+    subgraph AD["Adapter + Gate — check-backport.py (deterministic, zero LLM)"]
+        rebuild["Rebuild AI tree<br/>(temp worktree @ base + git apply)"]
+        scan1["dead-symbol scan<br/>(git grep)"]
+        scan2["used-but-undefined scan"]
+        scan3["Makefile obj scan"]
+        md["external-context.md<br/>## Metadata (stdout)<br/>## Suspect findings<br/>## Resolved files (per-file diffs)"]
+        rebuild --> scan1 & scan2 & scan3 --> md
+    end
+
+    md -->|"exit 0: clean"| fast["FAST PATH<br/>synthmerge result is final (~1 min)"]
+    md -->|"exit 1: findings"| yaml["case YAML +<br/>external_context_file: md"]
+
+    subgraph AM["amalgamator — own worktree @ base, result preserved"]
+        load["load YAML<br/>load_external_context()"]
+        triage["Phase 0.5 triage + context section<br/>(prioritize flagged files)"]
+        amcp["own cherry-pick → SAME conflicts<br/>(deterministic)"]
+        p3a["Phase 3a resolution<br/>trusted: splice VERBATIM<br/>suspect: re-derive, findings as hints"]
+        p31["Phase 3a.1 verification<br/>verifies EVERYTHING incl. trusted"]
+        p4["Phase 4+ build/test (optional)"]
+        amcommit["commit → amalgamator/* branch"]
+        load --> triage --> amcp --> p3a --> p31 --> p4 --> amcommit
+        p31 -->|"issues → repair loop"| p3a
+    end
+
+    yaml --> load
+    amcommit --> score["Scoring vs human downstream<br/>exact_match / hunks"]
+    fast --> score
+
+    classDef llm fill:#ffec99,stroke:#b8860b,color:#000
+    classDef det fill:#b6e2a1,stroke:#2d6a4f,color:#000
+    classDef gitn fill:#d0d4de,stroke:#555,color:#000
+    class resolve,triage,p3a,p31 llm
+    class scan1,scan2,scan3,md,rebuild,yaml,load det
+    class cp,smcommit,aidiff,amcp,p4,amcommit,fast,score,orch,case gitn
 ```
-synthmerge --vibe --continue            # fast resolve, completes cherry-pick
-check-backport.sh <base>..HEAD          # deterministic scans, exit 1 + findings
-        │ exit 0
-        └──► done
-        │ exit 1 + findings.md
-        ▼
-case yaml gains: external_context_file: findings.md
-amalgamator pipeline:
-    Phase 0.5  triage sees prior context, prioritizes flagged files
-    Phase 2    cherry-pick (same conflicts as the prior resolver saw)
-    Phase 3a   resolution: trusted resolutions spliced verbatim,
-               suspect regions re-derived with findings as hints
-    Phase 3a.1 verification: everything verified, findings as evidence
-    Phase 4+   build/test/recovery as usual
-```
+
+Invariants the diagram encodes:
+
+- **Only text crosses** between the two worlds: the external-context MD is
+  the sole channel; no git objects are shared (synthmerge's commit is
+  ephemeral, amalgamator re-creates the identical conflict state because a
+  cherry-pick is deterministic).
+- **The adapter is also the gate**: exit 0 means the fast path ships without
+  ever paying amalgamator's cost; exit 1 escalates with findings in hand.
+- **Trust is prompt-level in v1**: "splice verbatim" is an instruction to the
+  resolution agent, not a mechanical checkout; Phase 3a.1 still verifies
+  everything, so a wrong trusted resolution can be caught, not just shipped.
 
 ## Files
 
