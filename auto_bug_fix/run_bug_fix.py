@@ -2474,8 +2474,24 @@ def _run_pipeline_phases(
                        f"[ All conflicts force-resolved with --theirs ]",
                        trailers=_COAUTHOR_TRAILERS)
 
-        with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
-            phase_4b_run_and_fix(config, claude_config, state, tracker)
+        # Enter 4b only when it has something to drive. With both build and
+        # test commands empty the run-and-fix loop has no success criterion:
+        # it cannot distinguish a good port from a --theirs-poisoned one, and
+        # a marker-less session would fail the whole target after the
+        # force-resolved tree is already committed. Let the port stand.
+        if (config.build_command or "").strip() or (config.test_command or "").strip():
+            with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
+                phase_4b_run_and_fix(config, claude_config, state, tracker)
+        else:
+            log.info("Phase 4b skipped after force-resolve: build and test "
+                     "commands are both empty — nothing for the run-and-fix "
+                     "loop to drive; the force-resolved port stands as-is")
+            state.dossier.add(
+                "Run-and-fix loop skipped",
+                "Build and test commands are both empty — Phase 4b not "
+                "entered after force-resolution; the port stands as-is",
+                "Phase 4b",
+            )
         cherry_pick_succeeded = True
 
     if not cherry_pick_succeeded:
