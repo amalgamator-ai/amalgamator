@@ -6,7 +6,6 @@ PRS_DIR="/home/alexm-redhat/code/ai_auto_analyze/auto_code_gen/prs"
 ISSUE_DIR="issue_1"
 
 # Run
-source "$(dirname "$0")/../env.sh"
 python -m auto_code_gen.run_fix_issue \
     --high_level_code_plan_file ${PRS_DIR}/high_level_code_plan.txt \
     --prs_dir ${PRS_DIR} \

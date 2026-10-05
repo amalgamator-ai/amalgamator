@@ -30,7 +30,7 @@ The user provides:
 
 3. Run the pipeline:
    ```bash
-   source env.sh && python -m auto_code_gen.run_code_gen --config "<config_path>" [--resume]
+   python -m auto_code_gen.run_code_gen --config "<config_path>" [--resume]
    ```
 
 4. This is a long-running operation (can take hours for complex ports). Inform the user.

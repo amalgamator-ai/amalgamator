@@ -25,7 +25,7 @@ The user provides a path to a run config JSON file. If not provided, help them f
 
 4. Run the parse step:
    ```bash
-   source env.sh && python -m auto_profile.run_profile_summary --run-config "<run_config>" --override-output-dir
+   python -m auto_profile.run_profile_summary --run-config "<run_config>" --override-output-dir
    ```
 
 5. Report what was generated:

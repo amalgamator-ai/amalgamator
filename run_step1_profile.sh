@@ -13,7 +13,6 @@ if [ $# -ne 1 ]; then
     exit 1
 fi
 
-source "$(dirname "$0")/env.sh"
 
 run_config="$1"
 

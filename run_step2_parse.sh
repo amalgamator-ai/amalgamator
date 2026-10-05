@@ -14,7 +14,6 @@ if [ $# -ne 1 ]; then
     exit 1
 fi
 
-source "$(dirname "$0")/env.sh"
 
 run_config="$1"
 output_dir=$(python -c "from common.utils import output_dir_from_run_config; print(output_dir_from_run_config('${run_config}'))")
