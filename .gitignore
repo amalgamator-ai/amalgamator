@@ -3,3 +3,7 @@ __run_log_bug_fix.txt
 dossier.md
 runs/
 auto_bug_fix/configs/*.yaml
+.pytest_cache/
+*.egg-info/
+.venv/
+.DS_Store
