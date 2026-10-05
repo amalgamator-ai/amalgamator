@@ -34,12 +34,12 @@ The config type is auto-detected from the JSON content.
 
    **Single-trace:**
    ```bash
-   source env.sh && python -m auto_analyze.run_single_trace --config "<config_path>"
+   python -m auto_analyze.run_single_trace --config "<config_path>"
    ```
 
    **Cross-trace:**
    ```bash
-   source env.sh && python -m auto_analyze.run_cross_trace --config "<config_path>"
+   python -m auto_analyze.run_cross_trace --config "<config_path>"
    ```
 
    Add `--no-clean` if the user requested it.

@@ -102,7 +102,6 @@ ai_auto_analyze/
 │   ├── mechanical.py                  #   Mechanical conflict resolution
 │   ├── evidence.py                    #   Token/line-provenance audits
 │   └── configs/                       #   Example YAML configs
-├── env.sh                              # Environment variables
 ├── run_all.sh                          # Full pipeline orchestrator
 └── run_all_scheduled.sh                # Scheduled pipeline execution
 ```

@@ -38,7 +38,7 @@ The user provides:
 
 5. Run the work items:
    ```bash
-   source env.sh && python -m auto_code_gen.run_work_items \
+   python -m auto_code_gen.run_work_items \
      --config "<config_path>" \
      --code-gen-dir "<output_dir>" \
      --work-items-file "<work_items_file>"

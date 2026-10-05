@@ -28,7 +28,7 @@ The user provides:
 
    **PDF (trace analysis):**
    ```bash
-   source env.sh && python -m auto_analyze.run_summary_pdf --cross-config "<config_path>"
+   python -m auto_analyze.run_summary_pdf --cross-config "<config_path>"
    ```
 
    **PPTX (code generation):**
@@ -42,7 +42,7 @@ The user provides:
    ```
    Then run:
    ```bash
-   source env.sh && python -m auto_code_gen.run_summary \
+   python -m auto_code_gen.run_summary \
      --config "<config_path>" \
      --framework-code-trace-files <trace_file_1> <trace_file_2>
    ```

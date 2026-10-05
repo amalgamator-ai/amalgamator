@@ -87,7 +87,7 @@ tests/               Test suite (pytest)
 
 ## Environment
 
-Source `env.sh` before running shell scripts. Set `ANTHROPIC_API_KEY` in your environment.
+Set `ANTHROPIC_API_KEY` in your environment.
 
 ## Running Tests
 

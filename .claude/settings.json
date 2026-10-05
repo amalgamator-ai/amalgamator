@@ -9,7 +9,6 @@
       "Bash(./run_step1_profile.sh*)",
       "Bash(./run_step2_parse.sh*)",
       "Bash(./run_step3_analyze.sh*)",
-      "Bash(source env.sh*)",
       "Bash(pytest*)",
       "Bash(ls *)",
       "Bash(find *)",
