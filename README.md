@@ -27,15 +27,10 @@ Detailed guides with copy-pasteable commands are in `auto_analyze/examples/`:
 
 | Guide | Description |
 |-------|-------------|
-| [Single-Trace Analysis and Annotation](https://github.com/neuralmagic/ai_auto_analyze/blob/main/auto_analyze/examples/single_trace_analysis_and_annotation_guide.md) | Analyze a GPU trace and produce an annotated Perfetto visualization |
-| [Cross-Commit Comparison](https://github.com/neuralmagic/ai_auto_analyze/blob/main/auto_analyze/examples/cross_commit_comparison_guide.md) | Compare two commits of the same framework |
-| [Cross-Framework Comparison](https://github.com/neuralmagic/ai_auto_analyze/blob/main/auto_analyze/examples/cross_framework_comparison_guide.md) | Compare different frameworks (e.g., vLLM vs SGLang) |
-| [vLLM Trace Generation](https://github.com/neuralmagic/ai_auto_analyze/blob/main/auto_analyze/examples/vllm_generate_trace_example.md) | How to capture PyTorch profiling traces with vLLM |
-
-Worked examples with full analysis results:
-
-- [Cross-commit example (Kimi-K2.5)](https://github.com/neuralmagic/ai_auto_analyze/tree/main/auto_analyze/examples/cross_commit_cmp_example_kimi) — vLLM `main` vs `v0.16.0` on 8xB200, showing a 21.3% improvement from specialized CUDA kernels
-- [Cross-framework example (Kimi-K2.5)](https://github.com/neuralmagic/ai_auto_analyze/tree/main/auto_analyze/examples/cross_framework_cmp_example_kimi) — vLLM vs SGLang on 8xB200, showing an 8.6% gap driven by MoE dual-stream design differences
+| [Single-Trace Analysis and Annotation](auto_analyze/examples/single_trace_analysis_and_annotation_guide.md) | Analyze a GPU trace and produce an annotated Perfetto visualization |
+| [Cross-Commit Comparison](auto_analyze/examples/cross_commit_comparison_guide.md) | Compare two commits of the same framework |
+| [Cross-Framework Comparison](auto_analyze/examples/cross_framework_comparison_guide.md) | Compare different frameworks (e.g., vLLM vs SGLang) |
+| [vLLM Trace Generation](auto_analyze/examples/vllm_generate_trace_example.md) | How to capture PyTorch profiling traces with vLLM |
 
 ### Bug Fix Porting
 
