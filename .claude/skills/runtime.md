@@ -24,7 +24,7 @@ The user provides:
 
 3. Run runtime iterations:
    ```bash
-   source env.sh && python -m auto_code_gen.run_runtime_iters --config "<config_path>" [--resume]
+   python -m auto_code_gen.run_runtime_iters --config "<config_path>" [--resume]
    ```
 
 4. Report results:

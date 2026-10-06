@@ -5,7 +5,6 @@ source "$(dirname "$0")/../auto_profile/utils.sh"
 PRS_DIR="/home/alexm-redhat/code/ai_auto_analyze/auto_code_gen/prs"
 
 # Run
-source "$(dirname "$0")/../env.sh"
 python -m auto_code_gen.run_summary \
     --frameworks sglang vllm \
     --framework-code-trace-files $PRS_DIR/sglang_code_trace.txt $PRS_DIR/vllm_code_trace.txt \

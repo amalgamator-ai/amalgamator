@@ -30,7 +30,7 @@ The user provides:
 
 4. Run the investigation with all required arguments:
    ```bash
-   source env.sh && python -m auto_code_gen.run_investigate_issue \
+   python -m auto_code_gen.run_investigate_issue \
      --config "<config_path>" \
      --framework-code-trace-files <trace_file_1> <trace_file_2> \
      --code-port-plan-file "<plan_file>" \

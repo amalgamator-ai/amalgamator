@@ -30,7 +30,7 @@ The user provides:
 
 4. Run the fix:
    ```bash
-   source env.sh && python -m auto_code_gen.run_fix_issue \
+   python -m auto_code_gen.run_fix_issue \
      --config "<config_path>" \
      --high_level_code_plan_file "<plan_file>" \
      --prs_dir "<prs_dir>" \

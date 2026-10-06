@@ -24,7 +24,7 @@ The user provides:
 
 3. Run the JIRA creator:
    ```bash
-   source env.sh && python -m auto_analyze.run_jiras --cross-config "<config_path>"
+   python -m auto_analyze.run_jiras --cross-config "<config_path>"
    ```
 
 4. Report results:
