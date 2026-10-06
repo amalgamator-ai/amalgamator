@@ -57,7 +57,7 @@ The user provides:
 
 4. Run the pipeline:
    ```bash
-   source env.sh && python -m auto_bug_fix.run_bug_fix "<config_path>"
+   python -m auto_bug_fix.run_bug_fix "<config_path>"
    ```
 
 5. This is a long-running operation. Inform the user.

@@ -23,7 +23,7 @@ The user provides a path to a run config JSON file. If not provided, help them f
 
 3. Run the profiling pipeline:
    ```bash
-   source env.sh && ./run_step1_profile.sh "<run_config>"
+   ./run_step1_profile.sh "<run_config>"
    ```
 
 4. Report results: show which frameworks were profiled and where output files are located.

@@ -48,7 +48,6 @@ if [ -z "$run_config" ]; then
     exit 1
 fi
 
-source "$(dirname "$0")/env.sh"
 
 output_dir=$(python -c "from common.utils import output_dir_from_run_config; print(output_dir_from_run_config('${run_config}'))")
 test_results_dir="${output_dir}/test_results"

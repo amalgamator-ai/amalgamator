@@ -22,7 +22,7 @@ The user provides:
 
 3. Build the command with any skip flags:
    ```bash
-   source env.sh && ./run_all.sh "<run_config>" [skip flags]
+   ./run_all.sh "<run_config>" [skip flags]
    ```
 
 4. Run the pipeline. This is a long-running operation — inform the user it may take a while.

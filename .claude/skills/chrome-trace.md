@@ -24,7 +24,7 @@ The user provides:
 
 3. Run the Chrome trace generator:
    ```bash
-   source env.sh && python -m auto_analyze.run_chrome_trace --cross-config "<config_path>"
+   python -m auto_analyze.run_chrome_trace --cross-config "<config_path>"
    ```
 
 4. Report results:
