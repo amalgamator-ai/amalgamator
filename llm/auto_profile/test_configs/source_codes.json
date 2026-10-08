@@ -1,0 +1,5 @@
+{
+  "vllm": "/path/to/vllm",
+  "sgl": "/path/to/sglang",
+  "trt": "/path/to/TensorRT-LLM"
+}

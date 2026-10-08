@@ -1,0 +1,25 @@
+{
+    "cross_trace_config": "/path/to/llm/auto_analyze/results/results_analyze_deepseek_r1_nvfp4/test_results/test_1/cross_trace_config.json",
+    "improvement_id": 2,
+    "source_code_dir": "/path/to/vllm",
+    "output_dir": "/path/to/llm/auto_code_gen/results/improvement_2",
+    "remote_vllm_subdir": "",
+    "num_code_port_plan_iterations": 4,
+    "num_test_port_plan_iterations": 3,
+    "num_code_gen_iterations": 3,
+    "disallowed_modules": [
+        "sglang",
+        "sgl_kernel",
+        "sgl*"
+    ],
+    "use_smaller_model_for_runtime": false,
+    "disable_new_feature_for_runtime": false,
+    "additional_benchmark_configs": [],
+    "code_port_plan_skip_review": false,
+    "test_plan_skip_review": false,
+    "code_gen_skip_review": false,
+    "generate_pr_commands": false,
+    "pr_base_branch": "main",
+    "pr_remote": "origin",
+    "thinking-mode": "deep"
+}

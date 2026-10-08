@@ -1,0 +1,11 @@
+{
+    "traces": [
+        {"result_dir": "/path/to/llm/auto_analyze/results/results_analyze_deepseek_r1_nvfp4/test_results/test_1/vllm"},
+        {"result_dir": "/path/to/llm/auto_analyze/results/results_analyze_deepseek_r1_nvfp4/test_results/test_1/sglang"}
+    ],
+    "target_trace_id": 0,
+    "output_dir": "/path/to/llm/auto_analyze/results/results_analyze_deepseek_r1_nvfp4/test_results/test_1/cross_trace",
+    "make_improvement_plan": false,
+    "thinking-mode": "deep",
+    "agent": null
+}

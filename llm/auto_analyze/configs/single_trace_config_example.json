@@ -1,0 +1,21 @@
+{
+    "framework_name": "vllm",
+    "model": "nvidia/DeepSeek-R1-NVFP4",
+    "gpu_type": "B200",
+    "batch_size_range": "1",
+    "prefill_size_range": "4",
+    "output_size_range": "1024",
+    "trace_file": "/path/to/trace-vllm-nvidia__DeepSeek-R1-NVFP4-tp_4-isl_4-osl_1024-b_1.nsys-rep",
+    "framework_source_code": "/path/to/vllm",
+    "commit_id": "ebf862c351dc4bcaf65de34c3caebe6df6e9e214",
+    "run_command": null,
+    "run_log": "/path/to/run-log-vllm-nvidia__DeepSeek-R1-NVFP4-tp_4-isl_4-osl_1024-b_1.txt",
+    "trace_gpu_focus": null,
+    "high_level_focus": null,
+    "perf_analysis_focus": null,
+    "output_dir": "/path/to/llm/auto_analyze/results/results_analyze_deepseek_r1_nvfp4/test_results/test_1/vllm",
+    "max_gpu_ops": 1000,
+    "skip_perf_analysis": false,
+    "thinking-mode": "deep",
+    "agent": null
+}

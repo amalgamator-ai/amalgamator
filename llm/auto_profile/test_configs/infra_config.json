@@ -1,0 +1,5 @@
+{
+    "docker_images_file": "llm/auto_profile/test_configs/docker_images.json",
+    "gpu_configs_file": "llm/auto_profile/test_configs/gpu_configs.json",
+    "exec_modes_file": "llm/auto_profile/test_configs/exec_modes.json"
+}

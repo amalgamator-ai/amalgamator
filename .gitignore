@@ -7,3 +7,4 @@ auto_bug_fix/configs/*.yaml
 *.egg-info/
 .venv/
 .DS_Store
+llm/auto_profile_server_client/results/

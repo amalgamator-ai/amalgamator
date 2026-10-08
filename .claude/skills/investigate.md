@@ -15,7 +15,7 @@ The user provides:
 ## Instructions
 
 1. Parse the arguments for the config path. If not provided:
-   - List available configs: `ls auto_code_gen/configs/*.json`
+   - List available configs: `ls llm/auto_code_gen/configs/*.json`
    - Ask the user to provide one.
 
 2. Load the config to find the output directory:
@@ -30,7 +30,7 @@ The user provides:
 
 4. Run the investigation with all required arguments:
    ```bash
-   python -m auto_code_gen.run_investigate_issue \
+   python -m llm.auto_code_gen.run_investigate_issue \
      --config "<config_path>" \
      --framework-code-trace-files <trace_file_1> <trace_file_2> \
      --code-port-plan-file "<plan_file>" \
@@ -45,5 +45,5 @@ The user provides:
 ## Example Usage
 
 ```
-/investigate auto_code_gen/configs/code_gen_config_example.json
+/investigate llm/auto_code_gen/configs/code_gen_config_example.json
 ```

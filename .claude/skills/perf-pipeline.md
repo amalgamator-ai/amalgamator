@@ -15,7 +15,7 @@ The user provides:
 ## Instructions
 
 1. Parse the arguments to get the run config path and any skip flags. If no config provided:
-   - List available configs: `ls auto_profile/test_configs/*/run_*.json`
+   - List available configs: `ls llm/auto_profile/test_configs/*/run_*.json`
    - Ask the user to pick one.
 
 2. Validate the config exists.
@@ -46,6 +46,6 @@ The user provides:
 ## Example Usage
 
 ```
-/perf-pipeline auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
-/perf-pipeline auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json --skip-profile --skip-pdf --skip-jiras
+/perf-pipeline llm/auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
+/perf-pipeline llm/auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json --skip-profile --skip-pdf --skip-jiras
 ```
