@@ -1,4 +1,4 @@
-from auto_code_gen.run_code_gen import _print_detailed_table, _print_phase_summary
+from llm.auto_code_gen.run_code_gen import _print_detailed_table, _print_phase_summary
 
 
 def test_reports_accept_unknown_and_zero_costs(capsys):

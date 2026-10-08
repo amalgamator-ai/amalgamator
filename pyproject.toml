@@ -7,7 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "claude-agent-sdk>=0.2.87",
     "colorama>=0.4.6",
-    "litellm>=1.67.0",
+    "litellm>=1.100.1,<2",
     "pyyaml>=6.0",
 ]
 
@@ -15,9 +15,10 @@ dependencies = [
 test = [
     "pytest>=9.0",
     "pytest-mock>=3.16",
+    "pytest-asyncio>=1.4",
     # The subprocess smoke test intentionally exercises private SDK machinery.
     "claude-agent-sdk==0.2.161",
 ]
 
 [tool.setuptools.packages.find]
-include = ["auto_bug_fix*", "auto_code_gen*", "auto_analyze*", "auto_profile*", "backport_scanner*", "common*"]
+include = ["auto_bug_fix*", "backport_scanner*", "common*", "llm*"]

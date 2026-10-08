@@ -28,7 +28,7 @@ The user provides:
 
    **PDF (trace analysis):**
    ```bash
-   python -m auto_analyze.run_summary_pdf --cross-config "<config_path>"
+   python -m llm.auto_analyze.run_summary_pdf --cross-config "<config_path>"
    ```
 
    **PPTX (code generation):**
@@ -42,7 +42,7 @@ The user provides:
    ```
    Then run:
    ```bash
-   python -m auto_code_gen.run_summary \
+   python -m llm.auto_code_gen.run_summary \
      --config "<config_path>" \
      --framework-code-trace-files <trace_file_1> <trace_file_2>
    ```
@@ -52,6 +52,6 @@ The user provides:
 ## Example Usage
 
 ```
-/summary auto_analyze/results/test_results/test_1/cross_trace_config.json
-/summary auto_code_gen/configs/code_gen_config_example.json
+/summary llm/auto_analyze/results/test_results/test_1/cross_trace_config.json
+/summary llm/auto_code_gen/configs/code_gen_config_example.json
 ```

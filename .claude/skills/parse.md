@@ -13,7 +13,7 @@ The user provides a path to a run config JSON file. If not provided, help them f
 ## Instructions
 
 1. Parse the argument to get the run config path. If not provided:
-   - List available configs: `ls auto_profile/test_configs/*/run_*.json`
+   - List available configs: `ls llm/auto_profile/test_configs/*/run_*.json`
    - Ask the user to pick one.
 
 2. Validate the config exists.
@@ -25,7 +25,7 @@ The user provides a path to a run config JSON file. If not provided, help them f
 
 4. Run the parse step:
    ```bash
-   python -m auto_profile.run_profile_summary --run-config "<run_config>" --override-output-dir
+   python -m llm.auto_profile.run_profile_summary --run-config "<run_config>" --override-output-dir
    ```
 
 5. Report what was generated:
@@ -35,5 +35,5 @@ The user provides a path to a run config JSON file. If not provided, help them f
 ## Example Usage
 
 ```
-/parse auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
+/parse llm/auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
 ```

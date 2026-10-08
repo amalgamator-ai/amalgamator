@@ -5,8 +5,8 @@
 #          and JIRA task creation.
 #
 # Usage: ./run_step3_analyze.sh <run_config> [options]
-# Example: ./run_step3_analyze.sh ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
-#          ./run_step3_analyze.sh ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json --skip-pdf --skip-jiras
+# Example: ./run_step3_analyze.sh ./llm/auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
+#          ./run_step3_analyze.sh ./llm/auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json --skip-pdf --skip-jiras
 #
 # Options:
 #   --skip-pdf      Skip summary PDF report generation (step 3c)
@@ -44,7 +44,7 @@ done
 
 if [ -z "$run_config" ]; then
     echo "Usage: $0 <run_config> [--skip-pdf] [--skip-trace] [--skip-jiras]"
-    echo "Example: $0 ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json"
+    echo "Example: $0 ./llm/auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json"
     exit 1
 fi
 
@@ -94,14 +94,14 @@ for test_dir in "${test_results_dir}"/*/; do
         fw_name="$(basename "${st_config}" .json | sed 's/single_trace_config_//')"
         echo ""
         echo "--- Single-trace analysis: ${fw_name} ---"
-        python -m auto_analyze.run_single_trace \
+        python -m llm.auto_analyze.run_single_trace \
             --config "${st_config}"
     done
 
     # 3b: Run cross-trace analysis
     echo ""
     echo "--- Cross-trace analysis ---"
-    python -m auto_analyze.run_cross_trace \
+    python -m llm.auto_analyze.run_cross_trace \
         --config "${cross_config}"
 
     cross_output_dir=$(python -c "import json; print(json.load(open('${cross_config}'))['output_dir'])")
@@ -112,7 +112,7 @@ for test_dir in "${test_results_dir}"/*/; do
     if [ "$skip_pdf" = false ]; then
         echo ""
         echo "--- Summary PDF ---"
-        python -m auto_analyze.run_summary_pdf \
+        python -m llm.auto_analyze.run_summary_pdf \
             --cross-config "${cross_config}"
     else
         echo ""
@@ -123,7 +123,7 @@ for test_dir in "${test_results_dir}"/*/; do
     if [ "$skip_trace" = false ]; then
         echo ""
         echo "--- Cross trace JSON ---"
-        python -m auto_analyze.run_chrome_trace \
+        python -m llm.auto_analyze.run_chrome_trace \
             --cross-config "${cross_config}"
     else
         echo ""
@@ -134,7 +134,7 @@ for test_dir in "${test_results_dir}"/*/; do
     if [ "$skip_jiras" = false ]; then
         echo ""
         echo "--- Create JIRA tasks ---"
-        python -m auto_analyze.run_jiras \
+        python -m llm.auto_analyze.run_jiras \
             --cross-config "${cross_config}"
     else
         echo ""
