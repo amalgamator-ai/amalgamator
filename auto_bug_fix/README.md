@@ -346,7 +346,7 @@ credentials.
 | `api_base`, `api_key`, `api_key_file`, `model_params` | Unset | Legacy inline model settings; see the selection rules above |
 | `claude.allowed_tools` | `[Read, Write, Bash]` | Tools available to the agents |
 | `claude.perm_mode` | `acceptEdits` | Agent permission mode |
-| `external_context_file` | Unset | Hybrid mode: path (relative to the case file) to a prior resolver's context Markdown — deterministic scan findings and trusted per-file resolutions, injected as scoped sections into the triage, resolution, verification, and review prompts. Absent = standard pipeline. Produced by the vendored [`adapter/`](../adapter/README.md) (`check-backport.py`); see `docs/external-context.md`. |
+| `external_context_file` | Unset | Hybrid mode: path (relative to the case file) to a prior resolver's context Markdown — deterministic scan findings and trusted per-file resolutions, injected as scoped sections into the triage, resolution, verification, and review prompts. Absent = standard pipeline. Produced by [`adapter/`](../adapter/README.md) (`check-backport.py`); see `docs/external-context.md`. |
 
 Repository paths support `~` and environment-variable expansion. Use absolute
 repository/workdir paths to make cases independent of the invocation directory;

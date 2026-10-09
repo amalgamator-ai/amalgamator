@@ -60,8 +60,8 @@
 #                           would carry its own options instead
 #   --python PATH           python with amalgamator deps (default: python3)
 #   --amalgamator-root PATH dir containing auto_bug_fix/ (PYTHONPATH);
-#                           default: the parent dir when this script is
-#                           vendored as <amalgamator>/adapter/hybrid-backport.sh
+#                           default: this repo's root when the script
+#                           lives at <repo>/adapter/hybrid-backport.sh
 #   --model STR             litellm model (e.g. openai/deepseek-...)
 #   --api-base URL          endpoint base URL
 #   --api-key-file PATH     endpoint key file
@@ -83,9 +83,9 @@ API_KEY_FILE="${API_KEY_FILE:-}"
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-128000}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Amalgamator root: default to the parent directory when this script is
-# vendored inside an amalgamator checkout (<amalgamator>/adapter/) — the
-# parent contains auto_bug_fix/, which is all --amalgamator-root needs.
+# Amalgamator root: default to this repo's root when the script lives
+# at <repo>/adapter/ — the parent contains auto_bug_fix/, which is all
+# --amalgamator-root needs.
 if [ -z "$AMALGAMATOR_ROOT" ] && [ -d "$SCRIPT_DIR/../auto_bug_fix" ]; then
     AMALGAMATOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi

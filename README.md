@@ -99,7 +99,7 @@ ai_auto_analyze/
 │   ├── mechanical.py                  #   Mechanical conflict resolution
 │   ├── evidence.py                    #   Token/line-provenance audits
 │   └── configs/                       #   Example YAML configs
-├── adapter/                            # Hybrid backport adapter (vendored)
+├── adapter/                            # Hybrid backport adapter
 │   ├── hybrid-backport.sh             #   Driver: resolver → gate → seeded amalgamator → arbiter
 │   └── check-backport.py              #   Deterministic gate + external-context emitter
 ├── run_all.sh                          # Full pipeline orchestrator
@@ -378,8 +378,7 @@ python -m auto_bug_fix.run_bug_fix path/to/case.yaml
 ### Hybrid mode (fast resolver + gate + seeded amalgamator)
 
 The repo also ships the **hybrid backport adapter** in
-[`adapter/`](adapter/README.md) — a vendored copy of the
-adapter-synthmerge-amalgamator project — which wraps `auto_bug_fix` in a
+[`adapter/`](adapter/README.md), which wraps `auto_bug_fix` in a
 faster, deterministic-first flow:
 
 ```

@@ -140,9 +140,8 @@ interacting with external-context runs:
   cherry-pick; the prior resolutions are context, not state. Since the
   cherry-pick is deterministic (same base + same upstream commit → same
   conflicts), the prior resolutions remain directly reusable.
-- **The checker and the driver live in the adapter**, vendored in this
-  repo's [`adapter/`](../adapter/README.md) subdirectory (canonical home:
-  the adapter-synthmerge-amalgamator project):
+- **The checker and the driver live in this repo's
+  [`adapter/`](../adapter/README.md) subdirectory:
   `check-backport.py` scans the live worktree where the fast resolver
   finished (base and upstream treeishes give the findings their ground
   truth) and emits this Markdown; `hybrid-backport.sh` orchestrates the
@@ -240,7 +239,5 @@ Invariants the diagram encodes:
   the upstream-conditioned restoration rule in the review prompt
 - `auto_bug_fix/run_bug_fix.py` — one-time load in `run_pipeline`, section wiring
 - `docs/external-context-template.md` — fill-in template for the Markdown file
-- `adapter/` — the vendored hybrid adapter (`check-backport.py` emitter,
-  `hybrid-backport.sh` driver + arbiter; canonical home:
-  adapter-synthmerge-amalgamator, gitlab.cee.redhat.com/asangior/
-  adapter-amalgamator-synthmerge)
+- `adapter/` — the hybrid adapter (`check-backport.py` emitter,
+  `hybrid-backport.sh` driver + arbiter)
