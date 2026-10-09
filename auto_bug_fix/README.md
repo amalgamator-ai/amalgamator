@@ -19,6 +19,7 @@ The guiding rule for resolution is three-way discipline: lines the fix changes c
 
 ```mermaid
 flowchart TD
+    EC["OPTIONAL — external_context_file<br/>(hybrid mode: a prior resolver's findings<br/>+ trusted resolutions;<br/>see docs/external-context.md)"]
     T0[Phase 0 — Triage<br/>patch-id + ancestry gates,<br/>upstream follow-up scan] --> T05[Phase 0.5 — Semantic triage<br/>LLM assesses difficulty, prerequisites,<br/>files to skip; claims validated deterministically]
     T05 --> P05B[Phase 0.5b — Prerequisite chain<br/>port prerequisite commits if needed]
     P05B --> P05C[Phase 0.5c — Test port<br/>port test files from the fix commit]
@@ -29,10 +30,12 @@ flowchart TD
     P15 --> P2
     P2 --> P3B[Phase 3b — Regeneration<br/>re-generate skipped generated files]
     P3B --> P4[Phase 4 — Verify<br/>build + test with recovery attempts]
-    P4 -->|unrecoverable| P4B[Phase 4b — Escalation<br/>autonomous build-test-fix loop]
+    P4 -->|"unrecoverable AND build/test<br/>commands configured"| P4B[Phase 4b — Escalation<br/>autonomous build-test-fix loop —<br/>entered only when build/test commands<br/>are non-empty; else skipped]
     P4 --> P45[Phase 4.5 — Semantic equivalence<br/>git range-diff source vs. ported]
     P4B --> P45
     P45 --> P5([Phase 5 — Dossier for human review])
+    EC -.->|"triage section"| T05
+    EC -.->|"resolution / verification /<br/>review sections"| P2
 ```
 
 ### Phase summary
@@ -47,7 +50,7 @@ flowchart TD
 | 1.5 — RED triage | If RED unexpectedly passed: decides between *not vulnerable* (pipeline stops — no backport needed), *mitigated* (port anyway for defense-in-depth), or *bad test* (produce a replacement or escalate). |
 | 2+3a — Cherry-pick and resolve | `git cherry-pick` with a strategy ladder (default → patience → ort). Conflicted files first go through mechanical rungs (`git apply --ignore-whitespace`, `-C1` of the per-file patch onto the target side — byte-spliced, never regenerated). What remains goes to a narrowly-scoped LLM resolution loop. Finalization then runs the deterministic safety nets (below) and two review agents (3a.1 verification fed with computed evidence, 3a.2 triage-blind review). |
 | 3b — Regeneration | Runs the validated regeneration commands for generated files that were deliberately skipped, keeping the result only if the build still passes. |
-| 4 — Verify | Build + test. On failure, an agent diagnoses and repairs iteratively (4a); if unrecoverable, escalates to the autonomous build-test-fix loop (4b, `phase_4b.py`) as a last resort — a single long-running agent using the pipeline profile or an explicit Phase 4b override, fed the full dossier, which writes `run_and_fix_success.txt` or `run_and_fix_failure.txt` to report back. Successful 4a/4b recovery edits are committed as a fixup so they reach the candidate patch and preserved branch. |
+| 4 — Verify | Build + test. On failure, an agent diagnoses and repairs iteratively (4a); if unrecoverable, escalates to the autonomous build-test-fix loop (4b, `phase_4b.py`) as a last resort — entered only when build and/or test commands are configured (with an empty command set the loop has nothing to run and is skipped, rather than rubber-stamping via marker files). 4b is a single long-running agent using the pipeline profile or an explicit Phase 4b override, fed the full dossier, which writes `run_and_fix_success.txt` or `run_and_fix_failure.txt` to report back. Successful 4a/4b recovery edits are committed as a fixup so they reach the candidate patch and preserved branch. |
 | 4.5 — Semantic equivalence | `git range-diff` between the source fix and the backport (squashed into one synthetic commit, so test-port/review/recovery fixups don't skew the comparison), classified into an equivalence verdict. |
 | 5 — Dossier | Writes `dossier.md` — every decision, gate value, audit finding, and diff, organized for a human reviewer. |
 
@@ -343,6 +346,7 @@ credentials.
 | `api_base`, `api_key`, `api_key_file`, `model_params` | Unset | Legacy inline model settings; see the selection rules above |
 | `claude.allowed_tools` | `[Read, Write, Bash]` | Tools available to the agents |
 | `claude.perm_mode` | `acceptEdits` | Agent permission mode |
+| `external_context_file` | Unset | Hybrid mode: path (relative to the case file) to a prior resolver's context Markdown — deterministic scan findings and trusted per-file resolutions, injected as scoped sections into the triage, resolution, verification, and review prompts. Absent = standard pipeline. Produced by [`adapter/`](../adapter/README.md) (`check-backport.py`); see `docs/external-context.md`. |
 
 Repository paths support `~` and environment-variable expansion. Use absolute
 repository/workdir paths to make cases independent of the invocation directory;

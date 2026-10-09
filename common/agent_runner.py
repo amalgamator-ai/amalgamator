@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from abc import ABC, abstractmethod
@@ -156,6 +157,58 @@ def _filter_tools(allowed_tools: list[str] | None) -> list[dict]:
     allowed = {_CLAUDE_TO_LITELLM_TOOL.get(t, t) for t in allowed_tools}
     filtered = [s for s in ALL_TOOL_SCHEMAS if s["function"]["name"] in allowed]
     return filtered or ALL_TOOL_SCHEMAS
+
+
+# ── XML tool-call fallback ───────────────────────────────────────────────────
+#
+# Some models (DeepSeek V4 Flash notably) occasionally emit Claude-style XML
+# tool invocations in the message content — e.g.
+#
+#     <bash><command>git status</command></bash>
+#
+# instead of structured OpenAI ``tool_calls``. Without a fallback the loop
+# treats that response as a final answer and ends the session, which surfaces
+# upstream as "ended without writing a result file". When such XML blocks are
+# present we execute them like native tool calls and feed the results back.
+
+_XML_TOOL_TAG_RE = re.compile(
+    r"<(bash|Bash|read_file|Read|write_file|Write)>(.*?)</\1>",
+    re.DOTALL,
+)
+_XML_ARG_TAG_RE = re.compile(
+    r"<(command|path|content)>(.*?)</\1>",
+    re.DOTALL,
+)
+
+_XML_TOOL_ALIAS = {
+    "Bash": "bash",
+    "Read": "read_file",
+    "Write": "write_file",
+}
+
+
+def _parse_xml_tool_calls(text: str) -> list[tuple[str, dict]]:
+    """Extract Claude-style XML tool calls from message content.
+
+    Returns a list of ``(tool_name, args)`` pairs for well-formed calls only.
+    """
+    if not text or "<" not in text:
+        return []
+    calls: list[tuple[str, dict]] = []
+    for m in _XML_TOOL_TAG_RE.finditer(text):
+        name = _XML_TOOL_ALIAS.get(m.group(1), m.group(1))
+        body = m.group(2)
+        args: dict[str, str] = {}
+        for am in _XML_ARG_TAG_RE.finditer(body):
+            args[am.group(1)] = am.group(2)
+        if name == "bash" and "command" in args:
+            calls.append(("bash", {"command": args["command"]}))
+        elif name == "read_file" and "path" in args:
+            calls.append(("read_file", {"path": args["path"]}))
+        elif name == "write_file" and "path" in args and "content" in args:
+            calls.append(("write_file", {
+                "path": args["path"], "content": args["content"]}))
+    return calls
 
 
 # ── Context window management ────────────────────────────────────────────────
@@ -748,8 +801,52 @@ class LiteLLMAgentRunner(AgentRunner):
                 print(f"{Fore.CYAN}Agent:{Style.RESET_ALL} {content_text[:500]}")
 
             if not message.tool_calls:
-                log.info("Agent finished (no tool calls) on iteration %d", iteration)
-                break
+                xml_calls = _parse_xml_tool_calls(content_text)
+                if not xml_calls:
+                    log.info("Agent finished (no tool calls) on iteration %d", iteration)
+                    break
+                # The model emitted Claude-style XML tool calls in its content
+                # instead of structured tool_calls. Execute them and feed the
+                # results back as a user message (no tool_call_ids exist for
+                # this format).
+                log.info("Parsed %d XML tool call(s) from agent content",
+                         len(xml_calls))
+                sig_parts = []
+                result_blocks = []
+                for fn_name, fn_args in xml_calls:
+                    if fn_name not in allowed_names:
+                        result_blocks.append(
+                            f"<{fn_name}>\n<output>\nError: tool '{fn_name}' "
+                            f"is not allowed by the pipeline configuration.\n"
+                            f"</output>\n</{fn_name}>")
+                        continue
+                    print(f"{Fore.YELLOW}  Tool: {fn_name}"
+                          f"({_summarize_args(fn_args)}){Style.RESET_ALL}")
+                    result = _execute_tool(fn_name, fn_args, cwd,
+                                           bash_timeout=effective_timeout,
+                                           read_cap=read_cap, bash_cap=bash_cap)
+                    print(f"  Result: {result[:200]}"
+                          f"{'...' if len(result) > 200 else ''}")
+                    result_blocks.append(
+                        f"<{fn_name}>\n<output>\n{result}\n</output>\n</{fn_name}>")
+                    sig_parts.append(
+                        f"{fn_name}:{json.dumps(fn_args, sort_keys=True)}")
+                xml_sig = "|".join(sig_parts)
+                if xml_sig == last_tool_sig:
+                    repeat_count += 1
+                    if repeat_count >= 3:
+                        log.warning("Breaking loop: same XML tool call "
+                                    "repeated %d times", repeat_count + 1)
+                        break
+                else:
+                    repeat_count = 0
+                last_tool_sig = xml_sig
+                messages.append({
+                    "role": "user",
+                    "content": "<tool_results>\n" + "\n".join(result_blocks)
+                               + "\n</tool_results>",
+                })
+                continue
 
             tool_sig = "|".join(
                 f"{tc.function.name}:{tc.function.arguments}"

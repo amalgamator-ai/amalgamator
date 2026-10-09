@@ -33,6 +33,30 @@ if TYPE_CHECKING:
     from common.model_registry import ModelProfile
 
 
+def _external_context_section(config: BugFixConfig, phase: str) -> str:
+    """Render the external-resolver context section for one pipeline phase.
+
+    The strategy dispatch: an inactive/absent context renders "" for every
+    phase, so prompts and call sites never branch on it.  *phase* selects
+    the rendering ("triage", "resolution" or "verification") — each phase
+    gets different instructions around the same underlying data.
+    """
+    ctx = getattr(config, "external_context", None)
+    if ctx is None or not getattr(ctx, "active", False):
+        return ""
+    renderers = {
+        "triage": ctx.render_triage_section,
+        "resolution": ctx.render_resolution_section,
+        "verification": ctx.render_verification_section,
+        "review": ctx.render_review_section,
+    }
+    renderer = renderers.get(phase)
+    if renderer is None:
+        log.warning("unknown external context phase: %s", phase)
+        return ""
+    return renderer()
+
+
 def _phase_config(
     claude_config: ClaudeConfig,
     config: "BugFixConfig",
@@ -528,6 +552,7 @@ def phase_0_5_semantic_triage(
         source_branch=config.source_branch,
         target_branch=config.target_branch,
         seed_files=state.seed,
+        external_context_section=_external_context_section(config, "triage"),
     )
 
     claude_config_triage = _phase_config(claude_config, config)
@@ -1470,6 +1495,7 @@ def cherry_pick_and_resolve(
                     target_branch=config.target_branch,
                     baseline_ref=base_head,
                     followup_fixes=followup_note,
+                    external_context_section=_external_context_section(config, "resolution"),
                 )
                 asyncio.run(claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker))
         else:
@@ -1482,6 +1508,7 @@ def cherry_pick_and_resolve(
                 target_branch=config.target_branch,
                 baseline_ref=base_head,
                 followup_fixes=followup_note,
+                external_context_section=_external_context_section(config, "resolution"),
             )
             log.info("%s attempt %d/%d — resolving %d conflicts",
                      label, attempt, config.max_resolution_retries, len(uu_files))
@@ -1767,6 +1794,7 @@ def _finalize_resolution(
             triage_assessment=json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "",
             evidence_report=evidence_report,
             baseline_ref=base_head,
+            external_context_section=_external_context_section(config, "verification"),
         )
         try:
             asyncio.run(claude_run(claude_config_resolve, [check_prompt.prompt()], tracker=tracker))
@@ -1817,6 +1845,7 @@ def _finalize_resolution(
                 current_diff=blind_diff,
                 target_branch=config.target_branch,
                 baseline_ref=base_head,
+                external_context_section=_external_context_section(config, "review"),
             )
             try:
                 asyncio.run(claude_run(
@@ -2172,6 +2201,19 @@ def run_pipeline(
         bug_description=f"Porting fix for {config.issue_id}",
     )
 
+    # Load the external resolver context (hybrid pipelines). Absent or
+    # empty file yields the inactive strategy object: every rendered
+    # section is "" and the pipeline behaves exactly as before.
+    from auto_bug_fix.external_context import load_external_context
+    config.external_context = load_external_context(config.external_context_file)
+    if config.external_context.active:
+        log.info(
+            "External resolver context active: %s (%d findings, %d resolved files)",
+            config.external_context.source_path,
+            len(config.external_context.findings),
+            len(config.external_context.resolved_files),
+        )
+
     try:
         return _run_pipeline_phases(config, claude_config, state, tracker)
     except (PipelineStop, PipelineEscalation) as e:
@@ -2432,8 +2474,24 @@ def _run_pipeline_phases(
                        f"[ All conflicts force-resolved with --theirs ]",
                        trailers=_COAUTHOR_TRAILERS)
 
-        with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
-            phase_4b_run_and_fix(config, claude_config, state, tracker)
+        # Enter 4b only when it has something to drive. With both build and
+        # test commands empty the run-and-fix loop has no success criterion:
+        # it cannot distinguish a good port from a --theirs-poisoned one, and
+        # a marker-less session would fail the whole target after the
+        # force-resolved tree is already committed. Let the port stand.
+        if (config.build_command or "").strip() or (config.test_command or "").strip():
+            with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
+                phase_4b_run_and_fix(config, claude_config, state, tracker)
+        else:
+            log.info("Phase 4b skipped after force-resolve: build and test "
+                     "commands are both empty — nothing for the run-and-fix "
+                     "loop to drive; the force-resolved port stands as-is")
+            state.dossier.add(
+                "Run-and-fix loop skipped",
+                "Build and test commands are both empty — Phase 4b not "
+                "entered after force-resolution; the port stands as-is",
+                "Phase 4b",
+            )
         cherry_pick_succeeded = True
 
     if not cherry_pick_succeeded:
