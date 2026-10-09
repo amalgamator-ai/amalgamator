@@ -26,7 +26,7 @@ The user specifies which config type they want. If not specified, ask them.
 
 Use the CLI helper:
 ```bash
-python -m auto_analyze.create_single_trace_config \
+python -m llm.auto_analyze.create_single_trace_config \
   --framework-name <name> \
   --model <model> \
   --gpu-type <gpu> \
@@ -47,7 +47,7 @@ python -m auto_analyze.create_single_trace_config \
 
 Use the CLI helper:
 ```bash
-python -m auto_analyze.create_cross_trace_config \
+python -m llm.auto_analyze.create_cross_trace_config \
   --result-dirs <dir1> <dir2> \
   --target-trace-id <idx> \
   --output-dir <path> \
@@ -56,7 +56,7 @@ python -m auto_analyze.create_cross_trace_config \
 
 ### Code Gen Config (LLM Framework)
 
-Create a JSON file based on `auto_code_gen/configs/code_gen_config_example.json`:
+Create a JSON file based on `llm/auto_code_gen/configs/code_gen_config_example.json`:
 ```json
 {
     "use_case": "llm_framework",

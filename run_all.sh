@@ -4,8 +4,8 @@
 # Runs all 3 steps sequentially. Each step can also be run individually.
 #
 # Usage: ./run_all.sh <run_config> [options]
-# Example: ./run_all.sh ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
-#          ./run_all.sh ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json --skip-profile --skip-pdf --skip-jiras
+# Example: ./run_all.sh ./llm/auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
+#          ./run_all.sh ./llm/auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json --skip-profile --skip-pdf --skip-jiras
 #
 # Options:
 #   --skip-profile  Skip step 1: benchmarks and profiling
@@ -49,7 +49,7 @@ done
 
 if [ -z "$run_config" ]; then
     echo "Usage: $0 <run_config> [--skip-profile] [--skip-parse] [--skip-analyze] [--skip-pdf] [--skip-trace] [--skip-jiras]"
-    echo "Example: $0 ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json"
+    echo "Example: $0 ./llm/auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json"
     exit 1
 fi
 

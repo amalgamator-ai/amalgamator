@@ -1,0 +1,13 @@
+{
+  "backend": "litellm",
+  "model": "openai/replace-with-served-model-id",
+  "api_base": "http://localhost:8000/v1",
+  "api_key": "dummy",
+  "model_params": {"temperature": 0.2, "max_tokens": 8192},
+  "context_length": 32768,
+  "command_timeout": 1800,
+  "request_timeout": 300,
+  "max_agent_iterations": 100,
+  "billing": "self_hosted",
+  "allowed_tools": ["Read", "Write", "Bash"]
+}

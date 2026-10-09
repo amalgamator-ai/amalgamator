@@ -23,14 +23,14 @@ Backport a bug fix from one branch to another using Claude as the AI engine. The
 
 ### GPU Performance Analysis
 
-Detailed guides with copy-pasteable commands are in `auto_analyze/examples/`:
+Detailed guides with copy-pasteable commands are in `llm/auto_analyze/examples/`:
 
 | Guide | Description |
 |-------|-------------|
-| [Single-Trace Analysis and Annotation](auto_analyze/examples/single_trace_analysis_and_annotation_guide.md) | Analyze a GPU trace and produce an annotated Perfetto visualization |
-| [Cross-Commit Comparison](auto_analyze/examples/cross_commit_comparison_guide.md) | Compare two commits of the same framework |
-| [Cross-Framework Comparison](auto_analyze/examples/cross_framework_comparison_guide.md) | Compare different frameworks (e.g., vLLM vs SGLang) |
-| [vLLM Trace Generation](auto_analyze/examples/vllm_generate_trace_example.md) | How to capture PyTorch profiling traces with vLLM |
+| [Single-Trace Analysis and Annotation](llm/auto_analyze/examples/single_trace_analysis_and_annotation_guide.md) | Analyze a GPU trace and produce an annotated Perfetto visualization |
+| [Cross-Commit Comparison](llm/auto_analyze/examples/cross_commit_comparison_guide.md) | Compare two commits of the same framework |
+| [Cross-Framework Comparison](llm/auto_analyze/examples/cross_framework_comparison_guide.md) | Compare different frameworks (e.g., vLLM vs SGLang) |
+| [vLLM Trace Generation](llm/auto_analyze/examples/vllm_generate_trace_example.md) | How to capture PyTorch profiling traces with vLLM |
 
 ### Bug Fix Porting
 
@@ -48,45 +48,48 @@ ai_auto_analyze/
 │   ├── claude_utils.py                 #   Claude Agent SDK wrapper
 │   ├── utils.py                        #   Logging, directory cleanup, output dir helpers
 │   └── convert_nsys_to_sqlite.sh       #   NSYS trace format converter
-├── auto_analyze/                       # Analysis pipeline
-│   ├── run_single_trace.py             #   Single-trace analysis entry point
-│   ├── run_cross_trace.py              #   Cross-trace analysis entry point
-│   ├── run_chrome_trace.py             #   Chrome trace JSON generation
-│   ├── run_summary_pdf.py              #   PDF report generation
-│   ├── run_jiras.py                    #   JIRA task creation
-│   ├── create_single_trace_config.py   #   Helper: generate single-trace config JSON
-│   ├── create_cross_trace_config.py    #   Helper: generate cross-trace config JSON
-│   ├── configs/                        #   Config dataclasses and examples
-│   │   ├── single_trace_config.py
-│   │   ├── single_trace_config_example.json
-│   │   ├── cross_trace_config.py
-│   │   ├── cross_trace_config_example.json
-│   │   └── claude_config.json
-│   ├── prompts/                        #   Prompt templates for all analysis steps
-│   │   ├── single_trace_prompts.py
-│   │   ├── cross_trace_prompts.py
-│   │   ├── chrome_trace_prompts.py
-│   │   ├── jira_prompts.py
-│   │   └── summary_pdf_prompts.py
-│   └── examples/                       #   Guides and example runs
-├── auto_profile/                       # Profiling orchestration
-│   ├── run_profile_core.sh             #   Main profiling script
-│   ├── run_profile_summary.py          #   Parse results into analysis configs
-│   ├── parse_run_config.py             #   Config parser and validator
-│   └── test_configs/                   #   JSON configs (infra, run, docker, GPUs)
-├── auto_code_gen/                      # AI-based code generation pipeline
-│   ├── run_code_gen.py                #   Pipeline orchestrator (all use cases)
-│   ├── code_gen_prompts.py            #   Shared prompt classes
-│   ├── code_gen_configs.py            #   PipelineConfig, CodeGenConfig
-│   ├── use_cases/                     #   Pluggable use case definitions
-│   │   ├── base.py                    #     UseCase ABC
-│   │   └── llm_framework.py           #     LLM framework optimization porting
-│   ├── configs/                       #   Example JSON configs
-│   ├── run_runtime_iters.py           #   Standalone runtime iteration runner
-│   ├── run_investigate_issue.py
-│   ├── run_fix_issue.py
-│   ├── run_work_items.py
-│   └── run_summary.py
+├── llm/                                # LLM use-case subtree (GPU inference frameworks) — see llm/README.md
+│   ├── auto_analyze/                       # Analysis pipeline
+│   │   ├── run_single_trace.py             #   Single-trace analysis entry point
+│   │   ├── run_cross_trace.py              #   Cross-trace analysis entry point
+│   │   ├── run_chrome_trace.py             #   Chrome trace JSON generation
+│   │   ├── run_summary_pdf.py              #   PDF report generation
+│   │   ├── run_jiras.py                    #   JIRA task creation
+│   │   ├── create_single_trace_config.py   #   Helper: generate single-trace config JSON
+│   │   ├── create_cross_trace_config.py    #   Helper: generate cross-trace config JSON
+│   │   ├── configs/                        #   Config dataclasses and examples
+│   │   │   ├── single_trace_config.py
+│   │   │   ├── single_trace_config_example.json
+│   │   │   ├── cross_trace_config.py
+│   │   │   ├── cross_trace_config_example.json
+│   │   │   └── claude_config.json
+│   │   ├── prompts/                        #   Prompt templates for all analysis steps
+│   │   │   ├── single_trace_prompts.py
+│   │   │   ├── cross_trace_prompts.py
+│   │   │   ├── chrome_trace_prompts.py
+│   │   │   ├── jira_prompts.py
+│   │   │   └── summary_pdf_prompts.py
+│   │   └── examples/                       #   Guides and example runs
+│   ├── auto_profile/                       # Profiling orchestration
+│   │   ├── run_profile_core.sh             #   Main profiling script
+│   │   ├── run_profile_summary.py          #   Parse results into analysis configs
+│   │   ├── parse_run_config.py             #   Config parser and validator
+│   │   └── test_configs/                   #   JSON configs (infra, run, docker, GPUs)
+│   ├── auto_code_gen/                      # AI-based code generation pipeline
+│   │   ├── run_code_gen.py                #   Pipeline orchestrator (all use cases)
+│   │   ├── code_gen_prompts.py            #   Shared prompt classes
+│   │   ├── code_gen_configs.py            #   PipelineConfig, CodeGenConfig
+│   │   ├── use_cases/                     #   Pluggable use case definitions
+│   │   │   ├── base.py                    #     UseCase ABC
+│   │   │   └── llm_framework.py           #     LLM framework optimization porting
+│   │   ├── configs/                       #   Example JSON configs
+│   │   ├── run_runtime_iters.py           #   Standalone runtime iteration runner
+│   │   ├── run_investigate_issue.py
+│   │   ├── run_fix_issue.py
+│   │   ├── run_work_items.py
+│   │   └── run_summary.py
+│   ├── auto_profile_server_client/     #   Framework-aware profiling client (docker/K8s)
+│   └── auto_config/                    #   vLLM/SGLang model inventory → run configs
 ├── auto_bug_fix/                       # Git-first bug fix backport pipeline
 │   ├── run_bug_fix.py                 #   Phase 0-5 orchestrator, entry point
 │   ├── bug_fix_config.py              #   Config dataclass
@@ -117,7 +120,7 @@ Analyze one framework's GPU trace to produce an annotated trace with high-level 
 
 ```bash
 # 1. Create the analysis config
-python -m auto_analyze.create_single_trace_config \
+python -m llm.auto_analyze.create_single_trace_config \
     --model nvidia/Kimi-K2.5-NVFP4 \
     --gpu-type B200 \
     --batch-size-range 1 \
@@ -131,7 +134,7 @@ python -m auto_analyze.create_single_trace_config \
     --output-config-file /path/to/config
 
 # 2. Run the analysis
-python -m auto_analyze.run_single_trace --config /path/to/config.json
+python -m llm.auto_analyze.run_single_trace --config /path/to/config.json
 
 # 3. Open the annotated trace in Perfetto
 #    -> /path/to/output/single_trace_transformer_block.json
@@ -145,7 +148,7 @@ Compare two single-trace results to identify performance differences:
 # 1. Run single-trace analysis for each commit (see above)
 
 # 2. Create the cross-trace config
-python -m auto_analyze.create_cross_trace_config \
+python -m llm.auto_analyze.create_cross_trace_config \
     --trace-result-dir /path/to/commit_a/analyze \
     --trace-result-dir /path/to/commit_b/analyze \
     --target-trace-id 0 \
@@ -153,7 +156,7 @@ python -m auto_analyze.create_cross_trace_config \
     --output-config-file /path/to/cross_config
 
 # 3. Run the cross-trace analysis
-python -m auto_analyze.run_cross_trace --config /path/to/cross_config.json
+python -m llm.auto_analyze.run_cross_trace --config /path/to/cross_config.json
 ```
 
 ## Analysis Pipeline
@@ -215,7 +218,7 @@ The pipeline runs 2-3 steps:
 Generates a single-trace config JSON from command-line parameters. Automatically infers framework name and run command from the run log.
 
 ```bash
-python -m auto_analyze.create_single_trace_config --help
+python -m llm.auto_analyze.create_single_trace_config --help
 ```
 
 Key parameters: `--model`, `--gpu-type`, `--trace-file`, `--run-log-file`, `--clean-source-code-path`, `--commit-id`, `--analyze-output-dir`, `--output-config-file`
@@ -225,7 +228,7 @@ Key parameters: `--model`, `--gpu-type`, `--trace-file`, `--run-log-file`, `--cl
 Generates a cross-trace config JSON from single-trace result directories. Validates that required output files exist.
 
 ```bash
-python -m auto_analyze.create_cross_trace_config --help
+python -m llm.auto_analyze.create_cross_trace_config --help
 ```
 
 Key parameters: `--trace-result-dir` (repeatable), `--target-trace-id`, `--analyze-output-dir`, `--output-config-file`, `--make-improvement-plan`
@@ -236,7 +239,7 @@ For automated profiling + analysis across multiple frameworks:
 
 ```bash
 ./run_all.sh <run_config>
-# Example: ./run_all.sh ./auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
+# Example: ./run_all.sh ./llm/auto_profile/test_configs/deepseek_r1_nvfp4/run_deepseek_r1_nvfp4.json
 ```
 
 This orchestrates:

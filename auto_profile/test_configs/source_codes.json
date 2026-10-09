@@ -1,5 +1,0 @@
-{
-    "vllm": "/home/alexm-redhat/code/vllm",
-    "sgl": "/home/alexm-redhat/code/sglang",
-    "trt": "/home/alexm-redhat/code/TensorRT-LLM"
-}
