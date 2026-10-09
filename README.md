@@ -17,7 +17,7 @@ Manual analysis of GPU profile traces is labor-intensive, particularly when corr
 
 ### Bug Fix Porting
 
-Backport a bug fix from one branch to another using Claude as the AI engine. The [`auto_bug_fix`](auto_bug_fix/README.md) pipeline is git-first: it exhausts deterministic mechanisms (`git cherry-pick`, mechanical re-apply) before letting an LLM touch anything, audits every LLM edit against deterministic evidence, and escalates to an autonomous build-test-fix loop only as a last resort.
+Backport a bug fix from one branch to another using Claude as the AI engine. The [`auto_bug_fix`](auto_bug_fix/README.md) pipeline is git-first: it exhausts deterministic mechanisms (`git cherry-pick`, mechanical re-apply) before letting an LLM touch anything, audits every LLM edit against deterministic evidence, and escalates to an autonomous build-test-fix loop only as a last resort. The vendored [`adapter/`](adapter/README.md) adds a hybrid mode on top: a fast conflict resolver does the bulk work, a deterministic gate (zero LLM) decides whether it is good enough to ship, and the amalgamator is invoked seeded — with the prior resolver's output and the gate's findings — only when the gate fires.
 
 ## Examples and Guides
 
@@ -37,6 +37,8 @@ Detailed guides with copy-pasteable commands are in `auto_analyze/examples/`:
 | Guide | Description |
 |-------|-------------|
 | [auto_bug_fix README](auto_bug_fix/README.md) | Git-first backport pipeline — phase-by-phase walkthrough, config reference, and example YAML configs |
+| [Hybrid adapter](adapter/README.md) | Fast-resolver → deterministic gate → seeded amalgamator → arbiter; the vendored hybrid backport flow |
+| [External-context contract](docs/external-context.md) | How the hybrid seeds the amalgamator: the Markdown format, per-phase prompt injection, and design invariants |
 
 ## Project Structure
 
@@ -97,6 +99,9 @@ ai_auto_analyze/
 │   ├── mechanical.py                  #   Mechanical conflict resolution
 │   ├── evidence.py                    #   Token/line-provenance audits
 │   └── configs/                       #   Example YAML configs
+├── adapter/                            # Hybrid backport adapter (vendored)
+│   ├── hybrid-backport.sh             #   Driver: resolver → gate → seeded amalgamator → arbiter
+│   └── check-backport.py              #   Deterministic gate + external-context emitter
 ├── run_all.sh                          # Full pipeline orchestrator
 └── run_all_scheduled.sh                # Scheduled pipeline execution
 ```
@@ -369,3 +374,33 @@ See **[auto_bug_fix/README.md](auto_bug_fix/README.md)** for the full setup and 
 # 2. Run
 python -m auto_bug_fix.run_bug_fix path/to/case.yaml
 ```
+
+### Hybrid mode (fast resolver + gate + seeded amalgamator)
+
+The repo also ships the **hybrid backport adapter** in
+[`adapter/`](adapter/README.md) — a vendored copy of the
+adapter-synthmerge-amalgamator project — which wraps `auto_bug_fix` in a
+faster, deterministic-first flow:
+
+```
+cherry-pick → conflict resolver (pluggable; tested: synthmerge)
+           → deterministic gate (check-backport.py, zero LLM)
+           → clean: ship            (~30 s typical)
+           → findings: amalgamator, seeded with the prior resolver's
+             output + the findings (external_context_file)
+           → deterministic arbiter: keep or reject the escalation
+```
+
+```bash
+# from this checkout (--amalgamator-root defaults to the repo root):
+./adapter/hybrid-backport.sh \
+    --repo /path/to/repo --upstream <fix-sha> \
+    --synthmerge-config endpoints.yaml --synthmerge-cache /var/hybrid/lmdb \
+    --python <python with this repo's deps> \
+    --model openai/<model-id> --api-base https://... --api-key-file key
+```
+
+Validated on a 400-case kernel-backport evaluation (same model at every
+stage): 42.5% combined exact/whitespace match against human results for
+the hybrid vs 35.5% for the fast resolver alone. Contract and design:
+**[docs/external-context.md](docs/external-context.md)**.
