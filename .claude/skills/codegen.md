@@ -19,8 +19,8 @@ The user provides:
 ## Instructions
 
 1. Parse the arguments to get the config path and resume flag. If no config provided:
-   - List available configs: `ls auto_code_gen/configs/*.json`
-   - Show the example: `auto_code_gen/configs/code_gen_config_example.json`
+   - List available configs: `ls llm/auto_code_gen/configs/*.json`
+   - Show the example: `llm/auto_code_gen/configs/code_gen_config_example.json`
    - Help them create a config if needed.
 
 2. Validate the config:
@@ -30,7 +30,7 @@ The user provides:
 
 3. Run the pipeline:
    ```bash
-   python -m auto_code_gen.run_code_gen --config "<config_path>" [--resume]
+   python -m llm.auto_code_gen.run_code_gen --config "<config_path>" [--resume]
    ```
 
 4. This is a long-running operation (can take hours for complex ports). Inform the user.
@@ -62,6 +62,6 @@ Key config fields:
 ## Example Usage
 
 ```
-/codegen auto_code_gen/configs/code_gen_config_example.json
-/codegen auto_code_gen/configs/code_gen_config_example.json --resume
+/codegen llm/auto_code_gen/configs/code_gen_config_example.json
+/codegen llm/auto_code_gen/configs/code_gen_config_example.json --resume
 ```

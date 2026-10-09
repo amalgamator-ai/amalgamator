@@ -3,7 +3,7 @@
 This is the common ground every pipeline builds on. A package that wants its
 own agent persona subclasses :class:`ClaudeConfig` and overrides
 ``system_prompt`` — see ``auto_bug_fix/claude_utils.py`` and
-``auto_code_gen/claude_utils.py``. Everything else (resume handling, message
+``llm/auto_code_gen/claude_utils.py``. Everything else (resume handling, message
 printing, timing, token accounting) is identical across pipelines and lives
 here only.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING
 
@@ -56,6 +57,20 @@ try:
     _HAS_CLAUDE_SDK = True
 except ImportError:
     _HAS_CLAUDE_SDK = False
+
+# Background-agent tracking in _run_steps. Imported separately because older
+# SDK releases lack these; the step loop degrades to plain result handling
+# when they are unavailable.
+try:
+    from claude_agent_sdk.types import (
+        TaskStartedMessage,
+        TaskNotificationMessage,
+        TaskUpdatedMessage,
+        TERMINAL_TASK_STATUSES,
+    )
+    _HAS_TASK_TRACKING = True
+except ImportError:
+    _HAS_TASK_TRACKING = False
 
 
 # Deliberately domain-neutral: a package that never picks a persona gets a
@@ -114,7 +129,6 @@ def _all_steps_complete(steps: list[PipelineStep], output_dir: str) -> bool:
 
 
 def _find_resume_index(steps: list[PipelineStep], output_dir: str) -> int:
-    last_completed = -1
     for i, step in enumerate(steps):
         if not step.output_files:
             continue
@@ -123,13 +137,25 @@ def _find_resume_index(steps: list[PipelineStep], output_dir: str) -> int:
             and os.path.getsize(os.path.join(output_dir, f)) > 0
             for f in step.output_files
         )
-        if all_exist:
-            last_completed = i
+        if not all_exist:
+            # Include immediately preceding setup/cleanup steps, but never
+            # delete and rerun the last successfully completed artifact step.
+            boundary = i
+            while boundary > 0 and not steps[boundary - 1].output_files:
+                boundary -= 1
+            return boundary
+    return len(steps)
 
-    if last_completed < 0:
-        return 0
-    # Re-run from last_completed since its files may be corrupted
-    return last_completed
+
+def _step_output_files_complete(step: PipelineStep, cwd: str) -> bool:
+    """Return True if all output_files for a step exist and are non-empty."""
+    if not step.output_files:
+        return True
+    for f in step.output_files:
+        path = f if os.path.isabs(f) else os.path.join(cwd, f)
+        if not os.path.isfile(path) or os.path.getsize(path) == 0:
+            return False
+    return True
 
 
 def print_claude_config(config: ClaudeConfig) -> None:
@@ -297,10 +323,30 @@ def build_claude_options(config: ClaudeConfig):
     )
 
 
+@asynccontextmanager
+async def claude_session(claude_config: ClaudeConfig):
+    """Create a reusable Claude session that can be passed to claude_run().
+
+    The session is built with the same options ``claude_run()`` would use
+    (including profile transport), so a session-aware caller behaves exactly
+    like the one-shot path minus per-step session recreation.
+    """
+    if not _HAS_CLAUDE_SDK:
+        raise ImportError(
+            "claude_agent_sdk is required for claude_session(). "
+            "Install it or run inside the Claude Code environment."
+        )
+    assert claude_config.cwd is not None, "claude_config must have CWD set"
+    options = build_claude_options(claude_config)
+    async with ClaudeSDKClient(options=options) as client:
+        yield client
+
+
 async def claude_run(
     claude_config: ClaudeConfig,
     steps: list,
     resume: bool = False,
+    client=None,
 ):
     if not _HAS_CLAUDE_SDK:
         raise ImportError(
@@ -373,31 +419,62 @@ async def claude_run(
         print("\n{}=== END RESUME SUMMARY ==={}".format(Fore.YELLOW, Style.RESET_ALL))
         print()
 
+    wall_start = time.time()
+
+    if client is not None:
+        result = await _run_steps(client, steps, start_index, cwd=claude_config.cwd)
+        wall_duration = time.time() - wall_start
+        for t in result:
+            t["wall_overhead"] = wall_duration - sum(s["duration"] for s in result)
+        return result
+
     options = build_claude_options(claude_config)
 
+    session_start = time.time()
+    async with ClaudeSDKClient(options=options) as new_client:
+        session_create_time = time.time() - session_start
+        result = await _run_steps(new_client, steps, start_index, cwd=claude_config.cwd)
+        wall_duration = time.time() - wall_start
+        for t in result:
+            t["session_create_time"] = session_create_time
+            t["wall_overhead"] = wall_duration - sum(s["duration"] for s in result)
+        return result
+
+
+async def _run_steps(active_client, steps, start_index, cwd=None):
+    """Run pipeline steps against an active SDK client.
+
+    Retries a step (up to 3 attempts) when the API reports an error and the
+    step's output files are missing; if files were written despite the error
+    the result is accepted. Tracks background agents spawned during a step
+    when the SDK exposes task-tracking types.
+    """
     step_timings = []
+    for i, step in enumerate(steps):
+        if i < start_index:
+            continue
 
-    async with ClaudeSDKClient(options=options) as client:
-        prompt_step = 0
-        for i, step in enumerate(steps):
-            if i < start_index:
-                continue
+        prompt = step.prompt
+        if isinstance(prompt, dict):
+            if "fn" not in prompt:
+                raise ValueError(
+                    "Unsupported dict step {!r}: only callable 'fn' steps are "
+                    "allowed. The former {{'cmd': '<source>'}} form was executed "
+                    "via eval() and has been removed.".format(step.name)
+                )
+            fn_name = prompt.get("fn_name", str(prompt["fn"]))
+            print("{} RUN CMD: {} {}".format(Fore.GREEN, fn_name, Style.RESET_ALL))
+            prompt["fn"]()
+            continue
 
-            prompt = step.prompt
-            if isinstance(prompt, dict):
-                if "fn" not in prompt:
-                    raise ValueError(
-                        "Unsupported dict step {!r}: only callable 'fn' steps are "
-                        "allowed. The former {{'cmd': '<source>'}} form was executed "
-                        "via eval() and has been removed.".format(step.name)
-                    )
-                fn_name = prompt.get("fn_name", str(prompt["fn"]))
-                print("{} RUN CMD: {} {}".format(Fore.GREEN, fn_name, Style.RESET_ALL))
-                prompt["fn"]()
-                continue
+        start_time = time.time()
+        step_usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": None}
+        max_retries = 3
 
-            prompt_step += 1
-            start_time = time.time()
+        for attempt in range(1, max_retries + 1):
+            if attempt > 1:
+                print("{}RETRY STEP {} ({}) — attempt {}/{}{}".format(
+                    Fore.YELLOW, i + 1, step.name, attempt, max_retries, Style.RESET_ALL))
 
             print("{} STEP {} ({}): SEND QUERY PROMPT:{}".format(
                 Fore.GREEN, i + 1, step.name, Style.RESET_ALL
@@ -419,10 +496,19 @@ async def claude_run(
                     Fore.CYAN, Style.RESET_ALL
                 )
             )
-            await client.query(prompt)
-            step_usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": None}
-            async for msg in client.receive_response():
+            await active_client.query(prompt)
+
+            # Track background agents spawned during this step. We must not advance
+            # to the next step until every spawned agent reaches a terminal state,
+            # otherwise their results (file writes) are lost when the next prompt
+            # resets the session's active work.
+            pending_tasks: set[str] = set()
+            result_received = False
+            api_error = False
+
+            async for msg in active_client.receive_response():
                 print_Message(msg)
+
                 if isinstance(msg, ResultMessage):
                     if msg.usage:
                         step_usage["input_tokens"] += msg.usage.get("input_tokens", 0)
@@ -430,31 +516,77 @@ async def claude_run(
                     if msg.total_cost_usd is not None:
                         previous_cost = step_usage["cost_usd"]
                         step_usage["cost_usd"] = (previous_cost if previous_cost is not None else 0.0) + msg.total_cost_usd
+                    # getattr: minimal test stubs may not carry is_error.
+                    if getattr(msg, "is_error", False):
+                        api_error = True
+                    result_received = True
+
+                elif _HAS_TASK_TRACKING and isinstance(msg, TaskStartedMessage):
+                    pending_tasks.add(msg.task_id)
+                    print("{}  [background] task started: {}{}".format(
+                        Fore.YELLOW, msg.task_id[:12], Style.RESET_ALL))
+
+                elif _HAS_TASK_TRACKING and isinstance(
+                    msg, (TaskNotificationMessage, TaskUpdatedMessage)
+                ):
+                    if msg.status in TERMINAL_TASK_STATUSES:
+                        pending_tasks.discard(msg.task_id)
+                        print("{}  [background] task {}: {}{}".format(
+                            Fore.YELLOW, msg.task_id[:12], msg.status, Style.RESET_ALL))
+
                 print(
                     "{}--------------------------------------------{}".format(
                         Fore.CYAN, Style.RESET_ALL
                     )
                 )
+
+                # Only advance to the next step when the main turn is complete
+                # AND all background agents have reached a terminal state.
+                if result_received and not pending_tasks:
+                    break
+
             print(
                 "{}============================================{}".format(
                     Fore.CYAN, Style.RESET_ALL
                 )
             )
 
-            duration_time = time.time() - start_time
-            step_timings.append({
-                "name": step.name,
-                "duration": duration_time,
-                "input_tokens": step_usage["input_tokens"],
-                "output_tokens": step_usage["output_tokens"],
-                "cost_usd": step_usage["cost_usd"],
-            })
-            mins, secs = divmod(int(duration_time), 60)
-            hrs, mins = divmod(mins, 60)
-            human_time = f"{hrs}h {mins}m {secs}s" if hrs else f"{mins}m {secs}s"
-            print("FINISHED STEP {} ({}): duration = {:.1f}s ({})".format(
-                i + 1, step.name, duration_time, human_time
-            ))
+            # If the API reported an error AND output files are missing, retry.
+            # If files were written despite the error (truncated after writes),
+            # accept the result and move on — no retry needed.
+            if api_error and not _step_output_files_complete(step, cwd or ""):
+                missing = [
+                    f for f in (step.output_files or [])
+                    if not os.path.isfile(
+                        f if os.path.isabs(f) else os.path.join(cwd or "", f)
+                    )
+                ]
+                print("{}API error on step {} ({}) and output files missing: {}{}".format(
+                    Fore.RED, i + 1, step.name, missing, Style.RESET_ALL))
+                if attempt < max_retries:
+                    print("{}Retrying...{}".format(Fore.YELLOW, Style.RESET_ALL))
+                    continue
+                else:
+                    print("{}Max retries reached for step {} ({}). Proceeding anyway.{}".format(
+                        Fore.RED, i + 1, step.name, Style.RESET_ALL))
+            break  # success or no retry condition met
+
+        duration_time = time.time() - start_time
+        step_timings.append({
+            "name": step.name,
+            "duration": duration_time,
+            "start_time": start_time,
+            "end_time": start_time + duration_time,
+            "input_tokens": step_usage["input_tokens"],
+            "output_tokens": step_usage["output_tokens"],
+            "cost_usd": step_usage["cost_usd"],
+        })
+        mins, secs = divmod(int(duration_time), 60)
+        hrs, mins = divmod(mins, 60)
+        human_time = f"{hrs}h {mins}m {secs}s" if hrs else f"{mins}m {secs}s"
+        print("FINISHED STEP {} ({}): duration = {:.1f}s ({})".format(
+            i + 1, step.name, duration_time, human_time
+        ))
 
     return step_timings
 

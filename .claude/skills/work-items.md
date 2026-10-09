@@ -15,7 +15,7 @@ The user provides:
 ## Instructions
 
 1. Parse the arguments. If no config provided:
-   - List available configs: `ls auto_code_gen/configs/*.json`
+   - List available configs: `ls llm/auto_code_gen/configs/*.json`
    - Ask the user to provide one.
 
 2. Load the config to find the output directory:
@@ -32,13 +32,13 @@ The user provides:
 
 4. Check example work item scripts for patterns:
    ```bash
-   ls auto_code_gen/run_work_item_*.sh
+   ls llm/auto_code_gen/run_work_item_*.sh
    ```
    These show patterns for error investigation, PR review, and rebase operations.
 
 5. Run the work items:
    ```bash
-   python -m auto_code_gen.run_work_items \
+   python -m llm.auto_code_gen.run_work_items \
      --config "<config_path>" \
      --code-gen-dir "<output_dir>" \
      --work-items-file "<work_items_file>"
@@ -49,5 +49,5 @@ The user provides:
 ## Example Usage
 
 ```
-/work-items auto_code_gen/configs/code_gen_config_example.json
+/work-items llm/auto_code_gen/configs/code_gen_config_example.json
 ```

@@ -16,7 +16,7 @@ The user provides:
 1. Parse the argument to get the config path. If not provided:
    - Find available cross-trace configs with improvement plans:
      ```bash
-     find auto_analyze/results -name "cross_trace_config.json" 2>/dev/null | head -20
+     find llm/auto_analyze/results -name "cross_trace_config.json" 2>/dev/null | head -20
      ```
    - Ask the user to pick one.
 
@@ -24,7 +24,7 @@ The user provides:
 
 3. Run the JIRA creator:
    ```bash
-   python -m auto_analyze.run_jiras --cross-config "<config_path>"
+   python -m llm.auto_analyze.run_jiras --cross-config "<config_path>"
    ```
 
 4. Report results:
@@ -34,5 +34,5 @@ The user provides:
 ## Example Usage
 
 ```
-/jiras auto_analyze/results/test_results/test_1/cross_trace_config.json
+/jiras llm/auto_analyze/results/test_results/test_1/cross_trace_config.json
 ```

@@ -11,7 +11,7 @@ from common.claude_utils import (
     claude_run,
 )
 from auto_bug_fix.claude_utils import BugFixClaudeConfig, BUG_FIX_SYSTEM_PROMPT
-from auto_code_gen.claude_utils import CodeGenClaudeConfig
+from llm.auto_code_gen.claude_utils import CodeGenClaudeConfig
 
 
 BASE_KWARGS = dict(
@@ -71,7 +71,7 @@ class TestLegacyBehaviourIsPinned:
     """Pipelines that predate configurable personas must not have drifted."""
 
     def test_auto_code_gen_persona_is_unchanged(self):
-        from auto_code_gen.code_gen_configs import CodeGenConfig
+        from llm.auto_code_gen.code_gen_configs import CodeGenConfig
         cfg = CodeGenConfig(output_dir="/tmp", thinking_mode="deep")
         assert cfg.make_claude_config().system_prompt == _LEGACY_HARDCODED_PROMPT
 

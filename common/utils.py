@@ -9,8 +9,8 @@ from pathlib import Path
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS_DIR = os.path.join(_PROJECT_ROOT, "logs")
 
-PROFILE_RESULTS_DIR = "./auto_profile/results"
-_OUTPUT_DIR_PREFIX = "./auto_analyze/results/results_analyze_"
+PROFILE_RESULTS_DIR = "./llm/auto_profile/results"
+_OUTPUT_DIR_PREFIX = "./llm/auto_analyze/results/results_analyze_"
 
 
 def test_name_from_run_config(run_config: str) -> str:

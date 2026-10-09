@@ -17,14 +17,14 @@ The user provides:
 ## Instructions
 
 1. Parse the arguments for the config path and resume flag. If not provided:
-   - List available configs: `ls auto_code_gen/configs/*.json`
+   - List available configs: `ls llm/auto_code_gen/configs/*.json`
    - Ask the user to provide one.
 
 2. Validate the config exists and contains the required fields.
 
 3. Run runtime iterations:
    ```bash
-   python -m auto_code_gen.run_runtime_iters --config "<config_path>" [--resume]
+   python -m llm.auto_code_gen.run_runtime_iters --config "<config_path>" [--resume]
    ```
 
 4. Report results:
@@ -35,6 +35,6 @@ The user provides:
 ## Example Usage
 
 ```
-/runtime auto_code_gen/configs/code_gen_config_example.json
-/runtime auto_code_gen/configs/code_gen_config_example.json --resume
+/runtime llm/auto_code_gen/configs/code_gen_config_example.json
+/runtime llm/auto_code_gen/configs/code_gen_config_example.json --resume
 ```

@@ -21,9 +21,9 @@ The config type is auto-detected from the JSON content.
 1. Parse the argument to get the config path. If not provided:
    - Check if there are generated configs from a previous parse step:
      ```bash
-     find auto_analyze/results -name "single_trace_config_*.json" -o -name "cross_trace_config.json" 2>/dev/null | head -20
+     find llm/auto_analyze/results -name "single_trace_config_*.json" -o -name "cross_trace_config.json" 2>/dev/null | head -20
      ```
-   - Also check example configs: `ls auto_analyze/configs/*_example.json`
+   - Also check example configs: `ls llm/auto_analyze/configs/*_example.json`
    - Ask the user to pick one.
 
 2. Determine the config type by reading the file:
@@ -34,12 +34,12 @@ The config type is auto-detected from the JSON content.
 
    **Single-trace:**
    ```bash
-   python -m auto_analyze.run_single_trace --config "<config_path>"
+   python -m llm.auto_analyze.run_single_trace --config "<config_path>"
    ```
 
    **Cross-trace:**
    ```bash
-   python -m auto_analyze.run_cross_trace --config "<config_path>"
+   python -m llm.auto_analyze.run_cross_trace --config "<config_path>"
    ```
 
    Add `--no-clean` if the user requested it.
@@ -53,6 +53,6 @@ The config type is auto-detected from the JSON content.
 ## Example Usage
 
 ```
-/analyze auto_analyze/results/results_analyze_deepseek_r1_nvfp4/test_results/test_1/single_trace_config_vllm.json
-/analyze auto_analyze/results/results_analyze_deepseek_r1_nvfp4/test_results/test_1/cross_trace_config.json
+/analyze llm/auto_analyze/results/results_analyze_deepseek_r1_nvfp4/test_results/test_1/single_trace_config_vllm.json
+/analyze llm/auto_analyze/results/results_analyze_deepseek_r1_nvfp4/test_results/test_1/cross_trace_config.json
 ```

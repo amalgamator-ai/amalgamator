@@ -15,7 +15,7 @@ The user provides:
 ## Instructions
 
 1. Parse the argument for the config path. If not provided:
-   - List available configs: `ls auto_code_gen/configs/*.json`
+   - List available configs: `ls llm/auto_code_gen/configs/*.json`
    - Ask the user to provide one.
 
 2. Load the config to find the output directory:
@@ -30,7 +30,7 @@ The user provides:
 
 4. Run the fix:
    ```bash
-   python -m auto_code_gen.run_fix_issue \
+   python -m llm.auto_code_gen.run_fix_issue \
      --config "<config_path>" \
      --high_level_code_plan_file "<plan_file>" \
      --prs_dir "<prs_dir>" \
@@ -45,5 +45,5 @@ The user provides:
 ## Example Usage
 
 ```
-/fix auto_code_gen/configs/code_gen_config_example.json
+/fix llm/auto_code_gen/configs/code_gen_config_example.json
 ```
