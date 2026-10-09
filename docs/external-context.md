@@ -2,7 +2,10 @@
 
 ## Motivation
 
-Fast per-conflict resolvers (synthmerge) complete cherry-picks in seconds
+The prior resolver is a **pluggable front-end**: anything that finishes a
+cherry-pick and leaves a commit on top of a known base — plain git on a
+clean pick, a human, a mechanical applier, or an LLM conflict resolver.
+Fast per-conflict resolvers complete cherry-picks in seconds
 but fail exact-match on hard backports with a small number of residual
 defects. A hard-case study (the 8 hardest cases, 27 residual hunks) showed
 the defects cluster into a taxonomy where roughly half are mechanically
@@ -13,7 +16,10 @@ The hybrid design: let the fast resolver do the bulk of the work, run
 deterministic checks (git grep based, no LLM, no build) over its result,
 and escalate to the full amalgamator pipeline **only** when the checks
 fail — handing amalgamator both the prior resolver's output and the
-check findings so it does not start from zero.
+check findings so it does not start from zero. The resolver this design
+was built and validated with is
+[synthmerge](https://gitlab.com/aarcange/synthmerge) (all numbers below);
+the adapter's gate, escalation and arbiter are resolver-agnostic.
 
 Validated at scale: on a 400-case kernel-backport evaluation with the
 same model at every stage, the hybrid scored 42.5% combined
@@ -72,7 +78,10 @@ Rules that bit us, now part of the contract:
 - **Metadata is regexed from the prior resolver's captured stdout**
   (conflict count, relocation retries, extra-conflict-lines escalation,
   duration, endpoint label). It is provenance for orientation, never
-  evidence.
+  evidence. The resolver front-end is pluggable; unrecognized or absent
+  stdout degrades every field to `unknown` rather than claiming a tool —
+  `resolver: synthmerge` appears only when synthmerge's log is recognized
+  (tested resolver: [synthmerge](https://gitlab.com/aarcange/synthmerge)).
 
 ## Prompt injection (the "strategy pattern")
 
@@ -145,9 +154,9 @@ flowchart TD
     input["backport request<br/>(repo @ base, upstream fix sha)"]
     input --> orch["Adapter driver — hybrid-backport.sh<br/>(adapter repo)"]
 
-    subgraph SM["synthmerge worktree @ base — ephemeral, driver-owned"]
+    subgraph SM["resolver worktree @ base — PLUGGABLE front-end<br/>(tested: synthmerge) — ephemeral, driver-owned"]
         cp["git cherry-pick -x &lt;upstream&gt;"]
-        resolve["LLM per-conflict resolution<br/>(~1s each, LMDB-cached)"]
+        resolve["conflict resolution<br/>(pluggable resolver; tested: synthmerge,<br/>~1s/conflict, LMDB-cached)"]
         smcommit["cherry-pick --continue<br/>→ ephemeral commit"]
         cp --> resolve --> smcommit
     end

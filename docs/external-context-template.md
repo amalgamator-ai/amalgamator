@@ -22,13 +22,18 @@ Rules (see `docs/external-context.md` for the full contract):
 - Findings may carry inline upstream-tree ground truth and advisory
   discipline ("predates the patch — do not remove…") — obey the
   instruction inside the finding, not just its existence.
+- `resolver:` in the Metadata names the prior resolver — `synthmerge`
+  when its log format is recognized, `unknown` for anything else. The
+  front-end is pluggable (tested with
+  [synthmerge](https://gitlab.com/aarcange/synthmerge)); absent or
+  unrecognized stdout degrades every Metadata field to `unknown`.
 
 ---
 
 # External Resolver Context
 
 ## Metadata
-- resolver: synthmerge 0.3.15
+- resolver: synthmerge
 - endpoint: Turnstile DeepSeek V4 Flash
 - command: synthmerge -c /path/to/config.yaml --cache /path/to/cache --vibe --continue
 - conflicts: 26 across 11 files
