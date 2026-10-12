@@ -1306,8 +1306,6 @@ def _print_detailed_table(all_step_timings, total_duration, output_dir=None):
     )
 
     max_dur_len = max(len(str(r["dur_raw"])) for r in rows)
-    max(len(str(r["input"])) for r in rows)
-    max(len(str(r["output"])) for r in rows)
     w = 120
 
     lines = []

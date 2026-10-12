@@ -192,9 +192,6 @@ def _print_phase_summary(
     phase_results, all_step_timings, total_duration, output_dir=None
 ):
     """Print a summary table of all phases with iteration counts and convergence status."""
-    sum(s.get("input_tokens", 0) for s in all_step_timings)
-    sum(s.get("output_tokens", 0) for s in all_step_timings)
-    sum(s.get("cost_usd", 0.0) for s in all_step_timings)
 
     rows = []
     for phase in phase_results:

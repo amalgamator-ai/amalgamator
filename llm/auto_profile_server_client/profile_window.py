@@ -37,7 +37,6 @@ def find_decode_window(
     t0 = samples[0].timestamp
     times = [s.timestamp - t0 for s in samples]
     running = [s.requests_running for s in samples]
-    [s.generation_tokens_total for s in samples]
 
     decode_start = _find_prefill_end(times, running, total_requests)
     decode_end = _find_decode_end(times, running, decode_start)
