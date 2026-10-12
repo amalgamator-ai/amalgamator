@@ -13,8 +13,10 @@ permissions:
   contents: read
 
 jobs:
-  lint-type-test:
-    name: Format / Lint / Type / Test
+  # Format/lint/type-check run once, on the minimum supported Python; the
+  # pytest matrix below covers the supported range.
+  lint-type:
+    name: Format / Lint / Type (Python 3.12)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -38,7 +40,7 @@ jobs:
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Install dependencies
-        run: uv sync --extra test --extra dev --locked
+        run: uv sync --extra test --extra dev --locked --python "3.12"
 
       # Single source of truth for format/lint tool versions: the pinned revs
       # in .pre-commit-config.yaml. CI runs the same hooks developers do, so
@@ -52,6 +54,36 @@ jobs:
       # isolated env), so it runs directly from the locked uv environment.
       - name: Type check (pyrefly)
         run: uv run pyrefly check
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor catches >=3.12-only breakage early; a current release
+        # catches deprecations heading for the next floor bump.
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          # Keep the uv caches of the matrix legs separate (they hold
+          # interpreter-specific wheels).
+          cache-suffix: py${{ matrix.python-version }}
+
+      # --python pins the sync to the matrix interpreter (the one
+      # setup-python just installed) instead of whatever else uv finds.
+      - name: Install dependencies
+        run: uv sync --extra test --extra dev --locked --python "${{ matrix.python-version }}"
 
       - name: Test (pytest)
         run: uv run pytest

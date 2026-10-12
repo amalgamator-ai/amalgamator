@@ -375,8 +375,9 @@ python -m auto_bug_fix.run_bug_fix path/to/case.yaml
 
 ## Development
 
-The CI gate runs, in order: **pre-commit** (black + ruff + hygiene hooks),
-**pyrefly** (type check), and **pytest**. All three must pass.
+The CI gate runs **pre-commit** (black + ruff + hygiene hooks) and **pyrefly**
+(type check) on Python 3.12, then **pytest** on a **3.12 / 3.14 matrix**. All
+jobs must pass.
 
 ### Environment setup (uv or pip, both first-class)
 
