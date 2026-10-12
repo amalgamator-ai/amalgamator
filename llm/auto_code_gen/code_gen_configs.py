@@ -5,22 +5,13 @@ import subprocess
 from dataclasses import dataclass, field
 
 from common.claude_utils import ClaudeConfig
-from llm.auto_code_gen.claude_utils import CodeGenClaudeConfig
-from llm.auto_code_gen.agents.config import MODE_PARAMS, resolve_agent_config
-
-from llm.auto_analyze.configs.cross_trace_config import (
-    CrossTraceConfig,
-    TraceResult,
-    CROSS_IMPROVEMENT_FILE,
-)
-
-from llm.auto_analyze.configs.single_trace_config import (
-    MEDIAN_BLOCK_FILE,
-    HIGH_LEVEL_OPS_FILE,
-)
-
 from common.iteration_utils import resolve_output_file
-
+from llm.auto_analyze.configs.cross_trace_config import (
+    CROSS_IMPROVEMENT_FILE,
+    CrossTraceConfig,
+)
+from llm.auto_code_gen.agents.config import MODE_PARAMS, resolve_agent_config
+from llm.auto_code_gen.claude_utils import CodeGenClaudeConfig
 
 _CODE_PORT_DISALLOWED_MODULES_MAP = {
     "sgl": ["sglang", "sgl_kernel", "sgl*"],
@@ -34,7 +25,9 @@ def _infer_disallowed_modules(source_framework: str) -> list[str]:
     return _CODE_PORT_DISALLOWED_MODULES_MAP.get(source_framework, [source_framework])
 
 
-def _run_git(args: list[str], cwd: str, check: bool = True) -> subprocess.CompletedProcess:
+def _run_git(
+    args: list[str], cwd: str, check: bool = True
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git"] + args,
         cwd=cwd,
@@ -97,8 +90,11 @@ def _ensure_worktree(source_dir: str, worktree_name: str) -> str:
             f"Cannot create worktree {worktree}: {source_dir} is not a git "
             f"repository ({head.stderr.strip()})"
         )
-    result = _run_git(["worktree", "add", "--detach", worktree,
-                       head.stdout.strip()], source_dir, check=False)
+    result = _run_git(
+        ["worktree", "add", "--detach", worktree, head.stdout.strip()],
+        source_dir,
+        check=False,
+    )
     if result.returncode != 0:
         raise RuntimeError(
             f"git worktree add failed for {worktree}: {result.stderr.strip()}"
@@ -125,8 +121,9 @@ def _apply_runtime_bench_num_prompts(run_command: str, num_prompts: int) -> str:
     # (--num-prompts is not a flag there). Support both " " and "=" forms.
     for flag in ("--num-prompts", "--num-samples"):
         for pattern, repl in (
-                (r"{} (\d+)".format(flag), "{} {}".format(flag, num_prompts)),
-                (r"{}=(\d+)".format(flag), "{}={}".format(flag, num_prompts))):
+            (rf"{flag} (\d+)", f"{flag} {num_prompts}"),
+            (rf"{flag}=(\d+)", f"{flag}={num_prompts}"),
+        ):
             rewritten, n = re.subn(pattern, repl, run_command)
             if n:
                 return rewritten
@@ -155,9 +152,13 @@ class PipelineConfig:
 
     def make_agent_config(self, agent_config_path=None):
         if agent_config_path:
-            self.agent_config_path = os.path.abspath(os.path.expanduser(agent_config_path))
+            self.agent_config_path = os.path.abspath(
+                os.path.expanduser(agent_config_path)
+            )
         return resolve_agent_config(
-            self.agent, cwd=self.output_dir, mode=self.thinking_mode,
+            self.agent,
+            cwd=self.output_dir,
+            mode=self.thinking_mode,
             config_path=self.config_json_path,
             agent_config_path=self.agent_config_path or None,
         )
@@ -177,11 +178,11 @@ class CodeGenConfig(PipelineConfig):
     # Only override if your cluster differs. remote_disable_env_var is intentionally
     # absent — it is auto-detected at runtime from patch/summary files.
     remote_namespace: str = ""
-    remote_pvc_name: str = "vllm-workspace"    # RWX NFS: vllm source, pip-cache, output
-    remote_model_pvc_name: str = ""            # required when runtime_backend="remote":
-                                               # HF model cache PVC mounted at /model-cache.
-                                               # Sets HF_HOME=/model-cache. Model is downloaded
-                                               # there on first run if not already cached.
+    remote_pvc_name: str = "vllm-workspace"  # RWX NFS: vllm source, pip-cache, output
+    remote_model_pvc_name: str = ""  # required when runtime_backend="remote":
+    # HF model cache PVC mounted at /model-cache.
+    # Sets HF_HOME=/model-cache. Model is downloaded
+    # there on first run if not already cached.
     remote_image: str = "quay.io/example/vllm-sandbox-nsys:latest"
     remote_gpu_count: int = 4
     remote_gpu_product: str = "NVIDIA-B200"
@@ -232,7 +233,7 @@ class CodeGenConfig(PipelineConfig):
     target_run_command: str = ""
 
     @classmethod
-    def from_json(cls, path: str) -> "CodeGenConfig":
+    def from_json(cls, path: str) -> CodeGenConfig:
         with open(path) as f:
             data = json.load(f)
 
@@ -242,10 +243,16 @@ class CodeGenConfig(PipelineConfig):
         if not cross_trace_config_path:
             errors.append('"cross_trace_config" is required.')
         elif not os.path.isfile(cross_trace_config_path):
-            errors.append(f'"cross_trace_config" file not found: {cross_trace_config_path}')
+            errors.append(
+                f'"cross_trace_config" file not found: {cross_trace_config_path}'
+            )
 
         improvement_id = data.get("improvement_id")
-        if improvement_id is None or not isinstance(improvement_id, int) or improvement_id <= 0:
+        if (
+            improvement_id is None
+            or not isinstance(improvement_id, int)
+            or improvement_id <= 0
+        ):
             errors.append('"improvement_id" must be a positive integer.')
 
         source_code_dir = data.get("source_code_dir", "")
@@ -259,11 +266,17 @@ class CodeGenConfig(PipelineConfig):
             errors.append('"output_dir" is required.')
 
         num_code_port_plan_iterations = data.get("num_code_port_plan_iterations", 3)
-        if not isinstance(num_code_port_plan_iterations, int) or num_code_port_plan_iterations <= 0:
+        if (
+            not isinstance(num_code_port_plan_iterations, int)
+            or num_code_port_plan_iterations <= 0
+        ):
             errors.append('"num_code_port_plan_iterations" must be a positive integer.')
 
         num_test_plan_iterations = data.get("num_test_plan_iterations", 3)
-        if not isinstance(num_test_plan_iterations, int) or num_test_plan_iterations <= 0:
+        if (
+            not isinstance(num_test_plan_iterations, int)
+            or num_test_plan_iterations <= 0
+        ):
             errors.append('"num_test_plan_iterations" must be a positive integer.')
 
         num_code_gen_iterations = data.get("num_code_gen_iterations", 3)
@@ -275,26 +288,41 @@ class CodeGenConfig(PipelineConfig):
             errors.append('"num_runtime_iterations" must be a positive integer.')
 
         gpu_wait_timeout_minutes = data.get("gpu_wait_timeout_minutes", 30)
-        if not isinstance(gpu_wait_timeout_minutes, (int, float)) or gpu_wait_timeout_minutes <= 0:
+        if (
+            not isinstance(gpu_wait_timeout_minutes, (int, float))
+            or gpu_wait_timeout_minutes <= 0
+        ):
             errors.append('"gpu_wait_timeout_minutes" must be a positive number.')
 
         runtime_bench_num_prompts = data.get("runtime_bench_num_prompts", 0)
-        if not isinstance(runtime_bench_num_prompts, int) or runtime_bench_num_prompts < 0:
-            errors.append('"runtime_bench_num_prompts" must be a non-negative integer (0 = keep the trace value).')
+        if (
+            not isinstance(runtime_bench_num_prompts, int)
+            or runtime_bench_num_prompts < 0
+        ):
+            errors.append(
+                '"runtime_bench_num_prompts" must be a non-negative integer (0 = keep the trace value).'
+            )
 
         use_knowledge_base = data.get("use_knowledge_base", False)
         if not isinstance(use_knowledge_base, bool):
             errors.append('"use_knowledge_base" must be a boolean.')
 
         max_investigation_revisions = data.get("max_investigation_revisions", 2)
-        if not isinstance(max_investigation_revisions, int) or max_investigation_revisions < 0:
-            errors.append('"max_investigation_revisions" must be a non-negative integer.')
+        if (
+            not isinstance(max_investigation_revisions, int)
+            or max_investigation_revisions < 0
+        ):
+            errors.append(
+                '"max_investigation_revisions" must be a non-negative integer.'
+            )
 
         use_smaller_model_for_runtime = data.get("use_smaller_model_for_runtime", False)
         if not isinstance(use_smaller_model_for_runtime, bool):
             errors.append('"use_smaller_model_for_runtime" must be a boolean.')
 
-        disable_new_feature_for_runtime = data.get("disable_new_feature_for_runtime", False)
+        disable_new_feature_for_runtime = data.get(
+            "disable_new_feature_for_runtime", False
+        )
         if not isinstance(disable_new_feature_for_runtime, bool):
             errors.append('"disable_new_feature_for_runtime" must be a boolean.')
 
@@ -320,16 +348,18 @@ class CodeGenConfig(PipelineConfig):
         remote_vllm_subdir = str(data.get("remote_vllm_subdir", "")).strip("/")
         if remote_vllm_subdir:
             import re as _re
+
             if not _re.fullmatch(r"[A-Za-z0-9._-]+", remote_vllm_subdir):
                 errors.append(
                     '"remote_vllm_subdir" must be a single path segment '
-                    '(letters, digits, ".", "_", "-"): {!r}'.format(remote_vllm_subdir)
+                    f'(letters, digits, ".", "_", "-"): {remote_vllm_subdir!r}'
                 )
         elif output_dir:
             # Default: "pvc_" + the run's own name, so the PVC tree is
             # self-identifying and concurrent runs never share /workspace/vllm.
             remote_vllm_subdir = "pvc_" + (
-                os.path.basename(os.path.normpath(output_dir)) or "vllm")
+                os.path.basename(os.path.normpath(output_dir)) or "vllm"
+            )
         remote_extra_env = []
         for entry in data.get("remote_extra_env", []) or []:
             entry = str(entry)
@@ -427,7 +457,8 @@ class CodeGenConfig(PipelineConfig):
         self.source_commit_id = source_trace.commit_id
         self.source_framework_code_dir = source_trace.framework_source_code
         self.target_run_command = _apply_runtime_bench_num_prompts(
-            target_trace.run_command, self.runtime_bench_num_prompts)
+            target_trace.run_command, self.runtime_bench_num_prompts
+        )
 
         self.model = target_trace.model
         self.gpu_type = target_trace.gpu_type
@@ -448,7 +479,8 @@ class CodeGenConfig(PipelineConfig):
         # tree in place, so concurrent runs need separate working trees.
         run_name = os.path.basename(os.path.normpath(self.output_dir)) or "run"
         self.source_code_dir = _ensure_worktree(
-            self.source_code_dir, "vllm_worktree_" + run_name,
+            self.source_code_dir,
+            "vllm_worktree_" + run_name,
         )
         source_codes = []
         for idx, trace in ordered:
@@ -478,9 +510,7 @@ class CodeGenConfig(PipelineConfig):
         self.plan_file = plan_path
 
         if not self.disallowed_modules:
-            self.disallowed_modules = (
-                _infer_disallowed_modules(self.source_framework)
-            )
+            self.disallowed_modules = _infer_disallowed_modules(self.source_framework)
 
     def _prepare_branch(self, repo_dir: str, commit: str, branch: str, label: str):
         if not commit:
@@ -494,7 +524,9 @@ class CodeGenConfig(PipelineConfig):
 
         result = _run_git(["rev-parse", "--is-inside-work-tree"], repo_dir, check=False)
         if result.returncode != 0:
-            raise RuntimeError(f"{label} code directory is not a git repository: {repo_dir}")
+            raise RuntimeError(
+                f"{label} code directory is not a git repository: {repo_dir}"
+            )
 
         result = _run_git(["cat-file", "-t", commit], repo_dir, check=False)
         if result.returncode != 0:
@@ -512,7 +544,9 @@ class CodeGenConfig(PipelineConfig):
 
             head = _run_git(["rev-parse", "HEAD"], repo_dir).stdout.strip()
             if head == commit:
-                print(f"  [{label}] Branch HEAD is at the tested commit ({commit[:12]}).")
+                print(
+                    f"  [{label}] Branch HEAD is at the tested commit ({commit[:12]})."
+                )
             else:
                 ancestor_check = _run_git(
                     ["merge-base", "--is-ancestor", commit, head],
@@ -559,7 +593,10 @@ class CodeGenConfig(PipelineConfig):
 
         print(f"Preparing source framework ({self.source_framework}) branch...")
         self._prepare_branch(
-            self.source_framework_code_dir, self.source_commit_id, source_branch, "source"
+            self.source_framework_code_dir,
+            self.source_commit_id,
+            source_branch,
+            "source",
         )
 
     def get_target_branch_name(self) -> str:
@@ -587,7 +624,8 @@ class CodeGenConfig(PipelineConfig):
             head = _run_git(["rev-parse", "HEAD"], cwd).stdout.strip()
             ancestor_check = _run_git(
                 ["merge-base", "--is-ancestor", self.target_commit_id, head],
-                cwd, check=False,
+                cwd,
+                check=False,
             )
             if ancestor_check.returncode == 0:
                 print(f"Target repo on correct branch '{branch}', HEAD={head[:12]}")
@@ -601,7 +639,8 @@ class CodeGenConfig(PipelineConfig):
 
         status = _run_git(["status", "--porcelain"], cwd, check=False)
         dirty = [
-            l for l in status.stdout.strip().splitlines()
+            l
+            for l in status.stdout.strip().splitlines()
             if l and not l.startswith("??")
         ]
         if dirty:
@@ -650,7 +689,6 @@ class CodeGenConfig(PipelineConfig):
         )
 
 
-
 def load_config_and_use_case(path: str):
     """Load a pipeline config and its corresponding UseCase from a JSON file.
 
@@ -664,6 +702,7 @@ def load_config_and_use_case(path: str):
 
     if use_case_name == "llm_framework":
         from llm.auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase
+
         return CodeGenConfig.from_json(path), LLMFrameworkUseCase()
     if use_case_name == "bug_fix":
         raise ValueError(

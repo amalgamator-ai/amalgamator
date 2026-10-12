@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-type-test:
+    name: Format / Lint / Type / Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # pre-commit builds its own isolated envs for the black/ruff/hygiene
+      # hooks; cache them so CI does not rebuild on every run.
+      - name: Cache pre-commit environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Install dependencies
+        run: uv sync --extra test --extra dev --locked
+
+      # Single source of truth for format/lint tool versions: the pinned revs
+      # in .pre-commit-config.yaml. CI runs the same hooks developers do, so
+      # the two can never drift. Fixing hooks (black, ruff --fix) fail here if
+      # they modify anything, and --show-diff-on-failure prints what changed.
+      - name: Format & lint (pre-commit)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+      # pyrefly is env-coupled (it resolves the project's third-party imports
+      # and would report bogus missing-import errors from a pre-commit-managed
+      # isolated env), so it runs directly from the locked uv environment.
+      - name: Type check (pyrefly)
+        run: uv run pyrefly check
+
+      - name: Test (pytest)
+        run: uv run pytest

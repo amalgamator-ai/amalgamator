@@ -30,15 +30,21 @@ def check_stability(
 
     parts = []
     if not tpot_stable:
-        parts.append(f"TPOT diff {tpot_diff:.1f}% > {threshold_pct}% "
-                     f"(a={tpot_a:.2f}ms, b={tpot_b:.2f}ms)")
+        parts.append(
+            f"TPOT diff {tpot_diff:.1f}% > {threshold_pct}% "
+            f"(a={tpot_a:.2f}ms, b={tpot_b:.2f}ms)"
+        )
     if not ttft_stable:
-        parts.append(f"TTFT diff {ttft_diff:.1f}% > {threshold_pct}% "
-                     f"(a={ttft_a:.2f}ms, b={ttft_b:.2f}ms)")
+        parts.append(
+            f"TTFT diff {ttft_diff:.1f}% > {threshold_pct}% "
+            f"(a={ttft_a:.2f}ms, b={ttft_b:.2f}ms)"
+        )
 
     if stable:
-        msg = (f"Stable: TPOT diff={tpot_diff:.1f}%, TTFT diff={ttft_diff:.1f}% "
-               f"(threshold={threshold_pct}%)")
+        msg = (
+            f"Stable: TPOT diff={tpot_diff:.1f}%, TTFT diff={ttft_diff:.1f}% "
+            f"(threshold={threshold_pct}%)"
+        )
     else:
         msg = f"Unstable: {'; '.join(parts)}"
 
@@ -66,7 +72,8 @@ def average_results(a: BenchmarkResult, b: BenchmarkResult) -> BenchmarkResult:
     return BenchmarkResult(
         ttft_ms=(a.ttft_ms + b.ttft_ms) / 2,
         tpot_ms=(a.tpot_ms + b.tpot_ms) / 2,
-        throughput_tok_per_sec=(a.throughput_tok_per_sec + b.throughput_tok_per_sec) / 2,
+        throughput_tok_per_sec=(a.throughput_tok_per_sec + b.throughput_tok_per_sec)
+        / 2,
         ttft_p50_ms=(a.ttft_p50_ms + b.ttft_p50_ms) / 2,
         ttft_p90_ms=(a.ttft_p90_ms + b.ttft_p90_ms) / 2,
         ttft_p99_ms=(a.ttft_p99_ms + b.ttft_p99_ms) / 2,

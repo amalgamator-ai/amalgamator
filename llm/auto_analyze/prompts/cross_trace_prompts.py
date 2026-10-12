@@ -1,17 +1,16 @@
 import os
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar
 
+from common.claude_utils import PipelineStep
+from common.iteration_utils import prev_iteration_section as _prev_iteration_section
 from llm.auto_analyze.configs.cross_trace_config import (
-    CrossTraceConfig,
-    TraceResult,
-    CROSS_MATCHING_FILE,
     CROSS_COMPARE_FILE,
     CROSS_IMPROVEMENT_FILE,
+    CROSS_MATCHING_FILE,
+    CrossTraceConfig,
+    TraceResult,
 )
-from common.iteration_utils import prev_iteration_section as _prev_iteration_section
-from common.claude_utils import PipelineStep
-
 
 # ---------------------------------------------------------------------------
 # File prefix constants for versioned iteration outputs
@@ -63,8 +62,8 @@ def _build_traces_context(
 class MatchMedianTransformerBlocksPrompt:
     config: CrossTraceConfig
     output_file: str
-    prev_output_file: Optional[str] = None
-    prev_output_summary_file: Optional[str] = None
+    prev_output_file: str | None = None
+    prev_output_summary_file: str | None = None
     iteration: int = 1
     output_summary_file: str = ""
     prompt_template: ClassVar[str] = """
@@ -131,8 +130,8 @@ class CompareMedianTransformerBlocksPrompt:
     config: CrossTraceConfig
     matching_file: str
     output_file: str
-    prev_output_file: Optional[str] = None
-    prev_output_summary_file: Optional[str] = None
+    prev_output_file: str | None = None
+    prev_output_summary_file: str | None = None
     iteration: int = 1
     output_summary_file: str = ""
     prompt_template: ClassVar[str] = """
@@ -221,11 +220,11 @@ class ImprovementPlanPrompt:
     config: CrossTraceConfig
     compare_file: str
     output_file: str
-    prev_output_file: Optional[str] = None
-    prev_output_summary_file: Optional[str] = None
+    prev_output_file: str | None = None
+    prev_output_summary_file: str | None = None
     iteration: int = 1
     output_summary_file: str = ""
-    knowledge_base_file: Optional[str] = None
+    knowledge_base_file: str | None = None
     prompt_template: ClassVar[str] = """
 {traces_context}
 {prev_iteration_section}
@@ -480,7 +479,7 @@ class ReviewImprovementPlanPrompt:
     output_file: str
     output_summary_file: str
     iteration: int = 1
-    knowledge_base_file: Optional[str] = None
+    knowledge_base_file: str | None = None
     prompt_template: ClassVar[str] = """
 {traces_context}
 {knowledge_base_section}
@@ -585,8 +584,8 @@ Dump a summary to [output_summary_file] that includes:
 def gen_matching_iter_steps(
     config: CrossTraceConfig,
     traces_context: str,
-    prev_output_file: Optional[str],
-    prev_output_summary_file: Optional[str],
+    prev_output_file: str | None,
+    prev_output_summary_file: str | None,
     iteration: int,
 ):
     """Generate generation + review steps for one matching iteration.
@@ -599,12 +598,12 @@ def gen_matching_iter_steps(
 
     gen_prompt = MatchMedianTransformerBlocksPrompt(
         config=config,
-        output_file=os.path.join(output_dir, "{}_V{}.txt".format(MATCHING_PREFIX, iteration)),
+        output_file=os.path.join(output_dir, f"{MATCHING_PREFIX}_V{iteration}.txt"),
         prev_output_file=prev_output_file,
         prev_output_summary_file=prev_output_summary_file,
         iteration=iteration,
         output_summary_file=os.path.join(
-            output_dir, "{}_summary_V{}.txt".format(MATCHING_PREFIX, iteration)
+            output_dir, f"{MATCHING_PREFIX}_summary_V{iteration}.txt"
         ),
     )
 
@@ -613,22 +612,22 @@ def gen_matching_iter_steps(
         input_file=gen_prompt.output_file,
         input_summary_file=gen_prompt.output_summary_file,
         output_file=os.path.join(
-            output_dir, "{}_review_V{}.txt".format(MATCHING_PREFIX, iteration)
+            output_dir, f"{MATCHING_PREFIX}_review_V{iteration}.txt"
         ),
         output_summary_file=os.path.join(
-            output_dir, "{}_review_summary_V{}.txt".format(MATCHING_PREFIX, iteration)
+            output_dir, f"{MATCHING_PREFIX}_review_summary_V{iteration}.txt"
         ),
         iteration=iteration,
     )
 
     steps = [
         PipelineStep(
-            name="matching_V{}".format(iteration),
+            name=f"matching_V{iteration}",
             prompt=gen_prompt.prompt(),
             output_files=[gen_prompt.output_file, gen_prompt.output_summary_file],
         ),
         PipelineStep(
-            name="matching_review_V{}".format(iteration),
+            name=f"matching_review_V{iteration}",
             prompt=review_prompt.prompt(),
             output_files=[review_prompt.output_file, review_prompt.output_summary_file],
         ),
@@ -641,8 +640,8 @@ def gen_compare_iter_steps(
     config: CrossTraceConfig,
     traces_context: str,
     matching_file: str,
-    prev_output_file: Optional[str],
-    prev_output_summary_file: Optional[str],
+    prev_output_file: str | None,
+    prev_output_summary_file: str | None,
     iteration: int,
 ):
     """Generate generation + review steps for one compare iteration.
@@ -654,12 +653,12 @@ def gen_compare_iter_steps(
     gen_prompt = CompareMedianTransformerBlocksPrompt(
         config=config,
         matching_file=matching_file,
-        output_file=os.path.join(output_dir, "{}_V{}.txt".format(COMPARE_PREFIX, iteration)),
+        output_file=os.path.join(output_dir, f"{COMPARE_PREFIX}_V{iteration}.txt"),
         prev_output_file=prev_output_file,
         prev_output_summary_file=prev_output_summary_file,
         iteration=iteration,
         output_summary_file=os.path.join(
-            output_dir, "{}_summary_V{}.txt".format(COMPARE_PREFIX, iteration)
+            output_dir, f"{COMPARE_PREFIX}_summary_V{iteration}.txt"
         ),
     )
 
@@ -669,22 +668,22 @@ def gen_compare_iter_steps(
         input_file=gen_prompt.output_file,
         input_summary_file=gen_prompt.output_summary_file,
         output_file=os.path.join(
-            output_dir, "{}_review_V{}.txt".format(COMPARE_PREFIX, iteration)
+            output_dir, f"{COMPARE_PREFIX}_review_V{iteration}.txt"
         ),
         output_summary_file=os.path.join(
-            output_dir, "{}_review_summary_V{}.txt".format(COMPARE_PREFIX, iteration)
+            output_dir, f"{COMPARE_PREFIX}_review_summary_V{iteration}.txt"
         ),
         iteration=iteration,
     )
 
     steps = [
         PipelineStep(
-            name="compare_V{}".format(iteration),
+            name=f"compare_V{iteration}",
             prompt=gen_prompt.prompt(),
             output_files=[gen_prompt.output_file, gen_prompt.output_summary_file],
         ),
         PipelineStep(
-            name="compare_review_V{}".format(iteration),
+            name=f"compare_review_V{iteration}",
             prompt=review_prompt.prompt(),
             output_files=[review_prompt.output_file, review_prompt.output_summary_file],
         ),
@@ -696,6 +695,7 @@ def gen_compare_iter_steps(
 def _resolve_knowledge_base_file():
     """Resolve the global knowledge base file path."""
     from llm.auto_code_gen.code_gen_prompts import KNOWLEDGE_BASE_FILE
+
     kb_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         KNOWLEDGE_BASE_FILE,
@@ -707,8 +707,8 @@ def gen_improvement_plan_iter_steps(
     config: CrossTraceConfig,
     traces_context: str,
     compare_file: str,
-    prev_output_file: Optional[str],
-    prev_output_summary_file: Optional[str],
+    prev_output_file: str | None,
+    prev_output_summary_file: str | None,
     iteration: int,
 ):
     """Generate generation + review steps for one improvement plan iteration.
@@ -721,12 +721,12 @@ def gen_improvement_plan_iter_steps(
     gen_prompt = ImprovementPlanPrompt(
         config=config,
         compare_file=compare_file,
-        output_file=os.path.join(output_dir, "{}_V{}.txt".format(IMPROVEMENT_PREFIX, iteration)),
+        output_file=os.path.join(output_dir, f"{IMPROVEMENT_PREFIX}_V{iteration}.txt"),
         prev_output_file=prev_output_file,
         prev_output_summary_file=prev_output_summary_file,
         iteration=iteration,
         output_summary_file=os.path.join(
-            output_dir, "{}_summary_V{}.txt".format(IMPROVEMENT_PREFIX, iteration)
+            output_dir, f"{IMPROVEMENT_PREFIX}_summary_V{iteration}.txt"
         ),
         knowledge_base_file=kb_file,
     )
@@ -737,10 +737,10 @@ def gen_improvement_plan_iter_steps(
         input_file=gen_prompt.output_file,
         input_summary_file=gen_prompt.output_summary_file,
         output_file=os.path.join(
-            output_dir, "{}_review_V{}.txt".format(IMPROVEMENT_PREFIX, iteration)
+            output_dir, f"{IMPROVEMENT_PREFIX}_review_V{iteration}.txt"
         ),
         output_summary_file=os.path.join(
-            output_dir, "{}_review_summary_V{}.txt".format(IMPROVEMENT_PREFIX, iteration)
+            output_dir, f"{IMPROVEMENT_PREFIX}_review_summary_V{iteration}.txt"
         ),
         iteration=iteration,
         knowledge_base_file=kb_file,
@@ -748,12 +748,12 @@ def gen_improvement_plan_iter_steps(
 
     steps = [
         PipelineStep(
-            name="improvement_plan_V{}".format(iteration),
+            name=f"improvement_plan_V{iteration}",
             prompt=gen_prompt.prompt(),
             output_files=[gen_prompt.output_file, gen_prompt.output_summary_file],
         ),
         PipelineStep(
-            name="improvement_plan_review_V{}".format(iteration),
+            name=f"improvement_plan_review_V{iteration}",
             prompt=review_prompt.prompt(),
             output_files=[review_prompt.output_file, review_prompt.output_summary_file],
         ),
@@ -816,11 +816,7 @@ def gen_cross_trace_prompts(config: CrossTraceConfig, file_prefix=""):
     prompts = []
     for i, (step_name, prompt_obj) in enumerate(zip(step_names, prompt_objects), 1):
         prompts.append(
-            {
-                "cmd": (
-                    f"print('\\n=== [Step {i}/{total_steps}] {step_name}... ===')"
-                )
-            }
+            {"cmd": (f"print('\\n=== [Step {i}/{total_steps}] {step_name}... ===')")}
         )
         prompts.append(prompt_obj.prompt())
 
@@ -1015,11 +1011,12 @@ def gen_redo_cross_trace_steps(
     )
 
     output_file = os.path.join(
-        output_dir, "{}_V{}.txt".format(REDO_IMPROVEMENT_PREFIX, iteration))
+        output_dir, f"{REDO_IMPROVEMENT_PREFIX}_V{iteration}.txt"
+    )
     output_summary = os.path.join(
-        output_dir, "{}_summary_V{}.txt".format(REDO_IMPROVEMENT_PREFIX, iteration))
-    output_context = os.path.join(
-        output_dir, "{}_V{}.txt".format(REDO_CONTEXT_PREFIX, iteration))
+        output_dir, f"{REDO_IMPROVEMENT_PREFIX}_summary_V{iteration}.txt"
+    )
+    output_context = os.path.join(output_dir, f"{REDO_CONTEXT_PREFIX}_V{iteration}.txt")
 
     prompt = RedoCrossTraceAnalysisPrompt(
         config=config,
@@ -1036,7 +1033,7 @@ def gen_redo_cross_trace_steps(
 
     steps = [
         PipelineStep(
-            name="redo_improvement_plan_V{}".format(iteration),
+            name=f"redo_improvement_plan_V{iteration}",
             prompt=prompt.prompt(),
             output_files=[output_file, output_summary, output_context],
         ),

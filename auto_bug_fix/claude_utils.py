@@ -33,6 +33,7 @@ class BugFixClaudeConfig(ClaudeConfig):
     ``auto_bug_fix`` — the persona then travels with the config instead of
     having to be remembered at each of the pipeline's construction sites.
     """
+
     system_prompt: str = BUG_FIX_SYSTEM_PROMPT
 
 

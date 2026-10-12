@@ -1,4 +1,5 @@
 """Tests for auto_bug_fix.signature — normalization and comparison utilities."""
+
 from __future__ import annotations
 
 from auto_bug_fix.signature import compare_signatures, normalize_signature

@@ -21,37 +21,40 @@ from enum import Enum
 from pathlib import Path
 
 # Reuse existing detection functions from the pipeline — no reimplementation
-from auto_bug_fix.git_tools import git_is_ancestor, git_cat_file_exists, git_show_files
-from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
+from auto_bug_fix.git_tools import git_cat_file_exists, git_is_ancestor, git_show_files
+from auto_bug_fix.patch_id import backward_patch_id_check, forward_patch_id_check
 
 log = logging.getLogger(__name__)
 
 
 class FixStatus(str, Enum):
-    EXACT_MATCH    = "exact_match"       # same commit SHA on branch
-    EQUIVALENT     = "equivalent_patch"  # same patch content, different SHA
-    NOT_AFFECTED   = "not_affected"      # branch predates the bug — no fix needed
-    LIKELY_PRESENT = "likely_present"    # file diff heuristic says fix is there
-    NEEDS_FIX      = "needs_fix"         # fix is absent — backport needed
-    AMBIGUOUS      = "ambiguous"         # inconclusive — LLM will attempt to resolve
-    ERROR          = "error"             # git command failed
+    EXACT_MATCH = "exact_match"  # same commit SHA on branch
+    EQUIVALENT = "equivalent_patch"  # same patch content, different SHA
+    NOT_AFFECTED = "not_affected"  # branch predates the bug — no fix needed
+    LIKELY_PRESENT = "likely_present"  # file diff heuristic says fix is there
+    NEEDS_FIX = "needs_fix"  # fix is absent — backport needed
+    AMBIGUOUS = "ambiguous"  # inconclusive — LLM will attempt to resolve
+    ERROR = "error"  # git command failed
 
 
 @dataclass
 class BranchCheckResult:
     branch: str
     status: FixStatus
-    method: str                # which level detected this
-    detail: str                # human-readable explanation
-    changed_files: list[str]   # files touched by the fix commit
-    ref_type: str = "branch"   # "branch" or "tag"
+    method: str  # which level detected this
+    detail: str  # human-readable explanation
+    changed_files: list[str]  # files touched by the fix commit
+    ref_type: str = "branch"  # "branch" or "tag"
 
 
 # ── Helpers not already in the pipeline ───────────────────────────────────────
 
+
 def _run(cmd: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
     try:
-        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout
+        )
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except subprocess.TimeoutExpired:
         return 1, "", "timeout"
@@ -62,7 +65,10 @@ def _run(cmd: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
 def get_remote_branches(repo_path: Path, pattern: str | None = None) -> list[str]:
     """List remote branches, optionally filtered by a glob pattern."""
     import fnmatch
-    rc, out, _ = _run(["git", "branch", "-r", "--format=%(refname:short)"], cwd=repo_path)
+
+    rc, out, _ = _run(
+        ["git", "branch", "-r", "--format=%(refname:short)"], cwd=repo_path
+    )
     if rc != 0:
         return []
     branches = []
@@ -79,6 +85,7 @@ def get_remote_branches(repo_path: Path, pattern: str | None = None) -> list[str
 def get_tags(repo_path: Path, pattern: str | None = None) -> list[str]:
     """List tags (local and fetched), optionally filtered by a glob pattern."""
     import fnmatch
+
     rc, out, _ = _run(["git", "tag", "--list"], cwd=repo_path)
     if rc != 0:
         return []
@@ -96,7 +103,10 @@ def _resolve_ref(name: str, ref_type: str) -> str:
 
 
 def _check_file_diff(
-    repo_path: Path, name: str, fix_commit: str, changed_files: list[str],
+    repo_path: Path,
+    name: str,
+    fix_commit: str,
+    changed_files: list[str],
     ref_type: str = "branch",
 ) -> FixStatus:
     """
@@ -115,7 +125,8 @@ def _check_file_diff(
         return FixStatus.AMBIGUOUS
 
     added_lines = [
-        line[1:] for line in fix_diff.splitlines()
+        line[1:]
+        for line in fix_diff.splitlines()
         if line.startswith("+") and not line.startswith("+++")
     ]
     if not added_lines:
@@ -147,6 +158,7 @@ def _check_file_diff(
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
+
 
 def check_ref(
     repo_path: Path,
@@ -202,7 +214,9 @@ def check_ref(
     try:
         match = forward_patch_id_check(repo, fix_commit, target)
     except Exception as e:
-        log.debug("forward_patch_id_check failed for %s: %s — skipping to Level 4", name, e)
+        log.debug(
+            "forward_patch_id_check failed for %s: %s — skipping to Level 4", name, e
+        )
         match = None
     if match:
         return BranchCheckResult(
@@ -235,12 +249,13 @@ def check_ref(
             )
 
     # Level 4: file diff heuristic
-    file_status = _check_file_diff(repo_path, name, fix_commit, changed_files,
-                                   ref_type=ref_type)
+    file_status = _check_file_diff(
+        repo_path, name, fix_commit, changed_files, ref_type=ref_type
+    )
     detail_map = {
         FixStatus.LIKELY_PRESENT: f"85%+ of fix lines found in {target} files",
-        FixStatus.NEEDS_FIX:      f"Fix lines not found in {target} files",
-        FixStatus.AMBIGUOUS:      "Inconclusive — LLM semantic check will resolve",
+        FixStatus.NEEDS_FIX: f"Fix lines not found in {target} files",
+        FixStatus.AMBIGUOUS: "Inconclusive — LLM semantic check will resolve",
     }
     return BranchCheckResult(
         branch=name,

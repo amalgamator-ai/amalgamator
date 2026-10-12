@@ -30,30 +30,28 @@ Outputs:
       - cross_trace_transformer_blocks.txt    Human-readable summary
 """
 
-import sys as _sys
 import os as _os
+import sys as _sys
+
 _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
-import os
-import sys
-import time
-import asyncio
 import argparse
+import asyncio
+import os
+import time
 
-from common.utils import setup_logging
 from common.claude_utils import PipelineStep
+from common.utils import setup_logging
 from llm.agents import agent_run
 from llm.auto_analyze.agent_support import add_agent_arguments, make_agent_config
-
-from llm.auto_analyze.configs.single_trace_config import SingleTraceConfig
 from llm.auto_analyze.configs.cross_trace_config import CrossTraceConfig
+from llm.auto_analyze.configs.single_trace_config import SingleTraceConfig
 from llm.auto_analyze.prompts.chrome_trace_prompts import (
-    build_single_trace_json_prompt,
     build_cross_trace_json_prompt,
+    build_single_trace_json_prompt,
 )
-
 
 if __name__ == "__main__":
     setup_logging("trace_json")
@@ -113,7 +111,9 @@ if __name__ == "__main__":
     agent_config = make_agent_config(config, output_dir, args.agent_config)
 
     start_time = time.time()
-    print(f"\nStarting trace JSON generation ({mode}) at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(
+        f"\nStarting trace JSON generation ({mode}) at {time.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
 
     step = PipelineStep(
         name="chrome_trace",

@@ -1,28 +1,27 @@
 import os
 import re
 
-from llm.auto_code_gen.use_cases.base import UseCase
 from common.claude_utils import PipelineStep
 from llm.auto_code_gen.agents import agent_run
+from llm.auto_code_gen.code_gen_prompts import (
+    CODE_GEN_DIR,
+    CODE_PORT_PLAN_DIR,
+    CODE_TRACES_DIR,
+    RUNTIME_DIR,
+    TEST_PLAN_DIR,
+    create_context_str,
+    gen_CodeGenPrompt,
+    gen_CodePortPlanPrompt,
+    gen_CodeTracePrompt,
+    gen_ReviewCodeGenPrompt,
+    gen_ReviewCodePortPlanPrompt,
+    gen_ReviewTestPlanPrompt,
+    gen_TestPlanPrompt,
+)
+from llm.auto_code_gen.use_cases.base import UseCase
 from llm.auto_code_gen.workspace import clear_vllm_source_tree
 
-from llm.auto_code_gen.code_gen_prompts import (
-    create_context_str,
-    gen_CodeTracePrompt,
-    gen_CodePortPlanPrompt,
-    gen_ReviewCodePortPlanPrompt,
-    gen_TestPlanPrompt,
-    gen_ReviewTestPlanPrompt,
-    gen_CodeGenPrompt,
-    gen_ReviewCodeGenPrompt,
-    CODE_TRACES_DIR,
-    CODE_PORT_PLAN_DIR,
-    TEST_PLAN_DIR,
-    CODE_GEN_DIR,
-    RUNTIME_DIR,
-)
-
-_HISTORY_MARKER_RE = re.compile(r'LAST_ITERATION_USED=V(\d+)')
+_HISTORY_MARKER_RE = re.compile(r"LAST_ITERATION_USED=V(\d+)")
 
 
 def _parse_history_marker(history_file):
@@ -478,6 +477,7 @@ The goal of this task is to perform a critical, in-depth review of the code patc
 # LLMFrameworkUseCase -- orchestrates the LLM framework porting pipeline
 # ---------------------------------------------------------------------------
 
+
 class LLMFrameworkUseCase(UseCase):
     """Use case for porting optimisations between LLM serving frameworks."""
 
@@ -487,45 +487,52 @@ class LLMFrameworkUseCase(UseCase):
     def clear_target_cmd(self, config):
         return {
             "fn": lambda: clear_vllm_source_tree(config.source_code_dir),
-            "fn_name": 'clear_vllm_source_tree("{}")'.format(config.source_code_dir),
+            "fn_name": f'clear_vllm_source_tree("{config.source_code_dir}")',
         }
 
     @staticmethod
     def _derive_run_command(primary_command, model, num_gpus):
         cmd = primary_command
-        tp_pat = re.compile(r'(--tensor-parallel-size\s+)\d+')
+        tp_pat = re.compile(r"(--tensor-parallel-size\s+)\d+")
         if tp_pat.search(cmd):
-            cmd = tp_pat.sub(r'\g<1>{}'.format(num_gpus), cmd)
+            cmd = tp_pat.sub(rf"\g<1>{num_gpus}", cmd)
         else:
-            tp_pat2 = re.compile(r'(--tp\s+)\d+')
+            tp_pat2 = re.compile(r"(--tp\s+)\d+")
             if tp_pat2.search(cmd):
-                cmd = tp_pat2.sub(r'\g<1>{}'.format(num_gpus), cmd)
-        model_pat = re.compile(r'(--model\s+)\S+')
+                cmd = tp_pat2.sub(rf"\g<1>{num_gpus}", cmd)
+        model_pat = re.compile(r"(--model\s+)\S+")
         if model_pat.search(cmd):
-            cmd = model_pat.sub(r'\g<1>{}'.format(model), cmd)
+            cmd = model_pat.sub(rf"\g<1>{model}", cmd)
         else:
-            model_path_pat = re.compile(r'(--model-path\s+)\S+')
+            model_path_pat = re.compile(r"(--model-path\s+)\S+")
             if model_path_pat.search(cmd):
-                cmd = model_path_pat.sub(r'\g<1>{}'.format(model), cmd)
+                cmd = model_path_pat.sub(rf"\g<1>{model}", cmd)
         return cmd
 
     @staticmethod
     def _make_model_slug(model_name):
-        return re.sub(r'[^a-z0-9]+', '_', model_name.lower()).strip('_')
+        return re.sub(r"[^a-z0-9]+", "_", model_name.lower()).strip("_")
 
     async def run_runtime_iterations(
-        self, context, config, claude_config, code_trace_files,
-        code_port_plan_file, test_plan_file, resume=False,
-        run_models=None, client=None,
+        self,
+        context,
+        config,
+        claude_config,
+        code_trace_files,
+        code_port_plan_file,
+        test_plan_file,
+        resume=False,
+        run_models=None,
+        client=None,
     ):
         from llm.auto_code_gen.code_gen_prompts import (
-            gen_IterationHistorySummaryPrompt,
-            gen_ExtractExpectedImprovementPrompt,
-            gen_FindSmallerModelPrompt,
-            gen_CollectBenchmarkResultsPrompt,
-            RUNTIME_SMALLER_MODEL_FILE,
             RUNTIME_EXPECTED_IMPROVEMENT_FILE,
             RUNTIME_RESULTS_MANIFEST,
+            RUNTIME_SMALLER_MODEL_FILE,
+            gen_CollectBenchmarkResultsPrompt,
+            gen_ExtractExpectedImprovementPrompt,
+            gen_FindSmallerModelPrompt,
+            gen_IterationHistorySummaryPrompt,
         )
         from llm.auto_code_gen.run_code_gen import (
             run_runtime_iterations as _run_runtime_iters,
@@ -548,12 +555,14 @@ class LLMFrameworkUseCase(UseCase):
         skip_history = False
         if os.path.isfile(history_file):
             from llm.auto_code_gen.run_code_gen import _find_latest_runtime_iteration
+
             latest_iter = _find_latest_runtime_iteration(output_dir)
             marker_iter = _parse_history_marker(history_file)
             if marker_iter is not None and marker_iter >= latest_iter:
-                print("Reusing existing iteration history summary "
-                      "(covers V{}, latest iteration is V{})".format(
-                          marker_iter, latest_iter))
+                print(
+                    "Reusing existing iteration history summary "
+                    f"(covers V{marker_iter}, latest iteration is V{latest_iter})"
+                )
                 skip_history = True
         if not skip_history:
             print("Generating iteration history summary before runtime iterations...")
@@ -572,8 +581,9 @@ class LLMFrameworkUseCase(UseCase):
             output_dir, RUNTIME_DIR, RUNTIME_EXPECTED_IMPROVEMENT_FILE
         )
         if os.path.isfile(expected_improvement_path):
-            print("Reusing existing expected improvement extraction ({})".format(
-                RUNTIME_EXPECTED_IMPROVEMENT_FILE))
+            print(
+                f"Reusing existing expected improvement extraction ({RUNTIME_EXPECTED_IMPROVEMENT_FILE})"
+            )
         else:
             print("Extracting expected improvement from plan file...")
             extract_prompt = gen_ExtractExpectedImprovementPrompt(context=context)
@@ -593,24 +603,33 @@ class LLMFrameworkUseCase(UseCase):
             models_to_run = run_models
         else:
             # Default: original model
-            models_to_run.append({
-                "model": config.model,
-                "num_gpus": None,
-                "label": "original",
-                "execution_command": config.target_run_command,
-                "smaller_model_file": None,
-                "disable_new_feature": config.disable_new_feature_for_runtime,
-            })
+            models_to_run.append(
+                {
+                    "model": config.model,
+                    "num_gpus": None,
+                    "label": "original",
+                    "execution_command": config.target_run_command,
+                    "smaller_model_file": None,
+                    "disable_new_feature": config.disable_new_feature_for_runtime,
+                }
+            )
 
             # Smaller model (if enabled)
             if config.use_smaller_model_for_runtime:
                 smaller_model_file = None
-                smaller_model_path = os.path.join(output_dir, RUNTIME_DIR, RUNTIME_SMALLER_MODEL_FILE)
-                if os.path.isfile(smaller_model_path) and os.path.getsize(smaller_model_path) > 0:
-                    print("Reusing existing smaller model selection ({})".format(
-                        RUNTIME_SMALLER_MODEL_FILE
-                    ))
-                    smaller_model_file = os.path.join(RUNTIME_DIR, RUNTIME_SMALLER_MODEL_FILE)
+                smaller_model_path = os.path.join(
+                    output_dir, RUNTIME_DIR, RUNTIME_SMALLER_MODEL_FILE
+                )
+                if (
+                    os.path.isfile(smaller_model_path)
+                    and os.path.getsize(smaller_model_path) > 0
+                ):
+                    print(
+                        f"Reusing existing smaller model selection ({RUNTIME_SMALLER_MODEL_FILE})"
+                    )
+                    smaller_model_file = os.path.join(
+                        RUNTIME_DIR, RUNTIME_SMALLER_MODEL_FILE
+                    )
                 else:
                     print("Finding smaller model for runtime iterations...")
                     smaller_prompt = gen_FindSmallerModelPrompt(
@@ -625,18 +644,22 @@ class LLMFrameworkUseCase(UseCase):
                             output_files=[smaller_prompt.output_file],
                         ),
                     ]
-                    timings = await agent_run(claude_config, steps_smaller, client=client)
+                    timings = await agent_run(
+                        claude_config, steps_smaller, client=client
+                    )
                     all_step_timings.extend(timings)
                     smaller_model_file = smaller_prompt.output_file
 
-                models_to_run.append({
-                    "model": "smaller",
-                    "num_gpus": None,
-                    "label": "smaller",
-                    "execution_command": config.target_run_command,
-                    "smaller_model_file": smaller_model_file,
-                    "disable_new_feature": config.disable_new_feature_for_runtime,
-                })
+                models_to_run.append(
+                    {
+                        "model": "smaller",
+                        "num_gpus": None,
+                        "label": "smaller",
+                        "execution_command": config.target_run_command,
+                        "smaller_model_file": smaller_model_file,
+                        "disable_new_feature": config.disable_new_feature_for_runtime,
+                    }
+                )
 
             # Additional benchmark models
             for bench_cfg in config.additional_benchmark_configs:
@@ -648,30 +671,37 @@ class LLMFrameworkUseCase(UseCase):
                     exec_cmd = self._derive_run_command(
                         config.target_run_command, model, num_gpus
                     )
-                models_to_run.append({
-                    "model": model,
-                    "num_gpus": num_gpus,
-                    "label": label,
-                    "execution_command": exec_cmd,
-                    "smaller_model_file": None,
-                    "disable_new_feature": config.disable_new_feature_for_runtime,
-                })
+                models_to_run.append(
+                    {
+                        "model": model,
+                        "num_gpus": num_gpus,
+                        "label": label,
+                        "execution_command": exec_cmd,
+                        "smaller_model_file": None,
+                        "disable_new_feature": config.disable_new_feature_for_runtime,
+                    }
+                )
 
         # Run runtime iterations for each model
         for model_cfg in models_to_run:
             label = model_cfg["label"]
 
-            phase_label = "Runtime ({})".format(label)
+            phase_label = f"Runtime ({label})"
             print("\n" + "=" * 80)
-            print("RUNTIME MODEL: {}".format(label))
-            print("  Results dir: {}".format(runtime_dir))
+            print(f"RUNTIME MODEL: {label}")
+            print(f"  Results dir: {runtime_dir}")
             print("  Command: {}".format(model_cfg["execution_command"]))
             print("=" * 80)
 
             phase_results, runtime_timings = await _run_runtime_iters(
-                context, code_trace_files, config, claude_config,
-                code_port_plan_file, test_plan_file,
-                history_prompt.output_file, resume=resume,
+                context,
+                code_trace_files,
+                config,
+                claude_config,
+                code_port_plan_file,
+                test_plan_file,
+                history_prompt.output_file,
+                resume=resume,
                 smaller_model_file=model_cfg.get("smaller_model_file"),
                 disable_new_feature=model_cfg.get("disable_new_feature", False),
                 execution_command=model_cfg["execution_command"],
@@ -730,12 +760,12 @@ class LLMFrameworkUseCase(UseCase):
                 prompt=self.clear_target_cmd(config),
             ),
             PipelineStep(
-                name="code_trace_{}".format(source_fw),
+                name=f"code_trace_{source_fw}",
                 prompt=source_prompt.prompt(),
                 output_files=[source_prompt.output_file],
             ),
             PipelineStep(
-                name="code_trace_{}".format(target_fw),
+                name=f"code_trace_{target_fw}",
                 prompt=target_prompt.prompt(),
                 output_files=[target_prompt.output_file],
             ),
@@ -746,8 +776,13 @@ class LLMFrameworkUseCase(UseCase):
     # -- Phase 2: code port plan iterations -----------------------------------
 
     def gen_code_port_plan_iter_steps(
-        self, context, config, code_trace_files,
-        prev_output_file, prev_output_summary_file, iteration,
+        self,
+        context,
+        config,
+        code_trace_files,
+        prev_output_file,
+        prev_output_summary_file,
+        iteration,
     ):
         os.makedirs(os.path.join(config.output_dir, CODE_PORT_PLAN_DIR), exist_ok=True)
 
@@ -755,8 +790,10 @@ class LLMFrameworkUseCase(UseCase):
             context=context,
             code_trace_files=code_trace_files,
             disallowed_modules=config.disallowed_modules,
-            output_file=os.path.join(CODE_PORT_PLAN_DIR, "V{}.txt".format(iteration)),
-            output_summary_file=os.path.join(CODE_PORT_PLAN_DIR, "V{}_summary.txt".format(iteration)),
+            output_file=os.path.join(CODE_PORT_PLAN_DIR, f"V{iteration}.txt"),
+            output_summary_file=os.path.join(
+                CODE_PORT_PLAN_DIR, f"V{iteration}_summary.txt"
+            ),
             prev_output_file=prev_output_file,
             prev_output_summary_file=prev_output_summary_file,
             iteration=iteration,
@@ -768,22 +805,27 @@ class LLMFrameworkUseCase(UseCase):
             code_trace_files=code_trace_files,
             input_file=plan_prompt.output_file,
             input_summary_file=plan_prompt.output_summary_file,
-            output_file=os.path.join(CODE_PORT_PLAN_DIR, "V{}_review.txt".format(iteration)),
-            output_summary_file=os.path.join(CODE_PORT_PLAN_DIR, "V{}_review_summary.txt".format(iteration)),
+            output_file=os.path.join(CODE_PORT_PLAN_DIR, f"V{iteration}_review.txt"),
+            output_summary_file=os.path.join(
+                CODE_PORT_PLAN_DIR, f"V{iteration}_review_summary.txt"
+            ),
             iteration=iteration,
             prompt_template=LLM_REVIEW_CODE_PORT_PLAN_TEMPLATE,
         )
 
         steps = [
             PipelineStep(
-                name="code_port_plan_V{}".format(iteration),
+                name=f"code_port_plan_V{iteration}",
                 prompt=plan_prompt.prompt(),
                 output_files=[plan_prompt.output_file, plan_prompt.output_summary_file],
             ),
             PipelineStep(
-                name="code_port_plan_review_V{}".format(iteration),
+                name=f"code_port_plan_review_V{iteration}",
                 prompt=review_prompt.prompt(),
-                output_files=[review_prompt.output_file, review_prompt.output_summary_file],
+                output_files=[
+                    review_prompt.output_file,
+                    review_prompt.output_summary_file,
+                ],
             ),
         ]
 
@@ -792,9 +834,14 @@ class LLMFrameworkUseCase(UseCase):
     # -- Phase 3: test plan iterations ----------------------------------------
 
     def gen_test_plan_iter_steps(
-        self, context, config, code_trace_files,
+        self,
+        context,
+        config,
+        code_trace_files,
         code_port_plan_file,
-        prev_output_file, prev_output_summary_file, iteration,
+        prev_output_file,
+        prev_output_summary_file,
+        iteration,
     ):
         os.makedirs(os.path.join(config.output_dir, TEST_PLAN_DIR), exist_ok=True)
 
@@ -802,8 +849,10 @@ class LLMFrameworkUseCase(UseCase):
             context=context,
             code_trace_files=code_trace_files,
             code_port_plan_file=code_port_plan_file,
-            output_file=os.path.join(TEST_PLAN_DIR, "V{}.txt".format(iteration)),
-            output_summary_file=os.path.join(TEST_PLAN_DIR, "V{}_summary.txt".format(iteration)),
+            output_file=os.path.join(TEST_PLAN_DIR, f"V{iteration}.txt"),
+            output_summary_file=os.path.join(
+                TEST_PLAN_DIR, f"V{iteration}_summary.txt"
+            ),
             prev_output_file=prev_output_file,
             prev_output_summary_file=prev_output_summary_file,
             iteration=iteration,
@@ -816,22 +865,30 @@ class LLMFrameworkUseCase(UseCase):
             code_port_plan_file=code_port_plan_file,
             input_file=test_plan_prompt.output_file,
             input_summary_file=test_plan_prompt.output_summary_file,
-            output_file=os.path.join(TEST_PLAN_DIR, "V{}_review.txt".format(iteration)),
-            output_summary_file=os.path.join(TEST_PLAN_DIR, "V{}_review_summary.txt".format(iteration)),
+            output_file=os.path.join(TEST_PLAN_DIR, f"V{iteration}_review.txt"),
+            output_summary_file=os.path.join(
+                TEST_PLAN_DIR, f"V{iteration}_review_summary.txt"
+            ),
             iteration=iteration,
             prompt_template=LLM_REVIEW_TEST_PLAN_TEMPLATE,
         )
 
         steps = [
             PipelineStep(
-                name="test_plan_V{}".format(iteration),
+                name=f"test_plan_V{iteration}",
                 prompt=test_plan_prompt.prompt(),
-                output_files=[test_plan_prompt.output_file, test_plan_prompt.output_summary_file],
+                output_files=[
+                    test_plan_prompt.output_file,
+                    test_plan_prompt.output_summary_file,
+                ],
             ),
             PipelineStep(
-                name="test_plan_review_V{}".format(iteration),
+                name=f"test_plan_review_V{iteration}",
                 prompt=review_prompt.prompt(),
-                output_files=[review_prompt.output_file, review_prompt.output_summary_file],
+                output_files=[
+                    review_prompt.output_file,
+                    review_prompt.output_summary_file,
+                ],
             ),
         ]
 
@@ -840,9 +897,15 @@ class LLMFrameworkUseCase(UseCase):
     # -- Phase 4: code gen iterations -----------------------------------------
 
     def gen_code_gen_iter_steps(
-        self, context, config, code_trace_files,
-        code_port_plan_file, test_plan_file,
-        prev_output_patch_file, prev_output_summary_file, iteration,
+        self,
+        context,
+        config,
+        code_trace_files,
+        code_port_plan_file,
+        test_plan_file,
+        prev_output_patch_file,
+        prev_output_summary_file,
+        iteration,
     ):
         os.makedirs(os.path.join(config.output_dir, CODE_GEN_DIR), exist_ok=True)
 
@@ -851,8 +914,8 @@ class LLMFrameworkUseCase(UseCase):
             code_trace_files=code_trace_files,
             code_port_plan_file=code_port_plan_file,
             test_plan_file=test_plan_file,
-            output_patch_file=os.path.join(CODE_GEN_DIR, "V{}.patch".format(iteration)),
-            output_summary_file=os.path.join(CODE_GEN_DIR, "V{}_summary.txt".format(iteration)),
+            output_patch_file=os.path.join(CODE_GEN_DIR, f"V{iteration}.patch"),
+            output_summary_file=os.path.join(CODE_GEN_DIR, f"V{iteration}_summary.txt"),
             prev_output_patch_file=prev_output_patch_file,
             prev_output_summary_file=prev_output_summary_file,
             iteration=iteration,
@@ -866,26 +929,34 @@ class LLMFrameworkUseCase(UseCase):
             test_plan_file=test_plan_file,
             input_patch_file=code_gen_prompt.output_patch_file,
             input_summary_file=code_gen_prompt.output_summary_file,
-            output_patch_file=os.path.join(CODE_GEN_DIR, "V{}_review.patch".format(iteration)),
-            output_summary_file=os.path.join(CODE_GEN_DIR, "V{}_review_summary.txt".format(iteration)),
+            output_patch_file=os.path.join(CODE_GEN_DIR, f"V{iteration}_review.patch"),
+            output_summary_file=os.path.join(
+                CODE_GEN_DIR, f"V{iteration}_review_summary.txt"
+            ),
             iteration=iteration,
             prompt_template=LLM_REVIEW_CODE_GEN_TEMPLATE,
         )
 
         steps = [
             PipelineStep(
-                name="clear_target_dir_code_gen_V{}".format(iteration),
+                name=f"clear_target_dir_code_gen_V{iteration}",
                 prompt=self.clear_target_cmd(config),
             ),
             PipelineStep(
-                name="code_gen_V{}".format(iteration),
+                name=f"code_gen_V{iteration}",
                 prompt=code_gen_prompt.prompt(),
-                output_files=[code_gen_prompt.output_patch_file, code_gen_prompt.output_summary_file],
+                output_files=[
+                    code_gen_prompt.output_patch_file,
+                    code_gen_prompt.output_summary_file,
+                ],
             ),
             PipelineStep(
-                name="code_gen_review_V{}".format(iteration),
+                name=f"code_gen_review_V{iteration}",
                 prompt=code_review_prompt.prompt(),
-                output_files=[code_review_prompt.output_patch_file, code_review_prompt.output_summary_file],
+                output_files=[
+                    code_review_prompt.output_patch_file,
+                    code_review_prompt.output_summary_file,
+                ],
             ),
         ]
 
@@ -893,12 +964,14 @@ class LLMFrameworkUseCase(UseCase):
 
     # -- Phase 6: generate PR commands -----------------------------------------
 
-    async def run_generate_pr_commands(self, context, config, claude_config,
-                                       descs_only=False, client=None):
+    async def run_generate_pr_commands(
+        self, context, config, claude_config, descs_only=False, client=None
+    ):
         import time
+
         from llm.auto_code_gen.code_gen_prompts import (
-            gen_UpdateCommitAndPRDescsPrompt,
             gen_GeneratePRCommandsPrompt,
+            gen_UpdateCommitAndPRDescsPrompt,
         )
 
         phase_start = time.time()
@@ -937,11 +1010,13 @@ class LLMFrameworkUseCase(UseCase):
             timings = await agent_run(claude_config, steps_commands, client=client)
             all_timings.extend(timings)
 
-        phase_results = [{
-            "name": "Generate PR commands",
-            "iterations": 1,
-            "max_iterations": 1,
-            "converged": False,
-            "duration": time.time() - phase_start,
-        }]
+        phase_results = [
+            {
+                "name": "Generate PR commands",
+                "iterations": 1,
+                "max_iterations": 1,
+                "converged": False,
+                "duration": time.time() - phase_start,
+            }
+        ]
         return phase_results, all_timings

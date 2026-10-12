@@ -17,6 +17,7 @@ All file content is handled as bytes so line endings and non-UTF-8 encodings
 survive untouched. Whitespace-significant file types never use the
 ``--ignore-whitespace`` rungs.
 """
+
 from __future__ import annotations
 
 import os

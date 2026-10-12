@@ -59,7 +59,9 @@ def test_gate_fails_closed_when_metric_is_unknown(tmp_path):
 
 
 def test_gate_fails_closed_when_baseline_missing(tmp_path):
-    (tmp_path / "bench_result.json").write_text(json.dumps({"output_throughput": 120.0}))
+    (tmp_path / "bench_result.json").write_text(
+        json.dumps({"output_throughput": 120.0})
+    )
     passed, _, _ = _check_performance_meets_target(tmp_path, 1, 3.81)
     assert passed is False
 
@@ -77,14 +79,20 @@ def test_no_expected_improvement_is_not_gated(tmp_path):
 def test_pair_requires_the_same_key_on_both_sides():
     patched = {"output_throughput": 120.0, "tokens_per_second": 500.0}
     baseline = {"tokens_per_second": 100.0}
-    assert _bench_throughput_pair(patched, baseline) == (500.0, 100.0, "tokens_per_second")
+    assert _bench_throughput_pair(patched, baseline) == (
+        500.0,
+        100.0,
+        "tokens_per_second",
+    )
 
 
 def test_pair_rejects_non_numeric_and_zero_values():
     assert _bench_throughput_pair(
-        {"output_throughput": "118"}, {"output_throughput": 118.0}) == (None, None, None)
+        {"output_throughput": "118"}, {"output_throughput": 118.0}
+    ) == (None, None, None)
     assert _bench_throughput_pair(
-        {"output_throughput": 118.0}, {"output_throughput": 0}) == (None, None, None)
+        {"output_throughput": 118.0}, {"output_throughput": 0}
+    ) == (None, None, None)
 
 
 def _make_shared_baseline(tmp_path, baseline_type="bench_off"):
@@ -98,6 +106,7 @@ def test_shared_baseline_usable_when_files_are_real(tmp_path):
     base, out = _make_shared_baseline(tmp_path)
     (base / "baseline_bench_result.json").write_text("{}")
     from llm.auto_code_gen.run_code_gen import _has_shared_baseline
+
     assert _has_shared_baseline(str(out), "bench_off") is True
 
 
@@ -110,11 +119,13 @@ def test_shared_baseline_rejected_when_symlink_dangles(tmp_path):
     link.symlink_to(gone.resolve())
     gone.unlink()
     from llm.auto_code_gen.run_code_gen import _has_shared_baseline
+
     assert _has_shared_baseline(str(out), "bench_off") is False
 
 
 def test_link_baseline_results_links_only_existing_files(tmp_path):
     from llm.auto_code_gen.run_code_gen import _link_baseline_results
+
     src = tmp_path / "src"
     dst = tmp_path / "dst"
     src.mkdir()

@@ -22,18 +22,19 @@ from pathlib import Path
 
 import yaml
 
+from auto_bug_fix.git_tools import git_show_files
 from common.model_registry import ModelProfile, RegistryError
 
-from auto_bug_fix.git_tools import git_show_files
-from .triage import FixStatus, check_ref
+from .report import print_report
 from .run_scanner import load_config
 from .scanner import ScanConfig, run_scan
-from .report import print_report
+from .triage import FixStatus, check_ref
 
 log = logging.getLogger(__name__)
 
 
 # ── Default branch discovery ───────────────────────────────────────────────────
+
 
 def _get_default_branch(repo_path: Path) -> str:
     """
@@ -43,7 +44,10 @@ def _get_default_branch(repo_path: Path) -> str:
     try:
         result = subprocess.run(
             ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode == 0:
             # Returns e.g. "origin/main" — strip the "origin/" prefix
@@ -58,19 +62,26 @@ def _get_default_branch(repo_path: Path) -> str:
 
 # Files the LLM reads to understand how to build and test the project
 _DISCOVERY_FILES = [
-    "README.md", "README.rst", "README",
-    "Makefile", "GNUmakefile",
+    "README.md",
+    "README.rst",
+    "README",
+    "Makefile",
+    "GNUmakefile",
     "go.mod",
     "pom.xml",
-    "pyproject.toml", "setup.py", "tox.ini",
+    "pyproject.toml",
+    "setup.py",
+    "tox.ini",
     "package.json",
     "Cargo.toml",
 ]
 _DISCOVERY_CI_GLOB = ".github/workflows/*.yml"
-_DISCOVERY_MAX_BYTES = 4000   # per file, to keep prompt manageable
+_DISCOVERY_MAX_BYTES = 4000  # per file, to keep prompt manageable
 
 
-def _discover_commands(repo_path: Path, model: str, *, profile: ModelProfile | None = None) -> tuple[str, str]:
+def _discover_commands(
+    repo_path: Path, model: str, *, profile: ModelProfile | None = None
+) -> tuple[str, str]:
     """
     Use an LLM to discover the build and test commands for a repository.
 
@@ -96,6 +107,7 @@ def _discover_commands(repo_path: Path, model: str, *, profile: ModelProfile | N
 
     # Also read CI workflow files (up to 2)
     import glob as _glob
+
     ci_files = sorted(_glob.glob(str(repo_path / _DISCOVERY_CI_GLOB)))[:2]
     for ci_path in ci_files:
         try:
@@ -156,6 +168,7 @@ TEST: python -m pytest"""
 
 # ── YAML template ─────────────────────────────────────────────────────────────
 
+
 def _parse_target_entry(entry) -> tuple[str, str, dict]:
     """Parse a target entry from branches.targets.
 
@@ -194,6 +207,7 @@ def _safe_name(target_name: str, ref_type: str) -> str:
     still produce distinct filenames and workdirs.
     """
     import hashlib
+
     prefix = "tag-" if ref_type == "tag" else ""
     safe = target_name.replace("/", "-").replace(".", "-")
     short_hash = hashlib.sha256(target_name.encode()).hexdigest()[:6]
@@ -245,7 +259,9 @@ def _write_yaml(data: dict, path: Path, *, run_command: str | None = None) -> No
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         if run_command:
-            f.write("# Run from the Amalgamator environment, in the same working directory as generation:\n")
+            f.write(
+                "# Run from the Amalgamator environment, in the same working directory as generation:\n"
+            )
             for line in run_command.splitlines():
                 f.write(f"# {line}\n")
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
@@ -254,10 +270,13 @@ def _write_yaml(data: dict, path: Path, *, run_command: str | None = None) -> No
 
 # ── Mode: generate ─────────────────────────────────────────────────────────────
 
+
 def mode_generate(config: ScanConfig, output_dir: Path) -> None:
     """Scan branches and generate one YAML per NEEDS_FIX branch."""
     if config.profile is not None and config.models_path is None:
-        raise RegistryError("Profile-backed case generation requires models_path pointing to the profile's registry")
+        raise RegistryError(
+            "Profile-backed case generation requires models_path pointing to the profile's registry"
+        )
     log.info("Mode: generate — scanning branches and writing YAMLs to %s", output_dir)
 
     report = run_scan(config)
@@ -274,7 +293,9 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
     build_cmd, test_cmd = "", ""
     if config.discover_commands:
         log.info("Discovering build/test commands via LLM...")
-        build_cmd, test_cmd = _discover_commands(config.repo_path, config.llm_model, profile=config.profile)
+        build_cmd, test_cmd = _discover_commands(
+            config.repo_path, config.llm_model, profile=config.profile
+        )
         if build_cmd or test_cmd:
             log.info("Discovered — build: %r  test: %r", build_cmd, test_cmd)
         else:
@@ -308,11 +329,14 @@ def mode_generate(config: ScanConfig, output_dir: Path) -> None:
         print("  Review these commands before running the pipeline.")
     else:
         print("  build.command and build.test_command are empty — fill in manually.")
-    print("  Each generated file includes its run command, including --models when a registry was selected.")
+    print(
+        "  Each generated file includes its run command, including --models when a registry was selected."
+    )
     print_report(report)
 
 
 # ── Mode: add ──────────────────────────────────────────────────────────────────
+
 
 def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
     """Scan branches and append new NEEDS_FIX branches to an existing YAML."""
@@ -330,7 +354,9 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
     # entries).  Key by (ref_type, name) so a branch and tag with the
     # same bare name don't collide.
     branches_section = existing.get("branches", {})
-    existing_target = branches_section.get("targets") or branches_section.get("target", "")
+    existing_target = branches_section.get("targets") or branches_section.get(
+        "target", ""
+    )
     # (ref_type, name) -> original entry (preserves per-target overrides)
     existing_refs: dict[tuple[str, str], object] = {}
     if isinstance(existing_target, str):
@@ -346,8 +372,7 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
 
     report = run_scan(config)
     new_branches = [
-        r for r in report.needs_fix
-        if (r.ref_type, r.branch) not in existing_refs
+        r for r in report.needs_fix if (r.ref_type, r.branch) not in existing_refs
     ]
 
     if not new_branches:
@@ -372,9 +397,13 @@ def mode_add(config: ScanConfig, existing_yaml: Path) -> None:
 
 # ── Mode: verify ───────────────────────────────────────────────────────────────
 
-_ALREADY_FIXED_STATUSES = frozenset({
-    FixStatus.EXACT_MATCH, FixStatus.EQUIVALENT, FixStatus.LIKELY_PRESENT,
-})
+_ALREADY_FIXED_STATUSES = frozenset(
+    {
+        FixStatus.EXACT_MATCH,
+        FixStatus.EQUIVALENT,
+        FixStatus.LIKELY_PRESENT,
+    }
+)
 
 
 def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
@@ -389,7 +418,9 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
         existing = yaml.safe_load(f)
 
     branches_section = existing.get("branches", {})
-    existing_target = branches_section.get("targets") or branches_section.get("target", "")
+    existing_target = branches_section.get("targets") or branches_section.get(
+        "target", ""
+    )
     ref_type_map: dict[str, str] = {}
     if isinstance(existing_target, str):
         name, rtype, _ = _parse_target_entry(existing_target)
@@ -413,7 +444,9 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
 
     for name in refs_to_check:
         result = check_ref(
-            config.repo_path, name, fix_commit,
+            config.repo_path,
+            name,
+            fix_commit,
             vuln_commit=config.vuln_commit,
             ref_type=ref_type_map[name],
         )
@@ -444,7 +477,9 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
         for b in already_fixed:
             print(f"      - {b}")
     if not_affected:
-        print(f"  ~ Not affected ({len(not_affected)}) — ref predates the bug, may have been incorrectly included:")
+        print(
+            f"  ~ Not affected ({len(not_affected)}) — ref predates the bug, may have been incorrectly included:"
+        )
         for b in not_affected:
             print(f"      - {b}")
     if ambiguous:
@@ -457,26 +492,49 @@ def mode_verify(config: ScanConfig, existing_yaml: Path) -> None:
     if already_fixed:
         print("\nTip: Remove already-fixed refs from the YAML to avoid redundant runs.")
     if not_affected:
-        print("\nTip: NOT_AFFECTED refs may have been incorrectly added — review and remove if so.")
+        print(
+            "\nTip: NOT_AFFECTED refs may have been incorrectly added — review and remove if so."
+        )
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Generate or update auto_bug_fix YAML configs from branch scan results."
     )
-    parser.add_argument("--config", "-c", required=True, type=Path,
-                        help="Path to scan config YAML (same format as run_scanner)")
-    parser.add_argument("--mode", "-m", required=True,
-                        choices=["generate", "add", "verify"],
-                        help="generate=create YAMLs from scratch, add=append branches, verify=check existing")
-    parser.add_argument("--output-dir", "-o", type=Path, default=Path("./generated"),
-                        help="Directory to write generated YAMLs (generate mode only)")
-    parser.add_argument("--existing-yaml", "-e", type=Path,
-                        help="Existing auto_bug_fix YAML to update (add/verify modes)")
+    parser.add_argument(
+        "--config",
+        "-c",
+        required=True,
+        type=Path,
+        help="Path to scan config YAML (same format as run_scanner)",
+    )
+    parser.add_argument(
+        "--mode",
+        "-m",
+        required=True,
+        choices=["generate", "add", "verify"],
+        help="generate=create YAMLs from scratch, add=append branches, verify=check existing",
+    )
+    parser.add_argument(
+        "--output-dir",
+        "-o",
+        type=Path,
+        default=Path("./generated"),
+        help="Directory to write generated YAMLs (generate mode only)",
+    )
+    parser.add_argument(
+        "--existing-yaml",
+        "-e",
+        type=Path,
+        help="Existing auto_bug_fix YAML to update (add/verify modes)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
-    parser.add_argument("--models", type=Path, help="Explicit model registry (overrides discovery)")
+    parser.add_argument(
+        "--models", type=Path, help="Explicit model registry (overrides discovery)"
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(

@@ -52,7 +52,10 @@ def run_client_benchmark(
     start = time.time()
 
     import shlex
-    header = f"{'=' * 80}\nCLIENT COMMAND ({run_label})\n{'=' * 80}\n{cmd}\n{'=' * 80}\n\n"
+
+    header = (
+        f"{'=' * 80}\nCLIENT COMMAND ({run_label})\n{'=' * 80}\n{cmd}\n{'=' * 80}\n\n"
+    )
     Path(log_path).write_text(header)
     log_cmd = f"{cmd} 2>&1 | tee -a {shlex.quote(log_path)} > /dev/null; exit ${{PIPESTATUS[0]}}"
 
@@ -62,8 +65,12 @@ def run_client_benchmark(
     )
 
     duration = time.time() - start
-    log.info("[%s] Client benchmark completed in %.1fs (exit=%d)",
-             run_label, duration, result.returncode)
+    log.info(
+        "[%s] Client benchmark completed in %.1fs (exit=%d)",
+        run_label,
+        duration,
+        result.returncode,
+    )
 
     if result.returncode != 0:
         tail = Path(log_path).read_text()[-2000:] if Path(log_path).is_file() else ""

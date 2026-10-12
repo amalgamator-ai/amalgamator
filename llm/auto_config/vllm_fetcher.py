@@ -187,8 +187,14 @@ def fetch_recipe(
 
     extra_flags = _pairs_to_flags_str(pairs)
 
-    log.info("Resolved recipe for %s on %s: flags=%r env=%r docker=%s",
-             model_id, hardware, extra_flags, env, docker_image)
+    log.info(
+        "Resolved recipe for %s on %s: flags=%r env=%r docker=%s",
+        model_id,
+        hardware,
+        extra_flags,
+        env,
+        docker_image,
+    )
 
     return ResolvedRecipe(
         model_id=model_id,

@@ -1,0 +1,51 @@
+# Pre-commit hooks for amalgamator.
+#
+# Install (uv users):   uv run pre-commit install
+# Install (pip users):  python -m venv .venv && source .venv/bin/activate \
+#                          && pip install pre-commit && pre-commit install
+# Run on all files:     uv run pre-commit run --all-files
+#
+# Commit-stage hooks (black, ruff, hygiene) are hermetic: pre-commit builds
+# isolated, version-pinned environments for them, so they work on any machine
+# with git and pre-commit. No project environment, no uv, no active venv
+# required.
+#
+# pyrefly is deliberately NOT a commit-stage hook. A type checker must resolve
+# the project's third-party imports, so it needs the project environment: in
+# pre-commit's isolated env it would report bogus missing-import errors, and as
+# a system hook it would depend on whatever happens to be on PATH. It runs on
+# demand from an environment where pyrefly is installed:
+#
+#     uv run pre-commit run pyrefly --hook-stage manual --all-files
+#
+# CI type-checks directly from the locked uv environment (uv run pyrefly
+# check), which is the authoritative gate.
+repos:
+  - repo: https://github.com/psf/black
+    rev: 26.10.0
+    hooks:
+      - id: black
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  - repo: local
+    hooks:
+      - id: pyrefly
+        name: pyrefly (type check)
+        entry: pyrefly check
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [manual]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-yaml

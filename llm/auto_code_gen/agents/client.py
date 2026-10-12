@@ -2,6 +2,7 @@
 
 Configuration is per client; native Claude SDK behavior stays in its adapter.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -55,7 +56,9 @@ class LLMClient:
         self.model = config.model
         self._info_loaded = False
         self._info = {}
-        if self.model.startswith("claude-") and os.environ.get("CLAUDE_CODE_USE_VERTEX"):
+        if self.model.startswith("claude-") and os.environ.get(
+            "CLAUDE_CODE_USE_VERTEX"
+        ):
             self.model = "vertex_ai/" + self.model
 
     def _model_info(self):
@@ -63,6 +66,7 @@ class LLMClient:
             return self._info
         try:
             import litellm
+
             self._info = litellm.get_model_info(self.model) or {}
         except Exception:
             self._info = {}
@@ -80,35 +84,62 @@ class LLMClient:
 
     def count_tokens(self, messages, tools=None):
         import litellm
+
         try:
             if not self._model_info():
                 # LiteLLM may silently use an unrelated tokenizer for unknown
                 # OpenAI-compatible models. Prefer our conservative estimate.
                 raise ValueError("Unknown model tokenizer")
-            return litellm.token_counter(model=self.model, messages=messages, tools=tools or [])
+            return litellm.token_counter(
+                model=self.model, messages=messages, tools=tools or []
+            )
         except Exception:
             import json
-            # Conservative fallback for code and unknown tokenizers.
-            return len(json.dumps([messages, tools or []], ensure_ascii=False).encode("utf-8")) // 2 + 1
 
-    async def complete(self, messages, tools=None, *, max_tokens=None,
-                       request_model_params=None, tool_choice=None):
+            # Conservative fallback for code and unknown tokenizers.
+            return (
+                len(
+                    json.dumps([messages, tools or []], ensure_ascii=False).encode(
+                        "utf-8"
+                    )
+                )
+                // 2
+                + 1
+            )
+
+    async def complete(
+        self,
+        messages,
+        tools=None,
+        *,
+        max_tokens=None,
+        request_model_params=None,
+        tool_choice=None,
+    ):
         import litellm
+
         params = _merge_params(self.config.model_params, request_model_params)
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
         params.setdefault("max_tokens", 8192)
         output_limit = self.output_limit()
         if output_limit and params["max_tokens"] > output_limit:
-            raise ValueError("Requested max_tokens exceeds the known model output limit")
+            raise ValueError(
+                "Requested max_tokens exceeds the known model output limit"
+            )
         if self.config.api_base:
             params["api_base"] = self.config.api_base.rstrip("/")
         if self.config.api_key is not None:
             params["api_key"] = self.config.api_key
         if self.model.startswith(("ollama/", "ollama_chat/")):
             params.setdefault("extra_body", {}).setdefault("think", False)
-        request = dict(model=self.model, messages=messages, timeout=self.config.request_timeout,
-                       num_retries=0, **params)
+        request = dict(
+            model=self.model,
+            messages=messages,
+            timeout=self.config.request_timeout,
+            num_retries=0,
+            **params,
+        )
         if tools:
             request["tools"] = tools
         if tool_choice is not None:
@@ -137,8 +168,12 @@ class LLMClient:
                     if not any(getattr(chunk, "usage", None) for chunk in chunks):
                         usage_incomplete = True
                 break
-            except (litellm.RateLimitError, litellm.Timeout, litellm.APIConnectionError,
-                    litellm.ServiceUnavailableError) as exc:
+            except (
+                litellm.RateLimitError,
+                litellm.Timeout,
+                litellm.APIConnectionError,
+                litellm.ServiceUnavailableError,
+            ) as exc:
                 # A partially consumed response has uncertain billing; replaying
                 # it is only safe when the provider is not billed per token. A
                 # self-hosted server aborts mid-stream on its own repetition
@@ -149,7 +184,7 @@ class LLMClient:
                     raise
                 if chunks or not isinstance(exc, litellm.RateLimitError):
                     usage_incomplete = True
-                await asyncio.sleep(min(2 ** attempt, 8))
+                await asyncio.sleep(min(2**attempt, 8))
         if not response or not response.choices:
             raise RuntimeError("Provider returned no choices")
         choice = response.choices[0]
@@ -160,15 +195,25 @@ class LLMClient:
             cost = 0.0
         else:
             try:
-                cost = litellm.completion_cost(completion_response=response, model=self.model)
+                cost = litellm.completion_cost(
+                    completion_response=response, model=self.model
+                )
             except Exception:
                 pass
         return Reply(
             text=msg.content or "",
             reasoning=_message_reasoning(msg),
-            tool_calls=[{"id": tc.id, "type": "function", "function": {
-                "name": tc.function.name, "arguments": tc.function.arguments,
-            }} for tc in (msg.tool_calls or [])],
+            tool_calls=[
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in (msg.tool_calls or [])
+            ],
             finish_reason=choice.finish_reason or "stop",
             input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(usage, "completion_tokens", 0) or 0,

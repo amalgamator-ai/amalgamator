@@ -1,10 +1,14 @@
 """Backport scanner — identify which branches and tags need a fix backported."""
 
 from .scanner import ScanConfig, ScanReport, run_scan
-from .triage import FixStatus, BranchCheckResult, get_tags, check_ref
+from .triage import BranchCheckResult, FixStatus, check_ref, get_tags
 
 __all__ = [
-    "ScanConfig", "ScanReport", "run_scan",
-    "FixStatus", "BranchCheckResult",
-    "get_tags", "check_ref",
+    "ScanConfig",
+    "ScanReport",
+    "run_scan",
+    "FixStatus",
+    "BranchCheckResult",
+    "get_tags",
+    "check_ref",
 ]

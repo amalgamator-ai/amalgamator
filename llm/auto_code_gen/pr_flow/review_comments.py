@@ -38,7 +38,7 @@ def _load_json(path, default):
         with open(path) as f:
             text = f.read().strip()
         return json.loads(text) if text else default
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return default
 
 
@@ -66,13 +66,18 @@ def flatten_pages(payload):
 def load_round(inbox_dir):
     """Load everything the fetch script wrote for one round."""
     if not os.path.isdir(inbox_dir):
-        raise SystemExit("round directory not found: {}".format(inbox_dir))
+        raise SystemExit(f"round directory not found: {inbox_dir}")
     return {
         "pr_view": _load_json(os.path.join(inbox_dir, "pr_view.json"), {}),
-        "comments": flatten_pages(_load_json(os.path.join(inbox_dir, "comments.json"), [])),
-        "reviews": flatten_pages(_load_json(os.path.join(inbox_dir, "reviews.json"), [])),
+        "comments": flatten_pages(
+            _load_json(os.path.join(inbox_dir, "comments.json"), [])
+        ),
+        "reviews": flatten_pages(
+            _load_json(os.path.join(inbox_dir, "reviews.json"), [])
+        ),
         "issue_comments": flatten_pages(
-            _load_json(os.path.join(inbox_dir, "issue_comments.json"), [])),
+            _load_json(os.path.join(inbox_dir, "issue_comments.json"), [])
+        ),
         "checks": flatten_pages(_load_json(os.path.join(inbox_dir, "checks.json"), [])),
         "threads": _load_json(os.path.join(inbox_dir, "threads.json"), None),
     }
@@ -113,9 +118,13 @@ def resolved_thread_ids(payload):
         return resolved
     nodes = payload
     if isinstance(payload, dict):
-        nodes = (payload.get("data", {}).get("repository", {})
-                 .get("pullRequest", {}).get("reviewThreads", {})
-                 .get("nodes", []))
+        nodes = (
+            payload.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
     for thread in nodes or []:
         if not isinstance(thread, dict) or not thread.get("isResolved"):
             continue
@@ -127,13 +136,17 @@ def resolved_thread_ids(payload):
 
 def _is_bot(user):
     login = (user or {}).get("login", "") if isinstance(user, dict) else ""
-    return login.endswith("[bot]") or login in ("github-actions", "coveralls", "codecov")
+    return login.endswith("[bot]") or login in (
+        "github-actions",
+        "coveralls",
+        "codecov",
+    )
 
 
 def _location(comment):
     path = comment.get("path") or comment.get("filename") or "(no file)"
     line = comment.get("line") or comment.get("original_line")
-    return "{}:{}".format(path, line) if line else path
+    return f"{path}:{line}" if line else path
 
 
 def select_pending(data, cursor=None, our_logins=()):
@@ -160,19 +173,26 @@ def select_pending(data, cursor=None, our_logins=()):
         if not others or all(_is_bot(c.get("user")) for c in thread):
             continue
         last = thread[-1]
-        pending.append({
-            "comment_id": root["id"],
-            "thread_ids": ids,
-            "author": (root.get("user") or {}).get("login", "unknown"),
-            "path": root.get("path") or "",
-            "line": root.get("line") or root.get("original_line"),
-            "location": _location(root),
-            "created_at": root.get("created_at", ""),
-            "updated_at": last.get("updated_at") or last.get("created_at", ""),
-            "body": (root.get("body") or "").strip(),
-            "replies": [{"author": (c.get("user") or {}).get("login", ""),
-                         "body": (c.get("body") or "").strip()} for c in thread[1:]],
-        })
+        pending.append(
+            {
+                "comment_id": root["id"],
+                "thread_ids": ids,
+                "author": (root.get("user") or {}).get("login", "unknown"),
+                "path": root.get("path") or "",
+                "line": root.get("line") or root.get("original_line"),
+                "location": _location(root),
+                "created_at": root.get("created_at", ""),
+                "updated_at": last.get("updated_at") or last.get("created_at", ""),
+                "body": (root.get("body") or "").strip(),
+                "replies": [
+                    {
+                        "author": (c.get("user") or {}).get("login", ""),
+                        "body": (c.get("body") or "").strip(),
+                    }
+                    for c in thread[1:]
+                ],
+            }
+        )
     pending.sort(key=lambda item: item["comment_id"])
     return pending
 
@@ -187,19 +207,23 @@ def _format_checks(checks):
         name = item.get("name") or item.get("context") or "check"
         status = item.get("status") or item.get("state") or "?"
         conclusion = item.get("conclusion") or item.get("state") or ""
-        lines.append("CI check {}: {} {}".format(name, status, conclusion).rstrip())
+        lines.append(f"CI check {name}: {status} {conclusion}".rstrip())
     return lines or ["CI checks: none recorded"]
 
 
 def render_new_comments(data, pending, round_no):
     view = data.get("pr_view") or {}
-    lines = ["# New review input -- round {}".format(round_no), ""]
+    lines = [f"# New review input -- round {round_no}", ""]
     lines.append("PR: {}  (#{})".format(view.get("url", ""), view.get("number", "?")))
     lines.append("Head SHA: {}".format(view.get("headRefOid", "unknown")))
-    lines.append("State: {}  Mergeable: {}  Review decision: {}".format(
-        view.get("state", "?"), view.get("mergeable", "?"),
-        view.get("reviewDecision", "?")))
-    lines.append("Pending comments: {}".format(len(pending)))
+    lines.append(
+        "State: {}  Mergeable: {}  Review decision: {}".format(
+            view.get("state", "?"),
+            view.get("mergeable", "?"),
+            view.get("reviewDecision", "?"),
+        )
+    )
+    lines.append(f"Pending comments: {len(pending)}")
     lines.append("")
     lines.extend(_format_checks(data.get("checks")))
     lines.append("")
@@ -210,8 +234,11 @@ def render_new_comments(data, pending, round_no):
     for item in pending:
         lines.append("")
         lines.append("## Comment {}".format(item["comment_id"]))
-        lines.append("File: {}  Author: {}  Date: {}".format(
-            item["location"], item["author"], item["created_at"][:10]))
+        lines.append(
+            "File: {}  Author: {}  Date: {}".format(
+                item["location"], item["author"], item["created_at"][:10]
+            )
+        )
         lines.append("")
         lines.append(item["body"] or "(empty comment body)")
         for reply in item["replies"]:
@@ -220,8 +247,11 @@ def render_new_comments(data, pending, round_no):
         lines.append("")
         lines.append("-- end comment {} --".format(item["comment_id"]))
 
-    reviews = [r for r in (data.get("reviews") or [])
-               if isinstance(r, dict) and (r.get("body") or "").strip()]
+    reviews = [
+        r
+        for r in (data.get("reviews") or [])
+        if isinstance(r, dict) and (r.get("body") or "").strip()
+    ]
     if reviews:
         lines.append("")
         lines.append("=" * 72)
@@ -229,13 +259,19 @@ def render_new_comments(data, pending, round_no):
         lines.append("=" * 72)
         for review in reviews:
             lines.append("")
-            lines.append("--- review by {} ({}) ---".format(
-                (review.get("user") or {}).get("login", "unknown"),
-                review.get("state", "?")))
+            lines.append(
+                "--- review by {} ({}) ---".format(
+                    (review.get("user") or {}).get("login", "unknown"),
+                    review.get("state", "?"),
+                )
+            )
             lines.append(review["body"].strip())
 
-    issue_comments = [c for c in (data.get("issue_comments") or [])
-                      if (c.get("body") or "").strip() and not _is_bot(c.get("user"))]
+    issue_comments = [
+        c
+        for c in (data.get("issue_comments") or [])
+        if (c.get("body") or "").strip() and not _is_bot(c.get("user"))
+    ]
     if issue_comments:
         lines.append("")
         lines.append("=" * 72)
@@ -243,8 +279,12 @@ def render_new_comments(data, pending, round_no):
         lines.append("=" * 72)
         for comment in issue_comments:
             lines.append("")
-            lines.append("--- comment {} by {} ---".format(
-                comment.get("id"), (comment.get("user") or {}).get("login", "unknown")))
+            lines.append(
+                "--- comment {} by {} ---".format(
+                    comment.get("id"),
+                    (comment.get("user") or {}).get("login", "unknown"),
+                )
+            )
             lines.append(comment["body"].strip())
 
     return "\n".join(lines) + "\n"
@@ -252,7 +292,9 @@ def render_new_comments(data, pending, round_no):
 
 def summarize(inbox_dir, our_logins=(), round_no=None):
     """Write review_summary.txt / NEW_COMMENTS.md / pending_comments.json."""
-    round_no = round_no or os.path.basename(os.path.abspath(inbox_dir)).replace("round_", "")
+    round_no = round_no or os.path.basename(os.path.abspath(inbox_dir)).replace(
+        "round_", ""
+    )
     data = load_round(inbox_dir)
     pending = select_pending(data, our_logins=our_logins)
 
@@ -262,17 +304,24 @@ def summarize(inbox_dir, our_logins=(), round_no=None):
 
     summary_path = os.path.join(inbox_dir, REVIEW_SUMMARY_FILE)
     with open(summary_path, "w") as f:
-        f.write(render_new_comments(
-            data, select_pending(data, our_logins=our_logins, cursor=None),
-            "{} (all, no cursor)".format(round_no)))
+        f.write(
+            render_new_comments(
+                data,
+                select_pending(data, our_logins=our_logins, cursor=None),
+                f"{round_no} (all, no cursor)",
+            )
+        )
 
     pending_path = os.path.join(inbox_dir, PENDING_COMMENTS_FILE)
     with open(pending_path, "w") as f:
         json.dump({"round": round_no, "pending": pending}, f, indent=2, sort_keys=True)
         f.write("\n")
 
-    seen_ids = [c["id"] for c in (data.get("comments") or [])
-                if isinstance(c, dict) and "id" in c]
+    seen_ids = [
+        c["id"]
+        for c in (data.get("comments") or [])
+        if isinstance(c, dict) and "id" in c
+    ]
     return {
         "pending_count": len(pending),
         "pending_path": pending_path,
@@ -307,10 +356,13 @@ def main():
         state_path = None
         if args.state:
             from llm.auto_code_gen.pr_flow import pr_state as state_mod
+
             state_path = args.state
             cursor = state_mod.load_state(state_path).get("cursor")
             if not args.our_logins:
-                args.our_logins = [state_mod.load_state(state_path).get("fork_owner", "")]
+                args.our_logins = [
+                    state_mod.load_state(state_path).get("fork_owner", "")
+                ]
 
         data = load_round(args.inbox)
         pending = select_pending(data, cursor=cursor, our_logins=args.our_logins)
@@ -319,24 +371,34 @@ def main():
         with open(os.path.join(args.inbox, NEW_COMMENTS_FILE), "w") as f:
             f.write(render_new_comments(data, pending, round_no))
         with open(os.path.join(args.inbox, REVIEW_SUMMARY_FILE), "w") as f:
-            f.write(render_new_comments(
-                data, select_pending(data, our_logins=args.our_logins), round_no))
+            f.write(
+                render_new_comments(
+                    data, select_pending(data, our_logins=args.our_logins), round_no
+                )
+            )
         with open(os.path.join(args.inbox, PENDING_COMMENTS_FILE), "w") as f:
-            json.dump({"round": round_no, "pending": pending}, f, indent=2, sort_keys=True)
+            json.dump(
+                {"round": round_no, "pending": pending}, f, indent=2, sort_keys=True
+            )
             f.write("\n")
 
         seen = [c["id"] for c in (data.get("comments") or []) if "id" in c]
         max_id = max(seen) if seen else (cursor or {}).get("max_comment_id", 0)
         if state_path and not args.no_cursor_update:
             from llm.auto_code_gen.pr_flow import pr_state as state_mod
-            new_cursor = dict((state_mod.load_state(state_path).get("cursor") or {}))
+
+            new_cursor = dict(state_mod.load_state(state_path).get("cursor") or {})
             new_cursor["max_comment_id"] = max_id
             new_cursor["last_seen_at"] = max(
-                [c.get("updated_at") or c.get("created_at") or "" for c in data["comments"]]
-                or [new_cursor.get("last_seen_at", "")])
+                [
+                    c.get("updated_at") or c.get("created_at") or ""
+                    for c in data["comments"]
+                ]
+                or [new_cursor.get("last_seen_at", "")]
+            )
             state_mod.update(state_path, cursor=new_cursor)
 
-        print("pending comments: {}".format(len(pending)))
+        print(f"pending comments: {len(pending)}")
         return 0 if pending else 28
 
     if args.command == "count":

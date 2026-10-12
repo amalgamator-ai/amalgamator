@@ -1,18 +1,15 @@
-import sys
-import time
 import argparse
 import asyncio
-
+import time
 from pathlib import Path
+
 from common.utils import setup_logging
 from llm.auto_code_gen.agents import agent_run
-
 from llm.auto_code_gen.code_gen_configs import CodeGenConfig
 from llm.auto_code_gen.code_gen_prompts import (
     create_context_str,
     gen_WorkItemsPrompt,
 )
-
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     from llm.auto_code_gen.agents import add_agent_argument
+
     add_agent_argument(parser)
     return parser.parse_args()
 
@@ -63,7 +61,9 @@ if __name__ == "__main__":
     setup_logging("work_items")
 
     start_time = time.time()
-    asyncio.run(agent_run(claude_config, gen_prompts(args, code_gen_config, claude_config)))
+    asyncio.run(
+        agent_run(claude_config, gen_prompts(args, code_gen_config, claude_config))
+    )
     duration_time = time.time() - start_time
 
-    print("FINISHED ALL: total_duration = {}".format(duration_time))
+    print(f"FINISHED ALL: total_duration = {duration_time}")

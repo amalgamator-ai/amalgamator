@@ -25,25 +25,27 @@ Output:
     - Mode B reads: run_params_cross.txt, cross_compare_blocks.txt, cross_matching_blocks.txt
 """
 
-import sys as _sys
 import os as _os
+import sys as _sys
+
 _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
+import argparse
+import asyncio
 import os
 import sys
 import time
-import asyncio
-import argparse
 
-from common.utils import setup_logging
 from common.claude_utils import PipelineStep
+from common.utils import setup_logging
 from llm.agents import agent_run
 from llm.auto_analyze.agent_support import add_agent_arguments, make_agent_config
-
-from llm.auto_analyze.prompts.summary_pdf_prompts import SummaryPDFPrompt, SUMMARY_PDF_FILE
-
+from llm.auto_analyze.prompts.summary_pdf_prompts import (
+    SUMMARY_PDF_FILE,
+    SummaryPDFPrompt,
+)
 
 if __name__ == "__main__":
     setup_logging("summary_pdf")
@@ -69,11 +71,13 @@ if __name__ == "__main__":
 
     if args.single_config:
         from llm.auto_analyze.configs.single_trace_config import SingleTraceConfig
+
         config = SingleTraceConfig.from_json(args.single_config)
         results_dir = os.path.abspath(config.output_dir)
         mode = "single"
     else:
         from llm.auto_analyze.configs.cross_trace_config import CrossTraceConfig
+
         config = CrossTraceConfig.from_json(args.cross_config)
         config.load_all_trace_params()
         results_dir = os.path.abspath(config.output_dir)

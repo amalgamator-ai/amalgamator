@@ -9,14 +9,13 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from dataclasses import asdict
 from pathlib import Path
 
-from llm.auto_profile_server_client.config import VALID_FRAMEWORKS
-from llm.auto_profile_server_client.models import (
-    BenchmarkResult, make_test_id, make_test_id_with_batch, save_json,
-)
 from llm.auto_profile_server_client.frameworks import get_adapter
+from llm.auto_profile_server_client.models import (
+    BenchmarkResult,
+    save_json,
+)
 
 log = logging.getLogger(__name__)
 
@@ -57,12 +56,25 @@ def restructure_results(results_dir: str, output_dir: str) -> dict:
             all_results[test_id_batch] = {}
 
         adapter = get_adapter(fw)
-        result = BenchmarkResult(**{k: bench.get(k, 0) for k in [
-            "ttft_ms", "tpot_ms", "throughput_tok_per_sec",
-            "ttft_p50_ms", "ttft_p90_ms", "ttft_p99_ms",
-            "tpot_p50_ms", "tpot_p90_ms", "tpot_p99_ms",
-            "e2e_latency_ms", "num_prompts", "total_time_sec",
-        ]})
+        result = BenchmarkResult(
+            **{
+                k: bench.get(k, 0)
+                for k in [
+                    "ttft_ms",
+                    "tpot_ms",
+                    "throughput_tok_per_sec",
+                    "ttft_p50_ms",
+                    "ttft_p90_ms",
+                    "ttft_p99_ms",
+                    "tpot_p50_ms",
+                    "tpot_p90_ms",
+                    "tpot_p99_ms",
+                    "e2e_latency_ms",
+                    "num_prompts",
+                    "total_time_sec",
+                ]
+            }
+        )
         all_results[test_id_batch][fw] = result
 
         # Copy files into restructured directory
@@ -180,7 +192,8 @@ def generate_analysis_configs(
         vllm_result = fw_results["vllm"]
         is_vllm_slower = any(
             fw_results[fw].tpot_ms < vllm_result.tpot_ms
-            for fw in fw_results if fw != "vllm"
+            for fw in fw_results
+            if fw != "vllm"
         )
         if not is_vllm_slower:
             continue

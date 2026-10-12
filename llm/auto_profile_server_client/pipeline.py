@@ -6,20 +6,21 @@ Entry point for both CLI usage and LLM-driven execution.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
-import sys
 import time
 from pathlib import Path
 
-from llm.auto_profile_server_client.config import FRAMEWORK_PORTS
-from llm.auto_profile_server_client.run_config import load_config
-from llm.auto_profile_server_client.models import RunConfig, StepSummary, save_json
-from llm.auto_profile_server_client.docker_runner import DockerRunner, wait_for_gpu_memory_release
 from llm.auto_profile_server_client.benchmark_runner import BenchmarkRunner
-from llm.auto_profile_server_client.summary import SummaryWriter
+from llm.auto_profile_server_client.config import FRAMEWORK_PORTS
+from llm.auto_profile_server_client.docker_runner import (
+    DockerRunner,
+    wait_for_gpu_memory_release,
+)
 from llm.auto_profile_server_client.frameworks import get_adapter
+from llm.auto_profile_server_client.models import RunConfig, StepSummary, save_json
+from llm.auto_profile_server_client.run_config import load_config
+from llm.auto_profile_server_client.summary import SummaryWriter
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +62,9 @@ def run_pipeline(config: RunConfig) -> dict:
     pipeline_duration = time.time() - pipeline_start
 
     results_path = Path(output_dir) / "pipeline_results.json"
-    save_json({"results": all_results, "duration_sec": pipeline_duration}, str(results_path))
+    save_json(
+        {"results": all_results, "duration_sec": pipeline_duration}, str(results_path)
+    )
 
     log.info("=" * 72)
     log.info("PIPELINE COMPLETE (%.1fs)", pipeline_duration)
@@ -71,7 +74,9 @@ def run_pipeline(config: RunConfig) -> dict:
     return {"results": all_results, "output_dir": output_dir}
 
 
-def _run_direct(config: RunConfig, output_dir: str, summary: SummaryWriter) -> list[dict]:
+def _run_direct(
+    config: RunConfig, output_dir: str, summary: SummaryWriter
+) -> list[dict]:
     """Run benchmarks directly (inside docker or local with GPUs)."""
     all_results = []
 
@@ -94,17 +99,23 @@ def _run_direct(config: RunConfig, output_dir: str, summary: SummaryWriter) -> l
                     result = runner.run()
                     all_results.append(result)
                 except Exception as e:
-                    log.error("Benchmark failed: %s — %s", runner.test_name, e, exc_info=True)
-                    summary.write_step_summary(StepSummary(
-                        step_name=runner.test_name,
-                        status="failed",
-                        issues=[str(e)],
-                    ))
+                    log.error(
+                        "Benchmark failed: %s — %s", runner.test_name, e, exc_info=True
+                    )
+                    summary.write_step_summary(
+                        StepSummary(
+                            step_name=runner.test_name,
+                            status="failed",
+                            issues=[str(e)],
+                        )
+                    )
 
     return all_results
 
 
-def _run_via_docker(config: RunConfig, output_dir: str, summary: SummaryWriter) -> list[dict]:
+def _run_via_docker(
+    config: RunConfig, output_dir: str, summary: SummaryWriter
+) -> list[dict]:
     """Launch docker containers to run benchmarks."""
     docker = DockerRunner()
     all_results = []
@@ -123,7 +134,9 @@ def _run_via_docker(config: RunConfig, output_dir: str, summary: SummaryWriter) 
             wait_for_gpu_memory_release()
 
         image = config.docker_images[fw_entry.name]
-        container_name = f"{fw_entry.name}_auto_profile_{os.environ.get('USER', 'user')}"
+        container_name = (
+            f"{fw_entry.name}_auto_profile_{os.environ.get('USER', 'user')}"
+        )
 
         # Build the inner command that runs inside docker
         inner_config_path = f"/tmp/run_config_{fw_entry.name}.json"
@@ -157,12 +170,16 @@ def _run_via_docker(config: RunConfig, output_dir: str, summary: SummaryWriter) 
         if result.returncode == 0:
             log.info("Container %s completed successfully", container_name)
         else:
-            log.error("Container %s failed (exit=%d)", container_name, result.returncode)
-            summary.write_step_summary(StepSummary(
-                step_name=f"docker_{fw_entry.name}",
-                status="failed",
-                issues=[f"Container exited with code {result.returncode}"],
-            ))
+            log.error(
+                "Container %s failed (exit=%d)", container_name, result.returncode
+            )
+            summary.write_step_summary(
+                StepSummary(
+                    step_name=f"docker_{fw_entry.name}",
+                    status="failed",
+                    issues=[f"Container exited with code {result.returncode}"],
+                )
+            )
 
     return all_results
 
@@ -172,7 +189,8 @@ def _is_inside_docker() -> bool:
         Path("/.dockerenv").exists()
         or Path("/run/.containerenv").exists()
         or "container" in Path("/proc/1/cgroup").read_text()
-        if Path("/proc/1/cgroup").exists() else False
+        if Path("/proc/1/cgroup").exists()
+        else False
     )
 
 
@@ -193,7 +211,9 @@ def main() -> None:
         description="Server-client benchmark and profiling pipeline"
     )
     parser.add_argument("--config", required=True, help="Path to run config JSON")
-    parser.add_argument("--framework", help="Run only this framework (for docker inner mode)")
+    parser.add_argument(
+        "--framework", help="Run only this framework (for docker inner mode)"
+    )
     parser.add_argument("--model", help="Run only this model (for docker inner mode)")
     parser.add_argument("--output-dir", help="Override output directory")
     parser.add_argument("--verbose", action="store_true")

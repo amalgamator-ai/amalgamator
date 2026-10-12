@@ -1,11 +1,12 @@
 """Tests for auto_bug_fix.bug_fix_prompts — prompt class rendering."""
+
 from auto_bug_fix.bug_fix_prompts import (
+    BuildErrorRecoveryPrompt,
     NarrowResolutionAgentPrompt,
     PostResolutionCheckPrompt,
-    TriageBlindReviewPrompt,
-    BuildErrorRecoveryPrompt,
     SemanticTriagePrompt,
     TestPortAgentPrompt,
+    TriageBlindReviewPrompt,
 )
 
 
@@ -44,12 +45,13 @@ def test_narrow_resolution_prompt_followup_section_optional():
     without = NarrowResolutionAgentPrompt(**kwargs).prompt()
     assert "follow-up fixes" not in without
     assert "keep the upstream form" in without  # adaptation rule 7
-    assert "git log --all" in without           # ref-scope guard (rule 9)
+    assert "git log --all" in without  # ref-scope guard (rule 9)
     # Grep commands use baseline_ref
     assert "baseline_sha_123" in without
 
     with_followups = NarrowResolutionAgentPrompt(
-        **kwargs, followup_fixes="  - abc1234 fix the fix",
+        **kwargs,
+        followup_fixes="  - abc1234 fix the fix",
     ).prompt()
     assert "follow-up fixes" in with_followups
     assert "abc1234 fix the fix" in with_followups
@@ -94,7 +96,8 @@ def test_post_resolution_prompt_evidence_section_optional():
     assert "origin/release-1.0" in without  # still mentioned for readability
 
     with_evidence = PostResolutionCheckPrompt(
-        **kwargs, evidence_report="- `sample_token`: NOT on target",
+        **kwargs,
+        evidence_report="- `sample_token`: NOT on target",
     ).prompt()
     assert "Deterministic evidence" in with_evidence
     assert "sample_token" in with_evidence

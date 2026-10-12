@@ -19,7 +19,6 @@ class FrameworkAdapter(ABC):
         model: str,
         tp: int,
         port: int,
-
         extra_flags: str = "",
         extra_env: dict[str, str] | None = None,
     ) -> str:
@@ -66,19 +65,19 @@ class FrameworkAdapter(ABC):
         instead of iteration-based delay."""
         return False
 
-    def profiling_server_extra_flags(self, delay: int, active: int,
-                                     profiler_type: str = "nsys") -> str:
+    def profiling_server_extra_flags(
+        self, delay: int, active: int, profiler_type: str = "nsys"
+    ) -> str:
         """Extra server flags for profiling. Only needed if the framework
         requires server-side config (e.g. vLLM --profiler-config)."""
         return ""
 
-    def profiling_start_request(self, port: int, delay: int, active: int,
-                                profiler_type: str = "nsys") -> list[str]:
+    def profiling_start_request(
+        self, port: int, delay: int, active: int, profiler_type: str = "nsys"
+    ) -> list[str]:
         """Build the curl command to arm the profiler via HTTP."""
-        return ["curl", "-sf", "-X", "POST",
-                f"http://localhost:{port}/start_profile"]
+        return ["curl", "-sf", "-X", "POST", f"http://localhost:{port}/start_profile"]
 
     def profiling_stop_request(self, port: int) -> list[str]:
         """Build the curl command to stop the profiler via HTTP."""
-        return ["curl", "-sf", "-X", "POST",
-                f"http://localhost:{port}/stop_profile"]
+        return ["curl", "-sf", "-X", "POST", f"http://localhost:{port}/stop_profile"]

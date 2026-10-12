@@ -47,13 +47,16 @@ import textwrap
 import time
 import uuid
 
-
 # ── oc helpers ────────────────────────────────────────────────────────────────
+
 
 def _oc(*args, check=True, capture=True, input=None):
     return subprocess.run(
         ["oc"] + list(args),
-        check=check, capture_output=capture, text=True, input=input,
+        check=check,
+        capture_output=capture,
+        text=True,
+        input=input,
     )
 
 
@@ -61,8 +64,12 @@ def _run_or_die(*args, **kw):
     try:
         return _oc(*args, **kw)
     except subprocess.CalledProcessError as e:
-        print("ERROR: oc {} failed\n{}".format(
-            " ".join(str(a) for a in args[:3]), e.stderr), file=sys.stderr)
+        print(
+            "ERROR: oc {} failed\n{}".format(
+                " ".join(str(a) for a in args[:3]), e.stderr
+            ),
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -71,9 +78,17 @@ def _wait_for_pod(namespace, job_name, timeout_s, poll_s=10):
     deadline = time.time() + timeout_s
     last_label = ""
     while time.time() < deadline:
-        r = _oc("get", "pods", "-n", namespace,
-                "-l", "job-name={}".format(job_name),
-                "-o", "json", check=False)
+        r = _oc(
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-l",
+            f"job-name={job_name}",
+            "-o",
+            "json",
+            check=False,
+        )
         if r.returncode == 0:
             items = json.loads(r.stdout).get("items", [])
             if items:
@@ -83,18 +98,17 @@ def _wait_for_pod(namespace, job_name, timeout_s, poll_s=10):
                 conds = pod["status"].get("conditions") or []
                 reason = conds[-1].get("reason", "") if conds else ""
                 msg = (conds[-1].get("message", "") or "")[:120] if conds else ""
-                label = "{} — {}".format(reason, msg) if msg else reason
+                label = f"{reason} — {msg}" if msg else reason
                 if phase not in ("Pending", "Unknown"):
                     return name, phase
                 if label != last_label:
-                    print("  pod {}: {} — {}".format(name, phase, label), file=sys.stderr)
+                    print(f"  pod {name}: {phase} — {label}", file=sys.stderr)
                     last_label = label
         time.sleep(poll_s)
-    raise TimeoutError("Timed out waiting for pod of Job {}".format(job_name))
+    raise TimeoutError(f"Timed out waiting for pod of Job {job_name}")
 
 
-def _poll_job_until_done(namespace, job_name, pod_name,
-                         timeout_s=7200, poll_s=30):
+def _poll_job_until_done(namespace, job_name, pod_name, timeout_s=7200, poll_s=30):
     """Poll job status and print log snapshots until the job reaches a terminal state."""
     deadline = time.time() + timeout_s
     terminal = None
@@ -102,7 +116,10 @@ def _poll_job_until_done(namespace, job_name, pod_name,
         r = _oc("get", "job", job_name, "-n", namespace, "-o", "json", check=False)
         if r.returncode == 0:
             for c in json.loads(r.stdout).get("status", {}).get("conditions", []):
-                if c.get("type") in ("Complete", "Failed") and c.get("status") == "True":
+                if (
+                    c.get("type") in ("Complete", "Failed")
+                    and c.get("status") == "True"
+                ):
                     terminal = c["type"]
                     break
         if terminal:
@@ -114,7 +131,7 @@ def _poll_job_until_done(namespace, job_name, pod_name,
         time.sleep(poll_s)
 
     if terminal is None:
-        raise TimeoutError("Timed out waiting for Job {}".format(job_name))
+        raise TimeoutError(f"Timed out waiting for Job {job_name}")
 
     r_final = _oc("logs", "-n", namespace, pod_name, "--tail=80", check=False)
     if r_final.returncode == 0:
@@ -133,64 +150,97 @@ def _copy_results(namespace, pvc_name, remote_dir, local_dir):
     wait for ``run_status.txt`` to confirm the job flushed all output,
     then copy and tear down.
     """
-    helper = "ai-auto-analyze-cp-{}".format(uuid.uuid4().hex[:6])
-    overrides = json.dumps({"spec": {
-        "containers": [{
-            "name": helper,
-            "image": "registry.access.redhat.com/ubi9/ubi:latest",
-            "command": ["sleep", "300"],
-            "volumeMounts": [{"name": "ws", "mountPath": "/workspace"}],
-        }],
-        "volumes": [{
-            "name": "ws",
-            "persistentVolumeClaim": {"claimName": pvc_name},
-        }],
-    }})
+    helper = f"ai-auto-analyze-cp-{uuid.uuid4().hex[:6]}"
+    overrides = json.dumps(
+        {
+            "spec": {
+                "containers": [
+                    {
+                        "name": helper,
+                        "image": "registry.access.redhat.com/ubi9/ubi:latest",
+                        "command": ["sleep", "300"],
+                        "volumeMounts": [{"name": "ws", "mountPath": "/workspace"}],
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "ws",
+                        "persistentVolumeClaim": {"claimName": pvc_name},
+                    }
+                ],
+            }
+        }
+    )
     try:
-        _oc("run", helper, "-n", namespace,
+        _oc(
+            "run",
+            helper,
+            "-n",
+            namespace,
             "--image=registry.access.redhat.com/ubi9/ubi:latest",
-            "--overrides=" + overrides, "--restart=Never", check=True)
-        _oc("wait", "-n", namespace, "pod/" + helper,
-            "--for=condition=Ready", "--timeout=120s", check=True)
+            "--overrides=" + overrides,
+            "--restart=Never",
+            check=True,
+        )
+        _oc(
+            "wait",
+            "-n",
+            namespace,
+            "pod/" + helper,
+            "--for=condition=Ready",
+            "--timeout=120s",
+            check=True,
+        )
 
         # Wait for run_status.txt — written as the last step by the job
-        status_path = "{}/run_status.txt".format(remote_dir)
+        status_path = f"{remote_dir}/run_status.txt"
         for _ in range(30):
-            r = _oc("exec", "-n", namespace, helper, "--",
-                     "test", "-f", status_path, check=False)
+            r = _oc(
+                "exec",
+                "-n",
+                namespace,
+                helper,
+                "--",
+                "test",
+                "-f",
+                status_path,
+                check=False,
+            )
             if r.returncode == 0:
                 break
             time.sleep(2)
 
         os.makedirs(local_dir, exist_ok=True)
-        src = "{}/{}:{}/".format(namespace, helper, remote_dir)
+        src = f"{namespace}/{helper}:{remote_dir}/"
         r = _oc("cp", src, local_dir + "/", check=False)
         if r.returncode != 0:
-            print("WARNING: oc cp via helper failed ({}): {}".format(
-                r.returncode, r.stderr.strip()), file=sys.stderr)
+            print(
+                f"WARNING: oc cp via helper failed ({r.returncode}): {r.stderr.strip()}",
+                file=sys.stderr,
+            )
             return False
         return True
     except subprocess.CalledProcessError as e:
-        print("WARNING: helper pod failed: {}".format(e.stderr or e),
-              file=sys.stderr)
+        print(f"WARNING: helper pod failed: {e.stderr or e}", file=sys.stderr)
         return False
     finally:
-        _oc("delete", "pod", helper, "-n", namespace,
-            "--wait=false", check=False)
+        _oc("delete", "pod", helper, "-n", namespace, "--wait=false", check=False)
 
 
 def _upload_dir(namespace, pod_name, local_dir, remote_dir):
     """oc cp local dir → pod. Used to upload diagnostic reference files."""
-    r = _oc("exec", "-n", namespace, pod_name, "--", "mkdir", "-p", remote_dir, check=False)
-    r = _oc("cp", local_dir + "/", "{}/{}:{}/".format(namespace, pod_name, remote_dir),
-            check=False)
+    r = _oc(
+        "exec", "-n", namespace, pod_name, "--", "mkdir", "-p", remote_dir, check=False
+    )
+    r = _oc("cp", local_dir + "/", f"{namespace}/{pod_name}:{remote_dir}/", check=False)
     if r.returncode != 0:
-        print("WARNING: upload to pod failed: {}".format(r.stderr.strip()), file=sys.stderr)
+        print(f"WARNING: upload to pod failed: {r.stderr.strip()}", file=sys.stderr)
         return False
     return True
 
 
 # ── bench command sanitization ───────────────────────────────────────────────
+
 
 def _sanitize_bench_command(cmd):
     """Clean a raw run_command from run_params.txt for use inside the GPU Job.
@@ -204,29 +254,29 @@ def _sanitize_bench_command(cmd):
        from run_params.txt shell escaping.
     """
     # Unescape backslash-escaped commas from run_params.txt
-    cmd = cmd.replace('\\,', ',')
+    cmd = cmd.replace("\\,", ",")
 
     # Strip leading `env VAR=VALUE VAR=VALUE ...` prefix (stops at first non-VAR= token)
     tokens = cmd.split()
-    if tokens and tokens[0] == 'env':
+    if tokens and tokens[0] == "env":
         tokens = tokens[1:]
     # Drop any remaining KEY=VALUE env tokens at the start
-    while tokens and '=' in tokens[0] and not tokens[0].startswith('-'):
+    while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
         tokens = tokens[1:]
-    cmd = ' '.join(tokens)
+    cmd = " ".join(tokens)
 
     # Replace --output-json <path> with the Job's output dir variable
-    cmd = re.sub(r'--output-json\s+\S+', '--output-json $OUT/bench_result.json', cmd)
+    cmd = re.sub(r"--output-json\s+\S+", "--output-json $OUT/bench_result.json", cmd)
 
     # Current vLLM uses the pair --result-dir/--result-filename instead.
-    cmd = re.sub(r'--result-dir\s+\S+', '--result-dir $OUT', cmd)
-    cmd = re.sub(r'--result-filename\s+\S+',
-                 '--result-filename bench_result.json', cmd)
+    cmd = re.sub(r"--result-dir\s+\S+", "--result-dir $OUT", cmd)
+    cmd = re.sub(r"--result-filename\s+\S+", "--result-filename bench_result.json", cmd)
 
     return cmd
 
 
 # ── lm_eval command derivation ────────────────────────────────────────────────
+
 
 def _derive_lm_eval_command(bench_command, hf_cache_dir, server_command=""):
     """Build a standard gsm8k lm_eval command from the benchmark command.
@@ -241,6 +291,7 @@ def _derive_lm_eval_command(bench_command, hf_cache_dir, server_command=""):
     The lm_eval writes its JSON output to $OUT/lm_eval_output (set by the
     entrypoint).
     """
+
     def _first(pattern):
         for source in (bench_command or "", server_command or ""):
             match = re.search(pattern, source)
@@ -248,26 +299,26 @@ def _derive_lm_eval_command(bench_command, hf_cache_dir, server_command=""):
                 return match.group(1)
         return None
 
-    model = _first(r'--model\s+(\S+)') or "UNKNOWN_MODEL"
-    tp = _first(r'--tensor-parallel-size\s+(\d+)') or "1"
-    kv = _first(r'--kv-cache-dtype\s+(\S+)') or ""
+    model = _first(r"--model\s+(\S+)") or "UNKNOWN_MODEL"
+    tp = _first(r"--tensor-parallel-size\s+(\d+)") or "1"
+    kv = _first(r"--kv-cache-dtype\s+(\S+)") or ""
 
     model_args = (
-        "pretrained={model},tensor_parallel_size={tp},"
+        f"pretrained={model},tensor_parallel_size={tp},"
         "trust_remote_code=True,max_model_len=4096"
-    ).format(model=model, tp=tp)
+    )
     if kv:
-        model_args += ",kv_cache_dtype={}".format(kv)
+        model_args += f",kv_cache_dtype={kv}"
 
     return (
-        "HF_HOME={hf} python3 -m lm_eval"
+        f"HF_HOME={hf_cache_dir} python3 -m lm_eval"
         " --model vllm"
-        " --model_args {args}"
+        f" --model_args {model_args}"
         " --tasks gsm8k"
         " --limit 200"
         " --batch_size auto"
         " --output_path $OUT/lm_eval_output"
-    ).format(hf=hf_cache_dir, args=model_args)
+    )
 
 
 # ── entrypoint script assembly ───────────────────────────────────────────────
@@ -288,18 +339,24 @@ def _assemble_script(script_name):
 
 # ── ConfigMap helpers ─────────────────────────────────────────────────────────
 
+
 def _create_configmap(namespace, name, script_content):
     """Create a ConfigMap containing the entrypoint script."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
         f.write(script_content)
         tmp_path = f.name
     try:
-        _run_or_die("create", "configmap", name, "-n", namespace,
-                     "--from-file=entrypoint.sh={}".format(tmp_path))
+        _run_or_die(
+            "create",
+            "configmap",
+            name,
+            "-n",
+            namespace,
+            f"--from-file=entrypoint.sh={tmp_path}",
+        )
     finally:
         os.unlink(tmp_path)
-    print("[cluster_runner] configmap {} created".format(name), file=sys.stderr)
-
+    print(f"[cluster_runner] configmap {name} created", file=sys.stderr)
 
 
 # ── Job manifest ──────────────────────────────────────────────────────────────
@@ -313,29 +370,40 @@ def _parse_extra_env(values):
     for item in values or []:
         key, sep, value = item.partition("=")
         if not sep or not key:
-            raise SystemExit("--extra-env expects KEY=VALUE, got: {}".format(item))
+            raise SystemExit(f"--extra-env expects KEY=VALUE, got: {item}")
         env[key] = value
     return env
 
 
-def _build_job_manifest(job_name, namespace, image, gpu_count, gpu_product,
-                        pvc_name, configmap_name, model_pvc_name="",
-                        ttl_seconds=600, env_vars=None, pull_secret=None):
+def _build_job_manifest(
+    job_name,
+    namespace,
+    image,
+    gpu_count,
+    gpu_product,
+    pvc_name,
+    configmap_name,
+    model_pvc_name="",
+    ttl_seconds=600,
+    env_vars=None,
+    pull_secret=None,
+):
     model_volume_mount = (
-        "\n            - name: model-cache\n"
-        "              mountPath: /model-cache"
-        if model_pvc_name else ""
+        "\n            - name: model-cache\n" "              mountPath: /model-cache"
+        if model_pvc_name
+        else ""
     )
     model_volume = (
         "\n        - name: model-cache\n"
         "          persistentVolumeClaim:\n"
-        "            claimName: {}".format(model_pvc_name)
-        if model_pvc_name else ""
+        f"            claimName: {model_pvc_name}"
+        if model_pvc_name
+        else ""
     )
     pull_secret_section = (
-        "imagePullSecrets:\n"
-        "                - name: {}".format(pull_secret)
-        if pull_secret else ""
+        "imagePullSecrets:\n" f"                - name: {pull_secret}"
+        if pull_secret
+        else ""
     )
 
     all_env = [
@@ -347,13 +415,14 @@ def _build_job_manifest(job_name, namespace, image, gpu_count, gpu_product,
         all_env.extend(env_vars.items())
     env_lines = []
     for name, value in all_env:
-        env_lines.append("            - name: {}".format(name))
+        env_lines.append(f"            - name: {name}")
         escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
-        env_lines.append('              value: "{}"'.format(escaped))
+        env_lines.append(f'              value: "{escaped}"')
     env_section = "\n".join(env_lines)
     env_section = env_section.replace("{", "{{").replace("}", "}}")
 
-    return textwrap.dedent("""
+    return (
+        textwrap.dedent("""
         apiVersion: batch/v1
         kind: Job
         metadata:
@@ -408,28 +477,41 @@ def _build_job_manifest(job_name, namespace, image, gpu_count, gpu_product,
                     sizeLimit: 64Gi
                 - name: flashinfer-cubins
                   emptyDir: {{}}{model_volume}
-    """).format(
-        job_name=job_name,
-        namespace=namespace,
-        image=image,
-        ttl=ttl_seconds,
-        gpu_product=gpu_product,
-        gpu_count=gpu_count,
-        pvc_name=pvc_name,
-        configmap_name=configmap_name,
-        env_section=env_section,
-        model_volume_mount=model_volume_mount,
-        model_volume=model_volume,
-        pull_secret_section=pull_secret_section,
-    ).strip()
+    """)
+        .format(
+            job_name=job_name,
+            namespace=namespace,
+            image=image,
+            ttl=ttl_seconds,
+            gpu_product=gpu_product,
+            gpu_count=gpu_count,
+            pvc_name=pvc_name,
+            configmap_name=configmap_name,
+            env_section=env_section,
+            model_volume_mount=model_volume_mount,
+            model_volume=model_volume,
+            pull_secret_section=pull_secret_section,
+        )
+        .strip()
+    )
 
 
 # ── shared job runner ─────────────────────────────────────────────────────────
 
-def _run_job(namespace, job_name, manifest, gpu_count, gpu_product,
-             pvc_out_dir, local_out_dir, gpu_wait_timeout_minutes,
-             pvc_name, yaml_name="job_manifest.yaml",
-             entrypoint_script=None):
+
+def _run_job(
+    namespace,
+    job_name,
+    manifest,
+    gpu_count,
+    gpu_product,
+    pvc_out_dir,
+    local_out_dir,
+    gpu_wait_timeout_minutes,
+    pvc_name,
+    yaml_name="job_manifest.yaml",
+    entrypoint_script=None,
+):
     """Submit the Job, wait for it, copy results back. Returns pod_name.
 
     If entrypoint_script is provided, its content is saved alongside the
@@ -443,41 +525,44 @@ def _run_job(namespace, job_name, manifest, gpu_count, gpu_product,
         f.write(manifest)
     if entrypoint_script:
         script_path = os.path.join(
-            yaml_dir, yaml_name.replace(".yaml", "_entrypoint.sh"))
+            yaml_dir, yaml_name.replace(".yaml", "_entrypoint.sh")
+        )
         with open(script_path, "w") as f:
             f.write(entrypoint_script)
-    print("[cluster_runner] job manifest written to {}".format(yaml_path),
-          file=sys.stderr)
+    print(f"[cluster_runner] job manifest written to {yaml_path}", file=sys.stderr)
     print(manifest, file=sys.stderr)
 
-    print("[cluster_runner] submitting {} namespace={}".format(job_name, namespace),
-          file=sys.stderr)
+    print(
+        f"[cluster_runner] submitting {job_name} namespace={namespace}", file=sys.stderr
+    )
     _run_or_die("apply", "-f", "-", "-n", namespace, capture=False, input=manifest)
 
-    print("[cluster_runner] waiting for pod ({} × {} GPUs)...".format(
-        gpu_count, gpu_product), file=sys.stderr)
+    print(
+        f"[cluster_runner] waiting for pod ({gpu_count} × {gpu_product} GPUs)...",
+        file=sys.stderr,
+    )
     try:
         pod_name, phase = _wait_for_pod(
-            namespace, job_name,
+            namespace,
+            job_name,
             timeout_s=gpu_wait_timeout_minutes * 60,
         )
     except TimeoutError as e:
-        print("ERROR: {}".format(e), file=sys.stderr)
+        print(f"ERROR: {e}", file=sys.stderr)
         _oc("delete", "job", job_name, "-n", namespace, check=False)
         sys.exit(1)
 
-    print("[cluster_runner] pod {} started (phase={})".format(pod_name, phase),
-          file=sys.stderr)
+    print(f"[cluster_runner] pod {pod_name} started (phase={phase})", file=sys.stderr)
 
     try:
         terminal = _poll_job_until_done(namespace, job_name, pod_name)
     except TimeoutError as e:
-        print("ERROR: {}".format(e), file=sys.stderr)
+        print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
-    print("[cluster_runner] Job state: {}".format(terminal), file=sys.stderr)
+    print(f"[cluster_runner] Job state: {terminal}", file=sys.stderr)
 
     # Always copy results so the agent can inspect logs even on failure.
-    print("[cluster_runner] copying results to {}...".format(local_out_dir), file=sys.stderr)
+    print(f"[cluster_runner] copying results to {local_out_dir}...", file=sys.stderr)
     _copy_results(namespace, pvc_name, pvc_out_dir, local_out_dir)
 
     return pod_name
@@ -485,23 +570,25 @@ def _run_job(namespace, job_name, manifest, gpu_count, gpu_product,
 
 # ── subcommand: run-iteration ─────────────────────────────────────────────────
 
+
 def cmd_run_iteration(args):
     nonce = uuid.uuid4().hex[:8]
-    job_name = "ai-auto-analyze-iter-{}".format(nonce)
+    job_name = f"ai-auto-analyze-iter-{nonce}"
 
     workspace = "/workspace"
-    vllm_dir = getattr(args, "vllm_dir", None) or "{}/vllm".format(workspace)
-    pvc_out_dir = "{}/output/{}".format(workspace, nonce)
+    vllm_dir = getattr(args, "vllm_dir", None) or f"{workspace}/vllm"
+    pvc_out_dir = f"{workspace}/output/{nonce}"
     hf_home = "/model-cache"
     bench_command = _sanitize_bench_command(args.bench_command)
     server_command = args.server_command.strip()
-    print("[cluster_runner] bench command: {}".format(bench_command), file=sys.stderr)
-    print("[cluster_runner] server command: {}".format(server_command), file=sys.stderr)
+    print(f"[cluster_runner] bench command: {bench_command}", file=sys.stderr)
+    print(f"[cluster_runner] server command: {server_command}", file=sys.stderr)
 
     lm_eval_command = args.lm_eval_command
     if args.run_lm_eval and not lm_eval_command:
         lm_eval_command = _derive_lm_eval_command(
-            bench_command, hf_home, server_command)
+            bench_command, hf_home, server_command
+        )
 
     stage = getattr(args, "stage", "") or ""
     env = {
@@ -513,7 +600,9 @@ def cmd_run_iteration(args):
         "DISABLE_ENV_VAR": args.disable_env_var,
         "RUN_LM_EVAL": "1" if args.run_lm_eval else "0",
         "LM_EVAL_CMD": lm_eval_command or "",
-        "SKIP_LM_EVAL_BASELINE": "1" if getattr(args, "skip_lm_eval_baseline", False) else "0",
+        "SKIP_LM_EVAL_BASELINE": (
+            "1" if getattr(args, "skip_lm_eval_baseline", False) else "0"
+        ),
     }
     if stage:
         env["STAGE"] = stage
@@ -530,7 +619,7 @@ def cmd_run_iteration(args):
         env["VLLM_BASE_DIR"] = getattr(args, "vllm_base_dir", None) or vllm_dir
 
     entrypoint = _assemble_script("run_iteration.sh")
-    cm_name = "ai-auto-analyze-iter-{}".format(nonce)
+    cm_name = f"ai-auto-analyze-iter-{nonce}"
     _create_configmap(args.namespace, cm_name, entrypoint)
 
     manifest = _build_job_manifest(
@@ -561,21 +650,22 @@ def cmd_run_iteration(args):
     )
 
     status_file = os.path.join(args.out_dir, "run_status.txt")
-    status = (open(status_file).read().strip()
-              if os.path.isfile(status_file) else "NO_STATUS_FILE")
-    print("[cluster_runner] run_status={}".format(status), file=sys.stderr)
-
-
+    status = (
+        open(status_file).read().strip()
+        if os.path.isfile(status_file)
+        else "NO_STATUS_FILE"
+    )
+    print(f"[cluster_runner] run_status={status}", file=sys.stderr)
 
     if status != "COMPLETED":
-        print("ERROR: iteration did not complete (status={})".format(status),
-              file=sys.stderr)
+        print(f"ERROR: iteration did not complete (status={status})", file=sys.stderr)
         sys.exit(1)
 
-    print("[cluster_runner] success — results in {}".format(args.out_dir), file=sys.stderr)
+    print(f"[cluster_runner] success — results in {args.out_dir}", file=sys.stderr)
 
 
 # ── perf comparison (shared by sequential and parallel paths) ────────────────
+
 
 def _generate_perf_comparison(out_dir):
     """Generate perf_comparison.txt from the two bench result JSONs."""
@@ -592,15 +682,15 @@ def _generate_perf_comparison(out_dir):
         pv, bv = p.get(key, "N/A"), b.get(key, "N/A")
         if isinstance(pv, (int, float)) and isinstance(bv, (int, float)) and bv != 0:
             d = (pv - bv) / abs(bv) * 100
-            lines.append("  {}: patched={:.4g} baseline={:.4g} delta={:+.2f}%".format(
-                key, pv, bv, d))
+            lines.append(f"  {key}: patched={pv:.4g} baseline={bv:.4g} delta={d:+.2f}%")
         else:
-            lines.append("  {}: patched={} baseline={}".format(key, pv, bv))
+            lines.append(f"  {key}: patched={pv} baseline={bv}")
     with open(os.path.join(out_dir, "perf_comparison.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")
 
 
 # ── subcommand: run-iteration-parallel ───────────────────────────────────────
+
 
 def cmd_run_iteration_parallel(args):
     """Compile once, then submit bench + baseline (+ optional lm_eval) in parallel.
@@ -613,20 +703,21 @@ def cmd_run_iteration_parallel(args):
 
     nonce = uuid.uuid4().hex[:8]
     workspace = "/workspace"
-    vllm_dir = getattr(args, "vllm_dir", None) or "{}/vllm".format(workspace)
+    vllm_dir = getattr(args, "vllm_dir", None) or f"{workspace}/vllm"
     hf_home = "/model-cache"
     bench_command = _sanitize_bench_command(args.bench_command)
     server_command = args.server_command.strip()
-    print("[cluster_runner] bench command: {}".format(bench_command), file=sys.stderr)
-    print("[cluster_runner] server command: {}".format(server_command), file=sys.stderr)
+    print(f"[cluster_runner] bench command: {bench_command}", file=sys.stderr)
+    print(f"[cluster_runner] server command: {server_command}", file=sys.stderr)
 
     lm_eval_command = args.lm_eval_command
     if args.run_lm_eval and not lm_eval_command:
         lm_eval_command = _derive_lm_eval_command(
-            bench_command, hf_home, server_command)
+            bench_command, hf_home, server_command
+        )
 
     entrypoint = _assemble_script("run_iteration.sh")
-    cm_name = "ai-auto-analyze-iter-{}".format(nonce)
+    cm_name = f"ai-auto-analyze-iter-{nonce}"
     _create_configmap(args.namespace, cm_name, entrypoint)
 
     yaml_dir = os.path.join(args.out_dir, "cluster_yamls")
@@ -636,8 +727,8 @@ def cmd_run_iteration_parallel(args):
         f.write(entrypoint)
 
     # ── Phase 1: compile-only job ────────────────────────────────────────────
-    compile_job_name = "ai-auto-analyze-compile-{}".format(nonce)
-    compile_pvc_out = "{}/output/{}-compile".format(workspace, nonce)
+    compile_job_name = f"ai-auto-analyze-compile-{nonce}"
+    compile_pvc_out = f"{workspace}/output/{nonce}-compile"
     compile_env = {
         "OUT": compile_pvc_out,
         "VLLM_DIR": vllm_dir,
@@ -651,7 +742,7 @@ def cmd_run_iteration_parallel(args):
     }
     if args.patch_file:
         compile_env["PATCH_FILE"] = args.patch_file
-        compile_env["VLLM_BASE_DIR"] = "{}/vllm".format(workspace)
+        compile_env["VLLM_BASE_DIR"] = f"{workspace}/vllm"
     compile_manifest = _build_job_manifest(
         job_name=compile_job_name,
         namespace=args.namespace,
@@ -681,11 +772,16 @@ def cmd_run_iteration_parallel(args):
     )
 
     compile_status_file = os.path.join(args.out_dir, "run_status.txt")
-    compile_status = (open(compile_status_file).read().strip()
-                      if os.path.isfile(compile_status_file) else "NO_STATUS_FILE")
+    compile_status = (
+        open(compile_status_file).read().strip()
+        if os.path.isfile(compile_status_file)
+        else "NO_STATUS_FILE"
+    )
     if compile_status != "COMPLETED":
-        print("ERROR: compile job did not complete (status={})".format(
-            compile_status), file=sys.stderr)
+        print(
+            f"ERROR: compile job did not complete (status={compile_status})",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print("[cluster_runner] Phase 1: compile OK", file=sys.stderr)
@@ -697,8 +793,8 @@ def cmd_run_iteration_parallel(args):
 
     stage_jobs = {}
     for stage in stages:
-        job_name = "ai-auto-analyze-{}-{}".format(stage, nonce)
-        pvc_out = "{}/output/{}-{}".format(workspace, nonce, stage)
+        job_name = f"ai-auto-analyze-{stage}-{nonce}"
+        pvc_out = f"{workspace}/output/{nonce}-{stage}"
         env = {
             "OUT": pvc_out,
             "VLLM_DIR": vllm_dir,
@@ -713,7 +809,7 @@ def cmd_run_iteration_parallel(args):
         }
         if args.patch_file:
             env["PATCH_FILE"] = args.patch_file
-            env["VLLM_BASE_DIR"] = "{}/vllm".format(workspace)
+            env["VLLM_BASE_DIR"] = f"{workspace}/vllm"
         manifest = _build_job_manifest(
             job_name=job_name,
             namespace=args.namespace,
@@ -732,38 +828,55 @@ def cmd_run_iteration_parallel(args):
             "pvc_out": pvc_out,
         }
 
-    print("[cluster_runner] Phase 2: submitting {} parallel jobs".format(
-        len(stages)), file=sys.stderr)
+    print(
+        f"[cluster_runner] Phase 2: submitting {len(stages)} parallel jobs",
+        file=sys.stderr,
+    )
 
     try:
         for stage, info in stage_jobs.items():
-            yaml_path = os.path.join(yaml_dir, "run_{}.yaml".format(stage))
+            yaml_path = os.path.join(yaml_dir, f"run_{stage}.yaml")
             with open(yaml_path, "w") as f:
                 f.write(info["manifest"])
-            print("[cluster_runner] {} manifest → {}".format(stage, yaml_path),
-                  file=sys.stderr)
+            print(f"[cluster_runner] {stage} manifest → {yaml_path}", file=sys.stderr)
             print(info["manifest"], file=sys.stderr)
-            _run_or_die("apply", "-f", "-", "-n", args.namespace,
-                         capture=False, input=info["manifest"])
+            _run_or_die(
+                "apply",
+                "-f",
+                "-",
+                "-n",
+                args.namespace,
+                capture=False,
+                input=info["manifest"],
+            )
 
-        print("[cluster_runner] submitted {} parallel jobs ({} × {} GPUs each)".format(
-            len(stages), args.gpu_count, args.gpu_product), file=sys.stderr)
+        print(
+            f"[cluster_runner] submitted {len(stages)} parallel jobs ({args.gpu_count} × {args.gpu_product} GPUs each)",
+            file=sys.stderr,
+        )
 
         # ── monitor all jobs in parallel ──────────────────────────────────────
         def _monitor_stage(stage):
             info = stage_jobs[stage]
             try:
                 pod_name, _ = _wait_for_pod(
-                    args.namespace, info["job_name"],
+                    args.namespace,
+                    info["job_name"],
                     timeout_s=args.gpu_wait_timeout_minutes * 60,
                 )
-                print("[cluster_runner] [{}] pod {} started".format(stage, pod_name),
-                      file=sys.stderr)
-                terminal = _poll_job_until_done(
-                    args.namespace, info["job_name"], pod_name,
+                print(
+                    f"[cluster_runner] [{stage}] pod {pod_name} started",
+                    file=sys.stderr,
                 )
-                print("[cluster_runner] [{}] job status: {}".format(stage, terminal),
-                      file=sys.stderr)
+                terminal = _poll_job_until_done(
+                    args.namespace,
+                    info["job_name"],
+                    pod_name,
+                )
+                print(
+                    f"[cluster_runner] [{stage}] job status: {terminal}",
+                    file=sys.stderr,
+                )
                 return stage, terminal, pod_name, None
             except Exception as e:
                 return stage, "Failed", None, str(e)
@@ -774,23 +887,25 @@ def cmd_run_iteration_parallel(args):
             for future in as_completed(futures):
                 stage, terminal, pod_name, error = future.result()
                 results[stage] = {
-                    "terminal": terminal, "pod_name": pod_name, "error": error,
+                    "terminal": terminal,
+                    "pod_name": pod_name,
+                    "error": error,
                 }
                 if error:
-                    print("[cluster_runner] [{}] ERROR: {}".format(stage, error),
-                          file=sys.stderr)
+                    print(f"[cluster_runner] [{stage}] ERROR: {error}", file=sys.stderr)
 
         # ── copy results from PVC (sequentially to avoid overwrites) ──────────
         for stage in stages:
             if results[stage]["pod_name"]:
-                print("[cluster_runner] copying {} results...".format(stage),
-                      file=sys.stderr)
+                print(f"[cluster_runner] copying {stage} results...", file=sys.stderr)
                 _copy_results(
-                    args.namespace, args.pvc_name,
-                    stage_jobs[stage]["pvc_out"], args.out_dir,
+                    args.namespace,
+                    args.pvc_name,
+                    stage_jobs[stage]["pvc_out"],
+                    args.out_dir,
                 )
     except Exception:
-    
+
         raise
 
     # ── generate perf_comparison.txt and final status ─────────────────────────
@@ -801,28 +916,28 @@ def cmd_run_iteration_parallel(args):
         final_status = "COMPLETED"
     else:
         failed = [s for s in stages if results[s]["terminal"] != "Complete"]
-        final_status = "{}_FAILED".format(failed[0].upper())
+        final_status = f"{failed[0].upper()}_FAILED"
 
     status_file = os.path.join(args.out_dir, "run_status.txt")
     with open(status_file, "w") as f:
         f.write(final_status + "\n")
 
-    print("[cluster_runner] run_status={}".format(final_status), file=sys.stderr)
-
-
+    print(f"[cluster_runner] run_status={final_status}", file=sys.stderr)
 
     if not all_ok:
         for stage in stages:
             r = results[stage]
-            print("  {}: {} {}".format(
-                stage, r["terminal"], r["error"] or ""), file=sys.stderr)
+            print(
+                "  {}: {} {}".format(stage, r["terminal"], r["error"] or ""),
+                file=sys.stderr,
+            )
         sys.exit(1)
 
-    print("[cluster_runner] success — results in {}".format(args.out_dir),
-          file=sys.stderr)
+    print(f"[cluster_runner] success — results in {args.out_dir}", file=sys.stderr)
 
 
 # ── subcommand: run-diagnostic ────────────────────────────────────────────────
+
 
 def cmd_run_diagnostic(args):
     """Submit two Jobs for nsys profiling (Steps 0-1 of the diagnostic).
@@ -837,18 +952,18 @@ def cmd_run_diagnostic(args):
     full reasoning history is preserved.
     """
     workspace = "/workspace"
-    vllm_dir = getattr(args, "vllm_dir", None) or "{}/vllm".format(workspace)
+    vllm_dir = getattr(args, "vllm_dir", None) or f"{workspace}/vllm"
     hf_home = "/model-cache"
     bench_command = _sanitize_bench_command(args.bench_command)
-    print("[cluster_runner] bench command: {}".format(bench_command), file=sys.stderr)
+    print(f"[cluster_runner] bench command: {bench_command}", file=sys.stderr)
 
     # ── Pod 1: patched (feature ON) ──────────────────────────────────
     nonce_p = uuid.uuid4().hex[:8]
-    job_name_p = "ai-auto-analyze-diag-p-{}".format(nonce_p)
-    pvc_out_dir_p = "{}/output/{}".format(workspace, nonce_p)
+    job_name_p = f"ai-auto-analyze-diag-p-{nonce_p}"
+    pvc_out_dir_p = f"{workspace}/output/{nonce_p}"
 
     entrypoint_p = _assemble_script("run_diagnostic_patched.sh")
-    cm_name_p = "ai-auto-analyze-diag-p-{}".format(nonce_p)
+    cm_name_p = f"ai-auto-analyze-diag-p-{nonce_p}"
     _create_configmap(args.namespace, cm_name_p, entrypoint_p)
 
     manifest_p = _build_job_manifest(
@@ -888,30 +1003,36 @@ def cmd_run_diagnostic(args):
     )
 
     status_file = os.path.join(args.out_dir, "diagnostic_status.txt")
-    status_p = (open(status_file).read().strip()
-                if os.path.isfile(status_file) else "NO_STATUS_FILE")
-    print("[cluster_runner] patched diagnostic_status={}".format(status_p),
-          file=sys.stderr)
+    status_p = (
+        open(status_file).read().strip()
+        if os.path.isfile(status_file)
+        else "NO_STATUS_FILE"
+    )
+    print(f"[cluster_runner] patched diagnostic_status={status_p}", file=sys.stderr)
 
     if status_p != "NSYS_PATCHED_DONE":
-        print("ERROR: patched diagnostic did not complete (status={})".format(
-            status_p), file=sys.stderr)
+        print(
+            f"ERROR: patched diagnostic did not complete (status={status_p})",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # ── Pod 2: baseline (feature OFF) — skip if --skip-baseline ─────
     if getattr(args, "skip_baseline", False):
-        print("[cluster_runner] SKIP baseline nsys (--skip-baseline, reusing shared baseline)",
-              file=sys.stderr)
+        print(
+            "[cluster_runner] SKIP baseline nsys (--skip-baseline, reusing shared baseline)",
+            file=sys.stderr,
+        )
         # Write final status so the pipeline knows patched-only succeeded
         with open(status_file, "w") as f:
             f.write("NSYS_DONE\n")
     else:
         nonce_b = uuid.uuid4().hex[:8]
-        job_name_b = "ai-auto-analyze-diag-b-{}".format(nonce_b)
-        pvc_out_dir_b = "{}/output/{}".format(workspace, nonce_b)
+        job_name_b = f"ai-auto-analyze-diag-b-{nonce_b}"
+        pvc_out_dir_b = f"{workspace}/output/{nonce_b}"
 
         entrypoint_b = _assemble_script("run_diagnostic_baseline.sh")
-        cm_name_b = "ai-auto-analyze-diag-b-{}".format(nonce_b)
+        cm_name_b = f"ai-auto-analyze-diag-b-{nonce_b}"
         _create_configmap(args.namespace, cm_name_b, entrypoint_b)
 
         manifest_b = _build_job_manifest(
@@ -950,21 +1071,27 @@ def cmd_run_diagnostic(args):
             entrypoint_script=entrypoint_b,
         )
 
-        status = (open(status_file).read().strip()
-                  if os.path.isfile(status_file) else "NO_STATUS_FILE")
-        print("[cluster_runner] diagnostic_status={}".format(status), file=sys.stderr)
+        status = (
+            open(status_file).read().strip()
+            if os.path.isfile(status_file)
+            else "NO_STATUS_FILE"
+        )
+        print(f"[cluster_runner] diagnostic_status={status}", file=sys.stderr)
 
         if status != "NSYS_DONE":
-            print("ERROR: diagnostic did not complete (status={})".format(status),
-                  file=sys.stderr)
+            print(
+                f"ERROR: diagnostic did not complete (status={status})", file=sys.stderr
+            )
             sys.exit(1)
 
-    print("[cluster_runner] nsys done — SQLite traces in {}".format(args.out_dir),
-          file=sys.stderr)
+    print(
+        f"[cluster_runner] nsys done — SQLite traces in {args.out_dir}", file=sys.stderr
+    )
     print("[cluster_runner] agent will now run Steps 2-5 locally.", file=sys.stderr)
 
 
 # ── subcommand: smoke-compile ────────────────────────────────────────────────
+
 
 def cmd_smoke_compile(args):
     """Smoke test: venv setup + cmake build + import vllm.
@@ -973,15 +1100,15 @@ def cmd_smoke_compile(args):
     run_diagnostic.sh, then verifies that `import vllm` succeeds.
     """
     nonce = uuid.uuid4().hex[:8]
-    job_name = "ai-auto-analyze-smoke-{}".format(nonce)
+    job_name = f"ai-auto-analyze-smoke-{nonce}"
 
     workspace = "/workspace"
-    vllm_dir = getattr(args, "vllm_dir", None) or "{}/vllm".format(workspace)
-    pvc_out_dir = "{}/output/{}".format(workspace, nonce)
+    vllm_dir = getattr(args, "vllm_dir", None) or f"{workspace}/vllm"
+    pvc_out_dir = f"{workspace}/output/{nonce}"
     hf_home = "/model-cache"
 
     entrypoint = _assemble_script("smoke_compile.sh")
-    cm_name = "ai-auto-analyze-smoke-{}".format(nonce)
+    cm_name = f"ai-auto-analyze-smoke-{nonce}"
     _create_configmap(args.namespace, cm_name, entrypoint)
 
     manifest = _build_job_manifest(
@@ -1016,22 +1143,25 @@ def cmd_smoke_compile(args):
     )
 
     status_file = os.path.join(args.out_dir, "smoke_status.txt")
-    status = (open(status_file).read().strip()
-              if os.path.isfile(status_file) else "NO_STATUS_FILE")
-    print("[cluster_runner] smoke_status={}".format(status), file=sys.stderr)
-
-
+    status = (
+        open(status_file).read().strip()
+        if os.path.isfile(status_file)
+        else "NO_STATUS_FILE"
+    )
+    print(f"[cluster_runner] smoke_status={status}", file=sys.stderr)
 
     if status != "SMOKE_OK":
-        print("ERROR: smoke test failed (status={})".format(status),
-              file=sys.stderr)
+        print(f"ERROR: smoke test failed (status={status})", file=sys.stderr)
         sys.exit(1)
 
-    print("[cluster_runner] smoke test passed — results in {}".format(args.out_dir),
-          file=sys.stderr)
+    print(
+        f"[cluster_runner] smoke test passed — results in {args.out_dir}",
+        file=sys.stderr,
+    )
 
 
 # ── subcommand: smoke-lm-eval ───────────────────────────────────────────────
+
 
 def cmd_smoke_lm_eval(args):
     """Smoke test: venv + cmake + install lm-eval[api] + verify import chain.
@@ -1040,15 +1170,15 @@ def cmd_smoke_lm_eval(args):
     dependency conflicts before a real benchmark wastes GPU time.
     """
     nonce = uuid.uuid4().hex[:8]
-    job_name = "ai-auto-analyze-smoke-lmeval-{}".format(nonce)
+    job_name = f"ai-auto-analyze-smoke-lmeval-{nonce}"
 
     workspace = "/workspace"
-    vllm_dir = getattr(args, "vllm_dir", None) or "{}/vllm".format(workspace)
-    pvc_out_dir = "{}/output/{}".format(workspace, nonce)
+    vllm_dir = getattr(args, "vllm_dir", None) or f"{workspace}/vllm"
+    pvc_out_dir = f"{workspace}/output/{nonce}"
     hf_home = "/model-cache"
 
     entrypoint = _assemble_script("smoke_lm_eval.sh")
-    cm_name = "ai-auto-analyze-smoke-lmeval-{}".format(nonce)
+    cm_name = f"ai-auto-analyze-smoke-lmeval-{nonce}"
     _create_configmap(args.namespace, cm_name, entrypoint)
 
     manifest = _build_job_manifest(
@@ -1083,11 +1213,12 @@ def cmd_smoke_lm_eval(args):
     )
 
     status_file = os.path.join(args.out_dir, "smoke_status.txt")
-    status = (open(status_file).read().strip()
-              if os.path.isfile(status_file) else "NO_STATUS_FILE")
-    print("[cluster_runner] smoke_status={}".format(status), file=sys.stderr)
-
-
+    status = (
+        open(status_file).read().strip()
+        if os.path.isfile(status_file)
+        else "NO_STATUS_FILE"
+    )
+    print(f"[cluster_runner] smoke_status={status}", file=sys.stderr)
 
     if status != "SMOKE_OK":
         runner_log = os.path.join(args.out_dir, "runner.log")
@@ -1097,15 +1228,17 @@ def cmd_smoke_lm_eval(args):
                 lines = f.readlines()
                 for line in lines[-40:]:
                     print(line, end="", file=sys.stderr)
-        print("ERROR: smoke-lm-eval test failed (status={})".format(status),
-              file=sys.stderr)
+        print(f"ERROR: smoke-lm-eval test failed (status={status})", file=sys.stderr)
         sys.exit(1)
 
-    print("[cluster_runner] smoke-lm-eval test passed — results in {}".format(
-        args.out_dir), file=sys.stderr)
+    print(
+        f"[cluster_runner] smoke-lm-eval test passed — results in {args.out_dir}",
+        file=sys.stderr,
+    )
 
 
 # ── subcommand: reset-workspace ──────────────────────────────────────────────
+
 
 def cmd_reset_workspace(args):
     """Reset /workspace/vllm on the PVC to a clean state at a given commit.
@@ -1117,122 +1250,164 @@ def cmd_reset_workspace(args):
     Without --keep-cmake, cmake-build-release/ is deleted for a full
     from-scratch compilation (~13 min).
     """
-    helper = "ai-auto-analyze-reset-{}".format(uuid.uuid4().hex[:6])
-    overrides = json.dumps({"spec": {
-        "containers": [{
-            "name": helper,
-            "image": args.image,
-            "command": ["sleep", "600"],
-            "volumeMounts": [{"name": "ws", "mountPath": "/workspace"}],
-        }],
-        "volumes": [{
-            "name": "ws",
-            "persistentVolumeClaim": {"claimName": args.pvc_name},
-        }],
-    }})
+    helper = f"ai-auto-analyze-reset-{uuid.uuid4().hex[:6]}"
+    overrides = json.dumps(
+        {
+            "spec": {
+                "containers": [
+                    {
+                        "name": helper,
+                        "image": args.image,
+                        "command": ["sleep", "600"],
+                        "volumeMounts": [{"name": "ws", "mountPath": "/workspace"}],
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "ws",
+                        "persistentVolumeClaim": {"claimName": args.pvc_name},
+                    }
+                ],
+            }
+        }
+    )
 
     vllm_dir = args.vllm_dir
     commit = args.commit
     keep_cmake = args.keep_cmake
 
     try:
-        print("[reset-workspace] creating helper pod {}...".format(helper),
-              file=sys.stderr)
-        _run_or_die("run", helper, "-n", args.namespace,
-                    "--image=" + args.image,
-                    "--overrides=" + overrides, "--restart=Never")
-        _run_or_die("wait", "-n", args.namespace, "pod/" + helper,
-                    "--for=condition=Ready", "--timeout=120s")
+        print(f"[reset-workspace] creating helper pod {helper}...", file=sys.stderr)
+        _run_or_die(
+            "run",
+            helper,
+            "-n",
+            args.namespace,
+            "--image=" + args.image,
+            "--overrides=" + overrides,
+            "--restart=Never",
+        )
+        _run_or_die(
+            "wait",
+            "-n",
+            args.namespace,
+            "pod/" + helper,
+            "--for=condition=Ready",
+            "--timeout=120s",
+        )
 
         def _exec(*cmd):
-            r = _oc("exec", "-n", args.namespace, helper, "--", *cmd,
-                    check=False)
+            r = _oc("exec", "-n", args.namespace, helper, "--", *cmd, check=False)
             if r.stdout:
                 print(r.stdout.rstrip(), file=sys.stderr)
             if r.stderr:
                 print(r.stderr.rstrip(), file=sys.stderr)
             return r.returncode
 
-        print("[reset-workspace] checking {}...".format(vllm_dir),
-              file=sys.stderr)
+        print(f"[reset-workspace] checking {vllm_dir}...", file=sys.stderr)
         rc = _exec("test", "-d", vllm_dir)
         if rc != 0:
-            print("ERROR: {} does not exist on PVC".format(vllm_dir),
-                  file=sys.stderr)
+            print(f"ERROR: {vllm_dir} does not exist on PVC", file=sys.stderr)
             sys.exit(1)
 
-        print("[reset-workspace] git reset --hard {}...".format(commit),
-              file=sys.stderr)
+        print(f"[reset-workspace] git reset --hard {commit}...", file=sys.stderr)
         rc = _exec("git", "-C", vllm_dir, "reset", "--hard", commit)
         if rc != 0:
-            print("ERROR: git reset --hard failed (exit {})".format(rc),
-                  file=sys.stderr)
+            print(f"ERROR: git reset --hard failed (exit {rc})", file=sys.stderr)
             sys.exit(1)
 
         clean_excludes = ["-e", "cmake-build-release/"]
         if keep_cmake:
-            print("[reset-workspace] git clean -fd (keeping cmake cache)...",
-                  file=sys.stderr)
-            rc = _exec("git", "-C", vllm_dir, "clean", "-fd",
-                        *clean_excludes)
+            print(
+                "[reset-workspace] git clean -fd (keeping cmake cache)...",
+                file=sys.stderr,
+            )
+            rc = _exec("git", "-C", vllm_dir, "clean", "-fd", *clean_excludes)
         else:
-            print("[reset-workspace] git clean -fdx + removing cmake cache...",
-                  file=sys.stderr)
-            rc = _exec("git", "-C", vllm_dir, "clean", "-fdx",
-                        "-e", "cmake-build-release/_deps/")
-            cmake_dir = "{}/cmake-build-release".format(vllm_dir)
+            print(
+                "[reset-workspace] git clean -fdx + removing cmake cache...",
+                file=sys.stderr,
+            )
+            rc = _exec(
+                "git",
+                "-C",
+                vllm_dir,
+                "clean",
+                "-fdx",
+                "-e",
+                "cmake-build-release/_deps/",
+            )
+            cmake_dir = f"{vllm_dir}/cmake-build-release"
             _exec("rm", "-rf", cmake_dir)
 
         if rc != 0:
-            print("WARNING: git clean failed (exit {})".format(rc),
-                  file=sys.stderr)
+            print(f"WARNING: git clean failed (exit {rc})", file=sys.stderr)
 
         rc = _exec("git", "-C", vllm_dir, "log", "--oneline", "-1")
         rc2 = _exec("git", "-C", vllm_dir, "status", "--short")
 
         mode = "incremental" if keep_cmake else "full rebuild"
-        print("[reset-workspace] done — workspace is clean at {} ({})".format(
-            commit, mode), file=sys.stderr)
+        print(
+            f"[reset-workspace] done — workspace is clean at {commit} ({mode})",
+            file=sys.stderr,
+        )
 
     except subprocess.CalledProcessError as e:
-        print("ERROR: reset-workspace failed: {}".format(e.stderr or e),
-              file=sys.stderr)
+        print(f"ERROR: reset-workspace failed: {e.stderr or e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        _oc("delete", "pod", helper, "-n", args.namespace,
-            "--wait=false", check=False)
+        _oc("delete", "pod", helper, "-n", args.namespace, "--wait=false", check=False)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-_DEFAULT_IMAGE = (
-    "quay.io/example/vllm-sandbox-nsys:latest"
-)
+_DEFAULT_IMAGE = "quay.io/example/vllm-sandbox-nsys:latest"
 
 _COMMON_ARGS = [
-    ("--namespace",              dict(default=None)),
-    ("--pvc-name",               dict(default="vllm-workspace",
-                                      help="Workspace PVC (vllm source, pip-cache, output)")),
-    ("--model-pvc-name",         dict(required=True,
-                                      help="PVC mounted at /model-cache; sets HF_HOME=/model-cache. "
-                                           "Model is downloaded there on first run if not cached.")),
-    ("--image",                  dict(default=_DEFAULT_IMAGE)),
-    ("--gpu-count",              dict(type=int, default=4)),
-    ("--gpu-product",            dict(default="NVIDIA-B200")),
-    ("--out-dir",                dict(required=True,
-                                      help="Local directory for result files")),
-    ("--vllm-dir",               dict(default="/workspace/vllm",
-                                      help="This run's vllm source dir on the PVC. "
-                                           "The pipeline passes a run-named subdir "
-                                           "(/workspace/<output_dir basename>) so "
-                                           "concurrent runs never share a tree.")),
+    ("--namespace", dict(default=None)),
+    (
+        "--pvc-name",
+        dict(
+            default="vllm-workspace",
+            help="Workspace PVC (vllm source, pip-cache, output)",
+        ),
+    ),
+    (
+        "--model-pvc-name",
+        dict(
+            required=True,
+            help="PVC mounted at /model-cache; sets HF_HOME=/model-cache. "
+            "Model is downloaded there on first run if not cached.",
+        ),
+    ),
+    ("--image", dict(default=_DEFAULT_IMAGE)),
+    ("--gpu-count", dict(type=int, default=4)),
+    ("--gpu-product", dict(default="NVIDIA-B200")),
+    ("--out-dir", dict(required=True, help="Local directory for result files")),
+    (
+        "--vllm-dir",
+        dict(
+            default="/workspace/vllm",
+            help="This run's vllm source dir on the PVC. "
+            "The pipeline passes a run-named subdir "
+            "(/workspace/<output_dir basename>) so "
+            "concurrent runs never share a tree.",
+        ),
+    ),
     ("--gpu-wait-timeout-minutes", dict(type=int, default=60)),
-    ("--ttl-seconds",            dict(type=int, default=600)),
-    ("--extra-env",              dict(action="append", default=[], metavar="KEY=VALUE",
-                                      help="Extra environment variable for the Job "
-                                           "container; repeatable. Pre-seeded model "
-                                           "caches are often read-only, so pass "
-                                           "HF_HUB_OFFLINE=1 in that case.")),
+    ("--ttl-seconds", dict(type=int, default=600)),
+    (
+        "--extra-env",
+        dict(
+            action="append",
+            default=[],
+            metavar="KEY=VALUE",
+            help="Extra environment variable for the Job "
+            "container; repeatable. Pre-seeded model "
+            "caches are often read-only, so pass "
+            "HF_HUB_OFFLINE=1 in that case.",
+        ),
+    ),
 ]
 
 
@@ -1249,81 +1424,156 @@ def main():
 
     # ── run-iteration ──────────────────────────────────────────────────────────
     _ITERATION_ARGS = [
-        ("--bench-command", dict(required=True,
-            help="Frozen benchmark command (must write --output-json to bench_result.json)")),
-        ("--server-command", dict(required=True,
-            help="Command that launches the vLLM OpenAI-compatible server")),
-        ("--disable-env-var", dict(required=True,
-            help="Env var whose value=1 disables the new feature")),
-        ("--lm-eval-command", dict(default="",
-            help="Override lm_eval command (auto-derived from --bench-command if omitted)")),
+        (
+            "--bench-command",
+            dict(
+                required=True,
+                help="Frozen benchmark command (must write --output-json to bench_result.json)",
+            ),
+        ),
+        (
+            "--server-command",
+            dict(
+                required=True,
+                help="Command that launches the vLLM OpenAI-compatible server",
+            ),
+        ),
+        (
+            "--disable-env-var",
+            dict(required=True, help="Env var whose value=1 disables the new feature"),
+        ),
+        (
+            "--lm-eval-command",
+            dict(
+                default="",
+                help="Override lm_eval command (auto-derived from --bench-command if omitted)",
+            ),
+        ),
         ("--run-lm-eval", dict(action="store_true", default=False)),
-        ("--patch-file", dict(default="",
-            help="Patch file path on the PVC. When set, the job copies "
-                 "/workspace/vllm to --vllm-dir and applies this patch before building.")),
-        ("--skip-lm-eval-baseline", dict(action="store_true", default=False,
-            help="Skip lm_eval baseline (feature OFF) run — reuse shared baseline from a previous iteration")),
-        ("--stage", dict(default="",
-            help="Run only this stage: 'bench', 'baseline', 'lm_eval', or '' for all")),
-        ("--force-feature-off", dict(action="store_true", default=False,
-            help="Force the feature OFF for this pod (sets DISABLE_ENV_VAR=1 + FORCE_FEATURE_OFF=1)")),
+        (
+            "--patch-file",
+            dict(
+                default="",
+                help="Patch file path on the PVC. When set, the job copies "
+                "/workspace/vllm to --vllm-dir and applies this patch before building.",
+            ),
+        ),
+        (
+            "--skip-lm-eval-baseline",
+            dict(
+                action="store_true",
+                default=False,
+                help="Skip lm_eval baseline (feature OFF) run — reuse shared baseline from a previous iteration",
+            ),
+        ),
+        (
+            "--stage",
+            dict(
+                default="",
+                help="Run only this stage: 'bench', 'baseline', 'lm_eval', or '' for all",
+            ),
+        ),
+        (
+            "--force-feature-off",
+            dict(
+                action="store_true",
+                default=False,
+                help="Force the feature OFF for this pod (sets DISABLE_ENV_VAR=1 + FORCE_FEATURE_OFF=1)",
+            ),
+        ),
     ]
 
-    ri = sub.add_parser("run-iteration",
-                        help="Compile + bench patched + bench baseline + optional lm_eval (sequential)")
+    ri = sub.add_parser(
+        "run-iteration",
+        help="Compile + bench patched + bench baseline + optional lm_eval (sequential)",
+    )
     _add_common(ri)
     for flag, kw in _ITERATION_ARGS:
         ri.add_argument(flag, **kw)
 
-    rip = sub.add_parser("run-iteration-parallel",
-                         help="Bench + baseline + optional lm_eval as parallel GPU pods")
+    rip = sub.add_parser(
+        "run-iteration-parallel",
+        help="Bench + baseline + optional lm_eval as parallel GPU pods",
+    )
     _add_common(rip)
     for flag, kw in _ITERATION_ARGS:
         rip.add_argument(flag, **kw)
 
     # ── run-diagnostic ─────────────────────────────────────────────────────────
-    rd = sub.add_parser("run-diagnostic",
-                        help="Compile + nsys profile patched + nsys profile baseline + SQLite export")
+    rd = sub.add_parser(
+        "run-diagnostic",
+        help="Compile + nsys profile patched + nsys profile baseline + SQLite export",
+    )
     _add_common(rd)
     rd.add_argument("--bench-command", required=True)
     rd.add_argument("--disable-env-var", required=True)
-    rd.add_argument("--server-command", default="",
-                    help="Command that launches the server. Required to profile a "
-                         "client-style bench (`vllm bench serve`): the engine lives "
-                         "in the server process, so nsys must wrap the server.")
-    rd.add_argument("--delay-iterations", type=int, default=512,
-                    help="NSYS delay_iterations (warmup offset before tracing starts)")
-    rd.add_argument("--skip-baseline", action="store_true", default=False,
-                    help="Skip baseline nsys profile (reuse shared baseline from a previous iteration)")
+    rd.add_argument(
+        "--server-command",
+        default="",
+        help="Command that launches the server. Required to profile a "
+        "client-style bench (`vllm bench serve`): the engine lives "
+        "in the server process, so nsys must wrap the server.",
+    )
+    rd.add_argument(
+        "--delay-iterations",
+        type=int,
+        default=512,
+        help="NSYS delay_iterations (warmup offset before tracing starts)",
+    )
+    rd.add_argument(
+        "--skip-baseline",
+        action="store_true",
+        default=False,
+        help="Skip baseline nsys profile (reuse shared baseline from a previous iteration)",
+    )
 
     # ── smoke-compile ──────────────────────────────────────────────────────────
-    sc = sub.add_parser("smoke-compile",
-                        help="Smoke test: venv setup + cmake build + verification only")
+    sc = sub.add_parser(
+        "smoke-compile", help="Smoke test: venv setup + cmake build + verification only"
+    )
     _add_common(sc)
     sc.set_defaults(gpu_count=1)
 
     # ── smoke-lm-eval ─────────────────────────────────────────────────────────
-    sle = sub.add_parser("smoke-lm-eval",
-                         help="Smoke test: venv + build + lm-eval install + import chain verification")
+    sle = sub.add_parser(
+        "smoke-lm-eval",
+        help="Smoke test: venv + build + lm-eval install + import chain verification",
+    )
     _add_common(sle)
     sle.set_defaults(gpu_count=1)
 
     # ── reset-workspace ───────────────────────────────────────────────────────
-    rw = sub.add_parser("reset-workspace",
-                        help="Reset /workspace/vllm on PVC to clean state at a commit")
+    rw = sub.add_parser(
+        "reset-workspace",
+        help="Reset /workspace/vllm on PVC to clean state at a commit",
+    )
     rw.add_argument("--namespace", default=None)
-    rw.add_argument("--pvc-name", default="vllm-workspace",
-                    help="Workspace PVC name")
-    rw.add_argument("--vllm-dir", default="/workspace/vllm",
-                    help="Path to vllm source on the PVC")
-    rw.add_argument("--commit", required=True,
-                    help="Git commit/ref to reset to (e.g. HEAD, a branch, or a SHA)")
-    rw.add_argument("--image", default=_DEFAULT_IMAGE,
-                    help="Helper image; must provide git (ubi9 base does not)")
-    rw.add_argument("--keep-cmake", action="store_true", default=True,
-                    help="Preserve cmake-build-release/ for incremental builds (default)")
-    rw.add_argument("--no-keep-cmake", dest="keep_cmake", action="store_false",
-                    help="Delete cmake-build-release/ for a full from-scratch compilation")
+    rw.add_argument("--pvc-name", default="vllm-workspace", help="Workspace PVC name")
+    rw.add_argument(
+        "--vllm-dir", default="/workspace/vllm", help="Path to vllm source on the PVC"
+    )
+    rw.add_argument(
+        "--commit",
+        required=True,
+        help="Git commit/ref to reset to (e.g. HEAD, a branch, or a SHA)",
+    )
+    rw.add_argument(
+        "--image",
+        default=_DEFAULT_IMAGE,
+        help="Helper image; must provide git (ubi9 base does not)",
+    )
+    rw.add_argument(
+        "--keep-cmake",
+        action="store_true",
+        default=True,
+        help="Preserve cmake-build-release/ for incremental builds (default)",
+    )
+    rw.add_argument(
+        "--no-keep-cmake",
+        dest="keep_cmake",
+        action="store_false",
+        help="Delete cmake-build-release/ for a full from-scratch compilation",
+    )
 
     args = parser.parse_args()
     _EXTRA_ENV.update(_parse_extra_env(getattr(args, "extra_env", None)))

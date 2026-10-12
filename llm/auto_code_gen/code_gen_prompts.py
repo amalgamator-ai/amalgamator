@@ -1,7 +1,7 @@
 import os
 import shlex
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 from common.claude_utils import ClaudeConfig
 from common.iteration_utils import prev_iteration_section as _prev_iteration_section
@@ -19,52 +19,52 @@ def _resolve_knowledge_base_path():
 
 def create_context_str(claude_config: ClaudeConfig, code_gen_config: CodeGenConfig):
     # Extract branch names if the use-case config provides them
-    source_branch = getattr(code_gen_config, 'source_branch', None)
-    target_branch = getattr(code_gen_config, 'target_branch', None)
+    source_branch = getattr(code_gen_config, "source_branch", None)
+    target_branch = getattr(code_gen_config, "target_branch", None)
 
     branch_section = ""
     if source_branch and target_branch:
-        branch_section = """
+        branch_section = f"""
 <source_branch>
 {source_branch}
 </source_branch>
 <target_branch>
 {target_branch}
 </target_branch>
-""".format(source_branch=source_branch, target_branch=target_branch)
+"""
 
     knowledge_base_section = ""
-    use_kb = getattr(code_gen_config, 'use_knowledge_base', False)
+    use_kb = getattr(code_gen_config, "use_knowledge_base", False)
     if use_kb:
         kb_path = _resolve_knowledge_base_path()
         if kb_path:
-            knowledge_base_section = """
+            knowledge_base_section = f"""
 <knowledge_base_file>
 {kb_path}
 </knowledge_base_file>
-""".format(kb_path=kb_path)
+"""
 
-    return """
+    return f"""
 <context>
 
 <output_dir>
-{output_dir}
+{claude_config.cwd}
 </output_dir>
 
 <model>
-{model}
+{code_gen_config.model}
 </model>
 <gpu_type>
-{gpu_type}
+{code_gen_config.gpu_type}
 </gpu_type>
 <batch_size>
-{batch_size}
+{code_gen_config.batch_size}
 </batch_size>
 <isl>
-{isl}
+{code_gen_config.isl}
 </isl>
 <osl>
-{osl}
+{code_gen_config.osl}
 </osl>
 
 <tested_execution>
@@ -72,40 +72,40 @@ Execution of model <model> on <gpu_type> GPU with ISL <isl>, OSL <osl> and batch
 </tested_execution>
 
 <framework_names>
-{framework_names}
+{code_gen_config.framework_names}
 </framework_names>
 <source_framework>
-{source_framework}
+{code_gen_config.source_framework}
 </source_framework>
 <target_framework>
-{target_framework}
+{code_gen_config.target_framework}
 </target_framework>
 <framework_source_codes>
-{framework_source_codes}
+{code_gen_config.framework_source_codes}
 </framework_source_codes>
 <framework_test_dirs>
-{framework_test_dirs}
+{code_gen_config.framework_test_dirs}
 </framework_test_dirs>
 <transformer_block_high_level_ops_files>
-{transformer_block_high_level_ops_files}
+{code_gen_config.transformer_block_high_level_ops_files}
 </transformer_block_high_level_ops_files>
 <median_transformer_block_files>
-{median_transformer_block_files}
+{code_gen_config.median_transformer_block_files}
 </median_transformer_block_files>
 
 <plan_file>
-{plan_file}
+{code_gen_config.plan_file}
 </plan_file>
 <plan_step>
-{plan_step}
+{code_gen_config.plan_step}
 </plan_step>
 
 <slower_framework>
-{slower_framework}
+{code_gen_config.target_framework}
 </slower_framework>
 
 <target_source_code_dir>
-{target_source_code_dir}
+{code_gen_config.source_code_dir}
 </target_source_code_dir>
 
 {branch_section}
@@ -144,27 +144,7 @@ code-paths, code-pieces, and their associated call-chains
     - Treat KB entries about thresholds (e.g. "must save >840us") as guidelines from past observations, not universal laws.
 </context_explanations>
 
-""".format(
-        output_dir=claude_config.cwd,
-        model=code_gen_config.model,
-        gpu_type=code_gen_config.gpu_type,
-        batch_size=code_gen_config.batch_size,
-        isl=code_gen_config.isl,
-        osl=code_gen_config.osl,
-        framework_names=code_gen_config.framework_names,
-        source_framework=code_gen_config.source_framework,
-        target_framework=code_gen_config.target_framework,
-        framework_source_codes=code_gen_config.framework_source_codes,
-        framework_test_dirs=code_gen_config.framework_test_dirs,
-        transformer_block_high_level_ops_files=code_gen_config.transformer_block_high_level_ops_files,
-        median_transformer_block_files=code_gen_config.median_transformer_block_files,
-        plan_file=code_gen_config.plan_file,
-        plan_step=code_gen_config.plan_step,
-        slower_framework=code_gen_config.target_framework,
-        target_source_code_dir=code_gen_config.source_code_dir,
-        branch_section=branch_section,
-        knowledge_base_section=knowledge_base_section,
-    )
+"""
 
 
 @dataclass
@@ -195,7 +175,7 @@ CODE_TRACE_FILE = "code_trace.txt"
 
 
 def code_trace_filename(framework: str) -> str:
-    return os.path.join(CODE_TRACES_DIR, "{}_{}".format(framework, CODE_TRACE_FILE))
+    return os.path.join(CODE_TRACES_DIR, f"{framework}_{CODE_TRACE_FILE}")
 
 
 def gen_CodeTracePrompt(
@@ -218,15 +198,17 @@ class CodePortPlanPrompt:
     disallowed_modules: list[str]
     output_file: str
     output_summary_file: str
-    prev_output_file: Optional[str]
-    prev_output_summary_file: Optional[str]
+    prev_output_file: str | None
+    prev_output_summary_file: str | None
     iteration: int
     prompt_template: str
 
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
-            prev_iteration_section=_prev_iteration_section(self.prev_output_file, self.prev_output_summary_file),
+            prev_iteration_section=_prev_iteration_section(
+                self.prev_output_file, self.prev_output_summary_file
+            ),
             code_trace_files=self.code_trace_files,
             disallowed_modules=self.disallowed_modules,
             output_file=self.output_file,
@@ -244,8 +226,8 @@ def gen_CodePortPlanPrompt(
     disallowed_modules: list[str],
     output_file: str,
     output_summary_file: str,
-    prev_output_file: Optional[str],
-    prev_output_summary_file: Optional[str],
+    prev_output_file: str | None,
+    prev_output_summary_file: str | None,
     iteration: int,
     prompt_template: str,
 ):
@@ -318,15 +300,17 @@ class TestPlanPrompt:
     code_port_plan_file: str
     output_file: str
     output_summary_file: str
-    prev_output_file: Optional[str]
-    prev_output_summary_file: Optional[str]
+    prev_output_file: str | None
+    prev_output_summary_file: str | None
     iteration: int
     prompt_template: str
 
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
-            prev_iteration_section=_prev_iteration_section(self.prev_output_file, self.prev_output_summary_file),
+            prev_iteration_section=_prev_iteration_section(
+                self.prev_output_file, self.prev_output_summary_file
+            ),
             code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             output_file=self.output_file,
@@ -344,8 +328,8 @@ def gen_TestPlanPrompt(
     code_port_plan_file: str,
     output_file: str,
     output_summary_file: str,
-    prev_output_file: Optional[str],
-    prev_output_summary_file: Optional[str],
+    prev_output_file: str | None,
+    prev_output_summary_file: str | None,
     iteration: int,
     prompt_template: str,
 ):
@@ -423,15 +407,17 @@ class CodeGenPrompt:
     test_plan_file: list[str]
     output_patch_file: str
     output_summary_file: str
-    prev_output_patch_file: Optional[str]
-    prev_output_summary_file: Optional[str]
+    prev_output_patch_file: str | None
+    prev_output_summary_file: str | None
     iteration: int
     prompt_template: str
 
     def prompt(self):
         return self.prompt_template.format(
             context=self.context,
-            prev_iteration_section=_prev_iteration_section(self.prev_output_patch_file, self.prev_output_summary_file),
+            prev_iteration_section=_prev_iteration_section(
+                self.prev_output_patch_file, self.prev_output_summary_file
+            ),
             code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             test_plan_file=self.test_plan_file,
@@ -451,8 +437,8 @@ def gen_CodeGenPrompt(
     test_plan_file: str,
     output_patch_file: str,
     output_summary_file: str,
-    prev_output_patch_file: Optional[str],
-    prev_output_summary_file: Optional[str],
+    prev_output_patch_file: str | None,
+    prev_output_summary_file: str | None,
     iteration: int,
     prompt_template: str,
 ):
@@ -781,7 +767,9 @@ def gen_ApplyCodeAndCompilePrompt(
         context=context,
         patch_file=patch_file,
         iteration=iteration,
-        output_status_file=os.path.join(RUNTIME_DIR, "V{}".format(iteration), "apply_status.txt"),
+        output_status_file=os.path.join(
+            RUNTIME_DIR, f"V{iteration}", "apply_status.txt"
+        ),
     )
 
 
@@ -792,7 +780,7 @@ class RunAndLogPrompt:
     runtime_logs_dir: str
     iteration: int
     gpu_wait_timeout_minutes: int
-    smaller_model_file: Optional[str]
+    smaller_model_file: str | None
     disable_new_feature: bool
     prompt_template: ClassVar[str] = """
 
@@ -882,8 +870,8 @@ Step 4: Write Run Status
         if self.smaller_model_file:
             smaller_section = (
                 "<smaller_model_file>\n"
-                "{}\n"
-                "</smaller_model_file>".format(self.smaller_model_file)
+                f"{self.smaller_model_file}\n"
+                "</smaller_model_file>"
             )
             smaller_instructions = (
                 "\n\nIMPORTANT: A smaller model is being used for runtime testing instead of <model>. "
@@ -891,9 +879,7 @@ Step 4: Write Run Status
                 "and GPU count (SMALLER_MODEL_NUM_GPUS). Use these values when adjusting the execution command "
                 "in Step 3, and use SMALLER_MODEL_NUM_GPUS as K in Step 1."
             )
-            gpu_count_instructions = (
-                "    - Read SMALLER_MODEL_NUM_GPUS from <smaller_model_file> in <output_dir> — that is K."
-            )
+            gpu_count_instructions = "    - Read SMALLER_MODEL_NUM_GPUS from <smaller_model_file> in <output_dir> — that is K."
             command_model_adjustments = (
                 "    - Replace the --model value with SMALLER_MODEL_NAME from <smaller_model_file>.\n"
                 "    - Replace --tensor-parallel-size with K (SMALLER_MODEL_NUM_GPUS)."
@@ -911,12 +897,12 @@ Step 4: Write Run Status
             feature_toggle_env_var = (
                 "    - Read the latest code gen or runtime summary file in <output_dir> to find the "
                 "environment variable name that disables the new feature.\n"
-                "    - Set this environment variable to \"1\" in the command prefix to disable the new feature."
+                '    - Set this environment variable to "1" in the command prefix to disable the new feature.'
             )
             feature_verification_step = (
                 "Step 5: Verify Feature is DISABLED\n"
                 "- Search the combined log for the expected disabled message containing "
-                "\"is DISABLED (env override)\".\n"
+                '"is DISABLED (env override)".\n'
                 "- If found, the feature was successfully disabled.\n"
                 "- If NOT found, print a WARNING that the feature disable mechanism may not be working."
             )
@@ -925,16 +911,16 @@ Step 4: Write Run Status
             feature_verification_step = (
                 "Step 5: Verify Feature is ENABLED\n"
                 "- Search the combined log for the expected enabled message containing "
-                "\"is ENABLED\".\n"
+                '"is ENABLED".\n'
                 "- If found, the new feature is confirmed active — good.\n"
                 "- If NOT found, print a WARNING that the new feature may not be running. "
-                "Write \"FEATURE_NOT_VERIFIED\" to {runtime_logs_dir}/run_status.txt "
+                'Write "FEATURE_NOT_VERIFIED" to {runtime_logs_dir}/run_status.txt '
                 "and include details about what was searched for and what was found instead.\n"
                 "\n"
                 "Step 6: Baseline Comparison Run (only if the patched run in Step 3 succeeded with exit code 0 AND Step 5 confirmed the feature is enabled)\n"
                 "- Read the latest code gen or runtime summary file in <output_dir> to find the environment variable "
                 "name that disables the new feature.\n"
-                "- Re-run the SAME adjusted command from Step 3, but with the disable env var set to \"1\" in the "
+                '- Re-run the SAME adjusted command from Step 3, but with the disable env var set to "1" in the '
                 "command prefix. This runs the original code paths WITHOUT the new feature, to establish a baseline.\n"
                 "- Write the final baseline command (including the disable env var prefix) to "
                 "{runtime_logs_dir}/baseline_command.txt\n"
@@ -944,7 +930,7 @@ Step 4: Write Run Status
                 "    - {runtime_logs_dir}/baseline_combined.log\n"
                 "    - {runtime_logs_dir}/baseline_exit_code.txt\n"
                 "  If --output-json is present, set it to {runtime_logs_dir}/baseline_bench_result.json\n"
-                "- Verify the baseline run log contains the \"is DISABLED (env override)\" message.\n"
+                '- Verify the baseline run log contains the "is DISABLED (env override)" message.\n'
                 "- The baseline run MUST succeed (exit code 0), since it runs the original unmodified code paths. "
                 "If it fails:\n"
                 "    - This indicates something is wrong with the patch's disable mechanism or the patch broke original code paths.\n"
@@ -965,13 +951,13 @@ Step 4: Write Run Status
             baseline_output_files = ""
         else:
             baseline_output_files = (
-                "- {runtime_logs_dir}/baseline_command.txt\n"
-                "- {runtime_logs_dir}/baseline_stdout.log\n"
-                "- {runtime_logs_dir}/baseline_stderr.log\n"
-                "- {runtime_logs_dir}/baseline_combined.log\n"
-                "- {runtime_logs_dir}/baseline_exit_code.txt\n"
-                "- {runtime_logs_dir}/perf_comparison.txt"
-            ).format(runtime_logs_dir=self.runtime_logs_dir, iteration=self.iteration)
+                f"- {self.runtime_logs_dir}/baseline_command.txt\n"
+                f"- {self.runtime_logs_dir}/baseline_stdout.log\n"
+                f"- {self.runtime_logs_dir}/baseline_stderr.log\n"
+                f"- {self.runtime_logs_dir}/baseline_combined.log\n"
+                f"- {self.runtime_logs_dir}/baseline_exit_code.txt\n"
+                f"- {self.runtime_logs_dir}/perf_comparison.txt"
+            )
 
         return self.prompt_template.format(
             context=self.context,
@@ -995,7 +981,7 @@ def gen_RunAndLogPrompt(
     runtime_logs_dir: str,
     iteration: int,
     gpu_wait_timeout_minutes: int = 30,
-    smaller_model_file: Optional[str] = None,
+    smaller_model_file: str | None = None,
     disable_new_feature: bool = False,
 ):
     return RunAndLogPrompt(
@@ -1019,7 +1005,7 @@ class RunLMEvalPrompt:
     runtime_logs_dir: str
     iteration: int
     gpu_wait_timeout_minutes: int
-    smaller_model_file: Optional[str]
+    smaller_model_file: str | None
     output_file: str
     prompt_template: ClassVar[str] = """
 
@@ -1119,15 +1105,11 @@ Step 5: Compare and Report
         if self.smaller_model_file:
             smaller_section = (
                 "<smaller_model_file>\n"
-                "{}\n"
-                "</smaller_model_file>".format(self.smaller_model_file)
+                f"{self.smaller_model_file}\n"
+                "</smaller_model_file>"
             )
-            gpu_count_instructions = (
-                "    - Read SMALLER_MODEL_NUM_GPUS from <smaller_model_file> in <output_dir> — that is K."
-            )
-            model_selection_instructions = (
-                "    - Read SMALLER_MODEL_NAME from <smaller_model_file> in <output_dir> — use that as the model."
-            )
+            gpu_count_instructions = "    - Read SMALLER_MODEL_NUM_GPUS from <smaller_model_file> in <output_dir> — that is K."
+            model_selection_instructions = "    - Read SMALLER_MODEL_NAME from <smaller_model_file> in <output_dir> — use that as the model."
         else:
             smaller_section = ""
             gpu_count_instructions = (
@@ -1157,7 +1139,7 @@ def gen_RunLMEvalPrompt(
     runtime_logs_dir: str,
     iteration: int,
     gpu_wait_timeout_minutes: int = 30,
-    smaller_model_file: Optional[str] = None,
+    smaller_model_file: str | None = None,
 ):
     return RunLMEvalPrompt(
         context=context,
@@ -1170,8 +1152,6 @@ def gen_RunLMEvalPrompt(
     )
 
 
-
-
 @dataclass
 class InvestigateRuntimeOutputAndFixCodePrompt:
     context: str
@@ -1181,15 +1161,15 @@ class InvestigateRuntimeOutputAndFixCodePrompt:
     runtime_logs_dir: str
     iteration: int
     prev_patch_file: str
-    prev_summary_file: Optional[str]
+    prev_summary_file: str | None
     iteration_history_summary_file: str
-    smaller_model_file: Optional[str]
-    lm_eval_result_file: Optional[str]
+    smaller_model_file: str | None
+    lm_eval_result_file: str | None
     output_patch_file: str
     output_summary_file: str
     success_result_file: str
-    results_output_dir: Optional[str]
-    review_feedback: Optional[str] = None
+    results_output_dir: str | None
+    review_feedback: str | None = None
     prompt_template: ClassVar[str] = """
 
 {context}
@@ -1310,8 +1290,8 @@ On FAILURE:
         if self.smaller_model_file:
             smaller_section = (
                 "<smaller_model_file>\n"
-                "{}\n"
-                "</smaller_model_file>".format(self.smaller_model_file)
+                f"{self.smaller_model_file}\n"
+                "</smaller_model_file>"
             )
         else:
             smaller_section = ""
@@ -1321,8 +1301,8 @@ On FAILURE:
                 "<review_feedback>\n"
                 "PREVIOUS REVIEW REJECTED YOUR DRAFT. You MUST address every issue listed below.\n"
                 "Do NOT repeat the same approach — the review explains what was wrong.\n\n"
-                "{}\n"
-                "</review_feedback>".format(self.review_feedback)
+                f"{self.review_feedback}\n"
+                "</review_feedback>"
             )
         else:
             review_section = ""
@@ -1357,21 +1337,21 @@ def gen_InvestigateRuntimeOutputAndFixCodePrompt(
     runtime_logs_dir: str,
     iteration: int,
     prev_patch_file: str,
-    prev_summary_file: Optional[str],
+    prev_summary_file: str | None,
     iteration_history_summary_file: str,
-    smaller_model_file: Optional[str] = None,
-    lm_eval_result_file: Optional[str] = None,
-    results_output_dir: Optional[str] = None,
-    output_patch_file: Optional[str] = None,
-    output_summary_file: Optional[str] = None,
-    review_feedback: Optional[str] = None,
+    smaller_model_file: str | None = None,
+    lm_eval_result_file: str | None = None,
+    results_output_dir: str | None = None,
+    output_patch_file: str | None = None,
+    output_summary_file: str | None = None,
+    review_feedback: str | None = None,
 ):
     assert len(code_trace_files) == 2
 
     if output_patch_file is None:
-        output_patch_file = os.path.join(RUNTIME_DIR, "V{}".format(iteration), "patch.patch")
+        output_patch_file = os.path.join(RUNTIME_DIR, f"V{iteration}", "patch.patch")
     if output_summary_file is None:
-        output_summary_file = os.path.join(RUNTIME_DIR, "V{}".format(iteration), "summary.txt")
+        output_summary_file = os.path.join(RUNTIME_DIR, f"V{iteration}", "summary.txt")
 
     return InvestigateRuntimeOutputAndFixCodePrompt(
         context=context,
@@ -1455,7 +1435,7 @@ If NEEDS_REVISION, list each issue as a numbered item with specific guidance.
         if self.prior_review_files:
             lines = ["6. Prior review feedback (issues that should now be fixed):"]
             for rf in self.prior_review_files:
-                lines.append("   - <output_dir>/{}".format(rf))
+                lines.append(f"   - <output_dir>/{rf}")
             prior_section = "\n".join(lines)
         else:
             prior_section = ""
@@ -1476,16 +1456,16 @@ def gen_ReviewInvestigationPrompt(
     runtime_logs_dir: str,
     iteration: int,
     revision: int,
-    prior_review_files: Optional[list[str]] = None,
+    prior_review_files: list[str] | None = None,
 ):
-    iter_dir = os.path.join(RUNTIME_DIR, "V{}".format(iteration))
+    iter_dir = os.path.join(RUNTIME_DIR, f"V{iteration}")
     return ReviewInvestigationPrompt(
         runtime_logs_dir=runtime_logs_dir,
         iteration=iteration,
         revision=revision,
-        patch_draft_file=os.path.join(iter_dir, "patch_draft_R{}.patch".format(revision)),
-        summary_draft_file=os.path.join(iter_dir, "summary_draft_R{}.txt".format(revision)),
-        output_review_file=os.path.join(iter_dir, "review_R{}.txt".format(revision)),
+        patch_draft_file=os.path.join(iter_dir, f"patch_draft_R{revision}.patch"),
+        summary_draft_file=os.path.join(iter_dir, f"summary_draft_R{revision}.txt"),
+        output_review_file=os.path.join(iter_dir, f"review_R{revision}.txt"),
         prior_review_files=prior_review_files or [],
     )
 
@@ -1915,27 +1895,27 @@ Visual design rules:
 <instructions>
 The goal of this task is to generate a sequence of PPTX slides that describe the AI-based automatic code generation process that implemented improvement step <plan_step> from the <plan_file>. Do the following and think hard:
 - Analyze and understand in-depth the AI-based automatic code generation process that is composed of the sequence of generated files in <output_dir>. Read all of these files in <output_dir> and analyze their contents. The general steps are as follows:
-    - Generate a code trace for the "source" framework, to get the call-chain of active code pieces 
-    - Generate a code trace for the "target" framework, to get the call-chain of active code pieces 
+    - Generate a code trace for the "source" framework, to get the call-chain of active code pieces
+    - Generate a code trace for the "target" framework, to get the call-chain of active code pieces
     - Generate a code port plan from "source" to "target" framework that implements the improvement plan.
         - The code port plan is done in iterations, where each iteration is "generate code port plan" => "review and fix"
         - Learnings from previous iterations are used in the current iteration to improve the quality of the result and avoid bugs
-        - In general, the iteration-based generation is critical to provide a correct code port plan due to the complexity of the problem. It is highly unlikely that AI can generate a working code port plan from first shot, and it does need these iterations to fix bugs and issues before actually running the code. This iteration "evolution" is key for success.  
+        - In general, the iteration-based generation is critical to provide a correct code port plan due to the complexity of the problem. It is highly unlikely that AI can generate a working code port plan from first shot, and it does need these iterations to fix bugs and issues before actually running the code. This iteration "evolution" is key for success.
     - Generate a test plan, from simple unit tests to larger end-to-end tests that are focused on critical things like: decode-only, prefill-only, mixed execution modes, cuda graphs support and more.
     - Generate a the code patch based on the code port plan
         - Here, we also apply the iterations to do "code gen" => "review" to fix issues and bugs. Also in this step, recompilation occurs and real tests are ran.
-    - After the code patch is done, the code was ran manually with the model <model> and a couple of issues, issue_1 and issue_2, where for each issue AI was used to fix the issue in the context of the previous generations. AI was able to fix these issues and after these fixes everything worked: has both correctness and speedups. 
+    - After the code patch is done, the code was ran manually with the model <model> and a couple of issues, issue_1 and issue_2, where for each issue AI was used to fix the issue in the context of the previous generations. AI was able to fix these issues and after these fixes everything worked: has both correctness and speedups.
 
 - Generate a sequence of PPTX slides as follows:
     - A comparison one-to-one, on the same slide, of the code traces of both frameworks from <code_trace_files>. Make sure to show:
-        - The full operation call-chains with all the necessary details, with the specific per-operation time breakdowns based on the median transformer blocks. 
+        - The full operation call-chains with all the necessary details, with the specific per-operation time breakdowns based on the median transformer blocks.
         - Explain the differences that can be seen in both the code traces and the transformer blocks, how the correlate and why the "target" is faster.
     - Explain what needs to be done to port the "source" code pieces to the "target" codebase. Base the explanation on the code port plan file. Make sure to explain:
         - Each critical code piece that is ported from the "source", what stays the same, what is changed, and how this code piece is integrated into the "target" codebase. Make sure to show actual code, and explain fully and clearly, so expert programmer can understand.
     - Show and explain in-detail the Claude query prompt that is used to generate the code port plan, based on the source code here llm/auto_code_gen/code_gen_prompts.py (in this repository).
     - Show and explain in-detail the Claude query prompt that is used to generate the code port plan review, based on the source code here llm/auto_code_gen/code_gen_prompts.py (in this repository).
     - Show and explain in-detail the "code port plan" => "review" iterations that are used to fix bugs and issues before running the code:
-        - The key problem is that a code that is generated on first iteration is usually incorrect due to the complexity of the task, and the key idea to solve it is to use iterations to evolve the generated code to the point where it is fully correct. 
+        - The key problem is that a code that is generated on first iteration is usually incorrect due to the complexity of the task, and the key idea to solve it is to use iterations to evolve the generated code to the point where it is fully correct.
         - Show each iteration (based on the files in <output_dir>), what bugs/issues it found (in-detail), why it is important, and how it is fixed. This "gen" => "review" evolution flow is important to understand since it is the key for correctness.
     - For code patch generation, same as for previous bullet:
         - Show the generated code vs the iteration evolution process that fixes bugs and issues. Show each iterations, with what it found, why it is important and how it is fixed.
@@ -2226,12 +2206,13 @@ Step 7: Verify the patch can be re-applied
 """
 
     def prompt(self):
-        import re
         import os
+        import re
+
         max_ver = 0
         runtime_dir = os.path.join(self.code_gen_output_dir, RUNTIME_DIR)
         if os.path.isdir(runtime_dir):
-            pat = re.compile(r'^V(\d+)$')
+            pat = re.compile(r"^V(\d+)$")
             for d in os.listdir(runtime_dir):
                 m = pat.match(d)
                 if m:
@@ -2239,8 +2220,8 @@ Step 7: Verify the patch can be re-applied
                     if ver > max_ver:
                         max_ver = ver
         next_ver = max_ver + 1
-        rebase_patch_file = os.path.join(RUNTIME_DIR, "V{}".format(next_ver), "patch.patch")
-        rebase_summary_file = os.path.join(RUNTIME_DIR, "V{}".format(next_ver), "summary.txt")
+        rebase_patch_file = os.path.join(RUNTIME_DIR, f"V{next_ver}", "patch.patch")
+        rebase_summary_file = os.path.join(RUNTIME_DIR, f"V{next_ver}", "summary.txt")
 
         return self.prompt_template.format(
             context=self.context,
@@ -2377,6 +2358,7 @@ def gen_UpdateCommitAndPRDescsPrompt(
     code_gen_output_dir: str,
 ):
     import os
+
     output_dir_pr = os.path.join(code_gen_output_dir, PR_COMMANDS_DIR)
     return UpdateCommitAndPRDescsPrompt(
         context=context,
@@ -2544,7 +2526,11 @@ File: <output_dir_pr>/pr_gen_step_8_rebase.sh
             output_dir_pr=self.output_dir_pr,
             config_path=self.config_path,
             config_command_arg=shlex.quote(self.config_path),
-            agent_command_arg=(" --agent-config " + shlex.quote(self.agent_config_path)) if self.agent_config_path else "",
+            agent_command_arg=(
+                (" --agent-config " + shlex.quote(self.agent_config_path))
+                if self.agent_config_path
+                else ""
+            ),
         )
 
 
@@ -2559,6 +2545,7 @@ def gen_GeneratePRCommandsPrompt(
     agent_config_path: str = "",
 ):
     import os
+
     output_dir_pr = os.path.join(code_gen_output_dir, PR_COMMANDS_DIR)
     return GeneratePRCommandsPrompt(
         agent_config_path=agent_config_path,
@@ -2734,6 +2721,7 @@ def gen_DiagnosticProfileAndAnalyzePrompt(
     gpu_wait_timeout_minutes: int = 30,
 ):
     import os
+
     diagnostic_dir = os.path.join(
         runtime_logs_dir,
         DIAGNOSTIC_PROFILE_DIR,
@@ -2759,6 +2747,7 @@ class LocalDiagnosticAnalysisPrompt:
     and copied the SQLite traces back to diagnostic_dir.  This prompt runs
     in a fresh agent session with no cluster output in its context.
     """
+
     context: str
     original_analysis_dir: str
     diagnostic_dir: str
@@ -2968,8 +2957,11 @@ Rules for updating:
         )
 
 
-def gen_RecordLearningsPrompt(code_gen_output_dir: str, knowledge_base_file: str = None):
+def gen_RecordLearningsPrompt(
+    code_gen_output_dir: str, knowledge_base_file: str = None
+):
     import os
+
     if knowledge_base_file is None:
         knowledge_base_file = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -3057,7 +3049,7 @@ IMPORTANT: If <source_branch> and <target_branch> are provided, ONLY examine cod
     - Analyze and understand in-detail the code gen => review iteration evolution that is described in <code_pr_review_evolution_file> that lead to the final <code_pr_file>.
 - Detect and analyze in-detail the root causes that make issue <issue_desc_file> to appear in <target_framework>.
 - Detect and analyze in-detail the root causes that make issue <issue_desc_file> to NOT appear in <source_framework>.
-- Dive deep into the source code of both frameworks (ON THE SPECIFIED BRANCHES ONLY), and their related third party libraries, to get full picture of the source code end-to-end as it related to the <code_trace> of both frameworks. 
+- Dive deep into the source code of both frameworks (ON THE SPECIFIED BRANCHES ONLY), and their related third party libraries, to get full picture of the source code end-to-end as it related to the <code_trace> of both frameworks.
     - For example, if an external kernel is used, then find/fetch the source code of this kernel and trace all of the wrappers till this kernel is invoked. Make sure to find the actual full source code of the kernel. This is important.
 - Analyze and read any necessary extra information to get deeper understanding of the issue, including:
     - run logs
@@ -3069,7 +3061,7 @@ IMPORTANT: If <source_branch> and <target_branch> are provided, ONLY examine cod
     - Any related commits, their descriptions and more
 - Understand how to fix the issue in <issue_desc_file> and provide a detailed explanation of:
     - Why it happens.
-    - What are the key reasons with source code references for both frameworks.    
+    - What are the key reasons with source code references for both frameworks.
     - Steps to fix
 </instructions>
 
@@ -3198,7 +3190,7 @@ class ReviewInvestigatedIssuePrompt:
 
 <instructions>
 The goal of this task is to perform a critical, in-depth review of issue fix in <issue_fix_file>. Do the following and think hard:
-- Analyze and understand in-detail the issue in <issue_desc_file> 
+- Analyze and understand in-detail the issue in <issue_desc_file>
 - Analyze and understand in-detail the fix described in <issue_fix_file> for the issue <issue_desc_file>.
 - Review the issue fix for any:
     - incorrect assumptions
@@ -3208,7 +3200,7 @@ The goal of this task is to perform a critical, in-depth review of issue fix in 
     - missing edge cases
     - architectural risks
     - hidden dependencies
-    
+
 - For each problem found, document:
     - The affected part of the plan
     - What is wrong

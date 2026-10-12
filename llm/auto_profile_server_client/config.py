@@ -28,8 +28,10 @@ DEFAULT_METRICS_POLL_INTERVAL_SEC = 1.0
 
 # NSYS profiling
 NSYS_DEFAULT_FLAGS = [
-    "-t", "cuda,nvtx",
-    "-c", "cudaProfilerApi",
+    "-t",
+    "cuda,nvtx",
+    "-c",
+    "cudaProfilerApi",
     "--capture-range-end=stop",
     "--cuda-graph-trace=node",
     "--trace-fork-before-exec=true",
@@ -40,8 +42,8 @@ PROFILING_BUFFER = 256
 # Framework-specific defaults
 FRAMEWORK_PORT_POOLS = {
     "vllm": list(range(8123, 8133)),
-    "sgl":  list(range(30123, 30133)),
-    "trt":  list(range(8534, 8544)),
+    "sgl": list(range(30123, 30133)),
+    "trt": list(range(8534, 8544)),
 }
 
 # Deprecated — use get_next_port() instead
@@ -62,7 +64,7 @@ def get_next_port(framework: str) -> int:
     if PORT_INDEX_FILE.is_file():
         try:
             index = json.loads(PORT_INDEX_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError, OSError:
             pass
 
     idx = index.get(framework, 0) % len(pool)

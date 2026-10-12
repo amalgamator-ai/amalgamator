@@ -1,4 +1,5 @@
 """Tests for auto_bug_fix.dossier — trailers, dossier construction, and formatting."""
+
 from auto_bug_fix.dossier import Dossier, build_trailers, format_dossier
 
 

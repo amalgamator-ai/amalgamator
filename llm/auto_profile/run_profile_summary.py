@@ -1,19 +1,23 @@
-import sys as _sys
 import os as _os
+import sys as _sys
+
 _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
+import argparse
+import asyncio
 import os
 import sys
 import time
-import asyncio
-import argparse
 
-from common.utils import setup_logging, safe_clean_dir, output_dir_from_run_config, PROFILE_RESULTS_DIR
-from common.claude_utils import claude_run
-
-from common.claude_utils import ProfilingClaudeConfig
+from common.claude_utils import ProfilingClaudeConfig, claude_run
+from common.utils import (
+    PROFILE_RESULTS_DIR,
+    output_dir_from_run_config,
+    safe_clean_dir,
+    setup_logging,
+)
 from llm.auto_profile.parse_prompts import ParseResultsPrompt
 
 claude_config = ProfilingClaudeConfig(
@@ -69,6 +73,10 @@ if __name__ == "__main__":
 
     # Run
     start_time = time.time()
-    asyncio.run(claude_run(claude_config, gen_parse_results_prompts(PROFILE_RESULTS_DIR, output_dir)))
+    asyncio.run(
+        claude_run(
+            claude_config, gen_parse_results_prompts(PROFILE_RESULTS_DIR, output_dir)
+        )
+    )
     duration_time = time.time() - start_time
-    print("FINISHED ALL: total_duration = {}".format(duration_time))
+    print(f"FINISHED ALL: total_duration = {duration_time}")

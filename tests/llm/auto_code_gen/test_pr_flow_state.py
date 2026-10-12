@@ -4,13 +4,15 @@ import pytest
 
 from llm.auto_code_gen.pr_flow import pr_state
 
-
 FORK_URL = "git@github.com:example-dev/vllm.git"
 
 
 def test_parse_git_url_accepts_ssh_https_and_short_form():
     assert pr_state.parse_git_url(FORK_URL) == "example-dev/vllm"
-    assert pr_state.parse_git_url("https://github.com/example-dev/vllm.git") == "example-dev/vllm"
+    assert (
+        pr_state.parse_git_url("https://github.com/example-dev/vllm.git")
+        == "example-dev/vllm"
+    )
     assert pr_state.parse_git_url("example-dev/vllm") == "example-dev/vllm"
     assert pr_state.url_owner(FORK_URL) == "example-dev"
 
@@ -28,8 +30,12 @@ def test_local_fork_url_is_refused():
 
 def test_fork_must_differ_from_upstream():
     with pytest.raises(ValueError, match="upstream"):
-        pr_state.new_state("/tmp/out", "/tmp/repo",
-                           "git@github.com:vllm-project/vllm.git", "vllm-project")
+        pr_state.new_state(
+            "/tmp/out",
+            "/tmp/repo",
+            "git@github.com:vllm-project/vllm.git",
+            "vllm-project",
+        )
 
 
 def test_fork_owner_is_required_and_validated():
@@ -40,8 +46,13 @@ def test_fork_owner_is_required_and_validated():
 
 
 def test_new_state_defaults(tmp_path):
-    state = pr_state.new_state(str(tmp_path), str(tmp_path / "repo"), FORK_URL,
-                               "example-dev", local_branch="local-perf")
+    state = pr_state.new_state(
+        str(tmp_path),
+        str(tmp_path / "repo"),
+        FORK_URL,
+        "example-dev",
+        local_branch="local-perf",
+    )
     assert state["upstream_repo"] == "vllm-project/vllm"
     assert state["remote_branch"] == ""
     assert state["round"] == 0
@@ -51,8 +62,9 @@ def test_new_state_defaults(tmp_path):
 
 def test_round_trip_update_and_gate_history(tmp_path):
     path = pr_state.state_path(str(tmp_path))
-    pr_state.save_state(path, pr_state.new_state(str(tmp_path), str(tmp_path), FORK_URL,
-                                                 "example-dev"))
+    pr_state.save_state(
+        path, pr_state.new_state(str(tmp_path), str(tmp_path), FORK_URL, "example-dev")
+    )
     pr_state.update(path, head_sha="abc123", round=2)
     assert pr_state.load_state(path)["head_sha"] == "abc123"
     assert pr_state.load_state(path)["round"] == 2
@@ -68,8 +80,12 @@ def test_round_trip_update_and_gate_history(tmp_path):
 
 
 def test_state_paths_are_stable_per_output_dir(tmp_path):
-    assert pr_state.state_path(str(tmp_path)) == str(tmp_path / "pr_p3" / "pr_state.json")
-    assert pr_state.inbox_dir(str(tmp_path), 3) == str(tmp_path / "pr_p3" / "inbox" / "round_3")
+    assert pr_state.state_path(str(tmp_path)) == str(
+        tmp_path / "pr_p3" / "pr_state.json"
+    )
+    assert pr_state.inbox_dir(str(tmp_path), 3) == str(
+        tmp_path / "pr_p3" / "inbox" / "round_3"
+    )
 
 
 def test_newer_state_version_is_refused(tmp_path):

@@ -33,38 +33,29 @@ _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
+import argparse
+import asyncio
 import os
 import sys
 import time
-import argparse
-import asyncio
 
 from common.utils import setup_logging
-from common.claude_utils import PipelineStep
-from llm.auto_code_gen.agents import agent_run
-
 from llm.auto_code_gen.code_gen_configs import CodeGenConfig
-from llm.auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase
-
 from llm.auto_code_gen.code_gen_prompts import (
-    code_trace_filename,
     CODE_PORT_PLAN_DIR,
-    TEST_PLAN_DIR,
     RUNTIME_DIR,
-    RUNTIME_SUCCESS_FILE,
     RUNTIME_RESULTS_MANIFEST,
+    TEST_PLAN_DIR,
+    code_trace_filename,
 )
-
 from llm.auto_code_gen.run_code_gen import (
-    _find_latest_patch,
     _check_runtime_success,
-    _format_duration,
-    _format_tokens,
     _print_detailed_table,
     _print_phase_summary,
     _print_timeline_and_costs,
     run_record_learnings,
 )
+from llm.auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,6 +92,7 @@ def parse_args() -> argparse.Namespace:
         help="Run ALL models: original, smaller (if enabled), and all additional.",
     )
     from llm.auto_code_gen.agents import add_agent_argument
+
     add_agent_argument(parser)
     return parser.parse_args()
 
@@ -111,22 +103,26 @@ def _build_model_list(args, config, use_case):
 
     if args.all_models:
         # Original model
-        models.append({
-            "model": config.model,
-            "label": "original",
-            "execution_command": config.target_run_command,
-            "smaller_model_file": None,
-            "disable_new_feature": config.disable_new_feature_for_runtime,
-        })
+        models.append(
+            {
+                "model": config.model,
+                "label": "original",
+                "execution_command": config.target_run_command,
+                "smaller_model_file": None,
+                "disable_new_feature": config.disable_new_feature_for_runtime,
+            }
+        )
         # Smaller model (if enabled in config)
         if config.use_smaller_model_for_runtime:
-            models.append({
-                "model": "smaller",
-                "label": "smaller",
-                "execution_command": config.target_run_command,
-                "smaller_model_file": "__pending__",
-                "disable_new_feature": config.disable_new_feature_for_runtime,
-            })
+            models.append(
+                {
+                    "model": "smaller",
+                    "label": "smaller",
+                    "execution_command": config.target_run_command,
+                    "smaller_model_file": "__pending__",
+                    "disable_new_feature": config.disable_new_feature_for_runtime,
+                }
+            )
         # All additional models
         for bench_cfg in config.additional_benchmark_configs:
             model = bench_cfg.get("model", "")
@@ -137,29 +133,33 @@ def _build_model_list(args, config, use_case):
                 exec_cmd = use_case._derive_run_command(
                     config.target_run_command, model, num_gpus
                 )
-            models.append({
-                "model": model,
-                "label": label,
-                "execution_command": exec_cmd,
-                "smaller_model_file": None,
-                "disable_new_feature": config.disable_new_feature_for_runtime,
-            })
+            models.append(
+                {
+                    "model": model,
+                    "label": label,
+                    "execution_command": exec_cmd,
+                    "smaller_model_file": None,
+                    "disable_new_feature": config.disable_new_feature_for_runtime,
+                }
+            )
 
     elif args.use_smaller_model:
-        models.append({
-            "model": "smaller",
-            "label": "smaller",
-            "execution_command": config.target_run_command,
-            "smaller_model_file": "__pending__",
-            "disable_new_feature": config.disable_new_feature_for_runtime,
-        })
+        models.append(
+            {
+                "model": "smaller",
+                "label": "smaller",
+                "execution_command": config.target_run_command,
+                "smaller_model_file": "__pending__",
+                "disable_new_feature": config.disable_new_feature_for_runtime,
+            }
+        )
 
     elif args.model_index is not None:
         idx = args.model_index
         if idx < 0 or idx >= len(config.additional_benchmark_configs):
-            print("ERROR: model-index {} out of range (0-{})".format(
-                idx, len(config.additional_benchmark_configs) - 1
-            ))
+            print(
+                f"ERROR: model-index {idx} out of range (0-{len(config.additional_benchmark_configs) - 1})"
+            )
             sys.exit(1)
         bench_cfg = config.additional_benchmark_configs[idx]
         model = bench_cfg.get("model", "")
@@ -170,23 +170,27 @@ def _build_model_list(args, config, use_case):
             exec_cmd = use_case._derive_run_command(
                 config.target_run_command, model, num_gpus
             )
-        models.append({
-            "model": model,
-            "label": label,
-            "execution_command": exec_cmd,
-            "smaller_model_file": None,
-            "disable_new_feature": config.disable_new_feature_for_runtime,
-        })
+        models.append(
+            {
+                "model": model,
+                "label": label,
+                "execution_command": exec_cmd,
+                "smaller_model_file": None,
+                "disable_new_feature": config.disable_new_feature_for_runtime,
+            }
+        )
 
     else:
         # Default: original model
-        models.append({
-            "model": config.model,
-            "label": "original",
-            "execution_command": config.target_run_command,
-            "smaller_model_file": None,
-            "disable_new_feature": config.disable_new_feature_for_runtime,
-        })
+        models.append(
+            {
+                "model": config.model,
+                "label": "original",
+                "execution_command": config.target_run_command,
+                "smaller_model_file": None,
+                "disable_new_feature": config.disable_new_feature_for_runtime,
+            }
+        )
 
     return models
 
@@ -201,8 +205,8 @@ def _find_code_trace_files(output_dir, code_gen_config):
     for f in files:
         if not os.path.isfile(f):
             raise FileNotFoundError(
-                "Code trace file not found: {}\n"
-                "  Run the code generation pipeline (run_code_gen.py) first.".format(f)
+                f"Code trace file not found: {f}\n"
+                "  Run the code generation pipeline (run_code_gen.py) first."
             )
     return files
 
@@ -214,11 +218,12 @@ def _find_latest_plan_file(output_dir, subdir):
     Returns a relative path like 'code_port_plan/V2_review.txt', or None.
     """
     import re as _re
+
     phase_dir = os.path.join(output_dir, subdir)
     if not os.path.isdir(phase_dir):
         return None
-    review_pat = _re.compile(r'^V(\d+)_review\.txt$')
-    plain_pat = _re.compile(r'^V(\d+)\.txt$')
+    review_pat = _re.compile(r"^V(\d+)_review\.txt$")
+    plain_pat = _re.compile(r"^V(\d+)\.txt$")
     latest = None
     latest_ver = 0
     for f in os.listdir(phase_dir):
@@ -239,9 +244,9 @@ def _find_latest_plan_file(output_dir, subdir):
     return latest
 
 
-async def run_standalone_runtime_iterations(code_gen_config, claude_config,
-                                            resume=False, run_models=None,
-                                            client=None):
+async def run_standalone_runtime_iterations(
+    code_gen_config, claude_config, resume=False, run_models=None, client=None
+):
     use_case = LLMFrameworkUseCase()
     context = use_case.create_context_str(claude_config, code_gen_config)
     output_dir = code_gen_config.output_dir
@@ -250,7 +255,7 @@ async def run_standalone_runtime_iterations(code_gen_config, claude_config,
     print("Verifying target framework branch...")
     if not code_gen_config.verify_target_branch():
         print("\nERROR: Target repo is not on the expected branch.")
-        print("  Expected branch: {}".format(code_gen_config.get_target_branch_name()))
+        print(f"  Expected branch: {code_gen_config.get_target_branch_name()}")
         print("  Please clean the repo and retry.")
         sys.exit(1)
 
@@ -262,7 +267,9 @@ async def run_standalone_runtime_iterations(code_gen_config, claude_config,
     test_plan_file = _find_latest_plan_file(output_dir, TEST_PLAN_DIR) or ""
 
     phase_results, all_step_timings = await use_case.run_runtime_iterations(
-        context, code_gen_config, claude_config,
+        context,
+        code_gen_config,
+        claude_config,
         code_trace_files=code_trace_files,
         code_port_plan_file=code_port_plan_file,
         test_plan_file=test_plan_file,
@@ -290,17 +297,19 @@ if __name__ == "__main__":
     print("\n" + "=" * 80)
     print("STANDALONE RUNTIME ITERATIONS")
     print("=" * 80)
-    print("  Output directory: {}".format(code_gen_config.output_dir))
-    print("  Models to run: {}".format(len(run_models)))
+    print(f"  Output directory: {code_gen_config.output_dir}")
+    print(f"  Models to run: {len(run_models)}")
     for m in run_models:
         print("    - {} ({})".format(m["label"], m["model"]))
     print("=" * 80 + "\n")
 
     async def _main_with_session():
         from llm.auto_code_gen.agents import agent_session
+
         async with agent_session(claude_config) as client:
             results = await run_standalone_runtime_iterations(
-                code_gen_config, claude_config,
+                code_gen_config,
+                claude_config,
                 resume=args.resume,
                 run_models=run_models,
                 client=client,
@@ -308,9 +317,10 @@ if __name__ == "__main__":
             # Record learnings within the same session
             try:
                 await run_record_learnings(
-                    code_gen_config.output_dir, claude_config, client=client)
+                    code_gen_config.output_dir, claude_config, client=client
+                )
             except Exception as e:
-                print("\nWarning: Could not record learnings: {}".format(e))
+                print(f"\nWarning: Could not record learnings: {e}")
             return results
 
     start_time = time.time()
@@ -323,7 +333,9 @@ if __name__ == "__main__":
         _print_phase_summary(phase_results, all_step_timings, total_duration)
     if all_step_timings:
         _print_timeline_and_costs(
-            all_step_timings, total_duration, start_time,
+            all_step_timings,
+            total_duration,
+            start_time,
             code_gen_config.output_dir,
         )
 
@@ -335,6 +347,8 @@ if __name__ == "__main__":
         else:
             print("\n  {} — DID NOT SUCCEED".format(m["label"]))
 
-    manifest_path = os.path.join(code_gen_config.output_dir, RUNTIME_DIR, RUNTIME_RESULTS_MANIFEST)
+    manifest_path = os.path.join(
+        code_gen_config.output_dir, RUNTIME_DIR, RUNTIME_RESULTS_MANIFEST
+    )
     if os.path.isfile(manifest_path):
-        print("\nResults manifest: {}".format(manifest_path))
+        print(f"\nResults manifest: {manifest_path}")

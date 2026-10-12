@@ -15,11 +15,17 @@ from llm.auto_code_gen.pr_flow import pr_descs
 
 
 def _write_verdict(root, number, overall, mode="rebase"):
-    vdir = root / "runtime" / "V{}".format(number)
+    vdir = root / "runtime" / f"V{number}"
     vdir.mkdir(parents=True)
-    (vdir / "verify_verdict.json").write_text(json.dumps({
-        "iteration": number, "overall": overall, "mode": mode,
-    }))
+    (vdir / "verify_verdict.json").write_text(
+        json.dumps(
+            {
+                "iteration": number,
+                "overall": overall,
+                "mode": mode,
+            }
+        )
+    )
     return str(vdir / "verify_verdict.json")
 
 
@@ -85,7 +91,8 @@ class TestFindSuccessProof:
         root.mkdir()
         (root / "runtime" / "baselines").mkdir(parents=True)
         (root / "runtime" / "baselines" / "verify_verdict.json").write_text(
-            json.dumps({"overall": "PASS"}))
+            json.dumps({"overall": "PASS"})
+        )
         with pytest.raises(pr_descs.PrDescsError):
             pr_descs.find_success_proof(str(root))
 
@@ -116,32 +123,39 @@ class TestUpdatePrDescs:
 
     def _config(self, tmp_path, name="run"):
         from types import SimpleNamespace
+
         root = tmp_path / name
         root.mkdir()
-        return SimpleNamespace(output_dir=str(root),
-                               config_json_path=str(tmp_path / "cfg.json"))
+        return SimpleNamespace(
+            output_dir=str(root), config_json_path=str(tmp_path / "cfg.json")
+        )
 
     def _use_case(self):
         class StubUseCase:
             def create_context_str(self, claude_config, config):
                 return "context"
+
         return StubUseCase()
 
     def test_generates_when_absent(self, tmp_path, stub_agent):
         import asyncio
+
         config = self._config(tmp_path)
         stub_agent["output_dir"] = config.output_dir
         _write_verdict(tmp_path / "run", 1, "PASS")
 
         desc, body = asyncio.run(
-            pr_descs.update_pr_descs(config, claude_config=None,
-                                     use_case=self._use_case()))
+            pr_descs.update_pr_descs(
+                config, claude_config=None, use_case=self._use_case()
+            )
+        )
         assert os.path.isfile(desc)
         assert os.path.isfile(body)
         assert open(desc).readline().strip() == "perf: stub title"
 
     def test_updates_in_place(self, tmp_path, stub_agent):
         import asyncio
+
         config = self._config(tmp_path)
         stub_agent["output_dir"] = config.output_dir
         pr_dir = tmp_path / "run" / "pr-generate"
@@ -150,21 +164,29 @@ class TestUpdatePrDescs:
         (pr_dir / "pr_desc.txt").write_text("old body\n")
         _write_verdict(tmp_path / "run", 2, "PASS")
 
-        asyncio.run(pr_descs.update_pr_descs(
-            config, claude_config=None, use_case=self._use_case()))
+        asyncio.run(
+            pr_descs.update_pr_descs(
+                config, claude_config=None, use_case=self._use_case()
+            )
+        )
         assert "stub" in (pr_dir / "commit_desc.txt").read_text()
         assert "stub" in (pr_dir / "pr_desc.txt").read_text()
 
     def test_refuses_without_success_proof(self, tmp_path, stub_agent):
         import asyncio
+
         config = self._config(tmp_path)
-        desc, body = asyncio.run(pr_descs.update_pr_descs(
-            config, claude_config=None, use_case=self._use_case()))
+        desc, body = asyncio.run(
+            pr_descs.update_pr_descs(
+                config, claude_config=None, use_case=self._use_case()
+            )
+        )
         assert desc is None and body is None
         assert not stub_agent["steps"]  # the agent step never ran
 
     def test_refresh_after_pass_survives_agent_crash(self, tmp_path, monkeypatch):
         import asyncio
+
         config = self._config(tmp_path)
         _write_verdict(tmp_path / "run", 1, "PASS")
 
@@ -173,5 +195,8 @@ class TestUpdatePrDescs:
 
         monkeypatch.setattr(pr_descs, "agent_run", exploding_agent)
         # must not raise -- the PASS verdict survives a description failure
-        asyncio.run(pr_descs.refresh_after_pass(
-            config, claude_config=None, use_case=self._use_case()))
+        asyncio.run(
+            pr_descs.refresh_after_pass(
+                config, claude_config=None, use_case=self._use_case()
+            )
+        )

@@ -1,4 +1,5 @@
 """Allowlist derivation and enforcement for the bug-fix porting pipeline."""
+
 from __future__ import annotations
 
 from auto_bug_fix.git_tools import (
@@ -10,7 +11,14 @@ from auto_bug_fix.git_tools import (
     is_merge_commit,
 )
 
-_DEFAULT_TEST_PATTERNS: list[str] = ["tests", "testing", "test_", "testdata", "spec", "_test."]
+_DEFAULT_TEST_PATTERNS: list[str] = [
+    "tests",
+    "testing",
+    "test_",
+    "testdata",
+    "spec",
+    "_test.",
+]
 
 
 def derive_seed(repo_path: str, fix_commit: str) -> list[str]:
@@ -45,7 +53,10 @@ def resolve_renames(
             continue
 
         rename_pairs = git_diff_find_renames(
-            repo_path, fork_point, target_branch, path,
+            repo_path,
+            fork_point,
+            target_branch,
+            path,
         )
         new_names = [dest for _, dest in rename_pairs]
 

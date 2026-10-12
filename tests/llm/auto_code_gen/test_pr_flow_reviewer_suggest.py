@@ -16,8 +16,9 @@ from llm.auto_code_gen.pr_flow import run_reviewer_suggest as rs
 
 
 def _run_git(cwd, *args):
-    subprocess.run(["git", "-C", str(cwd)] + list(args), check=True,
-                   capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(cwd)] + list(args), check=True, capture_output=True, text=True
+    )
 
 
 @pytest.fixture()
@@ -31,27 +32,50 @@ def fixture_repo(tmp_path):
         (repo / os.path.dirname(path)).mkdir(parents=True, exist_ok=True)
         (repo / path).write_text(content)
         _run_git(repo, "add", "-A")
-        _run_git(repo, "-c", "user.name={}".format(name),
-                 "-c", "user.email={}".format(email),
-                 "commit", "-q", "-m", name)
+        _run_git(
+            repo,
+            "-c",
+            f"user.name={name}",
+            "-c",
+            f"user.email={email}",
+            "commit",
+            "-q",
+            "-m",
+            name,
+        )
 
-    commit("alice", "alice@example.com", "src/feature.py",
-           "line1\nline2\nline3\n")
-    commit("bob", "bob@example.com", "src/feature.py",
-           "line1\nline2 changed\nline3\n")
-    _run_git(repo, "-c", "user.name=carol",
-             "-c", "user.email=carol@example.com",
-             "commit", "-q", "--allow-empty", "-m", "base marker")
-    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                          capture_output=True, text=True).stdout.strip()
+    commit("alice", "alice@example.com", "src/feature.py", "line1\nline2\nline3\n")
+    commit("bob", "bob@example.com", "src/feature.py", "line1\nline2 changed\nline3\n")
+    _run_git(
+        repo,
+        "-c",
+        "user.name=carol",
+        "-c",
+        "user.email=carol@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "base marker",
+    )
+    base = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
 
     # The PR: carol changes line 2 (originally bob's, per blame at base).
-    (repo / "src" / "feature.py").write_text(
-        "line1\nline2 rewritten\nline3\n")
+    (repo / "src" / "feature.py").write_text("line1\nline2 rewritten\nline3\n")
     _run_git(repo, "add", "-A")
-    _run_git(repo, "-c", "user.name=carol",
-             "-c", "user.email=carol@example.com",
-             "commit", "-q", "-m", "pr change")
+    _run_git(
+        repo,
+        "-c",
+        "user.name=carol",
+        "-c",
+        "user.email=carol@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "pr change",
+    )
     return repo, base, "src/feature.py"
 
 
@@ -111,15 +135,21 @@ class TestBotFilter:
 class TestRankCandidates:
 
     def test_blame_author_outranks_minor_history_committer(
-            self, fixture_repo, monkeypatch):
+        self, fixture_repo, monkeypatch
+    ):
         repo, base, path = fixture_repo
-        state = {"base_commit": base, "base_branch": "main",
-                 "repo_dir": str(repo), "head_sha": "HEAD",
-                 "upstream_repo": "vllm-project/vllm"}
+        state = {
+            "base_commit": base,
+            "base_branch": "main",
+            "repo_dir": str(repo),
+            "head_sha": "HEAD",
+            "upstream_repo": "vllm-project/vllm",
+        }
 
         # Stub the network parts: email->login mapping and PR reviews.
-        monkeypatch.setattr(rs, "_email_to_login",
-                            lambda repo_, email: email.split("@")[0])
+        monkeypatch.setattr(
+            rs, "_email_to_login", lambda repo_, email: email.split("@")[0]
+        )
         monkeypatch.setattr(rs, "review_candidates", lambda *a, **k: {})
 
         # alice has only history weight; bob owns the changed line.
@@ -128,26 +158,37 @@ class TestRankCandidates:
         assert "bob" in logins
         bob = next(e for e in ranked if e["login"] == "bob")
         assert bob["score"] > 0
-        assert any("blame" in line or "changed lines" in line
-                   for line in bob["evidence"])
+        assert any(
+            "blame" in line or "changed lines" in line for line in bob["evidence"]
+        )
         assert len(ranked) <= 3
 
     def test_author_is_excluded(self, fixture_repo, monkeypatch):
         repo, base, path = fixture_repo
-        state = {"base_commit": base, "repo_dir": str(repo),
-                 "head_sha": "HEAD", "upstream_repo": "vllm-project/vllm"}
-        monkeypatch.setattr(rs, "_email_to_login",
-                            lambda repo_, email: email.split("@")[0])
+        state = {
+            "base_commit": base,
+            "repo_dir": str(repo),
+            "head_sha": "HEAD",
+            "upstream_repo": "vllm-project/vllm",
+        }
+        monkeypatch.setattr(
+            rs, "_email_to_login", lambda repo_, email: email.split("@")[0]
+        )
         monkeypatch.setattr(rs, "review_candidates", lambda *a, **k: {})
         ranked, _ = rs.rank_candidates(state, str(repo), 3)
         assert "carol" not in [e["login"] for e in ranked]
 
     def test_bots_are_excluded(self, fixture_repo, monkeypatch):
         repo, base, path = fixture_repo
-        state = {"base_commit": base, "repo_dir": str(repo),
-                 "head_sha": "HEAD", "upstream_repo": "vllm-project/vllm"}
-        monkeypatch.setattr(rs, "_email_to_login",
-                            lambda repo_, email: "github-actions[bot]")
+        state = {
+            "base_commit": base,
+            "repo_dir": str(repo),
+            "head_sha": "HEAD",
+            "upstream_repo": "vllm-project/vllm",
+        }
+        monkeypatch.setattr(
+            rs, "_email_to_login", lambda repo_, email: "github-actions[bot]"
+        )
         monkeypatch.setattr(rs, "review_candidates", lambda *a, **k: {})
         ranked, _ = rs.rank_candidates(state, str(repo), 3)
         assert ranked == []
@@ -164,8 +205,7 @@ class TestReviewCandidatesQuery:
             return json.dumps({"items": []})
 
         monkeypatch.setattr(rs, "_gh", fake_gh)
-        rs.review_candidates("vllm-project/vllm",
-                              ["vllm/x/flashinfer_mla_sparse.py"])
+        rs.review_candidates("vllm-project/vllm", ["vllm/x/flashinfer_mla_sparse.py"])
         q = captured["args"][captured["args"].index("-f") + 1]
         assert q.startswith("q=")
         assert "flashinfer_mla_sparse.py" in q
@@ -181,7 +221,7 @@ class TestRenderDraft:
         ]
         draft = rs.render_draft("http://pr", candidates)
         assert draft.splitlines()[0] == "@alice @bob could you review this PR?"
-        assert "reviewed 3 PRs" not in draft   # evidence stays local
+        assert "reviewed 3 PRs" not in draft  # evidence stays local
         assert draft.rstrip().endswith(rs.MARKER)
         assert "Human reviewed changes" in draft
 
@@ -195,41 +235,66 @@ class TestPatchFilesFromState:
 
     def test_uses_base_head_diff(self, fixture_repo):
         repo, base, path = fixture_repo
-        state = {"repo_dir": str(repo), "base_commit": base,
-                 "head_sha": "HEAD", "output_dir": None}
+        state = {
+            "repo_dir": str(repo),
+            "base_commit": base,
+            "head_sha": "HEAD",
+            "output_dir": None,
+        }
         assert rs._patch_files_from_state(state) == [path]
 
 
 class TestEndToEndGenerate:
 
     def test_generate_writes_draft_and_json_and_stamps_state(
-            self, fixture_repo, tmp_path, monkeypatch):
+        self, fixture_repo, tmp_path, monkeypatch
+    ):
         repo, base, path = fixture_repo
         output_dir = tmp_path / "run"
         from llm.auto_code_gen.pr_flow import pr_state
-        state_path = str(tmp_path / "pr_state.json")
-        pr_state.save_state(state_path, dict(
-            pr_state.new_state(str(output_dir), str(repo),
-                               "git@github.com:me/vllm.git",
-                               "me", "vllm-project/vllm",
-                               base_branch="main"),
-            base_commit=base, head_sha="HEAD", repo_dir=str(repo),
-            pr_number=42, pr_url="http://pr/42",
-            upstream_repo="vllm-project/vllm"))
 
-        monkeypatch.setattr(rs, "_email_to_login",
-                            lambda repo_, email: email.split("@")[0])
+        state_path = str(tmp_path / "pr_state.json")
+        pr_state.save_state(
+            state_path,
+            dict(
+                pr_state.new_state(
+                    str(output_dir),
+                    str(repo),
+                    "git@github.com:me/vllm.git",
+                    "me",
+                    "vllm-project/vllm",
+                    base_branch="main",
+                ),
+                base_commit=base,
+                head_sha="HEAD",
+                repo_dir=str(repo),
+                pr_number=42,
+                pr_url="http://pr/42",
+                upstream_repo="vllm-project/vllm",
+            ),
+        )
+
+        monkeypatch.setattr(
+            rs, "_email_to_login", lambda repo_, email: email.split("@")[0]
+        )
         monkeypatch.setattr(rs, "review_candidates", lambda *a, **k: {})
 
         rc = subprocess.run(
-            ["python", "-m", "llm.auto_code_gen.pr_flow.run_reviewer_suggest",
-             "generate", "--state", state_path],
-            capture_output=True, text=True, cwd=os.getcwd())
+            [
+                "python",
+                "-m",
+                "llm.auto_code_gen.pr_flow.run_reviewer_suggest",
+                "generate",
+                "--state",
+                state_path,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd(),
+        )
         assert rc.returncode == 0, rc.stderr
-        draft_path = os.path.join(
-            pr_state.descs_dir(str(output_dir)), rs.REVIEWERS_TXT)
-        json_path = os.path.join(
-            pr_state.descs_dir(str(output_dir)), rs.REVIEWERS_JSON)
+        draft_path = os.path.join(pr_state.descs_dir(str(output_dir)), rs.REVIEWERS_TXT)
+        json_path = os.path.join(pr_state.descs_dir(str(output_dir)), rs.REVIEWERS_JSON)
         assert os.path.isfile(draft_path) and os.path.isfile(json_path)
 
         with open(json_path) as f:
@@ -242,5 +307,6 @@ class TestEndToEndGenerate:
         assert draft.rstrip().endswith(rs.MARKER)
 
         import hashlib
+
         stamped = pr_state.load_state(state_path)["reviewers_draft_sha256"]
         assert stamped == hashlib.sha256(draft.encode()).hexdigest()

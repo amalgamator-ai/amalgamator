@@ -1,8 +1,9 @@
 """Auditable dossier builder for human review."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from auto_bug_fix.git_tools import COAUTHOR_TRAILERS
 
@@ -32,7 +33,7 @@ class Dossier:
     strategies: list[StrategyAttempt] = field(default_factory=list)
     cherry_pick_path: str = ""
     trailers: dict[str, str] = field(default_factory=dict)
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def add(self, label: str, content: str, source: str) -> None:
         """Append a labelled evidence item to the dossier."""
@@ -40,9 +41,13 @@ class Dossier:
 
     def add_strategy(self, strategy: str, outcome: str, commentary: str = "") -> None:
         """Record a cherry-pick strategy attempt and its outcome."""
-        self.strategies.append(StrategyAttempt(
-            strategy=strategy, outcome=outcome, commentary=commentary,
-        ))
+        self.strategies.append(
+            StrategyAttempt(
+                strategy=strategy,
+                outcome=outcome,
+                commentary=commentary,
+            )
+        )
 
 
 def build_trailers(

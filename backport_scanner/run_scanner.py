@@ -43,7 +43,9 @@ def load_config(config_path: Path, models_path: str | Path | None = None) -> Sca
         sys.exit(1)
 
     model_ref = llm_cfg.get("model")
-    if model_ref is not None and (not isinstance(model_ref, str) or not model_ref.strip()):
+    if model_ref is not None and (
+        not isinstance(model_ref, str) or not model_ref.strip()
+    ):
         raise ValueError("llm.model must be a non-empty profile ID or model name")
     registry = find_registry(
         config_dir=str(config_path.resolve().parent),
@@ -86,18 +88,25 @@ def main(argv=None):
         description="Scan repo branches to identify which need a bug fix backported."
     )
     parser.add_argument(
-        "--config", "-c", required=True, type=Path,
-        help="Path to YAML scan config file (supports branches and/or tags)"
+        "--config",
+        "-c",
+        required=True,
+        type=Path,
+        help="Path to YAML scan config file (supports branches and/or tags)",
     )
     parser.add_argument(
-        "--output", "-o", type=Path, default=None,
-        help="Path to save JSON report (optional)"
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="Path to save JSON report (optional)",
     )
     parser.add_argument(
-        "--verbose", "-v", action="store_true",
-        help="Enable verbose logging"
+        "--verbose", "-v", action="store_true", help="Enable verbose logging"
     )
-    parser.add_argument("--models", type=Path, help="Explicit model registry (overrides discovery)")
+    parser.add_argument(
+        "--models", type=Path, help="Explicit model registry (overrides discovery)"
+    )
     args = parser.parse_args(argv)
 
     if args.verbose:

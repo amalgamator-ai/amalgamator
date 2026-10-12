@@ -48,48 +48,45 @@ Outputs (in output_dir):
       - single_trace_transformer_block.txt    Human-readable trace summary
 """
 
-import sys as _sys
 import os as _os
+import sys as _sys
+
 _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
-import json
+import argparse
+import asyncio
 import os
+import shutil
 import sys
 import time
-import asyncio
-import argparse
+from dataclasses import asdict
 
-from common.utils import setup_logging, safe_clean_dir
 from common.claude_utils import PipelineStep, _all_steps_complete
 from common.iteration_utils import check_converged, resolve_output_file
+from common.utils import safe_clean_dir, setup_logging
 from llm.agents import agent_run, agent_session
-from llm.auto_analyze.agent_support import add_agent_arguments, make_agent_config, log_agent_config
-
+from llm.auto_analyze.agent_support import (
+    add_agent_arguments,
+    log_agent_config,
+    make_agent_config,
+)
 from llm.auto_analyze.configs.single_trace_config import (
-    SingleTraceConfig,
-    HIGH_LEVEL_OPS_FILE,
-    GPU_OPS_TXT_FILE,
     GPU_OPS_TO_BLOCKS_FILE,
+    GPU_OPS_TXT_FILE,
+    HIGH_LEVEL_OPS_FILE,
     MEDIAN_BLOCK_FILE,
     PERF_ANALYSIS_SINGLE_FILE,
-)
-from llm.auto_analyze.prompts.single_trace_prompts import (
-    gen_single_trace_prompts,
-    gen_high_level_ops_iter_steps,
-    gen_correlation_iter_steps,
-    gen_perf_analysis_iter_steps,
-    GpuOpsPrompt,
-    HIGH_LEVEL_OPS_PREFIX,
-    CORRELATION_PREFIX,
-    MEDIAN_BLOCK_PREFIX,
-    PERF_ANALYSIS_PREFIX,
+    SingleTraceConfig,
 )
 from llm.auto_analyze.prompts.chrome_trace_prompts import build_single_trace_json_prompt
-
-import shutil
-from dataclasses import asdict
+from llm.auto_analyze.prompts.single_trace_prompts import (
+    GpuOpsPrompt,
+    gen_correlation_iter_steps,
+    gen_high_level_ops_iter_steps,
+    gen_perf_analysis_iter_steps,
+)
 
 
 def log_config(config: SingleTraceConfig):
@@ -116,7 +113,7 @@ def log_config(config: SingleTraceConfig):
         print(f"  Focus:         {config.high_level_focus}")
     print(f"  Output dir:    {config.output_dir}")
     print(f"  Skip perf analysis: {config.skip_perf_analysis}")
-    
+
     print("=" * 70)
 
 
@@ -144,7 +141,7 @@ def save_run_artifacts(config: SingleTraceConfig):
             shutil.copy2(trace_to_copy, dst)
             print(f"  Copied trace file: {dst}")
         else:
-            print(f"  Trace file already in output dir, skipping copy")
+            print("  Trace file already in output dir, skipping copy")
 
     # Save run_command.txt
     if config.run_command:
@@ -166,7 +163,9 @@ def log_outputs(output_dir, output_files):
     print("  OUTPUT FILES")
     print("=" * 70)
     for label, filename in output_files.items():
-        path = filename if os.path.isabs(filename) else os.path.join(output_dir, filename)
+        path = (
+            filename if os.path.isabs(filename) else os.path.join(output_dir, filename)
+        )
         exists = os.path.exists(path)
         status = "OK" if exists else "MISSING"
         print(f"  [{status}] {label}: {filename}")
@@ -176,23 +175,25 @@ def log_outputs(output_dir, output_files):
 def _format_duration(seconds):
     mins, secs = divmod(int(seconds), 60)
     hrs, mins = divmod(mins, 60)
-    raw = "{:.1f}s".format(seconds)
+    raw = f"{seconds:.1f}s"
     if hrs:
-        human = "{}h {}m {}s".format(hrs, mins, secs)
+        human = f"{hrs}h {mins}m {secs}s"
     else:
-        human = "{}m {}s".format(mins, secs)
+        human = f"{mins}m {secs}s"
     return raw, human
 
 
 def _format_tokens(count):
     if count >= 1_000_000:
-        return "{:.1f}M".format(count / 1_000_000)
+        return f"{count / 1_000_000:.1f}M"
     if count >= 1_000:
-        return "{:.1f}K".format(count / 1_000)
+        return f"{count / 1_000:.1f}K"
     return str(count)
 
 
-def _print_phase_summary(phase_results, all_step_timings, total_duration, output_dir=None):
+def _print_phase_summary(
+    phase_results, all_step_timings, total_duration, output_dir=None
+):
     """Print a summary table of all phases with iteration counts and convergence status."""
     total_input = sum(s.get("input_tokens", 0) for s in all_step_timings)
     total_output = sum(s.get("output_tokens", 0) for s in all_step_timings)
@@ -207,36 +208,51 @@ def _print_phase_summary(phase_results, all_step_timings, total_duration, output
         else:
             converged_str = "No"
         raw, human = _format_duration(phase["duration"])
-        rows.append({
-            "name": phase["name"],
-            "iters": "{}/{}".format(phase["iterations"], phase["max_iterations"]),
-            "conv": converged_str,
-            "dur_raw": raw, "dur_human": human,
-        })
+        rows.append(
+            {
+                "name": phase["name"],
+                "iters": "{}/{}".format(phase["iterations"], phase["max_iterations"]),
+                "conv": converged_str,
+                "dur_raw": raw,
+                "dur_human": human,
+            }
+        )
 
     total_raw, total_human = _format_duration(total_duration)
-    rows.append({
-        "name": "TOTAL", "iters": "", "conv": "",
-        "dur_raw": total_raw, "dur_human": total_human,
-    })
+    rows.append(
+        {
+            "name": "TOTAL",
+            "iters": "",
+            "conv": "",
+            "dur_raw": total_raw,
+            "dur_human": total_human,
+        }
+    )
 
     w = 100
     lines = []
     lines.append("\n" + "=" * w)
     lines.append("PHASE SUMMARY")
     lines.append("=" * w)
-    lines.append("{:<30s} {:<10s} {:<18s} {:<25s}".format(
-        "Phase", "Iters", "Converged", "Duration"
-    ))
+    lines.append(
+        "{:<30s} {:<10s} {:<18s} {:<25s}".format(
+            "Phase", "Iters", "Converged", "Duration"
+        )
+    )
     lines.append("-" * w)
 
     for i, r in enumerate(rows):
         if i == len(rows) - 1:
             lines.append("-" * w)
         dur_str = "{:<10s}  ({})".format(r["dur_raw"], r["dur_human"])
-        lines.append("{:<30s} {:<10s} {:<18s} {:<25s}".format(
-            r["name"], r["iters"], r["conv"], dur_str,
-        ))
+        lines.append(
+            "{:<30s} {:<10s} {:<18s} {:<25s}".format(
+                r["name"],
+                r["iters"],
+                r["conv"],
+                dur_str,
+            )
+        )
 
     lines.append("=" * w)
 
@@ -285,15 +301,29 @@ async def run_pipeline(config, agent_config, resume=False):
             run_steps = steps[:-1] if skip_review else steps
 
             if resume and _all_steps_complete(run_steps, output_dir):
-                print("Resume: skipping completed iteration 'High-level ops V{}'".format(iteration))
-                if not skip_review and check_converged(output_dir, review_step.output_files[1]):
+                print(
+                    f"Resume: skipping completed iteration 'High-level ops V{iteration}'"
+                )
+                if not skip_review and check_converged(
+                    output_dir, review_step.output_files[1]
+                ):
                     converged = True
                     break
-                prev_output_file = review_step.output_files[0] if not skip_review else run_steps[-1].output_files[0]
-                prev_output_summary_file = review_step.output_files[1] if not skip_review else run_steps[-1].output_files[1]
+                prev_output_file = (
+                    review_step.output_files[0]
+                    if not skip_review
+                    else run_steps[-1].output_files[0]
+                )
+                prev_output_summary_file = (
+                    review_step.output_files[1]
+                    if not skip_review
+                    else run_steps[-1].output_files[1]
+                )
                 continue
 
-            timings = await agent_run(agent_config, run_steps, resume=resume, client=client)
+            timings = await agent_run(
+                agent_config, run_steps, resume=resume, client=client
+            )
             all_step_timings.extend(timings)
 
             if skip_review:
@@ -308,16 +338,18 @@ async def run_pipeline(config, agent_config, resume=False):
 
         high_level_ops_file = resolve_output_file(output_dir, HIGH_LEVEL_OPS_FILE)
 
-        phase_results.append({
-            "name": "High-level ops",
-            "iterations": actual_iters,
-            "max_iterations": max_iters,
-            "converged": converged,
-            "duration": time.time() - phase_start,
-        })
-        print("High-level ops: {}/{} iterations, converged={}".format(
-            actual_iters, max_iters, converged
-        ))
+        phase_results.append(
+            {
+                "name": "High-level ops",
+                "iterations": actual_iters,
+                "max_iterations": max_iters,
+                "converged": converged,
+                "duration": time.time() - phase_start,
+            }
+        )
+        print(
+            f"High-level ops: {actual_iters}/{max_iters} iterations, converged={converged}"
+        )
 
         # ===================================================================
         # Phase: Step 3 — GPU Ops Extraction (flat, no iterations)
@@ -347,13 +379,15 @@ async def run_pipeline(config, agent_config, resume=False):
             )
             all_step_timings.extend(timings)
 
-        phase_results.append({
-            "name": "GPU ops extraction",
-            "iterations": 1,
-            "max_iterations": 1,
-            "converged": False,
-            "duration": time.time() - phase_start,
-        })
+        phase_results.append(
+            {
+                "name": "GPU ops extraction",
+                "iterations": 1,
+                "max_iterations": 1,
+                "converged": False,
+                "duration": time.time() - phase_start,
+            }
+        )
 
         # ===================================================================
         # Phase: Step 4 — Correlation (iteration loop)
@@ -375,21 +409,39 @@ async def run_pipeline(config, agent_config, resume=False):
             actual_iters = iteration
 
             steps, review_step = gen_correlation_iter_steps(
-                config, high_level_ops_file, gpu_ops_txt_file,
-                prev_output_file, prev_output_summary_file, iteration
+                config,
+                high_level_ops_file,
+                gpu_ops_txt_file,
+                prev_output_file,
+                prev_output_summary_file,
+                iteration,
             )
             run_steps = steps[:-1] if skip_review else steps
 
             if resume and _all_steps_complete(run_steps, output_dir):
-                print("Resume: skipping completed iteration 'Correlation V{}'".format(iteration))
-                if not skip_review and check_converged(output_dir, review_step.output_files[1]):
+                print(
+                    f"Resume: skipping completed iteration 'Correlation V{iteration}'"
+                )
+                if not skip_review and check_converged(
+                    output_dir, review_step.output_files[1]
+                ):
                     converged = True
                     break
-                prev_output_file = review_step.output_files[0] if not skip_review else run_steps[-1].output_files[0]
-                prev_output_summary_file = review_step.output_files[1] if not skip_review else run_steps[-1].output_files[1]
+                prev_output_file = (
+                    review_step.output_files[0]
+                    if not skip_review
+                    else run_steps[-1].output_files[0]
+                )
+                prev_output_summary_file = (
+                    review_step.output_files[1]
+                    if not skip_review
+                    else run_steps[-1].output_files[1]
+                )
                 continue
 
-            timings = await agent_run(agent_config, run_steps, resume=resume, client=client)
+            timings = await agent_run(
+                agent_config, run_steps, resume=resume, client=client
+            )
             all_step_timings.extend(timings)
 
             if skip_review:
@@ -405,16 +457,18 @@ async def run_pipeline(config, agent_config, resume=False):
         gpu_ops_to_blocks_file = resolve_output_file(output_dir, GPU_OPS_TO_BLOCKS_FILE)
         median_block_file = resolve_output_file(output_dir, MEDIAN_BLOCK_FILE)
 
-        phase_results.append({
-            "name": "Correlation",
-            "iterations": actual_iters,
-            "max_iterations": max_iters,
-            "converged": converged,
-            "duration": time.time() - phase_start,
-        })
-        print("Correlation: {}/{} iterations, converged={}".format(
-            actual_iters, max_iters, converged
-        ))
+        phase_results.append(
+            {
+                "name": "Correlation",
+                "iterations": actual_iters,
+                "max_iterations": max_iters,
+                "converged": converged,
+                "duration": time.time() - phase_start,
+            }
+        )
+        print(
+            f"Correlation: {actual_iters}/{max_iters} iterations, converged={converged}"
+        )
 
         # ===================================================================
         # Phase: Step 5 — Performance Analysis (iteration loop, conditional)
@@ -437,19 +491,36 @@ async def run_pipeline(config, agent_config, resume=False):
                 actual_iters = iteration
 
                 steps, review_step = gen_perf_analysis_iter_steps(
-                    config, median_block_file, high_level_ops_file,
-                    gpu_ops_to_blocks_file, gpu_ops_txt_file,
-                    prev_output_file, prev_output_summary_file, iteration
+                    config,
+                    median_block_file,
+                    high_level_ops_file,
+                    gpu_ops_to_blocks_file,
+                    gpu_ops_txt_file,
+                    prev_output_file,
+                    prev_output_summary_file,
+                    iteration,
                 )
                 run_steps = steps[:-1] if skip_review else steps
 
                 if resume and _all_steps_complete(run_steps, output_dir):
-                    print("Resume: skipping completed iteration 'Perf analysis V{}'".format(iteration))
-                    if not skip_review and check_converged(output_dir, review_step.output_files[1]):
+                    print(
+                        f"Resume: skipping completed iteration 'Perf analysis V{iteration}'"
+                    )
+                    if not skip_review and check_converged(
+                        output_dir, review_step.output_files[1]
+                    ):
                         converged = True
                         break
-                    prev_output_file = review_step.output_files[0] if not skip_review else run_steps[-1].output_files[0]
-                    prev_output_summary_file = review_step.output_files[1] if not skip_review else run_steps[-1].output_files[1]
+                    prev_output_file = (
+                        review_step.output_files[0]
+                        if not skip_review
+                        else run_steps[-1].output_files[0]
+                    )
+                    prev_output_summary_file = (
+                        review_step.output_files[1]
+                        if not skip_review
+                        else run_steps[-1].output_files[1]
+                    )
                     continue
 
                 timings = await agent_run(
@@ -467,16 +538,18 @@ async def run_pipeline(config, agent_config, resume=False):
                         converged = True
                         break
 
-            phase_results.append({
-                "name": "Perf analysis",
-                "iterations": actual_iters,
-                "max_iterations": max_iters,
-                "converged": converged,
-                "duration": time.time() - phase_start,
-            })
-            print("Perf analysis: {}/{} iterations, converged={}".format(
-                actual_iters, max_iters, converged
-            ))
+            phase_results.append(
+                {
+                    "name": "Perf analysis",
+                    "iterations": actual_iters,
+                    "max_iterations": max_iters,
+                    "converged": converged,
+                    "duration": time.time() - phase_start,
+                }
+            )
+            print(
+                f"Perf analysis: {actual_iters}/{max_iters} iterations, converged={converged}"
+            )
 
         # ===================================================================
         # Phase: Step 6 — Chrome Trace (flat, no iterations)
@@ -504,13 +577,15 @@ async def run_pipeline(config, agent_config, resume=False):
             )
             all_step_timings.extend(timings)
 
-        phase_results.append({
-            "name": "Chrome trace",
-            "iterations": 1,
-            "max_iterations": 1,
-            "converged": False,
-            "duration": time.time() - phase_start,
-        })
+        phase_results.append(
+            {
+                "name": "Chrome trace",
+                "iterations": 1,
+                "max_iterations": 1,
+                "converged": False,
+                "duration": time.time() - phase_start,
+            }
+        )
 
     return phase_results, all_step_timings
 
@@ -590,7 +665,9 @@ if __name__ == "__main__":
         "median_block": resolve_output_file(output_dir, MEDIAN_BLOCK_FILE),
     }
     if not config.skip_perf_analysis:
-        output_files["perf_analysis"] = resolve_output_file(output_dir, PERF_ANALYSIS_SINGLE_FILE)
+        output_files["perf_analysis"] = resolve_output_file(
+            output_dir, PERF_ANALYSIS_SINGLE_FILE
+        )
     trace_prompt = build_single_trace_json_prompt(config)
     output_files["chrome_trace_json"] = os.path.basename(trace_prompt.output_json_file)
     output_files["chrome_trace_txt"] = os.path.basename(trace_prompt.output_txt_file)

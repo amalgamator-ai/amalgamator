@@ -7,6 +7,7 @@ own agent persona subclasses :class:`ClaudeConfig` and overrides
 printing, timing, token accounting) is identical across pipelines and lives
 here only.
 """
+
 from __future__ import annotations
 
 import os
@@ -30,8 +31,10 @@ def make_anthropic_client():
         the Anthropic ``messages.create`` interface.
     """
     import anthropic
+
     if os.environ.get("CLAUDE_CODE_USE_VERTEX"):
         from anthropic import AnthropicVertex
+
         return AnthropicVertex(
             project_id=os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", ""),
             region=os.environ.get("CLOUD_ML_REGION", "us-east5"),
@@ -42,18 +45,19 @@ def make_anthropic_client():
 try:
     from claude_agent_sdk import (
         AssistantMessage,
-        TextBlock,
-        ThinkingBlock,
-        ToolUseBlock,
-        ToolResultBlock,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
         ContentBlock,
         ResultMessage,
         SystemMessage,
+        TextBlock,
+        ThinkingBlock,
+        ToolResultBlock,
+        ToolUseBlock,
         UserMessage,
-        ClaudeAgentOptions,
-        ClaudeSDKClient,
     )
     from claude_agent_sdk.types import StreamEvent
+
     _HAS_CLAUDE_SDK = True
 except ImportError:
     _HAS_CLAUDE_SDK = False
@@ -63,11 +67,12 @@ except ImportError:
 # when they are unavailable.
 try:
     from claude_agent_sdk.types import (
-        TaskStartedMessage,
-        TaskNotificationMessage,
-        TaskUpdatedMessage,
         TERMINAL_TASK_STATUSES,
+        TaskNotificationMessage,
+        TaskStartedMessage,
+        TaskUpdatedMessage,
     )
+
     _HAS_TASK_TRACKING = True
 except ImportError:
     _HAS_TASK_TRACKING = False
@@ -97,7 +102,7 @@ class ClaudeConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     command_timeout: int | None = None
     context_length: int | None = None
-    profile: "ModelProfile | None" = None
+    profile: ModelProfile | None = None
 
     def __post_init__(self):
         if self.profile:
@@ -107,6 +112,7 @@ class ClaudeConfig:
 @dataclass
 class ProfilingClaudeConfig(ClaudeConfig):
     """Persona for the GPU profiling and trace-analysis pipelines."""
+
     system_prompt: str = PROFILING_SYSTEM_PROMPT
 
 
@@ -180,49 +186,39 @@ def print_claude_config(config: ClaudeConfig) -> None:
 def print_dict(d, indent):
     for key, val in d.items():
         if isinstance(val, dict):
-            print("{}{} : ".format(indent, key))
+            print(f"{indent}{key} : ")
             print_dict(val, indent + "    ")
         else:
-            print("{}{} : {}".format(indent, key, val))
+            print(f"{indent}{key} : {val}")
 
 
 def print_ContentBlock(prefix, content):
     if isinstance(content, TextBlock):
-        print("{} {}".format(prefix, content.text))
+        print(f"{prefix} {content.text}")
 
     elif isinstance(content, ThinkingBlock):
-        print("{} Thinking: {} {}".format(prefix, content.signature, content.thinking))
+        print(f"{prefix} Thinking: {content.signature} {content.thinking}")
 
     elif isinstance(content, ToolUseBlock):
-        print(
-            "{} ToolUse: name = {}".format(
-                prefix,
-                content.name,
-            )
-        )
+        print(f"{prefix} ToolUse: name = {content.name}")
 
         print_dict(content.input, indent="    ")
 
     elif isinstance(content, ToolResultBlock):
-        print(
-            "{} ToolResult: err = {}".format(
-                prefix,
-                content.is_error,
-            )
-        )
+        print(f"{prefix} ToolResult: err = {content.is_error}")
 
         print()
         print(content.content)
 
     else:
-        raise Exception("Unexpected type(content) = {}".format(type(content)))
+        raise Exception(f"Unexpected type(content) = {type(content)}")
     print()
 
 
 def print_UserMessage(msg: UserMessage):
     prefix = f"{Fore.GREEN}User:{Style.RESET_ALL}"
     if isinstance(msg.content, str):
-        print("{} {}".format(prefix, msg.content))
+        print(f"{prefix} {msg.content}")
     else:
         for block in msg.content:
             assert isinstance(block, ContentBlock)
@@ -237,34 +233,28 @@ def print_AssistantMessage(msg: AssistantMessage):
         print_ContentBlock(prefix, block)
 
     if msg.error is not None:
-        print("    -- ERROR = {}".format(msg.error))
+        print(f"    -- ERROR = {msg.error}")
 
 
 def print_SystemMessage(msg: SystemMessage):
-    print("System: subtype = {} data = {}".format(msg.subtype, msg.data))
+    print(f"System: subtype = {msg.subtype} data = {msg.data}")
 
 
 def print_ResultMessage(msg: ResultMessage):
     print(
-        "Result: subtype = {} dur = {} dur_api = {} err = {} num_turns = {}".format(
-            msg.subtype,
-            msg.duration_ms,
-            msg.duration_api_ms,
-            msg.is_error,
-            msg.num_turns,
-        )
+        f"Result: subtype = {msg.subtype} dur = {msg.duration_ms} dur_api = {msg.duration_api_ms} err = {msg.is_error} num_turns = {msg.num_turns}"
     )
 
     if msg.usage is not None:
-        print("    -- usage = {}".format(msg.usage))
+        print(f"    -- usage = {msg.usage}")
     if msg.total_cost_usd is not None:
-        print("    -- cost = ${:.4f}".format(msg.total_cost_usd))
+        print(f"    -- cost = ${msg.total_cost_usd:.4f}")
     if msg.result is not None:
-        print("    -- result = {}".format(msg.result))
+        print(f"    -- result = {msg.result}")
 
 
 def print_StreamEvent(msg: StreamEvent):
-    print("Stream: event = {}".format(msg.event))
+    print(f"Stream: event = {msg.event}")
 
 
 def print_Message(msg):
@@ -279,7 +269,7 @@ def print_Message(msg):
     elif isinstance(msg, StreamEvent):
         print_StreamEvent(msg)
     else:
-        raise Exception("Unexpected type(msg) = {}".format(type(msg)))
+        raise Exception(f"Unexpected type(msg) = {type(msg)}")
 
 
 def build_claude_options(config: ClaudeConfig):
@@ -293,17 +283,30 @@ def build_claude_options(config: ClaudeConfig):
     extra = {}
     profile = config.profile
     if profile and (profile.api_key or profile.api_base):
-        backends = ("CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_FOUNDRY")
-        auth_modes = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-                      "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR")
-        conflicts = [key for key in backends if os.environ.get(key, "").lower() in ("1", "true")]
+        backends = (
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        )
+        auth_modes = (
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+            "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+        )
+        conflicts = [
+            key for key in backends if os.environ.get(key, "").lower() in ("1", "true")
+        ]
         conflicts.extend(key for key in auth_modes if os.environ.get(key))
         if conflicts:
             raise RegistryError(
-                "Explicit Anthropic profile transport conflicts with: " + ", ".join(conflicts)
+                "Explicit Anthropic profile transport conflicts with: "
+                + ", ".join(conflicts)
             )
         if profile.model.startswith(("vertex_ai/", "bedrock/", "azure_ai/")):
-            raise RegistryError("Direct Anthropic transport requires a direct Anthropic model")
+            raise RegistryError(
+                "Direct Anthropic transport requires a direct Anthropic model"
+            )
         if profile.api_key:
             env["ANTHROPIC_API_KEY"] = profile.api_key
         if profile.api_base:
@@ -361,10 +364,12 @@ async def claude_run(
         if isinstance(s, PipelineStep):
             wrapped_steps.append(s)
         else:
-            wrapped_steps.append(PipelineStep(
-                name="step_{}".format(i + 1),
-                prompt=s,
-            ))
+            wrapped_steps.append(
+                PipelineStep(
+                    name=f"step_{i + 1}",
+                    prompt=s,
+                )
+            )
     steps = wrapped_steps
 
     print_claude_config(claude_config)
@@ -372,51 +377,53 @@ async def claude_run(
     start_index = 0
     if resume:
         start_index = _find_resume_index(steps, claude_config.cwd)
-        print("\n{}=== RESUME SUMMARY ==={}\n".format(Fore.YELLOW, Style.RESET_ALL))
-        print("Total pipeline steps: {}".format(len(steps)))
+        print(f"\n{Fore.YELLOW}=== RESUME SUMMARY ==={Style.RESET_ALL}\n")
+        print(f"Total pipeline steps: {len(steps)}")
 
         if start_index > 0:
             # Log completed steps
-            print("\n{}Completed steps (will be skipped):{}\n".format(Fore.GREEN, Style.RESET_ALL))
+            print(
+                f"\n{Fore.GREEN}Completed steps (will be skipped):{Style.RESET_ALL}\n"
+            )
             for i in range(start_index):
                 s = steps[i]
                 if s.output_files:
                     files_str = ", ".join(s.output_files)
-                    print("  [{}] {} -> {}".format(i + 1, s.name, files_str))
+                    print(f"  [{i + 1}] {s.name} -> {files_str}")
                 else:
-                    print("  [{}] {} (command)".format(i + 1, s.name))
+                    print(f"  [{i + 1}] {s.name} (command)")
 
             # Log the step being re-executed (potentially corrupted)
             restart_step = steps[start_index]
-            print("\n{}Re-executing step (last completed, potentially corrupted):{}\n".format(
-                Fore.YELLOW, Style.RESET_ALL
-            ))
-            print("  [{}] {}".format(start_index + 1, restart_step.name))
+            print(
+                f"\n{Fore.YELLOW}Re-executing step (last completed, potentially corrupted):{Style.RESET_ALL}\n"
+            )
+            print(f"  [{start_index + 1}] {restart_step.name}")
             for f in restart_step.output_files:
                 path = os.path.join(claude_config.cwd, f)
                 if os.path.isfile(path):
                     size = os.path.getsize(path)
-                    print("    Deleting: {} ({} bytes)".format(f, size))
+                    print(f"    Deleting: {f} ({size} bytes)")
                     os.remove(path)
 
             # Log remaining steps
             remaining = len(steps) - start_index
-            print("\n{}Remaining steps to execute ({}):{}\n".format(
-                Fore.CYAN, remaining, Style.RESET_ALL
-            ))
+            print(
+                f"\n{Fore.CYAN}Remaining steps to execute ({remaining}):{Style.RESET_ALL}\n"
+            )
             for i in range(start_index, len(steps)):
                 s = steps[i]
                 if s.output_files:
                     files_str = ", ".join(s.output_files)
-                    print("  [{}] {} -> {}".format(i + 1, s.name, files_str))
+                    print(f"  [{i + 1}] {s.name} -> {files_str}")
                 else:
-                    print("  [{}] {} (command)".format(i + 1, s.name))
+                    print(f"  [{i + 1}] {s.name} (command)")
         else:
-            print("{}No completed steps found, starting from beginning{}".format(
-                Fore.YELLOW, Style.RESET_ALL
-            ))
+            print(
+                f"{Fore.YELLOW}No completed steps found, starting from beginning{Style.RESET_ALL}"
+            )
 
-        print("\n{}=== END RESUME SUMMARY ==={}".format(Fore.YELLOW, Style.RESET_ALL))
+        print(f"\n{Fore.YELLOW}=== END RESUME SUMMARY ==={Style.RESET_ALL}")
         print()
 
     wall_start = time.time()
@@ -458,12 +465,12 @@ async def _run_steps(active_client, steps, start_index, cwd=None):
         if isinstance(prompt, dict):
             if "fn" not in prompt:
                 raise ValueError(
-                    "Unsupported dict step {!r}: only callable 'fn' steps are "
-                    "allowed. The former {{'cmd': '<source>'}} form was executed "
-                    "via eval() and has been removed.".format(step.name)
+                    f"Unsupported dict step {step.name!r}: only callable 'fn' steps are "
+                    "allowed. The former {'cmd': '<source>'} form was executed "
+                    "via eval() and has been removed."
                 )
             fn_name = prompt.get("fn_name", str(prompt["fn"]))
-            print("{} RUN CMD: {} {}".format(Fore.GREEN, fn_name, Style.RESET_ALL))
+            print(f"{Fore.GREEN} RUN CMD: {fn_name} {Style.RESET_ALL}")
             prompt["fn"]()
             continue
 
@@ -473,28 +480,23 @@ async def _run_steps(active_client, steps, start_index, cwd=None):
 
         for attempt in range(1, max_retries + 1):
             if attempt > 1:
-                print("{}RETRY STEP {} ({}) — attempt {}/{}{}".format(
-                    Fore.YELLOW, i + 1, step.name, attempt, max_retries, Style.RESET_ALL))
-
-            print("{} STEP {} ({}): SEND QUERY PROMPT:{}".format(
-                Fore.GREEN, i + 1, step.name, Style.RESET_ALL
-            ))
-            print(
-                "{}============================================{}".format(
-                    Fore.GREEN, Style.RESET_ALL
+                print(
+                    f"{Fore.YELLOW}RETRY STEP {i + 1} ({step.name}) — attempt {attempt}/{max_retries}{Style.RESET_ALL}"
                 )
+
+            print(
+                f"{Fore.GREEN} STEP {i + 1} ({step.name}): SEND QUERY PROMPT:{Style.RESET_ALL}"
+            )
+            print(
+                f"{Fore.GREEN}============================================{Style.RESET_ALL}"
             )
             print(prompt)
             print(
-                "{}============================================{}".format(
-                    Fore.CYAN, Style.RESET_ALL
-                )
+                f"{Fore.CYAN}============================================{Style.RESET_ALL}"
             )
-            print("{} RESPONSES:{}".format(Fore.CYAN, Style.RESET_ALL))
+            print(f"{Fore.CYAN} RESPONSES:{Style.RESET_ALL}")
             print(
-                "{}============================================{}".format(
-                    Fore.CYAN, Style.RESET_ALL
-                )
+                f"{Fore.CYAN}============================================{Style.RESET_ALL}"
             )
             await active_client.query(prompt)
 
@@ -515,7 +517,9 @@ async def _run_steps(active_client, steps, start_index, cwd=None):
                         step_usage["output_tokens"] += msg.usage.get("output_tokens", 0)
                     if msg.total_cost_usd is not None:
                         previous_cost = step_usage["cost_usd"]
-                        step_usage["cost_usd"] = (previous_cost if previous_cost is not None else 0.0) + msg.total_cost_usd
+                        step_usage["cost_usd"] = (
+                            previous_cost if previous_cost is not None else 0.0
+                        ) + msg.total_cost_usd
                     # getattr: minimal test stubs may not carry is_error.
                     if getattr(msg, "is_error", False):
                         api_error = True
@@ -523,21 +527,21 @@ async def _run_steps(active_client, steps, start_index, cwd=None):
 
                 elif _HAS_TASK_TRACKING and isinstance(msg, TaskStartedMessage):
                     pending_tasks.add(msg.task_id)
-                    print("{}  [background] task started: {}{}".format(
-                        Fore.YELLOW, msg.task_id[:12], Style.RESET_ALL))
+                    print(
+                        f"{Fore.YELLOW}  [background] task started: {msg.task_id[:12]}{Style.RESET_ALL}"
+                    )
 
                 elif _HAS_TASK_TRACKING and isinstance(
                     msg, (TaskNotificationMessage, TaskUpdatedMessage)
                 ):
                     if msg.status in TERMINAL_TASK_STATUSES:
                         pending_tasks.discard(msg.task_id)
-                        print("{}  [background] task {}: {}{}".format(
-                            Fore.YELLOW, msg.task_id[:12], msg.status, Style.RESET_ALL))
+                        print(
+                            f"{Fore.YELLOW}  [background] task {msg.task_id[:12]}: {msg.status}{Style.RESET_ALL}"
+                        )
 
                 print(
-                    "{}--------------------------------------------{}".format(
-                        Fore.CYAN, Style.RESET_ALL
-                    )
+                    f"{Fore.CYAN}--------------------------------------------{Style.RESET_ALL}"
                 )
 
                 # Only advance to the next step when the main turn is complete
@@ -546,9 +550,7 @@ async def _run_steps(active_client, steps, start_index, cwd=None):
                     break
 
             print(
-                "{}============================================{}".format(
-                    Fore.CYAN, Style.RESET_ALL
-                )
+                f"{Fore.CYAN}============================================{Style.RESET_ALL}"
             )
 
             # If the API reported an error AND output files are missing, retry.
@@ -556,37 +558,42 @@ async def _run_steps(active_client, steps, start_index, cwd=None):
             # accept the result and move on — no retry needed.
             if api_error and not _step_output_files_complete(step, cwd or ""):
                 missing = [
-                    f for f in (step.output_files or [])
+                    f
+                    for f in (step.output_files or [])
                     if not os.path.isfile(
                         f if os.path.isabs(f) else os.path.join(cwd or "", f)
                     )
                 ]
-                print("{}API error on step {} ({}) and output files missing: {}{}".format(
-                    Fore.RED, i + 1, step.name, missing, Style.RESET_ALL))
+                print(
+                    f"{Fore.RED}API error on step {i + 1} ({step.name}) and output files missing: {missing}{Style.RESET_ALL}"
+                )
                 if attempt < max_retries:
-                    print("{}Retrying...{}".format(Fore.YELLOW, Style.RESET_ALL))
+                    print(f"{Fore.YELLOW}Retrying...{Style.RESET_ALL}")
                     continue
                 else:
-                    print("{}Max retries reached for step {} ({}). Proceeding anyway.{}".format(
-                        Fore.RED, i + 1, step.name, Style.RESET_ALL))
+                    print(
+                        f"{Fore.RED}Max retries reached for step {i + 1} ({step.name}). Proceeding anyway.{Style.RESET_ALL}"
+                    )
             break  # success or no retry condition met
 
         duration_time = time.time() - start_time
-        step_timings.append({
-            "name": step.name,
-            "duration": duration_time,
-            "start_time": start_time,
-            "end_time": start_time + duration_time,
-            "input_tokens": step_usage["input_tokens"],
-            "output_tokens": step_usage["output_tokens"],
-            "cost_usd": step_usage["cost_usd"],
-        })
+        step_timings.append(
+            {
+                "name": step.name,
+                "duration": duration_time,
+                "start_time": start_time,
+                "end_time": start_time + duration_time,
+                "input_tokens": step_usage["input_tokens"],
+                "output_tokens": step_usage["output_tokens"],
+                "cost_usd": step_usage["cost_usd"],
+            }
+        )
         mins, secs = divmod(int(duration_time), 60)
         hrs, mins = divmod(mins, 60)
         human_time = f"{hrs}h {mins}m {secs}s" if hrs else f"{mins}m {secs}s"
-        print("FINISHED STEP {} ({}): duration = {:.1f}s ({})".format(
-            i + 1, step.name, duration_time, human_time
-        ))
+        print(
+            f"FINISHED STEP {i + 1} ({step.name}): duration = {duration_time:.1f}s ({human_time})"
+        )
 
     return step_timings
 
@@ -594,6 +601,7 @@ async def _run_steps(active_client, steps, start_index, cwd=None):
 # ── Model-agnostic dispatch ──────────────────────────────────────────────────
 # Import here (not at module top) to avoid circular deps since agent_runner
 # imports PipelineStep and print_claude_config from this module.
+
 
 async def agent_run(config, steps, resume=False):
     """Model-agnostic agent entry point.
@@ -603,4 +611,5 @@ async def agent_run(config, steps, resume=False):
     ``claude_run()`` — same async signature, same return type.
     """
     from common.agent_runner import agent_run as _agent_run
+
     return await _agent_run(config, steps, resume=resume)

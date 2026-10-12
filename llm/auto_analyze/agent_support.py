@@ -12,8 +12,9 @@ from pathlib import Path
 
 from llm.agents import AgentConfig, resolve_agent_config
 
-
-DEFAULT_AGENT_CONFIG = Path(__file__).resolve().parent / "configs" / "claude_config.json"
+DEFAULT_AGENT_CONFIG = (
+    Path(__file__).resolve().parent / "configs" / "claude_config.json"
+)
 
 
 def add_agent_arguments(parser: argparse.ArgumentParser) -> None:
@@ -31,7 +32,9 @@ def add_agent_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def make_agent_config(config, cwd: str, agent_config_path: str | None = None) -> AgentConfig:
+def make_agent_config(
+    config, cwd: str, agent_config_path: str | None = None
+) -> AgentConfig:
     """Resolve an analysis config's embedded or external agent settings."""
     section = getattr(config, "agent", None)
     config_path = getattr(config, "config_json_path", "")

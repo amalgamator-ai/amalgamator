@@ -1,12 +1,10 @@
-import sys
-import time
 import argparse
 import asyncio
-
+import time
 from pathlib import Path
-from common.utils import setup_logging, clear_vllm_source_tree
-from llm.auto_code_gen.claude_utils import claude_run
 
+from common.utils import clear_vllm_source_tree, setup_logging
+from llm.auto_code_gen.claude_utils import claude_run
 from llm.auto_code_gen.code_gen_configs import CodeGenConfig
 from llm.auto_code_gen.code_gen_prompts import (
     create_context_str,
@@ -14,8 +12,8 @@ from llm.auto_code_gen.code_gen_prompts import (
     gen_ReviewInvestigatedIssuePrompt,
 )
 
-
 NUM_ITERS = 2
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Investigate issue in PR")
@@ -84,7 +82,7 @@ def parse_args() -> argparse.Namespace:
 def gen_prompts(args, code_gen_config, claude_config):
     clear_target_dir_cmd = {
         "fn": lambda: clear_vllm_source_tree(code_gen_config.source_code_dir),
-        "fn_name": 'clear_vllm_source_tree("{}")'.format(code_gen_config.source_code_dir),
+        "fn_name": f'clear_vllm_source_tree("{code_gen_config.source_code_dir}")',
     }
 
     context = create_context_str(claude_config, code_gen_config)
@@ -96,11 +94,9 @@ def gen_prompts(args, code_gen_config, claude_config):
     issue_fix_previous_attempt_review_evolution_file = ""
     code_pr_file_prev = args.code_pr_file
     for i in range(num_reviews):
-        issue_fix_file = "{}_fix_V{}.txt".format(args.output_file_prefix, i + 1)
-        code_pr_fixed_file = "{}_V{}_FIXED.patch".format(code_pr_file_prefix, i + 1)
-        code_pr_review_fixed_file = "{}_V{}_REVIEW_FIXED.patch".format(
-            code_pr_file_prefix, i + 1
-        )
+        issue_fix_file = f"{args.output_file_prefix}_fix_V{i + 1}.txt"
+        code_pr_fixed_file = f"{code_pr_file_prefix}_V{i + 1}_FIXED.patch"
+        code_pr_review_fixed_file = f"{code_pr_file_prefix}_V{i + 1}_REVIEW_FIXED.patch"
 
         investigate_issue_prompt = gen_InvestigateIssuePrompt(
             context=context,
@@ -119,15 +115,11 @@ def gen_prompts(args, code_gen_config, claude_config):
         )
         code_pr_file_prev = code_pr_fixed_file
 
-        issue_fix_review_file = "{}_fix_V{}_REVIEW.txt".format(
-            args.output_file_prefix, i + 1
-        )
-        issue_fix_fixed_file = "{}_fix_V{}_FIXED.txt".format(
-            args.output_file_prefix, i + 1
-        )
+        issue_fix_review_file = f"{args.output_file_prefix}_fix_V{i + 1}_REVIEW.txt"
+        issue_fix_fixed_file = f"{args.output_file_prefix}_fix_V{i + 1}_FIXED.txt"
 
-        issue_fix_review_evolution_file = "{}_fix_V{}_REVIEW_EVOLUTION.txt".format(
-            args.output_file_prefix, i + 1
+        issue_fix_review_evolution_file = (
+            f"{args.output_file_prefix}_fix_V{i + 1}_REVIEW_EVOLUTION.txt"
         )
 
         review_investigated_issue_prompt = gen_ReviewInvestigatedIssuePrompt(
@@ -168,7 +160,9 @@ if __name__ == "__main__":
     setup_logging("investigate_issue")
 
     start_time = time.time()
-    asyncio.run(claude_run(claude_config, gen_prompts(args, code_gen_config, claude_config)))
+    asyncio.run(
+        claude_run(claude_config, gen_prompts(args, code_gen_config, claude_config))
+    )
     duration_time = time.time() - start_time
 
-    print("FINISHED ALL: total_duration = {}".format(duration_time))
+    print(f"FINISHED ALL: total_duration = {duration_time}")

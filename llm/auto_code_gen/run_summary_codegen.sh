@@ -19,4 +19,4 @@ python -m llm.auto_code_gen.run_summary \
     --issue-fix-review-evolution-files $PRS_DIR/issue_1_research_fix_V3_REVIEW_EVOLUTION.txt $PRS_DIR/issue_2_research_fix_V3_REVIEW_EVOLUTION.txt \
     --auto-analyze-project-brief "$PROJECT_ROOT"/auto_analyze_project_brief.pdf \
     --output-file summary_slides.pptx
-        
+

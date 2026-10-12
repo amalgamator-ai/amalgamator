@@ -1,4 +1,5 @@
 """Phase -1: materialize a patch file as a commit for the existing pipeline."""
+
 from __future__ import annotations
 
 import hashlib
@@ -11,8 +12,12 @@ from typing import NoReturn
 
 from auto_bug_fix.config_loader import ConfigError
 from auto_bug_fix.git_tools import (
-    COAUTHOR_TRAILERS, GitResult, _run_git, git_commit, git_rev_parse,
+    COAUTHOR_TRAILERS,
+    GitResult,
+    _run_git,
+    git_commit,
     git_reset_hard,
+    git_rev_parse,
 )
 from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
 
@@ -129,8 +134,12 @@ def _try_am(worktree: str, patch_path: str) -> tuple[str, list[str]]:
 
 
 def _try_apply(
-    worktree: str, patch_path: str, issue_id: str, bug_description: str,
-    patch_basename: str, patch_hash: str,
+    worktree: str,
+    patch_path: str,
+    issue_id: str,
+    bug_description: str,
+    patch_basename: str,
+    patch_hash: str,
 ) -> tuple[str, list[str]]:
     """Try git apply (bare diff). Returns (method, warnings).
 
@@ -151,7 +160,9 @@ def _try_apply(
                     "Patch produced no changes on the base — likely already applied."
                 )
 
-            warnings = ["applied with --ignore-whitespace"] if method == "apply-ws" else []
+            warnings = (
+                ["applied with --ignore-whitespace"] if method == "apply-ws" else []
+            )
             message = f"{issue_id}: apply {patch_basename}\n\n{bug_description}"
             trailers = {
                 PATCH_TRAILER_KEY: _patch_trailer(patch_basename, patch_hash),
@@ -242,14 +253,24 @@ def ingest_patch(
                 trailer_line = (
                     f"{PATCH_TRAILER_KEY}: {_patch_trailer(patch_basename, patch_hash)}"
                 )
-                _run_git(worktree_path, [
-                    "commit", "--amend", "--no-edit",
-                    "-m", r.stdout.rstrip() + f"\n\n{trailer_line}",
-                ])
+                _run_git(
+                    worktree_path,
+                    [
+                        "commit",
+                        "--amend",
+                        "--no-edit",
+                        "-m",
+                        r.stdout.rstrip() + f"\n\n{trailer_line}",
+                    ],
+                )
         else:
             method, warnings = _try_apply(
-                worktree_path, abs_patch, issue_id, bug_description,
-                patch_basename, patch_hash,
+                worktree_path,
+                abs_patch,
+                issue_id,
+                bug_description,
+                patch_basename,
+                patch_hash,
             )
 
         sha = git_rev_parse(worktree_path, "HEAD")

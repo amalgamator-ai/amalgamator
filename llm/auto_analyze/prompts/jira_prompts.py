@@ -1,9 +1,8 @@
-import os
 from dataclasses import dataclass
 from typing import ClassVar
 
-from llm.auto_analyze.configs.single_trace_config import PERF_ANALYSIS_SINGLE_FILE
 from llm.auto_analyze.configs.cross_trace_config import CROSS_COMPARE_FILE
+from llm.auto_analyze.configs.single_trace_config import PERF_ANALYSIS_SINGLE_FILE
 
 JIRA_TASKS_FILE = "jira_tasks_output.txt"
 
@@ -77,7 +76,9 @@ It contains an improvement plan for the target framework based on comparison wit
 Create one JIRA sub-task per improvement plan item."""
 
     def prompt(self):
-        mode_context = self.SINGLE_CONTEXT if self.mode == "single" else self.CROSS_CONTEXT
+        mode_context = (
+            self.SINGLE_CONTEXT if self.mode == "single" else self.CROSS_CONTEXT
+        )
 
         return self.prompt_template.format(
             results_dir=self.results_dir,

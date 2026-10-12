@@ -1,13 +1,14 @@
 """Integration tests for cherry_pick_and_resolve — mechanical + finalize paths."""
+
 from __future__ import annotations
 
 import subprocess
 from unittest.mock import patch
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
+from auto_bug_fix.claude_utils import BugFixClaudeConfig
 from auto_bug_fix.dossier import Dossier
 from auto_bug_fix.run_bug_fix import PipelineState, cherry_pick_and_resolve
-from auto_bug_fix.claude_utils import BugFixClaudeConfig
 
 BASE = """\
 void foo(void)
@@ -34,7 +35,11 @@ def _git(cwd, *args):
 
 def _sha(cwd, ref="HEAD"):
     return subprocess.run(
-        ["git", "rev-parse", ref], cwd=cwd, capture_output=True, text=True, check=True,
+        ["git", "rev-parse", ref],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
@@ -91,8 +96,11 @@ def _make_claude_config(rp):
 def _make_state():
     state = PipelineState()
     state.dossier = Dossier(
-        issue_id="TEST-1", source_branch="main", target_branch="target",
-        fix_commit="x", bug_description="test",
+        issue_id="TEST-1",
+        source_branch="main",
+        target_branch="target",
+        fix_commit="x",
+        bug_description="test",
     )
     return state
 
@@ -104,8 +112,12 @@ def test_mechanical_path_resolves_without_llm(mock_claude, tmp_path):
     state = _make_state()
 
     result = cherry_pick_and_resolve(
-        config, _make_claude_config(rp), state, None,
-        commit=fix_sha, label="test port",
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
     )
 
     assert result == "resolved"
@@ -114,7 +126,10 @@ def test_mechanical_path_resolves_without_llm(mock_claude, tmp_path):
     assert "<<<<<<<" not in content
     # A commit concluded the cherry-pick.
     message = subprocess.run(
-        ["git", "log", "-1", "--format=%B"], cwd=rp, capture_output=True, text=True,
+        ["git", "log", "-1", "--format=%B"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
     ).stdout
     assert "Conflict summary" in message
     assert "Mechanically re-applied" in message
@@ -149,13 +164,20 @@ def test_llm_path_gets_snapback_and_amend(mock_claude, tmp_path):
     mock_claude.side_effect = fake_claude_run
 
     result = cherry_pick_and_resolve(
-        config, _make_claude_config(rp), state, None,
-        commit=fix_sha, label="test port",
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
     )
 
     assert result == "resolved"
     committed = subprocess.run(
-        ["git", "show", "HEAD:base.c"], cwd=rp, capture_output=True, text=True,
+        ["git", "show", "HEAD:base.c"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
     ).stdout
     assert "int c = 99;" in committed
     # Snap-back restored the upstream bytes (tabs) for the drifted line and
@@ -181,7 +203,9 @@ int version = 1;
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")
-def test_evidence_references_ported_prerequisites_not_bare_target(mock_claude, tmp_path):
+def test_evidence_references_ported_prerequisites_not_bare_target(
+    mock_claude, tmp_path
+):
     """A prerequisite port renamed a symbol; the fix uses the new name.
 
     Evidence must reference base_head (target + ported prereq), not the bare
@@ -207,10 +231,15 @@ def test_evidence_references_ported_prerequisites_not_bare_target(mock_claude, t
     prereq_sha = _sha(rp)
 
     # Fix: new caller using the new name, plus a version bump that conflicts.
-    fixed = (repo / "base.c").read_text().replace(
-        "void caller3(void) { new_helper_fn(3); }",
-        "void caller3(void) { new_helper_fn(3); }\nvoid caller4(void) { new_helper_fn(4); }",
-    ).replace("int version = 1;", "int version = 10;")
+    fixed = (
+        (repo / "base.c")
+        .read_text()
+        .replace(
+            "void caller3(void) { new_helper_fn(3); }",
+            "void caller3(void) { new_helper_fn(3); }\nvoid caller4(void) { new_helper_fn(4); }",
+        )
+        .replace("int version = 1;", "int version = 10;")
+    )
     (repo / "base.c").write_text(fixed)
     _git(rp, "add", ".")
     _git(rp, "commit", "-m", "fix: add caller4")
@@ -219,7 +248,9 @@ def test_evidence_references_ported_prerequisites_not_bare_target(mock_claude, t
     # Target diverged only in the version line.
     _git(rp, "branch", "target", base_sha)
     _git(rp, "checkout", "-q", "--detach", "target")
-    (repo / "base.c").write_text(PREREQ_BASE.replace("int version = 1;", "int version = 2;"))
+    (repo / "base.c").write_text(
+        PREREQ_BASE.replace("int version = 1;", "int version = 2;")
+    )
     _git(rp, "add", ".")
     _git(rp, "commit", "-m", "target divergence")
     # Update the target ref to include the divergence, then simulate the
@@ -230,10 +261,15 @@ def test_evidence_references_ported_prerequisites_not_bare_target(mock_claude, t
     config = _make_config(rp, fix_sha)
     state = _make_state()
 
-    resolved = (repo / "base.c").read_text().replace(
-        "void caller3(void) { new_helper_fn(3); }",
-        "void caller3(void) { new_helper_fn(3); }\nvoid caller4(void) { new_helper_fn(4); }",
-    ).replace("int version = 2;", "int version = 10;")
+    resolved = (
+        (repo / "base.c")
+        .read_text()
+        .replace(
+            "void caller3(void) { new_helper_fn(3); }",
+            "void caller3(void) { new_helper_fn(3); }\nvoid caller4(void) { new_helper_fn(4); }",
+        )
+        .replace("int version = 2;", "int version = 10;")
+    )
 
     captured_prompts: list[str] = []
 
@@ -250,12 +286,19 @@ def test_evidence_references_ported_prerequisites_not_bare_target(mock_claude, t
     base_head = _sha(rp)
 
     result = cherry_pick_and_resolve(
-        config, _make_claude_config(rp), state, None,
-        commit=fix_sha, label="test port",
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
     )
     assert result == "resolved"
     committed = subprocess.run(
-        ["git", "show", "HEAD:base.c"], cwd=rp, capture_output=True, text=True,
+        ["git", "show", "HEAD:base.c"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
     ).stdout
     assert "new_helper_fn(4);" in committed
     assert "old_helper_fn" not in committed
@@ -264,21 +307,21 @@ def test_evidence_references_ported_prerequisites_not_bare_target(mock_claude, t
     resolution_prompts = [p for p in captured_prompts if "Narrow Resolution Agent" in p]
     assert resolution_prompts, "expected at least one resolution prompt"
     for rp_text in resolution_prompts:
-        assert base_head in rp_text, (
-            "resolution prompt must use base_head for grep commands"
-        )
+        assert (
+            base_head in rp_text
+        ), "resolution prompt must use base_head for grep commands"
         assert f"git grep <symbol> {base_head}" in rp_text
 
     # The verification/blind-review prompts must also use base_head.
     verifier_prompts = [
-        p for p in captured_prompts
-        if "Post-Resolution Verification Agent" in p
-        or "Independent Review Agent" in p
+        p
+        for p in captured_prompts
+        if "Post-Resolution Verification Agent" in p or "Independent Review Agent" in p
     ]
     for vp_text in verifier_prompts:
-        assert base_head in vp_text, (
-            "verifier prompt must use base_head, not bare target branch"
-        )
+        assert (
+            base_head in vp_text
+        ), "verifier prompt must use base_head, not bare target branch"
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")
@@ -302,13 +345,18 @@ def test_committed_conflict_markers_are_flagged(mock_claude, tmp_path):
     mock_claude.side_effect = fake_claude_run
 
     result = cherry_pick_and_resolve(
-        config, _make_claude_config(rp), state, None,
-        commit=fix_sha, label="test port",
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
     )
     assert result == "resolved"
     assert any("Conflict markers" in i.label for i in state.dossier.items)
     check_prompts = [
-        c.args[1][0] for c in mock_claude.call_args_list
+        c.args[1][0]
+        for c in mock_claude.call_args_list
         if "Post-Resolution Verification" in c.args[1][0]
     ]
     assert check_prompts and "CRITICAL: conflict markers" in check_prompts[0]
@@ -337,18 +385,23 @@ def test_three_way_violations_reach_the_verifier(mock_claude, tmp_path):
     mock_claude.side_effect = fake_claude_run
 
     result = cherry_pick_and_resolve(
-        config, _make_claude_config(rp), state, None,
-        commit=fix_sha, label="test port",
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
     )
     assert result == "resolved"
     check_prompts = [
-        c.args[1][0] for c in mock_claude.call_args_list
+        c.args[1][0]
+        for c in mock_claude.call_args_list
         if "Post-Resolution Verification" in c.args[1][0]
     ]
     assert check_prompts
     report = check_prompts[0]
     assert "Three-way discipline check" in report
-    assert "int a = 1;" in report      # the removed target line is called out
+    assert "int a = 1;" in report  # the removed target line is called out
     assert "not remove" in report
 
 
@@ -373,22 +426,31 @@ def test_verifier_edits_survive_post_snapback(mock_claude, tmp_path):
             path.write_text(resolved)
             _git(rp, "add", "base.c")
         elif "Post-Resolution Verification" in prompts[0]:
-            path.write_text(path.read_text().replace(
-                "\t\tint extra_verification_counter = compute_checksum(a, b);",
-                verifier_form,
-            ))
+            path.write_text(
+                path.read_text().replace(
+                    "\t\tint extra_verification_counter = compute_checksum(a, b);",
+                    verifier_form,
+                )
+            )
             _git(rp, "add", "base.c")
         return []
 
     mock_claude.side_effect = fake_claude_run
 
     result = cherry_pick_and_resolve(
-        config, _make_claude_config(rp), state, None,
-        commit=fix_sha, label="test port",
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
     )
     assert result == "resolved"
     committed = subprocess.run(
-        ["git", "show", "HEAD:base.c"], cwd=rp, capture_output=True, text=True,
+        ["git", "show", "HEAD:base.c"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
     ).stdout
     assert verifier_form in committed
 
@@ -404,16 +466,21 @@ def test_flags_disable_mechanical_and_snapback(mock_claude, tmp_path):
 
     async def fake_claude_run(claude_config, prompts, tracker=None):
         if "Narrow Resolution Agent" in prompts[0]:
-            path.write_text(REINDENTED.replace(
-                "\tint c = 3;", "\tint c = 30; /* fixed */"))
+            path.write_text(
+                REINDENTED.replace("\tint c = 3;", "\tint c = 30; /* fixed */")
+            )
             _git(rp, "add", "base.c")
         return []
 
     mock_claude.side_effect = fake_claude_run
 
     result = cherry_pick_and_resolve(
-        config, _make_claude_config(rp), state, None,
-        commit=fix_sha, label="test port",
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
     )
     assert result == "resolved"
     prompts = [call.args[1][0] for call in mock_claude.call_args_list]
@@ -430,16 +497,21 @@ def test_post_resolution_check_false_skips_3a1(mock_claude, tmp_path):
 
     async def fake_claude_run(claude_config, prompts, tracker=None):
         if "Narrow Resolution Agent" in prompts[0]:
-            path.write_text(REINDENTED.replace(
-                "\tint c = 3;", "\tint c = 30; /* fixed */"))
+            path.write_text(
+                REINDENTED.replace("\tint c = 3;", "\tint c = 30; /* fixed */")
+            )
             _git(rp, "add", "base.c")
         return []
 
     mock_claude.side_effect = fake_claude_run
 
     result = cherry_pick_and_resolve(
-        config, _make_claude_config(rp), state, None,
-        commit=fix_sha, label="test port",
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
     )
     assert result == "resolved"
     prompts = [call.args[1][0] for call in mock_claude.call_args_list]
@@ -455,16 +527,21 @@ def test_blind_review_false_skips_3a2(mock_claude, tmp_path):
 
     async def fake_claude_run(claude_config, prompts, tracker=None):
         if "Narrow Resolution Agent" in prompts[0]:
-            path.write_text(REINDENTED.replace(
-                "\tint c = 3;", "\tint c = 30; /* fixed */"))
+            path.write_text(
+                REINDENTED.replace("\tint c = 3;", "\tint c = 30; /* fixed */")
+            )
             _git(rp, "add", "base.c")
         return []
 
     mock_claude.side_effect = fake_claude_run
 
     result = cherry_pick_and_resolve(
-        config, _make_claude_config(rp), state, None,
-        commit=fix_sha, label="test port",
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
     )
     assert result == "resolved"
     prompts = [call.args[1][0] for call in mock_claude.call_args_list]
@@ -481,16 +558,21 @@ def test_evidence_false_blind_review_true_still_runs_3a2(mock_claude, tmp_path):
 
     async def fake_claude_run(claude_config, prompts, tracker=None):
         if "Narrow Resolution Agent" in prompts[0]:
-            path.write_text(REINDENTED.replace(
-                "\tint c = 3;", "\tint c = 30; /* fixed */"))
+            path.write_text(
+                REINDENTED.replace("\tint c = 3;", "\tint c = 30; /* fixed */")
+            )
             _git(rp, "add", "base.c")
         return []
 
     mock_claude.side_effect = fake_claude_run
 
     result = cherry_pick_and_resolve(
-        config, _make_claude_config(rp), state, None,
-        commit=fix_sha, label="test port",
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
     )
     assert result == "resolved"
     prompts = [call.args[1][0] for call in mock_claude.call_args_list]

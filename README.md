@@ -372,3 +372,57 @@ See **[auto_bug_fix/README.md](auto_bug_fix/README.md)** for the full setup and 
 # 2. Run
 python -m auto_bug_fix.run_bug_fix path/to/case.yaml
 ```
+
+## Development
+
+The CI gate runs, in order: **pre-commit** (black + ruff + hygiene hooks),
+**pyrefly** (type check), and **pytest**. All three must pass.
+
+### Environment setup (uv or pip, both first-class)
+
+uv is used by CI for reproducible environments, but it is optional for
+developers:
+
+```bash
+# uv path (recommended: locked, reproducible)
+uv sync --extra test --extra dev
+
+# plain pip path
+python3.14 -m venv .venv && source .venv/bin/activate
+pip install -e ".[test,dev]"
+```
+
+### Formatting and lint
+
+Install the commit hooks once (black/ruff run hermetically — they need no
+project environment or uv, only git and pre-commit):
+
+```bash
+uv run pre-commit install        # or: pre-commit install (in an active env)
+```
+
+### Type checking
+
+pyrefly needs the project environment (it resolves third-party imports), so it
+is a manual-stage pre-commit hook rather than a commit-time hook:
+
+```bash
+uv run pyrefly check
+# or, via pre-commit:
+uv run pre-commit run pyrefly --hook-stage manual --all-files
+```
+
+### Tool versions
+
+- black/ruff: pinned revs in `.pre-commit-config.yaml` — the CI authority.
+  CI runs `pre-commit run --all-files`, so it always uses exactly these.
+- pyrefly: pinned by `uv.lock` — CI runs it from the locked environment.
+
+### Style notes
+
+- The repo targets **Python 3.14**. Parenthesis-less multi-exception `except A, B:`
+  (PEP 758) is the style black enforces for py314 targets; do not "fix" it back
+  to `except (A, B):` — black will revert it.
+- Mass-reformat commits are listed in `.git-blame-ignore-revs` so `git blame`
+  (and GitHub's blame UI) keeps pointing at the commit that changed the logic.
+  Enable locally with `git config blame.ignoreRevsFile .git-blame-ignore-revs`.

@@ -1,4 +1,5 @@
 """Tests for auto_bug_fix.ingest — Phase -1 patch materialization."""
+
 import os
 import subprocess
 import textwrap
@@ -6,24 +7,27 @@ import textwrap
 import pytest
 
 from auto_bug_fix.ingest import (
+    _REF_PREFIX,
     IngestError,
     IngestResult,
-    ingest_patch,
-    _slug,
-    _sha256_file,
     _mbox_message_count,
-    _REF_PREFIX,
+    _sha256_file,
+    _slug,
+    ingest_patch,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _git(repo, *args, check=True):
     return subprocess.run(
         ["git"] + list(args),
-        cwd=repo, capture_output=True, text=True, check=check,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=check,
     )
 
 
@@ -61,12 +65,18 @@ def _make_series_mbox(patch_repo, lore=False) -> str:
     """Create a 2-commit series mbox in patches_dir; restores main to base_sha."""
     repo = patch_repo["repo"]
     _git(repo, "reset", "--hard", patch_repo["fix_sha"])
-    _commit(repo, "followup fix", {
-        "lib/utils.c": "int safe_copy() { /* bounds check v2 */ return 2; }\n",
-    })
+    _commit(
+        repo,
+        "followup fix",
+        {
+            "lib/utils.c": "int safe_copy() { /* bounds check v2 */ return 2; }\n",
+        },
+    )
     raw = subprocess.run(
         ["git", "format-patch", "-2", "--stdout"],
-        cwd=repo, capture_output=True, check=True,
+        cwd=repo,
+        capture_output=True,
+        check=True,
     ).stdout
     if lore:
         raw = _make_lore_mbox(raw)
@@ -100,9 +110,13 @@ def patch_repo(tmp_path):
 
     _git(repo, "branch", "release-1.0")
 
-    fix_sha = _commit(repo, "fix: CVE-2026-1234 buffer overflow", {
-        "lib/utils.c": "int safe_copy() { /* bounds check */ return 1; }\n",
-    })
+    fix_sha = _commit(
+        repo,
+        "fix: CVE-2026-1234 buffer overflow",
+        {
+            "lib/utils.c": "int safe_copy() { /* bounds check */ return 1; }\n",
+        },
+    )
 
     diff_patch = str(patches / "fix.patch")
     with open(diff_patch, "w") as f:
@@ -112,7 +126,9 @@ def patch_repo(tmp_path):
     mbox_patch = str(patches / "fix.mbox")
     format_patch_raw = subprocess.run(
         ["git", "format-patch", "-1", "--stdout", fix_sha],
-        cwd=repo, capture_output=True, check=True,
+        cwd=repo,
+        capture_output=True,
+        check=True,
     ).stdout
     with open(mbox_patch, "wb") as f:
         f.write(format_patch_raw)
@@ -139,6 +155,7 @@ def patch_repo(tmp_path):
 # ---------------------------------------------------------------------------
 # Unit tests for helpers
 # ---------------------------------------------------------------------------
+
 
 class TestSlug:
     def test_simple(self):
@@ -199,11 +216,15 @@ class TestMboxMessageCount:
 # Integration tests — bare diff
 # ---------------------------------------------------------------------------
 
+
 class TestIngestDiff:
     def test_basic_ingest(self, patch_repo):
         result = ingest_patch(
-            patch_repo["repo"], patch_repo["diff_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["diff_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
 
@@ -217,18 +238,26 @@ class TestIngestDiff:
 
     def test_commit_has_trailer(self, patch_repo):
         result = ingest_patch(
-            patch_repo["repo"], patch_repo["diff_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["diff_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
-        msg = _git(patch_repo["repo"], "log", "-1", "--format=%B", result.synthetic_commit).stdout
+        msg = _git(
+            patch_repo["repo"], "log", "-1", "--format=%B", result.synthetic_commit
+        ).stdout
         assert "X-Amalgamator-Patch:" in msg
         assert f"sha256:{result.patch_sha256}" in msg
 
     def test_ref_pinned(self, patch_repo):
         result = ingest_patch(
-            patch_repo["repo"], patch_repo["diff_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["diff_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
         ref_sha = _sha(patch_repo["repo"], f"{_REF_PREFIX}/CVE-2026-1234")
@@ -236,8 +265,11 @@ class TestIngestDiff:
 
     def test_worktree_cleaned_up(self, patch_repo):
         ingest_patch(
-            patch_repo["repo"], patch_repo["diff_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["diff_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
         ingest_dir = os.path.join(patch_repo["workdir"], "ingest_CVE-2026-1234")
@@ -245,13 +277,19 @@ class TestIngestDiff:
 
     def test_idempotent_reingest(self, patch_repo):
         r1 = ingest_patch(
-            patch_repo["repo"], patch_repo["diff_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["diff_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
         r2 = ingest_patch(
-            patch_repo["repo"], patch_repo["diff_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["diff_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
         assert r1.synthetic_commit == r2.synthetic_commit
@@ -271,11 +309,7 @@ class TestIngestDiff:
         # Base file uses tabs for indentation
         base_file = os.path.join(repo, "file.c")
         with open(base_file, "w") as f:
-            f.write("#include <stdio.h>\n"
-                    "\n"
-                    "int foo() {\n"
-                    "\treturn 0;\n"
-                    "}\n")
+            f.write("#include <stdio.h>\n" "\n" "int foo() {\n" "\treturn 0;\n" "}\n")
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", "initial")
 
@@ -305,8 +339,11 @@ class TestIngestDiff:
             f.write("uncommitted work")
 
         result = ingest_patch(
-            patch_repo["repo"], patch_repo["diff_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["diff_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
         assert os.path.exists(dirty_file)
@@ -317,59 +354,86 @@ class TestIngestDiff:
 # Integration tests — mbox
 # ---------------------------------------------------------------------------
 
+
 class TestIngestMbox:
     def test_mbox_preserves_author(self, patch_repo):
         result = ingest_patch(
-            patch_repo["repo"], patch_repo["mbox_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["mbox_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
         assert result.method == "am"
         author = _git(
-            patch_repo["repo"], "log", "-1", "--format=%an",
+            patch_repo["repo"],
+            "log",
+            "-1",
+            "--format=%an",
             result.synthetic_commit,
         ).stdout.strip()
         assert author == "Test User"
 
     def test_mbox_preserves_subject(self, patch_repo):
         result = ingest_patch(
-            patch_repo["repo"], patch_repo["mbox_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["mbox_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
         subject = _git(
-            patch_repo["repo"], "log", "-1", "--format=%s",
+            patch_repo["repo"],
+            "log",
+            "-1",
+            "--format=%s",
             result.synthetic_commit,
         ).stdout.strip()
         assert "CVE-2026-1234" in subject or "buffer overflow" in subject.lower()
 
     def test_mbox_has_trailer(self, patch_repo):
         result = ingest_patch(
-            patch_repo["repo"], patch_repo["mbox_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["mbox_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
-        msg = _git(patch_repo["repo"], "log", "-1", "--format=%B", result.synthetic_commit).stdout
+        msg = _git(
+            patch_repo["repo"], "log", "-1", "--format=%B", result.synthetic_commit
+        ).stdout
         assert "X-Amalgamator-Patch:" in msg
         assert f"sha256:{result.patch_sha256}" in msg
 
     def test_lore_style_mbox_uses_am(self, patch_repo):
         """lore.kernel.org-style mbox (From mboxrd@z ...) must route to git am."""
         result = ingest_patch(
-            patch_repo["repo"], patch_repo["lore_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["lore_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
         assert result.method == "am"
 
     def test_lore_style_preserves_author(self, patch_repo):
         result = ingest_patch(
-            patch_repo["repo"], patch_repo["lore_patch"],
-            "main", "CVE-2026-1234", "buffer overflow fix",
+            patch_repo["repo"],
+            patch_repo["lore_patch"],
+            "main",
+            "CVE-2026-1234",
+            "buffer overflow fix",
             patch_repo["workdir"],
         )
         author = _git(
-            patch_repo["repo"], "log", "-1", "--format=%an",
+            patch_repo["repo"],
+            "log",
+            "-1",
+            "--format=%an",
             result.synthetic_commit,
         ).stdout.strip()
         assert author == "Test User"
@@ -379,20 +443,27 @@ class TestIngestMbox:
 # Error cases
 # ---------------------------------------------------------------------------
 
+
 class TestIngestErrors:
     def test_patch_not_found(self, patch_repo):
         with pytest.raises(IngestError, match="not found"):
             ingest_patch(
-                patch_repo["repo"], "/nonexistent/patch.diff",
-                "main", "CVE-2026-1234", "desc",
+                patch_repo["repo"],
+                "/nonexistent/patch.diff",
+                "main",
+                "CVE-2026-1234",
+                "desc",
                 patch_repo["workdir"],
             )
 
     def test_bad_base_ref(self, patch_repo):
         with pytest.raises(IngestError, match="Cannot resolve"):
             ingest_patch(
-                patch_repo["repo"], patch_repo["diff_patch"],
-                "nonexistent-branch", "CVE-2026-1234", "desc",
+                patch_repo["repo"],
+                patch_repo["diff_patch"],
+                "nonexistent-branch",
+                "CVE-2026-1234",
+                "desc",
                 patch_repo["workdir"],
             )
 
@@ -411,23 +482,38 @@ class TestIngestErrors:
             """))
         with pytest.raises(IngestError, match="does not apply"):
             ingest_patch(
-                patch_repo["repo"], bad_patch,
-                "main", "CVE-2026-1234", "desc",
+                patch_repo["repo"],
+                bad_patch,
+                "main",
+                "CVE-2026-1234",
+                "desc",
                 patch_repo["workdir"],
             )
 
     def test_multi_patch_format_patch_rejected(self, patch_repo):
         series = _make_series_mbox(patch_repo)
         with pytest.raises(IngestError, match="Multi-patch"):
-            ingest_patch(patch_repo["repo"], series, "main", "CVE-2026-1234",
-                         "desc", patch_repo["workdir"])
+            ingest_patch(
+                patch_repo["repo"],
+                series,
+                "main",
+                "CVE-2026-1234",
+                "desc",
+                patch_repo["workdir"],
+            )
 
     def test_multi_patch_lore_style_rejected(self, patch_repo):
         """A lore-style multi-patch series must be rejected, not silently squashed."""
         series = _make_series_mbox(patch_repo, lore=True)
         with pytest.raises(IngestError, match="Multi-patch"):
-            ingest_patch(patch_repo["repo"], series, "main", "CVE-2026-1234",
-                         "desc", patch_repo["workdir"])
+            ingest_patch(
+                patch_repo["repo"],
+                series,
+                "main",
+                "CVE-2026-1234",
+                "desc",
+                patch_repo["workdir"],
+            )
 
     def test_worktree_cleaned_on_failure(self, patch_repo):
         bad_patch = os.path.join(patch_repo["patches_dir"], "bad.patch")
@@ -436,8 +522,11 @@ class TestIngestErrors:
 
         with pytest.raises(IngestError):
             ingest_patch(
-                patch_repo["repo"], bad_patch,
-                "main", "CVE-2026-1234", "desc",
+                patch_repo["repo"],
+                bad_patch,
+                "main",
+                "CVE-2026-1234",
+                "desc",
                 patch_repo["workdir"],
             )
         ingest_dir = os.path.join(patch_repo["workdir"], "ingest_CVE-2026-1234")
@@ -448,8 +537,11 @@ class TestIngestErrors:
         _git(patch_repo["repo"], "reset", "--hard", patch_repo["fix_sha"])
         with pytest.raises(IngestError, match="already applied|no changes"):
             ingest_patch(
-                patch_repo["repo"], patch_repo["diff_patch"],
-                "main", "CVE-2026-1234", "desc",
+                patch_repo["repo"],
+                patch_repo["diff_patch"],
+                "main",
+                "CVE-2026-1234",
+                "desc",
                 patch_repo["workdir"],
             )
 
@@ -469,7 +561,10 @@ class TestIngestErrors:
             """))
         with pytest.raises(IngestError, match="git apply:"):
             ingest_patch(
-                patch_repo["repo"], bad_patch,
-                "main", "CVE-2026-1234", "desc",
+                patch_repo["repo"],
+                bad_patch,
+                "main",
+                "CVE-2026-1234",
+                "desc",
                 patch_repo["workdir"],
             )

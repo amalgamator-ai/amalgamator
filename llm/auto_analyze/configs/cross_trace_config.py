@@ -1,15 +1,14 @@
-import os
 import json
-from dataclasses import dataclass, field, asdict
+import os
+from dataclasses import dataclass
 
-from llm.auto_analyze.configs.single_trace_config import (
-    MEDIAN_BLOCK_FILE,
-    HIGH_LEVEL_OPS_FILE,
-    PERF_ANALYSIS_SINGLE_FILE,
-    GPU_OPS_TO_BLOCKS_FILE,
-)
 from common.iteration_utils import resolve_output_file
-
+from llm.auto_analyze.configs.single_trace_config import (
+    GPU_OPS_TO_BLOCKS_FILE,
+    HIGH_LEVEL_OPS_FILE,
+    MEDIAN_BLOCK_FILE,
+    PERF_ANALYSIS_SINGLE_FILE,
+)
 
 CROSS_MATCHING_FILE = "cross_matching_blocks.txt"
 CROSS_COMPARE_FILE = "cross_compare_blocks.txt"
@@ -68,7 +67,11 @@ class TraceResult:
 
     @property
     def trace_id(self):
-        return f"{self.framework_name}_{self.commit_id[:6]}" if self.commit_id else self.framework_name
+        return (
+            f"{self.framework_name}_{self.commit_id[:6]}"
+            if self.commit_id
+            else self.framework_name
+        )
 
     def get_median_block_file(self):
         return resolve_output_file(self.result_dir, MEDIAN_BLOCK_FILE)
@@ -114,8 +117,7 @@ class CrossTraceConfig:
             data = json.load(f)
 
         traces = [
-            TraceResult(result_dir=t["result_dir"])
-            for t in data.get("traces", [])
+            TraceResult(result_dir=t["result_dir"]) for t in data.get("traces", [])
         ]
 
         config = cls(
@@ -125,10 +127,14 @@ class CrossTraceConfig:
             make_improvement_plan=data.get("make_improvement_plan", False),
             num_matching_iterations=data.get("num_matching_iterations", 3),
             num_compare_iterations=data.get("num_compare_iterations", 3),
-            num_improvement_plan_iterations=data.get("num_improvement_plan_iterations", 3),
+            num_improvement_plan_iterations=data.get(
+                "num_improvement_plan_iterations", 3
+            ),
             matching_skip_review=data.get("matching_skip_review", False),
             compare_skip_review=data.get("compare_skip_review", False),
-            improvement_plan_skip_review=data.get("improvement_plan_skip_review", False),
+            improvement_plan_skip_review=data.get(
+                "improvement_plan_skip_review", False
+            ),
             thinking_mode=data.get("thinking-mode", data.get("thinking_mode", "deep")),
             agent=data.get("agent"),
         )
@@ -161,9 +167,11 @@ class CrossTraceConfig:
         for i, tr in enumerate(self.traces):
             print(f"  [{i}] Loading: {tr.result_dir}")
             tr.load_from_result_dir()
-            print(f"      Framework: {tr.framework_name}, "
-                  f"Model: {tr.model}, "
-                  f"Commit: {tr.commit_id[:12]}")
+            print(
+                f"      Framework: {tr.framework_name}, "
+                f"Model: {tr.model}, "
+                f"Commit: {tr.commit_id[:12]}"
+            )
 
     def validate(self):
         errors = []
@@ -184,9 +192,13 @@ class CrossTraceConfig:
                 errors.append(f"traces[{i}].result_dir not found: {tr.result_dir}")
 
             if not tr.framework_name:
-                errors.append(f"traces[{i}]: could not infer framework_name from run_params.txt")
+                errors.append(
+                    f"traces[{i}]: could not infer framework_name from run_params.txt"
+                )
             if not tr.commit_id:
-                errors.append(f"traces[{i}]: commit_id is required (run single-trace analysis with commit_id set)")
+                errors.append(
+                    f"traces[{i}]: commit_id is required (run single-trace analysis with commit_id set)"
+                )
 
             median_file = tr.get_median_block_file()
             if not os.path.exists(median_file):
@@ -194,11 +206,15 @@ class CrossTraceConfig:
 
             high_level_file = tr.get_high_level_ops_file()
             if not os.path.exists(high_level_file):
-                errors.append(f"traces[{i}] high-level ops file not found: {high_level_file}")
+                errors.append(
+                    f"traces[{i}] high-level ops file not found: {high_level_file}"
+                )
 
         # Check consistency of execution parameters across all traces
         def _check_consistency(field_name, display_name):
-            values = set(getattr(t, field_name) for t in self.traces if getattr(t, field_name))
+            values = set(
+                getattr(t, field_name) for t in self.traces if getattr(t, field_name)
+            )
             if len(values) > 1:
                 errors.append(f"traces have different {display_name}: {values}")
 

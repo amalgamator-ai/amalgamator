@@ -229,7 +229,7 @@ remove_docker_if_exists() {
     log_error "No container name provided"
     return 1
   fi
-  
+
   if docker container inspect $name >/dev/null 2>&1; then
 	  log_warn "Container $name already exists. Stopping and removing."
     docker container stop $name
@@ -248,7 +248,7 @@ _run_docker() {
     log_error "No container name provided"
     return 1
   fi
-  
+
   if [[ -z "${image}" ]]; then
     log_error "No container image provided"
     return 1

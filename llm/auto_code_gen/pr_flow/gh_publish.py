@@ -37,7 +37,7 @@ MAX_BODY_CHARS = 60000
 def _owner_repo(state):
     repo = state.get("upstream_repo") or ""
     if "/" not in repo:
-        raise SystemExit("state.upstream_repo is not owner/repo: {}".format(repo))
+        raise SystemExit(f"state.upstream_repo is not owner/repo: {repo}")
     return repo.split("/", 1)
 
 
@@ -45,7 +45,9 @@ def _gate_for(state, round_no=None, iteration=None):
     """Newest gate record matching round/iteration, newest overall otherwise."""
     records = list(state.get("gates") or [])
     if round_no is not None:
-        records = [g for g in records if str(g.get("round")) == str(round_no)] or records
+        records = [
+            g for g in records if str(g.get("round")) == str(round_no)
+        ] or records
     if iteration is not None:
         exact = [g for g in records if str(g.get("iteration")) == str(iteration)]
         records = exact or records
@@ -54,7 +56,7 @@ def _gate_for(state, round_no=None, iteration=None):
 
 def _fmt_pct(value):
     if isinstance(value, (int, float)):
-        return "{:+.2f}%".format(value)
+        return f"{value:+.2f}%"
     return "n/a"
 
 
@@ -70,30 +72,49 @@ def render_round_comment(state, round_no=None, iteration=None):
     verdict = gates.read_verdict(gates.latest_verdict(state["output_dir"])) or {}
 
     lines = []
-    lines.append("### Changes since the previous push (review round {})".format(
-        gate.get("round")))
+    lines.append(
+        "### Changes since the previous push (review round {})".format(
+            gate.get("round")
+        )
+    )
     lines.append("")
-    lines.append("Addressed review feedback in verification iteration V{}.".format(
-        gate.get("iteration")))
+    lines.append(
+        "Addressed review feedback in verification iteration V{}.".format(
+            gate.get("iteration")
+        )
+    )
     lines.append("")
     lines.append("| check | result |")
     lines.append("| --- | --- |")
-    lines.append("| throughput vs. baseline | {} |".format(
-        "**{}**".format(_fmt_pct(perf.get("actual_pct")))
-        if perf.get("pass") else _fmt_pct(perf.get("actual_pct"))))
-    lines.append("| correctness (gsm8k) | {} |".format(
-        "PASS" if lm_eval.get("pass")
-        else "FAIL ({})".format(lm_eval.get("verdict") or lm_eval.get("reason") or "-")))
-    lines.append("| review comments addressed | {} of {} |".format(
-        int(closure.get("fixed") or 0) + int(closure.get("explained") or 0),
-        closure.get("total") or 0))
+    lines.append(
+        "| throughput vs. baseline | {} |".format(
+            "**{}**".format(_fmt_pct(perf.get("actual_pct")))
+            if perf.get("pass")
+            else _fmt_pct(perf.get("actual_pct"))
+        )
+    )
+    lines.append(
+        "| correctness (gsm8k) | {} |".format(
+            "PASS"
+            if lm_eval.get("pass")
+            else "FAIL ({})".format(
+                lm_eval.get("verdict") or lm_eval.get("reason") or "-"
+            )
+        )
+    )
+    lines.append(
+        "| review comments addressed | {} of {} |".format(
+            int(closure.get("fixed") or 0) + int(closure.get("explained") or 0),
+            closure.get("total") or 0,
+        )
+    )
     lines.append("")
 
     resolution = verdict.get("notes") or []
     if resolution:
         lines.append("Notes:")
         for note in resolution[-6:]:
-            lines.append("- {}".format(note))
+            lines.append(f"- {note}")
         lines.append("")
 
     body = "\n".join(lines)
@@ -106,7 +127,7 @@ def render_thread_replies(replies_path):
         with open(replies_path) as f:
             payload = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit("cannot read {}: {}".format(replies_path, exc))
+        raise SystemExit(f"cannot read {replies_path}: {exc}")
     out = []
     for entry in payload.get("replies") or []:
         comment_id = entry.get("comment_id")
@@ -120,7 +141,7 @@ def render_thread_replies(replies_path):
 def _gh(*args, **kwargs):
     execute = kwargs.pop("execute", True)
     if kwargs:
-        raise TypeError("unexpected kwargs: {}".format(sorted(kwargs)))
+        raise TypeError(f"unexpected kwargs: {sorted(kwargs)}")
     if not execute:
         print("  (would run) gh " + " ".join(args))
         return 0
@@ -133,8 +154,16 @@ def post_round_comment(state, body, execute=True):
     number = state.get("pr_number")
     if not number:
         raise SystemExit("state.pr_number is unset -- cannot comment")
-    return _gh("pr", "comment", str(number), "--repo", "{}/{}".format(owner, repo),
-               "--body", body, execute=execute)
+    return _gh(
+        "pr",
+        "comment",
+        str(number),
+        "--repo",
+        f"{owner}/{repo}",
+        "--body",
+        body,
+        execute=execute,
+    )
 
 
 def post_reply(state, comment_id, body, execute=True):
@@ -142,12 +171,15 @@ def post_reply(state, comment_id, body, execute=True):
     if not state.get("pr_number"):
         raise SystemExit("state.pr_number is unset -- cannot reply")
     path = "repos/{}/{}/pulls/{}/comments/{}/replies".format(
-        owner, repo, state.get("pr_number"), comment_id)
+        owner, repo, state.get("pr_number"), comment_id
+    )
     return _gh("api", "--method", "POST", path, "-f", "body=" + body, execute=execute)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Render/post PR text for the review loop")
+    parser = argparse.ArgumentParser(
+        description="Render/post PR text for the review loop"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("render-comment", help="write the round comment to a file")
@@ -159,14 +191,20 @@ def parse_args():
     p = sub.add_parser("comment", help="post a rendered round comment")
     p.add_argument("--state", required=True)
     p.add_argument("--body-file", required=True)
-    p.add_argument("--execute", action="store_true",
-                   help="actually post; without it only the gh command is printed")
+    p.add_argument(
+        "--execute",
+        action="store_true",
+        help="actually post; without it only the gh command is printed",
+    )
 
     p = sub.add_parser("replies", help="post per-thread replies (or print them)")
     p.add_argument("--replies", required=True, help="thread_replies.json from a V dir")
     p.add_argument("--state", required=True)
-    p.add_argument("--execute", action="store_true",
-                   help="actually post; without it only the gh commands are printed")
+    p.add_argument(
+        "--execute",
+        action="store_true",
+        help="actually post; without it only the gh commands are printed",
+    )
 
     return parser.parse_args()
 
@@ -198,16 +236,19 @@ def main():
             return 0
         failures = 0
         for comment_id, body in entries:
-            print("  reply -> comment {}".format(comment_id))
+            print(f"  reply -> comment {comment_id}")
             if post_reply(state, comment_id, body, execute=args.execute) != 0:
                 failures += 1
                 if not args.execute:
                     return 29
         if failures:
-            print("{} reply/replies failed".format(failures))
+            print(f"{failures} reply/replies failed")
             return 29
-        print("{} reply/replies {}".format(len(entries),
-                                           "posted" if args.execute else "rendered (not posted)"))
+        print(
+            "{} reply/replies {}".format(
+                len(entries), "posted" if args.execute else "rendered (not posted)"
+            )
+        )
         return 0
 
     return 2

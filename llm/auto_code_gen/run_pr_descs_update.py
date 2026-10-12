@@ -32,7 +32,6 @@ import sys
 import time
 
 from common.utils import setup_logging
-
 from llm.auto_code_gen.code_gen_configs import load_config_and_use_case
 from llm.auto_code_gen.pr_flow.pr_descs import PrDescsError, update_pr_descs
 
@@ -40,13 +39,15 @@ from llm.auto_code_gen.pr_flow.pr_descs import PrDescsError, update_pr_descs
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate or update commit_desc.txt / pr_desc.txt "
-                    "(PR title and body) from the latest passing results.")
+        "(PR title and body) from the latest passing results."
+    )
     parser.add_argument(
         "--config",
         required=True,
         help="Path to the code generation JSON config file.",
     )
     from llm.auto_code_gen.agents import add_agent_argument
+
     add_agent_argument(parser)
     return parser.parse_args()
 
@@ -65,23 +66,25 @@ def main() -> int:
             update_pr_descs(config, claude_config, use_case)
         )
     except PrDescsError as exc:
-        print("ERROR: {}".format(exc))
+        print(f"ERROR: {exc}")
         return 1
 
-    print("Duration: {:.1f}s".format(time.time() - start_time))
+    print(f"Duration: {time.time() - start_time:.1f}s")
     if not desc_path:
         return 1
 
     for label, path in (("title+commit message", desc_path), ("PR body", body_path)):
         if path:
-            print("  {}: {}".format(label, path))
+            print(f"  {label}: {path}")
     print("\nThe publish steps pick these up automatically:")
-    print("  bash llm/auto_code_gen/pr_flow/scripts/pr_flow_step_2_push.sh "
-          "--config {} --remote-branch perf/<short-name>   # PR not yet created"
-          .format(args.config))
-    print("  bash llm/auto_code_gen/pr_flow/scripts/pr_flow_step_4_update_pr.sh "
-          "--config {}                                     # PR already published"
-          .format(args.config))
+    print(
+        "  bash llm/auto_code_gen/pr_flow/scripts/pr_flow_step_2_push.sh "
+        f"--config {args.config} --remote-branch perf/<short-name>   # PR not yet created"
+    )
+    print(
+        "  bash llm/auto_code_gen/pr_flow/scripts/pr_flow_step_4_update_pr.sh "
+        f"--config {args.config}                                     # PR already published"
+    )
     return 0
 
 

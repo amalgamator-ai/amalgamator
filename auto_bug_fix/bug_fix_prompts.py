@@ -1,4 +1,5 @@
 """Prompt classes for the Phase 0-5 bug-fix porting pipeline."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ SEMANTIC_TRIAGE_FILE = "semantic_triage.json"
 @dataclass
 class SemanticTriagePrompt:
     """Prompt for Phase 0.5 — LLM-powered semantic analysis of the commit before cherry-pick."""
+
     context: str
     fix_diff: str
     source_branch: str
@@ -395,6 +397,7 @@ if a resolved region seems broken without one, note it in your final summary:
 @dataclass
 class PostResolutionCheckPrompt:
     """Prompt for Phase 3a.1 — verify the resolved backport adapts correctly to the target branch."""
+
     context: str
     fix_diff: str
     current_diff: str
@@ -525,6 +528,7 @@ mined mechanically from the upstream-base vs target delta of the touched files.
 @dataclass
 class TriageBlindReviewPrompt:
     """Prompt for Phase 3a.2 — triage-blind independent symbol review."""
+
     context: str
     fix_diff: str
     current_diff: str
@@ -595,6 +599,7 @@ as available.
 @dataclass
 class BuildErrorRecoveryPrompt:
     """Prompt for Phase 4a — agent-assisted build/test error recovery."""
+
     context: str
     fix_diff: str
     current_diff: str
@@ -699,6 +704,7 @@ class RedTriagePrompt:
     This prompt asks the LLM to investigate and either produce a better test or
     confirm the branch is genuinely not vulnerable.
     """
+
     context: str
     bug_description: str
     test_output: str
@@ -795,10 +801,12 @@ the test command. Verify this before writing the JSON.
         return self.prompt_template.format(
             context=self.context,
             bug_description=self.bug_description,
-            test_output=self.test_output[-10000:] if len(self.test_output) > 10000 else self.test_output,
+            test_output=(
+                self.test_output[-10000:]
+                if len(self.test_output) > 10000
+                else self.test_output
+            ),
             ported_test_files="\n".join(f"  - {f}" for f in self.ported_test_files),
             triage_assessment=self.triage_assessment,
             output_file=RED_TRIAGE_FILE,
         )
-
-

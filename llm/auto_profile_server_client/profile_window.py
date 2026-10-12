@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+
 from llm.auto_profile_server_client.models import MetricsSample, ProfileWindow
 
 log = logging.getLogger(__name__)
@@ -53,7 +54,11 @@ def find_decode_window(
         profile_start = decode_start
 
     total_duration = times[-1] if times else 60
-    mid_iter = int((midpoint / total_duration) * total_requests * output_len) if total_duration > 0 else 0
+    mid_iter = (
+        int((midpoint / total_duration) * total_requests * output_len)
+        if total_duration > 0
+        else 0
+    )
     start_iter = max(0, mid_iter - 25)
     end_iter = start_iter + 50
 
@@ -67,11 +72,17 @@ def find_decode_window(
         end_iter=end_iter,
         method="metrics",
     )
-    log.info("Profile window: decode=[%.1f, %.1f]s, midpoint=%.1fs, "
-             "profile=[%.1f, +%.1f]s, iters=[%d, %d]",
-             decode_start, decode_end, midpoint,
-             profile_start, window_duration,
-             start_iter, end_iter)
+    log.info(
+        "Profile window: decode=[%.1f, %.1f]s, midpoint=%.1fs, "
+        "profile=[%.1f, +%.1f]s, iters=[%d, %d]",
+        decode_start,
+        decode_end,
+        midpoint,
+        profile_start,
+        window_duration,
+        start_iter,
+        end_iter,
+    )
     return window
 
 
@@ -133,7 +144,9 @@ def _heuristic_window(total_requests: int, output_len: int) -> ProfileWindow:
     """
     num_warmups = 0
     num_waves = 4
-    start_iter = (num_warmups * output_len) + ((num_waves // 2) * output_len) + (output_len // 2)
+    start_iter = (
+        (num_warmups * output_len) + ((num_waves // 2) * output_len) + (output_len // 2)
+    )
     end_iter = start_iter + 50
 
     return ProfileWindow(

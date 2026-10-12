@@ -1,4 +1,5 @@
 """Worktree management helpers."""
+
 from __future__ import annotations
 
 import os
@@ -15,11 +16,13 @@ def cleanup_worktree(repo_path: str, worktree_path: str) -> None:
         if not result.success:
             subprocess.run(
                 ["git", "worktree", "remove", "--force", worktree_path],
-                cwd=repo_path, capture_output=True,
+                cwd=repo_path,
+                capture_output=True,
             )
     subprocess.run(
         ["git", "worktree", "prune"],
-        cwd=repo_path, capture_output=True,
+        cwd=repo_path,
+        capture_output=True,
     )
 
 

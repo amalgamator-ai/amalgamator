@@ -22,10 +22,10 @@ _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..",
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
-import os
-import sys
 import argparse
+import os
 import subprocess
+import sys
 
 from llm.auto_code_gen.pr_review import run_git
 
@@ -56,12 +56,12 @@ def push_fixes(repo_dir: str, remote: str = "origin", branch: str = None):
     repo_dir = os.path.abspath(repo_dir)
 
     if not os.path.isdir(repo_dir):
-        print("ERROR: Repository directory not found: {}".format(repo_dir))
+        print(f"ERROR: Repository directory not found: {repo_dir}")
         sys.exit(1)
 
     result = run_git(["rev-parse", "--is-inside-work-tree"], repo_dir, check=False)
     if result.returncode != 0:
-        print("ERROR: {} is not a git repository.".format(repo_dir))
+        print(f"ERROR: {repo_dir} is not a git repository.")
         sys.exit(1)
 
     if branch is None:
@@ -73,13 +73,13 @@ def push_fixes(repo_dir: str, remote: str = "origin", branch: str = None):
     print("=" * 70)
     print("PUSH FIXES")
     print("=" * 70)
-    print("  Repo: {}".format(repo_dir))
-    print("  Remote: {}".format(remote))
-    print("  Branch: {}".format(branch))
+    print(f"  Repo: {repo_dir}")
+    print(f"  Remote: {remote}")
+    print(f"  Branch: {branch}")
     print("=" * 70)
 
     tracking = run_git(
-        ["rev-parse", "--abbrev-ref", "{}@{{upstream}}".format(branch)],
+        ["rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}"],
         repo_dir,
         check=False,
     )
@@ -88,7 +88,7 @@ def push_fixes(repo_dir: str, remote: str = "origin", branch: str = None):
     if has_upstream:
         upstream = tracking.stdout.strip()
         log_result = run_git(
-            ["log", "--oneline", "{}..{}".format(upstream, branch)],
+            ["log", "--oneline", f"{upstream}..{branch}"],
             repo_dir,
             check=False,
         )
@@ -101,18 +101,18 @@ def push_fixes(repo_dir: str, remote: str = "origin", branch: str = None):
         )
         commits = log_result.stdout.strip()
         print("\nWARNING: No upstream tracking branch set.")
-        print("Showing last 20 commits on '{}':".format(branch))
+        print(f"Showing last 20 commits on '{branch}':")
 
     if commits:
         print("\nCommits to push:")
         for line in commits.split("\n"):
-            print("  {}".format(line))
+            print(f"  {line}")
     else:
         print("\nNo new commits to push.")
         return
 
     commit_count = len(commits.strip().split("\n"))
-    print("\nPushing {} commit(s) to {}/{}...".format(commit_count, remote, branch))
+    print(f"\nPushing {commit_count} commit(s) to {remote}/{branch}...")
     print("(SSH passphrase may be requested)\n")
 
     push_result = subprocess.run(
@@ -123,7 +123,7 @@ def push_fixes(repo_dir: str, remote: str = "origin", branch: str = None):
     if push_result.returncode == 0:
         print("\nPush successful.")
     else:
-        print("\nERROR: Push failed (exit code {}).".format(push_result.returncode))
+        print(f"\nERROR: Push failed (exit code {push_result.returncode}).")
         sys.exit(1)
 
 

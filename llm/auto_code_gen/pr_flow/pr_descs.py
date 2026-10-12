@@ -56,8 +56,10 @@ def find_success_proof(output_dir):
     raise PrDescsError(
         "no passing result found in {} (looked for {} and a {} with "
         "overall == PASS). Run the runtime iterations first.".format(
-            os.path.join(output_dir, RUNTIME_DIR), RUNTIME_SUCCESS_FILE,
-            os.path.join("V*", "verify_verdict.json"))
+            os.path.join(output_dir, RUNTIME_DIR),
+            RUNTIME_SUCCESS_FILE,
+            os.path.join("V*", "verify_verdict.json"),
+        )
     )
 
 
@@ -77,9 +79,10 @@ def _latest_passing_verdict(output_dir):
             continue
         try:
             import json
+
             with open(candidate) as f:
                 verdict = json.load(f)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         if verdict.get("overall") == "PASS":
             number = int(name[1:])
@@ -94,8 +97,9 @@ def _ensure_attribution(body_path):
     The refresh agent rewrites pr_desc.txt from the prompt, which knows
     nothing about this footer -- append it here so every refresh keeps it.
     """
-    line = ("AI-based Amalgamator was used to prepare this PR. "
-            "Human reviewed changes.")
+    line = (
+        "AI-based Amalgamator was used to prepare this PR. " "Human reviewed changes."
+    )
     try:
         with open(body_path) as f:
             body = f.read()
@@ -104,10 +108,9 @@ def _ensure_attribution(body_path):
         with open(body_path, "a") as f:
             if body and not body.endswith("\n"):
                 f.write("\n")
-            f.write("\n{}\n".format(line))
+            f.write(f"\n{line}\n")
     except OSError as exc:
-        print("  WARNING: could not append attribution to {}: {}".format(
-            body_path, exc))
+        print(f"  WARNING: could not append attribution to {body_path}: {exc}")
 
 
 async def update_pr_descs(config, claude_config, use_case, client=None):
@@ -125,7 +128,7 @@ async def update_pr_descs(config, claude_config, use_case, client=None):
     try:
         proof = find_success_proof(output_dir)
     except PrDescsError as exc:
-        print("  PR descriptions NOT refreshed: {}".format(exc))
+        print(f"  PR descriptions NOT refreshed: {exc}")
         return None, None
 
     pr_dir = os.path.join(output_dir, PR_COMMANDS_DIR)
@@ -135,26 +138,42 @@ async def update_pr_descs(config, claude_config, use_case, client=None):
     body_existed = os.path.isfile(body_path)
 
     context = use_case.create_context_str(claude_config, config)
-    prompt = gen_UpdateCommitAndPRDescsPrompt(context=context,
-                                              code_gen_output_dir=output_dir)
-    await agent_run(claude_config, [
-        PipelineStep(name="update_commit_and_pr_descs", prompt=prompt.prompt()),
-    ], client=client)
+    prompt = gen_UpdateCommitAndPRDescsPrompt(
+        context=context, code_gen_output_dir=output_dir
+    )
+    await agent_run(
+        claude_config,
+        [
+            PipelineStep(name="update_commit_and_pr_descs", prompt=prompt.prompt()),
+        ],
+        client=client,
+    )
 
     missing = [p for p in (desc_path, body_path) if not os.path.isfile(p)]
     if missing:
-        print("  WARNING: PR description refresh wrote nothing "
-              "({} missing). Run manually:".format(", ".join(
-                  os.path.basename(p) for p in missing)))
-        print("    python -m llm.auto_code_gen.run_pr_descs_update --config {}".format(
-            getattr(config, "config_json_path", "<config.json>")))
+        print(
+            "  WARNING: PR description refresh wrote nothing "
+            "({} missing). Run manually:".format(
+                ", ".join(os.path.basename(p) for p in missing)
+            )
+        )
+        print(
+            "    python -m llm.auto_code_gen.run_pr_descs_update --config {}".format(
+                getattr(config, "config_json_path", "<config.json>")
+            )
+        )
         return None, None
 
     _ensure_attribution(body_path)
 
-    print("  PR descriptions {} from {} ({} / {})".format(
-        "updated" if (desc_existed or body_existed) else "generated",
-        proof, PR_COMMIT_DESC_FILE, PR_PR_DESC_FILE))
+    print(
+        "  PR descriptions {} from {} ({} / {})".format(
+            "updated" if (desc_existed or body_existed) else "generated",
+            proof,
+            PR_COMMIT_DESC_FILE,
+            PR_PR_DESC_FILE,
+        )
+    )
     return desc_path, body_path
 
 
@@ -169,6 +188,9 @@ async def refresh_after_pass(config, claude_config, use_case, client=None):
     try:
         await update_pr_descs(config, claude_config, use_case, client=client)
     except Exception as exc:  # noqa: BLE001 -- the PASS verdict must survive this
-        print("  WARNING: PR description refresh failed ({}). Run manually:".format(exc))
-        print("    python -m llm.auto_code_gen.run_pr_descs_update --config {}".format(
-            getattr(config, "config_json_path", "<config.json>")))
+        print(f"  WARNING: PR description refresh failed ({exc}). Run manually:")
+        print(
+            "    python -m llm.auto_code_gen.run_pr_descs_update --config {}".format(
+                getattr(config, "config_json_path", "<config.json>")
+            )
+        )

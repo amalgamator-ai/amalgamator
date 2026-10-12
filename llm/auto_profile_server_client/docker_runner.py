@@ -5,10 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shlex
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from llm.auto_profile_server_client.config import (
@@ -29,16 +28,18 @@ class DockerContainer:
     def logs(self, tail: int = 50) -> str:
         r = subprocess.run(
             ["docker", "logs", "--tail", str(tail), self.name],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         return r.stdout + r.stderr
 
     def stop(self) -> None:
         log.info("Stopping container: %s", self.name)
-        subprocess.run(["docker", "stop", self.name],
-                        capture_output=True, timeout=60)
-        subprocess.run(["docker", "rm", "-f", self.name],
-                        capture_output=True, timeout=30)
+        subprocess.run(["docker", "stop", self.name], capture_output=True, timeout=60)
+        subprocess.run(
+            ["docker", "rm", "-f", self.name], capture_output=True, timeout=30
+        )
         if self.process:
             try:
                 self.process.wait(timeout=10)
@@ -48,7 +49,9 @@ class DockerContainer:
     def is_running(self) -> bool:
         r = subprocess.run(
             ["docker", "inspect", "-f", "{{.State.Running}}", self.name],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return r.returncode == 0 and r.stdout.strip() == "true"
 
@@ -74,17 +77,25 @@ class DockerRunner:
         extra_volumes: dict[str, str] | None = None,
     ) -> list[str]:
         args = [
-            "docker", "run",
+            "docker",
+            "run",
             "--rm",
-            "--runtime", "nvidia",
-            "--ulimit", "memlock=-1",
-            "--ulimit", "stack=67108864",
+            "--runtime",
+            "nvidia",
+            "--ulimit",
+            "memlock=-1",
+            "--ulimit",
+            "stack=67108864",
             "--ipc=host",
-            "--shm-size", DOCKER_SHM_SIZE,
+            "--shm-size",
+            DOCKER_SHM_SIZE,
             "--gpus=all",
-            "-v", f"{self.base_dir}:{DOCKER_BASE_DIR}",
-            "-v", f"{self.hf_hub_cache}:{DOCKER_HF_HUB_CACHE}",
-            "--env", f"HF_HUB_CACHE={DOCKER_HF_HUB_CACHE}",
+            "-v",
+            f"{self.base_dir}:{DOCKER_BASE_DIR}",
+            "-v",
+            f"{self.hf_hub_cache}:{DOCKER_HF_HUB_CACHE}",
+            "--env",
+            f"HF_HUB_CACHE={DOCKER_HF_HUB_CACHE}",
         ]
 
         hf_token = os.environ.get("HF_TOKEN", "")
@@ -92,7 +103,10 @@ class DockerRunner:
             args += ["--env", f"HF_TOKEN={hf_token}"]
 
         if gpu_ids:
-            args += ["--env", f"CUDA_VISIBLE_DEVICES={','.join(str(g) for g in gpu_ids)}"]
+            args += [
+                "--env",
+                f"CUDA_VISIBLE_DEVICES={','.join(str(g) for g in gpu_ids)}",
+            ]
 
         if ports:
             for host_port, container_port in ports.items():
@@ -116,10 +130,14 @@ class DockerRunner:
         return args
 
     def _find_nsys_dir(self) -> str | None:
-        candidates = sorted(
-            Path("/opt/nvidia/nsight-systems").glob("*/bin/nsys"),
-            reverse=True,
-        ) if Path("/opt/nvidia/nsight-systems").is_dir() else []
+        candidates = (
+            sorted(
+                Path("/opt/nvidia/nsight-systems").glob("*/bin/nsys"),
+                reverse=True,
+            )
+            if Path("/opt/nvidia/nsight-systems").is_dir()
+            else []
+        )
         if candidates:
             return str(candidates[0].parent.parent.resolve())
         return None
@@ -127,12 +145,15 @@ class DockerRunner:
     def _remove_if_exists(self, name: str) -> None:
         r = subprocess.run(
             ["docker", "container", "inspect", name],
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
         )
         if r.returncode == 0:
             log.warning("Container %s exists, removing", name)
             subprocess.run(["docker", "stop", name], capture_output=True, timeout=60)
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
+            subprocess.run(
+                ["docker", "rm", "-f", name], capture_output=True, timeout=30
+            )
 
     def run(
         self,
@@ -152,11 +173,18 @@ class DockerRunner:
 
         log.info("docker run [%s]: %s", name, cmd[:200])
         result = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout,
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         if result.returncode != 0:
-            log.error("Container %s exited with code %d:\n%s",
-                      name, result.returncode, result.stderr[-2000:])
+            log.error(
+                "Container %s exited with code %d:\n%s",
+                name,
+                result.returncode,
+                result.stderr[-2000:],
+            )
         return result
 
     def run_background(
@@ -176,7 +204,10 @@ class DockerRunner:
 
         log.info("docker run (background) [%s]: %s", name, cmd[:200])
         proc = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
         return DockerContainer(name=name, process=proc, image=image)
 
@@ -189,7 +220,9 @@ class DockerRunner:
         try:
             r = subprocess.run(
                 ["docker", "manifest", "inspect", image],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
             if r.returncode != 0:
                 log.info("Could not fetch remote manifest for %s, skipping", image)
@@ -207,7 +240,9 @@ class DockerRunner:
 
             r_local = subprocess.run(
                 ["docker", "inspect", image, "--format", "{{index .RepoDigests 0}}"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             local_digest = ""
             if r_local.returncode == 0 and "@" in r_local.stdout:
@@ -230,25 +265,40 @@ def wait_for_gpu_memory_release(max_wait: int = 120, threshold_mib: int = 2000) 
     """Wait until GPU memory usage drops below threshold."""
     interval = 5
     elapsed = 0
-    log.info("Waiting for GPU memory release (threshold=%d MiB, timeout=%ds)",
-             threshold_mib, max_wait)
+    log.info(
+        "Waiting for GPU memory release (threshold=%d MiB, timeout=%ds)",
+        threshold_mib,
+        max_wait,
+    )
 
     while elapsed < max_wait:
         try:
             r = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.used",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=10,
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.used",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if r.returncode == 0:
                 max_used = max(
-                    int(line.strip()) for line in r.stdout.strip().split("\n") if line.strip()
+                    int(line.strip())
+                    for line in r.stdout.strip().split("\n")
+                    if line.strip()
                 )
                 if max_used <= threshold_mib:
-                    log.info("GPU memory released (max used: %d MiB, elapsed: %ds)",
-                             max_used, elapsed)
+                    log.info(
+                        "GPU memory released (max used: %d MiB, elapsed: %ds)",
+                        max_used,
+                        elapsed,
+                    )
                     return True
-                log.info("  GPU memory in use: %d MiB (%d/%ds)", max_used, elapsed, max_wait)
+                log.info(
+                    "  GPU memory in use: %d MiB (%d/%ds)", max_used, elapsed, max_wait
+                )
         except Exception:
             pass
 

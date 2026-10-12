@@ -26,10 +26,16 @@ import time
 
 from common.utils import setup_logging
 from llm.agents import agent_run, agent_session
-from llm.auto_analyze.agent_support import add_agent_arguments, make_agent_config, log_agent_config
-
+from llm.auto_analyze.agent_support import (
+    add_agent_arguments,
+    log_agent_config,
+    make_agent_config,
+)
 from llm.auto_analyze.configs.cross_trace_config import CrossTraceConfig
-from llm.auto_analyze.prompts.cross_trace_prompts import gen_redo_cross_trace_steps, REDO_IMPROVEMENT_PREFIX
+from llm.auto_analyze.prompts.cross_trace_prompts import (
+    REDO_IMPROVEMENT_PREFIX,
+    gen_redo_cross_trace_steps,
+)
 
 
 def parse_args():
@@ -66,8 +72,11 @@ def _find_next_iteration(output_dir):
     """Find the next redo iteration number."""
     import glob
     import re
+
     max_ver = 0
-    for path in glob.glob(os.path.join(output_dir, "{}_V*.txt".format(REDO_IMPROVEMENT_PREFIX))):
+    for path in glob.glob(
+        os.path.join(output_dir, f"{REDO_IMPROVEMENT_PREFIX}_V*.txt")
+    ):
         basename = os.path.basename(path)
         if "_summary_" in basename or "_review_" in basename:
             continue
@@ -91,12 +100,12 @@ if __name__ == "__main__":
     if errors:
         print("Configuration errors:")
         for e in errors:
-            print("  - {}".format(e))
+            print(f"  - {e}")
         raise SystemExit(1)
 
     for d in args.code_gen_dirs:
         if not os.path.isdir(d):
-            print("ERROR: code-gen directory not found: {}".format(d))
+            print(f"ERROR: code-gen directory not found: {d}")
             raise SystemExit(1)
 
     iteration = args.iteration
@@ -113,12 +122,12 @@ if __name__ == "__main__":
     print("=" * 70)
     print("  REDO CROSS-TRACE ANALYSIS")
     print("=" * 70)
-    print("  Config:       {}".format(args.config))
-    print("  Output dir:   {}".format(os.path.abspath(config.output_dir)))
-    print("  Iteration:    V{}".format(iteration))
+    print(f"  Config:       {args.config}")
+    print(f"  Output dir:   {os.path.abspath(config.output_dir)}")
+    print(f"  Iteration:    V{iteration}")
     print("  Code-gen dirs:")
     for d in args.code_gen_dirs:
-        print("    - {}".format(d))
+        print(f"    - {d}")
     print("=" * 70)
 
     agent_config = make_agent_config(
@@ -136,11 +145,11 @@ if __name__ == "__main__":
 
     mins, secs = divmod(int(duration), 60)
     print("\n" + "=" * 70)
-    print("  REDO COMPLETE — {}m {}s".format(mins, secs))
+    print(f"  REDO COMPLETE — {mins}m {secs}s")
     print("=" * 70)
     for f in output_files:
         if os.path.isfile(f):
-            print("  [OK] {}".format(os.path.basename(f)))
+            print(f"  [OK] {os.path.basename(f)}")
         else:
-            print("  [MISSING] {}".format(os.path.basename(f)))
+            print(f"  [MISSING] {os.path.basename(f)}")
     print("=" * 70)

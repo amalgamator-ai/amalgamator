@@ -1,4 +1,5 @@
 """Adapter preserving the target's native Claude behavior."""
+
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, fields
 
@@ -17,6 +18,7 @@ def native_config(config):
     configured timeout passes through unchanged.
     """
     from common.claude_utils import ClaudeConfig
+
     shared = {f.name for f in fields(ClaudeConfig)} & {
         f.name for f in fields(type(config))
     }
@@ -35,12 +37,14 @@ class ClaudeSession:
 @asynccontextmanager
 async def session(config):
     from common.claude_utils import claude_session
+
     async with claude_session(native_config(config)) as client:
         yield ClaudeSession(config, client)
 
 
 async def run(config, steps, resume=False, client=None):
     from common.claude_utils import claude_run
+
     if isinstance(client, ClaudeSession):
         if client.config != config:
             raise ValueError("Agent session configuration does not match the run")

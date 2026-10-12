@@ -1,4 +1,5 @@
 """Thin wrappers around git commands for the bug-fix porting pipeline."""
+
 from __future__ import annotations
 
 import subprocess
@@ -50,7 +51,9 @@ def _run_git(repo_path: str, args: list[str], **kwargs) -> GitResult:
 def git_show_files(repo_path: str, commit: str) -> list[str]:
     """Return the list of file paths modified by a commit."""
     r = _run_git(repo_path, ["show", commit, "--name-only", "--pretty=format:"])
-    return [line for line in r.stdout.splitlines() if line.strip() and line.strip() != '""']
+    return [
+        line for line in r.stdout.splitlines() if line.strip() and line.strip() != '""'
+    ]
 
 
 def git_patch_id(repo_path: str, commit: str) -> str:
@@ -62,7 +65,9 @@ def git_patch_id(repo_path: str, commit: str) -> str:
     worse than a crash.
     """
     show = subprocess.run(
-        ["git", "show", commit], cwd=repo_path, capture_output=True,
+        ["git", "show", commit],
+        cwd=repo_path,
+        capture_output=True,
     )
     pid = subprocess.run(
         ["git", "patch-id", "--stable"],
@@ -83,7 +88,6 @@ def git_is_ancestor(repo_path: str, commit: str, branch: str) -> bool:
     return r.success
 
 
-
 def git_cat_file_exists(repo_path: str, ref: str, path: str) -> bool:
     """Return True if path exists in the given ref."""
     r = _run_git(repo_path, ["cat-file", "-e", f"{ref}:{path}"])
@@ -97,8 +101,13 @@ def git_log_follow_renames(
     r = _run_git(
         repo_path,
         [
-            "log", "--follow", "--diff-filter=R", "--format=%H",
-            f"{fork_point}..{target}", "--", path,
+            "log",
+            "--follow",
+            "--diff-filter=R",
+            "--format=%H",
+            f"{fork_point}..{target}",
+            "--",
+            path,
         ],
     )
     return [line for line in r.stdout.splitlines() if line.strip()]
@@ -113,8 +122,12 @@ def git_diff_find_renames(
 ) -> list[tuple[str, str]]:
     """Detect file renames between two refs. Returns list of (old_path, new_path) pairs."""
     args = [
-        "diff", f"--find-renames={threshold}%", "--diff-filter=R",
-        "--name-status", ref_a, ref_b,
+        "diff",
+        f"--find-renames={threshold}%",
+        "--diff-filter=R",
+        "--name-status",
+        ref_a,
+        ref_b,
     ]
     if path is not None:
         args += ["--", path]
@@ -127,12 +140,15 @@ def git_diff_find_renames(
     return pairs
 
 
-
 def is_merge_commit(repo_path: str, commit: str) -> bool:
     """Return True if commit has more than one parent (is a merge)."""
     r = subprocess.run(
         ["git", "rev-parse", "--verify", f"{commit}^2"],
-        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return r.returncode == 0
 
@@ -203,15 +219,20 @@ def git_range_diff(
     return r.stdout
 
 
-def git_format_patch_bytes(repo_path: str, n: int = 1, base_ref: str | None = None) -> bytes:
+def git_format_patch_bytes(
+    repo_path: str, n: int = 1, base_ref: str | None = None
+) -> bytes:
     """Generate a patch for the last n commits as raw bytes.
 
     The patch is a deliverable that has to apply cleanly, so it must never be
     round-tripped through a lossy decode — a replacement character would
     silently produce a patch git cannot apply.
     """
-    args = ["format-patch", "--stdout", base_ref] if base_ref \
+    args = (
+        ["format-patch", "--stdout", base_ref]
+        if base_ref
         else ["format-patch", f"-{n}", "--stdout"]
+    )
     result = subprocess.run(["git"] + args, cwd=repo_path, capture_output=True)
     return result.stdout
 
@@ -226,7 +247,6 @@ def git_reset_hard(repo_path: str, ref: str = "HEAD") -> GitResult:
     return _run_git(repo_path, ["reset", "--hard", ref])
 
 
-
 def git_worktree_add(repo_path: str, path: str, branch: str) -> GitResult:
     """Create a new git worktree at path, detached at the given branch/commit."""
     return _run_git(repo_path, ["worktree", "add", "--detach", path, branch])
@@ -235,7 +255,6 @@ def git_worktree_add(repo_path: str, path: str, branch: str) -> GitResult:
 def git_worktree_remove(repo_path: str, path: str) -> GitResult:
     """Remove a git worktree."""
     return _run_git(repo_path, ["worktree", "remove", path])
-
 
 
 def git_log_commits(
@@ -253,7 +272,6 @@ def git_log_commits(
     args.append(branch)
     r = _run_git(repo_path, args)
     return [line for line in r.stdout.splitlines() if line.strip()]
-
 
 
 def git_merge_base(repo_path: str, a: str, b: str) -> str:
@@ -304,7 +322,9 @@ def resolve_merge_commit(repo_path: str, commit: str) -> str:
         ["git", "rev-parse", "--verify", f"{commit}^2"],
         cwd=repo_path,
         capture_output=True,
-        text=True, encoding="utf-8", errors="replace",
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
     if result.returncode == 0:

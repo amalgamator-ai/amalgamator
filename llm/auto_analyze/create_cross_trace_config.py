@@ -37,22 +37,23 @@ Advanced parameters:
                              with step-by-step coding guides (default: disabled)
 """
 
-import sys as _sys
 import os as _os
+import sys as _sys
+
 _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
+import argparse
+import json
 import os
 import sys
-import json
-import argparse
 
-from llm.auto_analyze.configs.single_trace_config import (
-    MEDIAN_BLOCK_FILE,
-    HIGH_LEVEL_OPS_FILE,
-)
 from common.iteration_utils import resolve_output_file
+from llm.auto_analyze.configs.single_trace_config import (
+    HIGH_LEVEL_OPS_FILE,
+    MEDIAN_BLOCK_FILE,
+)
 
 
 def main():
@@ -63,21 +64,39 @@ def main():
     )
 
     required = parser.add_argument_group("required parameters")
-    required.add_argument("--trace-result-dir", required=True, action="append",
-                          dest="trace_result_dirs",
-                          help="Path to a single-trace result directory "
-                               "(repeat for each trace; at least 2 required)")
-    required.add_argument("--target-trace-id", required=True, type=int,
-                          help="Index (0-based) of the target trace to optimize/fix")
-    required.add_argument("--analyze-output-dir", required=True,
-                          help="Directory where cross-trace analysis outputs will be stored")
-    required.add_argument("--output-config-file", required=True,
-                          help="Output path for the config JSON (without .json suffix)")
+    required.add_argument(
+        "--trace-result-dir",
+        required=True,
+        action="append",
+        dest="trace_result_dirs",
+        help="Path to a single-trace result directory "
+        "(repeat for each trace; at least 2 required)",
+    )
+    required.add_argument(
+        "--target-trace-id",
+        required=True,
+        type=int,
+        help="Index (0-based) of the target trace to optimize/fix",
+    )
+    required.add_argument(
+        "--analyze-output-dir",
+        required=True,
+        help="Directory where cross-trace analysis outputs will be stored",
+    )
+    required.add_argument(
+        "--output-config-file",
+        required=True,
+        help="Output path for the config JSON (without .json suffix)",
+    )
 
     advanced = parser.add_argument_group("advanced parameters")
-    advanced.add_argument("--make-improvement-plan", action="store_true", default=False,
-                          help="Generate an improvement plan for the target trace "
-                               "with step-by-step coding guides (default: disabled)")
+    advanced.add_argument(
+        "--make-improvement-plan",
+        action="store_true",
+        default=False,
+        help="Generate an improvement plan for the target trace "
+        "with step-by-step coding guides (default: disabled)",
+    )
 
     args = parser.parse_args()
 
@@ -103,7 +122,9 @@ def main():
 
         high_level_file = resolve_output_file(result_dir, HIGH_LEVEL_OPS_FILE)
         if not os.path.exists(high_level_file):
-            errors.append(f"trace [{i}] missing {HIGH_LEVEL_OPS_FILE}: {high_level_file}")
+            errors.append(
+                f"trace [{i}] missing {HIGH_LEVEL_OPS_FILE}: {high_level_file}"
+            )
 
     # Validate target trace ID
     if args.target_trace_id < 0 or args.target_trace_id >= len(args.trace_result_dirs):
@@ -123,7 +144,9 @@ def main():
     for i, result_dir in enumerate(args.trace_result_dirs):
         marker = " (TARGET)" if i == args.target_trace_id else ""
         print(f"    [{i}]{marker} {result_dir}")
-    print(f"  Improvement plan: {'enabled' if args.make_improvement_plan else 'disabled'}")
+    print(
+        f"  Improvement plan: {'enabled' if args.make_improvement_plan else 'disabled'}"
+    )
 
     # --- Resolve paths ---
     output_json = args.output_config_file
@@ -132,9 +155,7 @@ def main():
 
     # --- Build config ---
     config = {
-        "traces": [
-            {"result_dir": os.path.abspath(d)} for d in args.trace_result_dirs
-        ],
+        "traces": [{"result_dir": os.path.abspath(d)} for d in args.trace_result_dirs],
         "target_trace_id": args.target_trace_id,
         "output_dir": os.path.abspath(args.analyze_output_dir),
         "make_improvement_plan": args.make_improvement_plan,

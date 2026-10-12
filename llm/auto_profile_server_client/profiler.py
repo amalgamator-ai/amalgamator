@@ -35,11 +35,15 @@ def export_nsys_to_sqlite(nsys_rep_path: str) -> str:
 
     result = subprocess.run(
         ["nsys", "export", "--type=sqlite", f"--output={sqlite_path}", nsys_rep_path],
-        capture_output=True, text=True, timeout=600,
+        capture_output=True,
+        text=True,
+        timeout=600,
     )
     if result.returncode != 0:
         log.error("nsys export failed: %s", result.stderr[-1000:])
-        raise RuntimeError(f"nsys export failed for {nsys_rep_path}: {result.stderr[-500:]}")
+        raise RuntimeError(
+            f"nsys export failed for {nsys_rep_path}: {result.stderr[-500:]}"
+        )
 
     log.info("Exported: %s", sqlite_path)
     return sqlite_path

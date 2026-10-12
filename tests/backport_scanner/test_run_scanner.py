@@ -10,10 +10,10 @@ import pytest
 import yaml
 
 from backport_scanner.scanner import ScanConfig
-from backport_scanner.triage import FixStatus, BranchCheckResult
-
+from backport_scanner.triage import BranchCheckResult, FixStatus
 
 # ── load_config ────────────────────────────────────────────────────────────────
+
 
 def _write_yaml(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "scan.yaml"
@@ -24,7 +24,9 @@ def _write_yaml(tmp_path: Path, content: str) -> Path:
 def test_load_config_basic(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    cfg_file = _write_yaml(tmp_path, f"""
+    cfg_file = _write_yaml(
+        tmp_path,
+        f"""
         repository:
           local_path: "{repo}"
         fix:
@@ -34,8 +36,10 @@ def test_load_config_basic(tmp_path):
           branch_pattern: "release-1.*"
         llm:
           model: "claude-opus-4-6"
-    """)
+    """,
+    )
     from backport_scanner.run_scanner import load_config
+
     config = load_config(cfg_file)
     assert config.fix_commit == "abc123"
     assert config.fix_description == "fix a bug"
@@ -46,7 +50,9 @@ def test_load_config_basic(tmp_path):
 def test_load_config_with_vuln_commit(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    cfg_file = _write_yaml(tmp_path, f"""
+    cfg_file = _write_yaml(
+        tmp_path,
+        f"""
         repository:
           local_path: "{repo}"
         fix:
@@ -58,8 +64,10 @@ def test_load_config_with_vuln_commit(tmp_path):
             - release-1.34
         llm:
           model: "claude-sonnet-4-6"
-    """)
+    """,
+    )
     from backport_scanner.run_scanner import load_config
+
     config = load_config(cfg_file)
     assert config.vuln_commit == "def456"
     assert config.branches == ["release-1.33", "release-1.34"]
@@ -67,7 +75,9 @@ def test_load_config_with_vuln_commit(tmp_path):
 
 
 def test_load_config_missing_repo(tmp_path):
-    cfg_file = _write_yaml(tmp_path, """
+    cfg_file = _write_yaml(
+        tmp_path,
+        """
         repository:
           local_path: "/nonexistent/path"
         fix:
@@ -76,20 +86,27 @@ def test_load_config_missing_repo(tmp_path):
           branch_pattern: "release-*"
         llm:
           enabled: false
-    """)
+    """,
+    )
     from backport_scanner.run_scanner import load_config
+
     with pytest.raises(SystemExit):
         load_config(cfg_file)
 
 
 # ── mode_verify ────────────────────────────────────────────────────────────────
 
+
 def test_mode_verify_reports_still_needs(tmp_path, capsys):
     existing = tmp_path / "fix.yaml"
-    existing.write_text(yaml.dump({
-        "fix": {"commit": "abc123"},
-        "branches": {"target": "origin/release-1.33"},
-    }))
+    existing.write_text(
+        yaml.dump(
+            {
+                "fix": {"commit": "abc123"},
+                "branches": {"target": "origin/release-1.33"},
+            }
+        )
+    )
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -103,8 +120,11 @@ def test_mode_verify_reports_still_needs(tmp_path, capsys):
         changed_files=[],
     )
 
-    with patch("backport_scanner.generate_config.check_ref", return_value=needs_fix_result):
+    with patch(
+        "backport_scanner.generate_config.check_ref", return_value=needs_fix_result
+    ):
         from backport_scanner.generate_config import mode_verify
+
         mode_verify(cfg, existing)
 
     out = capsys.readouterr().out
@@ -114,10 +134,14 @@ def test_mode_verify_reports_still_needs(tmp_path, capsys):
 
 def test_mode_verify_reports_already_fixed(tmp_path, capsys):
     existing = tmp_path / "fix.yaml"
-    existing.write_text(yaml.dump({
-        "fix": {"commit": "abc123"},
-        "branches": {"target": "origin/release-1.33"},
-    }))
+    existing.write_text(
+        yaml.dump(
+            {
+                "fix": {"commit": "abc123"},
+                "branches": {"target": "origin/release-1.33"},
+            }
+        )
+    )
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -133,6 +157,7 @@ def test_mode_verify_reports_already_fixed(tmp_path, capsys):
 
     with patch("backport_scanner.generate_config.check_ref", return_value=fixed_result):
         from backport_scanner.generate_config import mode_verify
+
         mode_verify(cfg, existing)
 
     out = capsys.readouterr().out
@@ -142,13 +167,18 @@ def test_mode_verify_reports_already_fixed(tmp_path, capsys):
 
 # ── mode_add ──────────────────────────────────────────────────────────────────
 
+
 def test_mode_add_appends_new_branch(tmp_path, capsys):
     existing = tmp_path / "fix.yaml"
-    existing.write_text(yaml.dump({
-        "fix": {"commit": "abc123"},
-        "branches": {"source": "origin/main", "target": "origin/release-1.33"},
-        "issue_id": "test",
-    }))
+    existing.write_text(
+        yaml.dump(
+            {
+                "fix": {"commit": "abc123"},
+                "branches": {"source": "origin/main", "target": "origin/release-1.33"},
+                "issue_id": "test",
+            }
+        )
+    )
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -168,6 +198,7 @@ def test_mode_add_appends_new_branch(tmp_path, capsys):
 
     with patch("backport_scanner.generate_config.run_scan", return_value=mock_report):
         from backport_scanner.generate_config import mode_add
+
         mode_add(cfg, existing)
 
     updated = yaml.safe_load(existing.read_text())
@@ -181,10 +212,14 @@ def test_mode_add_appends_new_branch(tmp_path, capsys):
 
 def test_mode_add_no_new_branches(tmp_path, capsys):
     existing = tmp_path / "fix.yaml"
-    existing.write_text(yaml.dump({
-        "fix": {"commit": "abc123"},
-        "branches": {"target": "origin/release-1.33"},
-    }))
+    existing.write_text(
+        yaml.dump(
+            {
+                "fix": {"commit": "abc123"},
+                "branches": {"target": "origin/release-1.33"},
+            }
+        )
+    )
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -204,6 +239,7 @@ def test_mode_add_no_new_branches(tmp_path, capsys):
 
     with patch("backport_scanner.generate_config.run_scan", return_value=mock_report):
         from backport_scanner.generate_config import mode_add
+
         mode_add(cfg, existing)
 
     out = capsys.readouterr().out
@@ -213,16 +249,24 @@ def test_mode_add_no_new_branches(tmp_path, capsys):
 def test_mode_add_preserves_mapping_entries(tmp_path, capsys):
     """Mapping entries with per-target overrides must survive mode_add."""
     existing = tmp_path / "fix.yaml"
-    existing.write_text(yaml.dump({
-        "fix": {"commit": "abc123"},
-        "branches": {
-            "source": "origin/main",
-            "targets": [
-                {"branch": "origin/release-1.33", "issue_id": "fix-to-1.33", "build_command": "make -j4"},
-            ],
-        },
-        "issue_id": "test",
-    }))
+    existing.write_text(
+        yaml.dump(
+            {
+                "fix": {"commit": "abc123"},
+                "branches": {
+                    "source": "origin/main",
+                    "targets": [
+                        {
+                            "branch": "origin/release-1.33",
+                            "issue_id": "fix-to-1.33",
+                            "build_command": "make -j4",
+                        },
+                    ],
+                },
+                "issue_id": "test",
+            }
+        )
+    )
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -242,6 +286,7 @@ def test_mode_add_preserves_mapping_entries(tmp_path, capsys):
 
     with patch("backport_scanner.generate_config.run_scan", return_value=mock_report):
         from backport_scanner.generate_config import mode_add
+
         mode_add(cfg, existing)
 
     updated = yaml.safe_load(existing.read_text())

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-import sys
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,7 +19,7 @@ def test_name_from_run_config(run_config: str) -> str:
         raise ValueError(
             f"run_config filename must match run_<test_name>.json, got: {basename}"
         )
-    return basename[len("run_"):-len(".json")]
+    return basename[len("run_") : -len(".json")]
 
 
 def output_dir_from_run_config(run_config: str) -> str:
@@ -28,12 +28,12 @@ def output_dir_from_run_config(run_config: str) -> str:
 
 def setup_logging(name: str) -> None:
     os.makedirs(LOGS_DIR, exist_ok=True)
-    log_path = os.path.join(LOGS_DIR, "run_{}.log".format(name))
+    log_path = os.path.join(LOGS_DIR, f"run_{name}.log")
     log_file = open(log_path, "w")
     sys.stdout = Tee(sys.stdout, log_file)
 
 
-class Tee(object):
+class Tee:
     """A file-like object that writes to multiple files simultaneously."""
 
     def __init__(self, *files):
@@ -48,6 +48,7 @@ class Tee(object):
                     break
                 except BlockingIOError:
                     import time
+
                     time.sleep(0.01)
 
     def flush(self):
@@ -55,11 +56,30 @@ class Tee(object):
             f.flush()
 
 
-_SENSITIVE_DIRS = frozenset({
-    "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
-    "/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin",
-    "/srv", "/sys", "/tmp", "/usr", "/var",
-})
+_SENSITIVE_DIRS = frozenset(
+    {
+        "/",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/home",
+        "/lib",
+        "/lib64",
+        "/media",
+        "/mnt",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/srv",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/var",
+    }
+)
 
 
 def safe_clean_dir(dir_path: str | Path) -> None:
@@ -114,8 +134,11 @@ def safe_clean_dir(dir_path: str | Path) -> None:
             child.unlink()
 
 
-def clean_output_dir(output_dir: str | Path, keep_files: dict[str, str],
-                     extra_keep: list[str] | None = None) -> None:
+def clean_output_dir(
+    output_dir: str | Path,
+    keep_files: dict[str, str],
+    extra_keep: list[str] | None = None,
+) -> None:
     """Remove intermediate files from output_dir, keeping only known outputs.
 
     Walks output_dir and deletes any file not in the keep set. The
@@ -140,8 +163,11 @@ def clean_output_dir(output_dir: str | Path, keep_files: dict[str, str],
         p = Path(path)
         keep_abs.add(str(p if p.is_absolute() else output_dir / p))
 
-    always_keep_basenames = {"run_params.txt", "run_params_cross.txt",
-                             "result_metadata.json"}
+    always_keep_basenames = {
+        "run_params.txt",
+        "run_params_cross.txt",
+        "result_metadata.json",
+    }
     if extra_keep:
         always_keep_basenames.update(extra_keep)
 

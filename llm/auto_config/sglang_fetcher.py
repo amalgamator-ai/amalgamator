@@ -10,9 +10,9 @@ from urllib.error import HTTPError, URLError
 
 from llm.auto_config.models import ResolvedRecipe
 from llm.auto_config.vllm_fetcher import (
+    HardwareNotSupportedError,
     RecipeFetchError,
     RecipeNotFoundError,
-    HardwareNotSupportedError,
     _pairs_to_flags_str,
 )
 
@@ -54,7 +54,6 @@ def _fetch_raw(url: str) -> str:
         raise RecipeFetchError(f"HTTP {e.code} fetching {url}") from e
     except URLError as e:
         raise RecipeFetchError(f"Failed to connect to {url}: {e.reason}") from e
-
 
 
 # ── JSX parsing ──────────────────────────────────────────────────────────
@@ -104,7 +103,12 @@ def _strip_js_comments(text: str) -> str:
                     in_string = ch
                 elif in_string == ch:
                     in_string = None
-            elif ch == "/" and i + 1 < len(line) and line[i + 1] == "/" and in_string is None:
+            elif (
+                ch == "/"
+                and i + 1 < len(line)
+                and line[i + 1] == "/"
+                and in_string is None
+            ):
                 break
             result.append(ch)
             i += 1
@@ -142,7 +146,9 @@ def _parse_config(content: str) -> tuple[dict, dict, list]:
         raise RecipeFetchError("Could not parse cells from SGLang config")
 
     model_names = json.loads(_js_to_json(model_names_raw)) if model_names_raw else {}
-    docker_images = json.loads(_js_to_json(docker_images_raw)) if docker_images_raw else {}
+    docker_images = (
+        json.loads(_js_to_json(docker_images_raw)) if docker_images_raw else {}
+    )
     cells = json.loads(_js_to_json(cells_raw)) if cells_raw else []
 
     return model_names, docker_images, cells
@@ -177,8 +183,12 @@ def _find_config_via_llms_txt(slug: str) -> str | None:
         if model_in_url != slug:
             continue
 
-        mdx_path = page_url.replace("https://docs.sglang.io/", "docs/").replace(".md", ".mdx")
-        mdx_url = f"https://raw.githubusercontent.com/sgl-project/sglang/main/{mdx_path}"
+        mdx_path = page_url.replace("https://docs.sglang.io/", "docs/").replace(
+            ".md", ".mdx"
+        )
+        mdx_url = (
+            f"https://raw.githubusercontent.com/sgl-project/sglang/main/{mdx_path}"
+        )
         try:
             mdx_content = _fetch_raw(mdx_url)
         except RecipeFetchError:
@@ -304,21 +314,25 @@ def fetch_sglang_recipe(
             break
 
     if matching_cell is None:
-        available_hw = sorted({
-            c["match"]["hw"]
-            for c in cells
-            if c["match"].get("variant") == variant
-            and c["match"].get("quant") == quant
-            and c["match"].get("nodes") == "single"
-        })
-        available_strategies = sorted({
-            c["match"]["strategy"]
-            for c in cells
-            if c["match"].get("hw") == hardware
-            and c["match"].get("variant") == variant
-            and c["match"].get("quant") == quant
-            and c["match"].get("nodes") == "single"
-        })
+        available_hw = sorted(
+            {
+                c["match"]["hw"]
+                for c in cells
+                if c["match"].get("variant") == variant
+                and c["match"].get("quant") == quant
+                and c["match"].get("nodes") == "single"
+            }
+        )
+        available_strategies = sorted(
+            {
+                c["match"]["strategy"]
+                for c in cells
+                if c["match"].get("hw") == hardware
+                and c["match"].get("variant") == variant
+                and c["match"].get("quant") == quant
+                and c["match"].get("nodes") == "single"
+            }
+        )
         if not available_hw:
             raise HardwareNotSupportedError(
                 f"Hardware {hardware!r} not available for {model} (quant={quant}). "
@@ -334,9 +348,8 @@ def fetch_sglang_recipe(
             f"Available hardware: {available_hw}, strategies: {available_strategies}"
         )
 
-    docker_image = (
-        docker_images.get(f"{hardware}|{quant}")
-        or docker_images.get(hardware, "lmsysorg/sglang:latest")
+    docker_image = docker_images.get(f"{hardware}|{quant}") or docker_images.get(
+        hardware, "lmsysorg/sglang:latest"
     )
 
     pairs = _parse_cell_flags(matching_cell.get("flags", []))
@@ -351,7 +364,12 @@ def fetch_sglang_recipe(
 
     log.info(
         "Resolved SGLang recipe for %s on %s (%s): flags=%r env=%r docker=%s",
-        model, hardware, strategy, extra_flags, extra_env, docker_image,
+        model,
+        hardware,
+        strategy,
+        extra_flags,
+        extra_env,
+        docker_image,
     )
 
     return ResolvedRecipe(

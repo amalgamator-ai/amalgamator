@@ -8,12 +8,23 @@ import subprocess
 import time
 from pathlib import Path
 
-from llm.auto_profile_server_client.config import SERVER_HEALTH_TIMEOUT_SEC, SERVER_HEALTH_POLL_SEC
+from llm.auto_profile_server_client.config import (
+    SERVER_HEALTH_POLL_SEC,
+    SERVER_HEALTH_TIMEOUT_SEC,
+)
 
 log = logging.getLogger(__name__)
 
-ERROR_MARKERS = ("RuntimeError:", "Error:", "FATAL", "OOMKilled", "CUDA error",
-                 "OutOfMemoryError", "NCCL error", "CalledProcessError")
+ERROR_MARKERS = (
+    "RuntimeError:",
+    "Error:",
+    "FATAL",
+    "OOMKilled",
+    "CUDA error",
+    "OutOfMemoryError",
+    "NCCL error",
+    "CalledProcessError",
+)
 
 
 class ServerProcess:
@@ -26,8 +37,9 @@ class ServerProcess:
         self._started = False
         self._log_path: str | None = None
 
-    def _extract_error_context(self, context_before: int = 5,
-                               context_after: int = 3) -> str:
+    def _extract_error_context(
+        self, context_before: int = 5, context_after: int = 3
+    ) -> str:
         """Extract the root-cause error from the server log with context.
 
         Finds the first error marker in the log (the root cause), includes
@@ -62,13 +74,15 @@ class ServerProcess:
         for i in range(first_error, len(lines)):
             line = lines[i].rstrip()
             stripped = line.lstrip()
-            if (any(m in line for m in ERROR_MARKERS)
-                    or stripped.startswith("File ")
-                    or stripped.startswith("Traceback")
-                    or stripped.startswith("^^^")
-                    or stripped.startswith("raise ")
-                    or (stripped and stripped[0] == " ")
-                    or stripped == ""):
+            if (
+                any(m in line for m in ERROR_MARKERS)
+                or stripped.startswith("File ")
+                or stripped.startswith("Traceback")
+                or stripped.startswith("^^^")
+                or stripped.startswith("raise ")
+                or (stripped and stripped[0] == " ")
+                or stripped == ""
+            ):
                 block_end = i
             else:
                 if i > first_error + 2:
@@ -76,7 +90,7 @@ class ServerProcess:
                 block_end = i
 
         block_end = min(block_end + context_after, len(lines) - 1)
-        excerpt = lines[block_start:block_end + 1]
+        excerpt = lines[block_start : block_end + 1]
 
         parts = [f"\n--- root cause (line {first_error + 1} of {len(lines)}) ---"]
         parts.extend(excerpt)
@@ -105,7 +119,9 @@ class ServerProcess:
             try:
                 r = subprocess.run(
                     ["curl", "-sf", "--max-time", "5", self.health_url],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 if r.returncode == 0:
                     self._started = True
@@ -134,7 +150,7 @@ class ServerProcess:
         log.info("Stopping server process group (PID=%d)", pid)
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError, PermissionError:
             self.process.terminate()
 
         try:
@@ -143,7 +159,7 @@ class ServerProcess:
             log.warning("Server did not exit after 30s, killing process group")
             try:
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError, PermissionError:
                 self.process.kill()
             self.process.wait(timeout=10)
 
@@ -153,7 +169,10 @@ class ServerProcess:
 
 
 def start_server_in_container(
-    cmd: str, port: int, health_url: str, log_path: str | None = None,
+    cmd: str,
+    port: int,
+    health_url: str,
+    log_path: str | None = None,
 ) -> ServerProcess:
     """Launch the server command as a background subprocess.
 

@@ -29,7 +29,6 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-
 log = logging.getLogger(__name__)
 
 
@@ -39,7 +38,10 @@ log = logging.getLogger(__name__)
 def _oc(*args, check=True, capture=True, input_text=None):
     return subprocess.run(
         ["oc"] + list(args),
-        check=check, capture_output=capture, text=True, input=input_text,
+        check=check,
+        capture_output=capture,
+        text=True,
+        input=input_text,
     )
 
 
@@ -47,8 +49,17 @@ def _wait_for_pod(namespace, job_name, timeout_s=600, poll_s=10):
     """Wait until Job pod leaves Pending. Returns (pod_name, phase)."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        r = _oc("get", "pods", "-n", namespace,
-                "-l", f"job-name={job_name}", "-o", "json", check=False)
+        r = _oc(
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-l",
+            f"job-name={job_name}",
+            "-o",
+            "json",
+            check=False,
+        )
         if r.returncode == 0:
             items = json.loads(r.stdout).get("items", [])
             if items:
@@ -73,14 +84,22 @@ def _sync_pod_log(namespace, pod_name, local_dir):
 
 def _sync_results(namespace, pod_name, remote_dir, local_dir):
     """Rsync output files from the running pod to local."""
-    r = _oc("rsync", f"{pod_name}:{remote_dir}/", f"{local_dir}/",
-            "-n", namespace, "--no-perms", check=False)
+    r = _oc(
+        "rsync",
+        f"{pod_name}:{remote_dir}/",
+        f"{local_dir}/",
+        "-n",
+        namespace,
+        "--no-perms",
+        check=False,
+    )
     if r.returncode != 0:
         log.debug("rsync interim: %s", (r.stderr or "")[:200])
 
 
-def _poll_until_done(namespace, job_name, pod_name, remote_dir, local_dir,
-                     timeout_s=7200, poll_s=30):
+def _poll_until_done(
+    namespace, job_name, pod_name, remote_dir, local_dir, timeout_s=7200, poll_s=30
+):
     """Poll job status, sync logs and results to local every interval."""
     deadline = time.time() + timeout_s
     terminal = None
@@ -90,7 +109,10 @@ def _poll_until_done(namespace, job_name, pod_name, remote_dir, local_dir,
         r = _oc("get", "job", job_name, "-n", namespace, "-o", "json", check=False)
         if r.returncode == 0:
             for c in json.loads(r.stdout).get("status", {}).get("conditions", []):
-                if c.get("type") in ("Complete", "Failed") and c.get("status") == "True":
+                if (
+                    c.get("type") in ("Complete", "Failed")
+                    and c.get("status") == "True"
+                ):
                     terminal = c["type"]
                     break
         if terminal:
@@ -159,18 +181,30 @@ def _pull_results_via_pvc(namespace, workspace_pvc, remote_dir, local_dir):
 
     try:
         _oc("apply", "-n", namespace, "-f", "-", input_text=pod_yaml)
-        _oc("wait", f"pod/{pod_name}", "-n", namespace,
-            "--for=condition=Ready", "--timeout=120s")
+        _oc(
+            "wait",
+            f"pod/{pod_name}",
+            "-n",
+            namespace,
+            "--for=condition=Ready",
+            "--timeout=120s",
+        )
 
         os.makedirs(local_dir, exist_ok=True)
-        _oc("rsync", f"{pod_name}:{remote_dir}/", f"{local_dir}/",
-            "-n", namespace, "--no-perms", check=True)
+        _oc(
+            "rsync",
+            f"{pod_name}:{remote_dir}/",
+            f"{local_dir}/",
+            "-n",
+            namespace,
+            "--no-perms",
+            check=True,
+        )
         log.info("Results saved to %s", local_dir)
     except subprocess.CalledProcessError as e:
         log.warning("Failed to pull results: %s", e)
     finally:
-        _oc("delete", "pod", pod_name, "-n", namespace,
-            "--wait=false", check=False)
+        _oc("delete", "pod", pod_name, "-n", namespace, "--wait=false", check=False)
 
 
 # ── Config loading ────────────────────────────────────────────────────────────
@@ -306,8 +340,11 @@ def _submit_and_wait(args, job_name, yaml, local_dir, nonce):
 
     remote_dir = f"/workspace/output/{nonce}"
     terminal = _poll_until_done(
-        args.namespace, job_name, pod_name,
-        remote_dir=remote_dir, local_dir=local_dir,
+        args.namespace,
+        job_name,
+        pod_name,
+        remote_dir=remote_dir,
+        local_dir=local_dir,
     )
     log.info("Job %s finished: %s", job_name, terminal)
 
@@ -337,14 +374,18 @@ def run_benchmark(args):
     fw_filter = args.framework
     if fw_filter:
         if fw_filter not in frameworks:
-            log.error("Framework %r not in config (available: %s)", fw_filter, frameworks)
+            log.error(
+                "Framework %r not in config (available: %s)", fw_filter, frameworks
+            )
             sys.exit(1)
         frameworks = [fw_filter]
 
     gpu_count = args.gpu_count or num_gpus
 
     base_out_dir = args.out_dir or os.path.join(
-        "auto_profile_server_client", "results", _model_slug(model),
+        "auto_profile_server_client",
+        "results",
+        _model_slug(model),
     )
 
     log.info("Config: model=%s gpus=%d frameworks=%s", model, gpu_count, frameworks)
@@ -362,18 +403,25 @@ def run_benchmark(args):
         # Add a file handler so the full run log is saved alongside results
         run_log_path = os.path.join(local_fw_dir, "run.log")
         file_handler = logging.FileHandler(run_log_path)
-        file_handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
         logging.getLogger().addHandler(file_handler)
         log.info("Run log: %s", run_log_path)
 
         log.info("=== Submitting job: %s (%s) ===", fw, nonce)
         job_name = f"bench-{fw}-{nonce}"
         yaml = _build_benchmark_job_yaml(
-            job_name=job_name, namespace=args.namespace, image=image,
-            gpu_count=gpu_count, gpu_product=args.gpu_product,
-            workspace_pvc=args.workspace_pvc, model_pvc=args.model_pvc,
-            config_path=args.config, framework=fw, model=model,
+            job_name=job_name,
+            namespace=args.namespace,
+            image=image,
+            gpu_count=gpu_count,
+            gpu_product=args.gpu_product,
+            workspace_pvc=args.workspace_pvc,
+            model_pvc=args.model_pvc,
+            config_path=args.config,
+            framework=fw,
+            model=model,
             output_nonce=nonce,
         )
         _submit_and_wait(args, job_name, yaml, local_fw_dir, nonce)
@@ -390,24 +438,31 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     bench_parser = sub.add_parser("run-benchmark", help="Submit benchmark Job(s)")
-    bench_parser.add_argument("--config", required=True,
-                              help="Run config JSON (model, frameworks, images read from here)")
-    bench_parser.add_argument("--namespace", default="",
-                              help="OpenShift namespace")
-    bench_parser.add_argument("--gpu-product", default="NVIDIA-H100-80GB-HBM3",
-                              help="GPU node selector label")
-    bench_parser.add_argument("--workspace-pvc", default="vllm-workspace",
-                              help="PVC for workspace")
-    bench_parser.add_argument("--model-pvc", default="models",
-                              help="PVC for HF model cache")
-    bench_parser.add_argument("--out-dir",
-                              help="Local output base directory")
-    bench_parser.add_argument("--framework",
-                              help="Run only this framework (default: all in config)")
-    bench_parser.add_argument("--image",
-                              help="Override docker image (default: from config)")
-    bench_parser.add_argument("--gpu-count", type=int,
-                              help="Override GPU count (default: from config)")
+    bench_parser.add_argument(
+        "--config",
+        required=True,
+        help="Run config JSON (model, frameworks, images read from here)",
+    )
+    bench_parser.add_argument("--namespace", default="", help="OpenShift namespace")
+    bench_parser.add_argument(
+        "--gpu-product", default="NVIDIA-H100-80GB-HBM3", help="GPU node selector label"
+    )
+    bench_parser.add_argument(
+        "--workspace-pvc", default="vllm-workspace", help="PVC for workspace"
+    )
+    bench_parser.add_argument(
+        "--model-pvc", default="models", help="PVC for HF model cache"
+    )
+    bench_parser.add_argument("--out-dir", help="Local output base directory")
+    bench_parser.add_argument(
+        "--framework", help="Run only this framework (default: all in config)"
+    )
+    bench_parser.add_argument(
+        "--image", help="Override docker image (default: from config)"
+    )
+    bench_parser.add_argument(
+        "--gpu-count", type=int, help="Override GPU count (default: from config)"
+    )
 
     args = parser.parse_args()
 

@@ -1,4 +1,5 @@
 """Tests for auto_bug_fix.evidence — deterministic adaptation evidence."""
+
 from __future__ import annotations
 
 import subprocess
@@ -8,7 +9,6 @@ import pytest
 from auto_bug_fix.evidence import (
     LineFinding,
     TokenFinding,
-    TriageCorrection,
     added_lines_by_file,
     annotate_dead_config,
     apply_substitutions,
@@ -65,16 +65,18 @@ def test_extract_tokens_filters_stopwords_and_short_names():
     tokens = extract_tokens(["if (legacy_release_rcu(ptr) != NULL) return do_it(x);"])
     assert "legacy_release_rcu" in tokens
     assert "do_it" in tokens
-    assert "if" not in tokens      # keyword
-    assert "NULL" not in tokens    # stopword
+    assert "if" not in tokens  # keyword
+    assert "NULL" not in tokens  # stopword
     assert "ptr" in tokens
-    assert "x" not in tokens       # too short
+    assert "x" not in tokens  # too short
 
 
 def test_apply_substitutions_only_touches_changed_lines():
     preimage = "keep_this();\nlegacy_release(z);\n"
     current = "keep_this();\nlegacy_release(z);\nlegacy_release(d);\n"
-    new_text, applied = apply_substitutions(current, preimage, {"legacy_release": "wrapped_release"})
+    new_text, applied = apply_substitutions(
+        current, preimage, {"legacy_release": "wrapped_release"}
+    )
     # The pre-existing legacy_release(z) line is target code — untouched.
     assert "legacy_release(z);" in new_text
     assert "wrapped_release(d);" in new_text
@@ -83,7 +85,8 @@ def test_apply_substitutions_only_touches_changed_lines():
 
 def test_apply_substitutions_word_bounded():
     new_text, applied = apply_substitutions(
-        "my_legacy_release_wrapper(d);\n", "", {"legacy_release": "wrapped_release"})
+        "my_legacy_release_wrapper(d);\n", "", {"legacy_release": "wrapped_release"}
+    )
     assert new_text == "my_legacy_release_wrapper(d);\n"
     assert not applied
 
@@ -94,7 +97,11 @@ def _git(cwd, *args):
 
 def _sha(cwd, ref="HEAD"):
     return subprocess.run(
-        ["git", "rev-parse", ref], cwd=cwd, capture_output=True, text=True, check=True,
+        ["git", "rev-parse", ref],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
@@ -209,9 +216,15 @@ def test_scan_followup_fixes(evidence_repo):
     rp, fix = evidence_repo
     repo_git = ["git", "-C", rp]
     subprocess.run(
-        repo_git + ["commit", "--allow-empty", "-m",
-                    f'fix the fix\n\nFixes: {fix[:12]} ("fix: free delta too")'],
-        check=True, capture_output=True,
+        repo_git
+        + [
+            "commit",
+            "--allow-empty",
+            "-m",
+            f'fix the fix\n\nFixes: {fix[:12]} ("fix: free delta too")',
+        ],
+        check=True,
+        capture_output=True,
     )
     followups = scan_followup_fixes(rp, fix, "main")
     assert len(followups) == 1
@@ -289,11 +302,14 @@ def test_target_config_state_from_tree_fragments(tmp_path):
     _git(rp, "config", "user.name", "t")
     _git(rp, "config", "user.email", "t@t")
     (repo / "configs" / "flavor" / "CONFIG_FEATURE_OFF").write_text(
-        "# CONFIG_FEATURE_OFF is not set\n")
+        "# CONFIG_FEATURE_OFF is not set\n"
+    )
     (repo / "configs" / "flavor" / "CONFIG_FEATURE_ON").write_text(
-        "CONFIG_FEATURE_ON=y\n")
+        "CONFIG_FEATURE_ON=y\n"
+    )
     (repo / "configs" / "flavor" / "CONFIG_FEATURE_MOD").write_text(
-        "CONFIG_FEATURE_MOD=m\n")
+        "CONFIG_FEATURE_MOD=m\n"
+    )
     _git(rp, "add", ".")
     _git(rp, "commit", "-m", "configs")
 
@@ -308,8 +324,9 @@ def test_target_config_state_from_tree_fragments(tmp_path):
 def test_annotate_dead_config_marks_fully_dead_tokens():
     finding = TokenFinding("ghost_call", "upstream_only", ["f.c"])
     live = TokenFinding("live_call", "upstream_only", ["f.c"])
-    port_changes = {"f.c": {"added": [(3, "\tghost_call();"), (5, "\tlive_call();")],
-                            "removed": []}}
+    port_changes = {
+        "f.c": {"added": [(3, "\tghost_call();"), (5, "\tlive_call();")], "removed": []}
+    }
     current = (
         "top();\n"
         "#ifdef CONFIG_GONE\n"
@@ -318,7 +335,9 @@ def test_annotate_dead_config_marks_fully_dead_tokens():
         "\tlive_call();\n"
     )
     annotate_dead_config(
-        [finding, live], port_changes, {"f.c": current},
+        [finding, live],
+        port_changes,
+        {"f.c": current},
         {"CONFIG_GONE": False}.get,
     )
     assert finding.dead_config == "CONFIG_GONE"
@@ -328,7 +347,8 @@ def test_annotate_dead_config_marks_fully_dead_tokens():
     # it must never flip to the keep-verbatim directive.
     hallucinated = TokenFinding("ghost_call", "unknown", ["f.c"])
     annotate_dead_config(
-        [hallucinated], port_changes, {"f.c": current}, {"CONFIG_GONE": False}.get)
+        [hallucinated], port_changes, {"f.c": current}, {"CONFIG_GONE": False}.get
+    )
     assert hallucinated.dead_config is None
 
 
@@ -384,7 +404,10 @@ def test_audit_line_provenance_exempts_auto_substitutions(evidence_repo):
     assert {f.kind for f in naked} == {"adapted_line"}
     # With the pipeline's own substitution declared, it is explained.
     explained = audit_line_provenance(
-        rp, "target", fix, port_diff,
+        rp,
+        "target",
+        fix,
+        port_diff,
         substitutions={"legacy_release": "wrapped_release"},
     )
     assert explained == []
@@ -468,7 +491,9 @@ def test_audit_line_provenance_flags_stale_fix_replaced_lines(tmp_path):
         "+\tmodern_invocation(argument);\n"
         " \tkeep_this();\n"
     )
-    current = {"f.c": "\tlegacy_invocation(argument);\n\tmodern_invocation(argument);\n\tkeep_this();\n"}
+    current = {
+        "f.c": "\tlegacy_invocation(argument);\n\tmodern_invocation(argument);\n\tkeep_this();\n"
+    }
     findings = audit_line_provenance(rp, base, fix, port_diff, current_texts=current)
     stale = [f for f in findings if f.kind == "stale_line"]
     assert len(stale) == 1
@@ -477,7 +502,8 @@ def test_audit_line_provenance_flags_stale_fix_replaced_lines(tmp_path):
     # A port that fully applied the hunk raises nothing.
     done = {"f.c": "\tmodern_invocation(argument);\n\tkeep_this();\n"}
     port_diff_done = port_diff.replace(
-        " \tlegacy_invocation(argument);\n", "-\tlegacy_invocation(argument);\n")
+        " \tlegacy_invocation(argument);\n", "-\tlegacy_invocation(argument);\n"
+    )
     findings = audit_line_provenance(rp, base, fix, port_diff_done, current_texts=done)
     assert [f for f in findings if f.kind == "stale_line"] == []
 
@@ -527,7 +553,9 @@ def test_find_pure_rename_restorations(evidence_repo):
         "+\tlegacy_release(beta);\n"
     )
     result = find_pure_rename_restorations(rp, "target", fix, port_diff)
-    assert result == {"lib.c": [(6, "\tlegacy_release(beta);", "\tlegacy_release(delta);")]}
+    assert result == {
+        "lib.c": [(6, "\tlegacy_release(beta);", "\tlegacy_release(delta);")]
+    }
 
     # A rename whose fix-side token does NOT exist in the target file is
     # never restored (that would introduce a missing symbol): brand_new_func
@@ -563,8 +591,10 @@ def test_render_evidence_sections():
     from auto_bug_fix.evidence import TokenFinding
 
     report = render_evidence(
-        [TokenFinding("legacy_release", "upstream_only", ["lib.c"]),
-         TokenFinding("ghost_sym", "unknown", ["lib.c"])],
+        [
+            TokenFinding("legacy_release", "upstream_only", ["lib.c"]),
+            TokenFinding("ghost_sym", "unknown", ["lib.c"]),
+        ],
         {"old_flat_member": "new_nested_member"},
         {"callback_alpha": "callback_alpha2"},
         ["abc1234 fix the fix"],
@@ -580,14 +610,25 @@ def test_render_evidence_sections():
 
 
 def test_render_evidence_dead_config_and_line_findings():
-    dead = TokenFinding("ghost_sym", "upstream_only", ["f.c"], dead_config="CONFIG_GONE")
+    dead = TokenFinding(
+        "ghost_sym", "upstream_only", ["f.c"], dead_config="CONFIG_GONE"
+    )
     report = render_evidence(
-        [dead], {}, {}, [], [],
+        [dead],
+        {},
+        {},
+        [],
+        [],
         line_findings=[
-            LineFinding("f.c", "removed_target_line", "\told_target_call();",
-                        detail="removed 1x, the fix removes 0x"),
-            LineFinding("f.c", "adapted_line", "\tnew_variant();",
-                        detail="original_from_fix();"),
+            LineFinding(
+                "f.c",
+                "removed_target_line",
+                "\told_target_call();",
+                detail="removed 1x, the fix removes 0x",
+            ),
+            LineFinding(
+                "f.c", "adapted_line", "\tnew_variant();", detail="original_from_fix();"
+            ),
         ],
         conflict_marker_files=["g.c"],
     )
@@ -620,8 +661,11 @@ class TestValidateTriagePrerequisites:
             "just a string",
             42,
             None,
-            {"symbol": "shared_helper", "portable": False,
-             "reason": "does not exist on target"},
+            {
+                "symbol": "shared_helper",
+                "portable": False,
+                "reason": "does not exist on target",
+            },
         ]
         corrections = validate_triage_prerequisites(rp, "target", prereqs)
         assert any(c.symbol == "shared_helper" for c in corrections)
@@ -629,8 +673,11 @@ class TestValidateTriagePrerequisites:
     def test_nonexistence_reason_gets_corrected(self, evidence_repo):
         rp, _ = evidence_repo
         prereqs = [
-            {"symbol": "shared_helper", "portable": False,
-             "reason": "shared_helper does not exist on the target branch"},
+            {
+                "symbol": "shared_helper",
+                "portable": False,
+                "reason": "shared_helper does not exist on the target branch",
+            },
         ]
         corrections = validate_triage_prerequisites(rp, "target", prereqs)
         assert len(corrections) == 1
@@ -640,21 +687,28 @@ class TestValidateTriagePrerequisites:
     def test_signature_difference_reason_is_appended(self, evidence_repo):
         rp, _ = evidence_repo
         prereqs = [
-            {"symbol": "shared_helper", "portable": False,
-             "reason": "exists but the signature differs on target"},
+            {
+                "symbol": "shared_helper",
+                "portable": False,
+                "reason": "exists but the signature differs on target",
+            },
         ]
         corrections = validate_triage_prerequisites(rp, "target", prereqs)
         assert len(corrections) == 1
         assert corrections[0].correction.startswith(
-            "exists but the signature differs on target")
+            "exists but the signature differs on target"
+        )
         assert "pipeline note" in corrections[0].correction
         assert "word-grep" in corrections[0].correction
 
     def test_truly_missing_symbol_produces_no_correction(self, evidence_repo):
         rp, _ = evidence_repo
         prereqs = [
-            {"symbol": "totally_nonexistent_xyz", "portable": False,
-             "reason": "does not exist on target"},
+            {
+                "symbol": "totally_nonexistent_xyz",
+                "portable": False,
+                "reason": "does not exist on target",
+            },
         ]
         corrections = validate_triage_prerequisites(rp, "target", prereqs)
         assert corrections == []
@@ -662,8 +716,7 @@ class TestValidateTriagePrerequisites:
     def test_portable_true_prereqs_are_skipped(self, evidence_repo):
         rp, _ = evidence_repo
         prereqs = [
-            {"symbol": "shared_helper", "portable": True,
-             "reason": "does not exist"},
+            {"symbol": "shared_helper", "portable": True, "reason": "does not exist"},
         ]
         corrections = validate_triage_prerequisites(rp, "target", prereqs)
         assert corrections == []
@@ -672,6 +725,7 @@ class TestValidateTriagePrerequisites:
 # ---------------------------------------------------------------------------
 # Macro-generated token (## token-pasting) false-positive guard
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def macro_repo(tmp_path):
@@ -700,8 +754,7 @@ def macro_repo(tmp_path):
 
     # Upstream fix: adds another call site.
     (repo / "caller.c").write_text(
-        "void use(void) { helper_foo(); }\n"
-        "void use2(void) { helper_foo(); }\n"
+        "void use(void) { helper_foo(); }\n" "void use2(void) { helper_foo(); }\n"
     )
     _git(rp, "add", ".")
     _git(rp, "commit", "-m", "fix: second call site")
