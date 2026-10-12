@@ -420,9 +420,9 @@ uv run pre-commit run pyrefly --hook-stage manual --all-files
 
 ### Style notes
 
-- The repo targets **Python 3.12+** (RHEL 9/10 and Ubuntu 24.04 LTS ship 3.12
-  as the system `python3`). Multi-exception clauses use parentheses,
-  `except (A, B):`.
+- The repo targets **Python 3.12+** (RHEL 10 and Ubuntu 24.04 LTS ship 3.12 as
+  the system `python3`; RHEL 9 offers 3.12 via AppStream). Multi-exception
+  clauses use parentheses, `except (A, B):`.
 - Mass-reformat commits are listed in `.git-blame-ignore-revs` so `git blame`
   (and GitHub's blame UI) keeps pointing at the commit that changed the logic.
   Enable locally with `git config blame.ignoreRevsFile .git-blame-ignore-revs`.

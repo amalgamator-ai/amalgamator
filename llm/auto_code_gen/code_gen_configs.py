@@ -512,6 +512,28 @@ class CodeGenConfig(PipelineConfig):
             t.get_median_block_file() for t in traces_ordered
         ]
 
+        # The improvement plan ports optimizations from the source framework to
+        # the target framework (cross-trace analysis improves the target), so
+        # source is the faster framework and target the slower one. Expose the
+        # faster/slower views used by FixIssuePrompt and the investigate
+        # prompts; they must stay consistent with the parallel lists above.
+        self.faster_framework = source_trace.framework_name
+        self.slower_framework = target_trace.framework_name
+        self.faster_framework_test_dir = os.path.join(
+            source_trace.result_dir, "run_originals"
+        )
+        self.slower_framework_test_dir = os.path.join(
+            target_trace.result_dir, "run_originals"
+        )
+        self.faster_transformer_block_high_level_ops_file = (
+            source_trace.get_high_level_ops_file()
+        )
+        self.slower_transformer_block_high_level_ops_file = (
+            target_trace.get_high_level_ops_file()
+        )
+        self.faster_median_transformer_block_file = source_trace.get_median_block_file()
+        self.slower_median_transformer_block_file = target_trace.get_median_block_file()
+
         plan_path = resolve_output_file(cross_cfg.output_dir, CROSS_IMPROVEMENT_FILE)
         if not os.path.isfile(plan_path):
             raise FileNotFoundError(

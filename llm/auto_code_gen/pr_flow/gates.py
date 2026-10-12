@@ -1,5 +1,3 @@
-from typing import TypedDict
-
 """Pass/fail rules for a PR-review verification iteration.
 
 Three gates, all fail-closed:
@@ -13,6 +11,7 @@ Three gates, all fail-closed:
 
 import os as _os
 import sys as _sys
+from typing import TypedDict
 
 _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
 if _project_root not in _sys.path:

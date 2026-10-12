@@ -30,8 +30,15 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-# Compatibility exports for existing callers.
-from common.model_identity import is_ollama_model as _is_ollama_model
+# Compatibility exports for existing callers. The redundant alias on
+# is_claude_model marks it as an intentional re-export of the public surface
+# documented in this module's docstring (ruff F401 honors that convention).
+from common.model_identity import (
+    is_claude_model as is_claude_model,
+)
+from common.model_identity import (
+    is_ollama_model as _is_ollama_model,
+)
 
 if TYPE_CHECKING:
     from common.model_registry import ModelProfile
