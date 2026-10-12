@@ -11,6 +11,7 @@ Three gates, all fail-closed:
 
 import os as _os
 import sys as _sys
+from typing import TypedDict
 
 _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
 if _project_root not in _sys.path:
@@ -22,9 +23,8 @@ import os
 import re
 
 from llm.auto_code_gen.run_code_gen import (
-    PERF_GATE_DILUTION_FACTOR,
-    _check_performance_meets_target,
     _bench_throughput_pair,
+    _check_performance_meets_target,
 )
 
 REGRESSION_RETENTION = 0.8
@@ -62,6 +62,7 @@ def recorded_perf_pct(state, output_dir=None):
                 return float(value)
     if output_dir:
         from llm.auto_code_gen.code_gen_prompts import RUNTIME_DIR, RUNTIME_SUCCESS_FILE
+
         try:
             with open(os.path.join(output_dir, RUNTIME_DIR, RUNTIME_SUCCESS_FILE)) as f:
                 text = f.read()
@@ -90,16 +91,18 @@ def measure_throughput(iter_dir):
         return False, 0.0
 
     patched_tps, baseline_tps, _ = _bench_throughput_pair(patched, baseline)
-    if patched_tps is None:
+    if patched_tps is None or baseline_tps is None:
         return False, 0.0
     return True, (patched_tps - baseline_tps) / baseline_tps * 100
 
 
-def evaluate_perf(iter_dir, expected_pct, recorded_pct=None,
-                  retention=REGRESSION_RETENTION):
+def evaluate_perf(
+    iter_dir, expected_pct, recorded_pct=None, retention=REGRESSION_RETENTION
+):
     """Compare this iteration's bench ON against the shared bench OFF baseline."""
     _, actual_pct, floor_pct = _check_performance_meets_target(
-        iter_dir, None, expected_pct)
+        iter_dir, None, expected_pct
+    )
 
     # The first return of _check_performance_meets_target means "diluted plan
     # gate met", which is False both for an absent measurement and for a real
@@ -121,8 +124,7 @@ def evaluate_perf(iter_dir, expected_pct, recorded_pct=None,
     if not measured:
         reason = "bench result missing/unreadable or no shared throughput metric"
     elif not passed:
-        reason = "actual {:+.2f}% < required {:+.2f}% (gate {:+.2f}%, retention {:+.2f}%)".format(
-            actual_pct, required, floor_pct, regression_floor)
+        reason = f"actual {actual_pct:+.2f}% < required {required:+.2f}% (gate {floor_pct:+.2f}%, retention {regression_floor:+.2f}%)"
 
     return {
         "pass": passed,
@@ -134,6 +136,22 @@ def evaluate_perf(iter_dir, expected_pct, recorded_pct=None,
         "recorded_pct": recorded_pct,
         "reason": reason,
     }
+
+
+_LMResult = TypedDict(
+    "_LMResult",
+    {
+        "pass": bool,
+        "verdict": str,
+        "reason": str,
+        "flexible": float | None,
+        "strict": float | None,
+        "delta_flexible": float | None,
+        "delta_strict": float | None,
+        "delta_stderr": float | None,
+        "delta_tolerance": float,
+    },
+)
 
 
 def _lm_eval_stderr(iter_dir):
@@ -166,9 +184,12 @@ def _lm_eval_stderr(iter_dir):
                         continue
                     task = (data.get("results") or {}).get("gsm8k") or {}
                     se = task.get("exact_match_stderr,flexible-extract")
-                    if isinstance(se, (int, float)) and se > 0:
-                        if best is None or se > best:
-                            best = float(se)
+                    if (
+                        isinstance(se, (int, float))
+                        and se > 0
+                        and (best is None or se > best)
+                    ):
+                        best = float(se)
         if best is not None:
             stderrs.append(best)
     if not stderrs:
@@ -182,8 +203,17 @@ def _lm_eval_stderr(iter_dir):
 
 def evaluate_lm_eval(iter_dir):
     """Read lm_eval.txt as rewritten by _recompute_lm_eval_verdict()."""
-    result = {"pass": False, "verdict": "MISSING", "flexible": None, "strict": None,
-              "delta_flexible": None, "delta_strict": None, "reason": ""}
+    result: _LMResult = {
+        "pass": False,
+        "verdict": "MISSING",
+        "flexible": None,
+        "strict": None,
+        "delta_flexible": None,
+        "delta_strict": None,
+        "delta_stderr": None,
+        "delta_tolerance": 0.0,
+        "reason": "",
+    }
     path = os.path.join(iter_dir, "lm_eval.txt")
     if not os.path.isfile(path):
         result["reason"] = "lm_eval.txt not written (lm_eval stage did not run)"
@@ -196,11 +226,12 @@ def evaluate_lm_eval(iter_dir):
     if m:
         result["flexible"] = float(m.group(1))
         result["strict"] = float(m.group(2))
-    for name, pattern in (("flexible", r"Delta flexible-extract:\s*([-+][0-9.]+)"),
-                          ("strict", r"Delta strict-match:\s*([-+][0-9.]+)")):
-        found = re.search(pattern, text)
-        if found:
-            result["delta_{}".format(name)] = float(found.group(1))
+    flex_delta = re.search(r"Delta flexible-extract:\s*([-+][0-9.]+)", text)
+    if flex_delta:
+        result["delta_flexible"] = float(flex_delta.group(1))
+    strict_delta = re.search(r"Delta strict-match:\s*([-+][0-9.]+)", text)
+    if strict_delta:
+        result["delta_strict"] = float(strict_delta.group(1))
     verdict = re.search(r"Verdict:\s*(\w+)", text)
     if verdict:
         result["verdict"] = verdict.group(1).upper()
@@ -217,20 +248,27 @@ def evaluate_lm_eval(iter_dir):
     else:
         result["delta_tolerance"] = LM_EVAL_MIN_DELTA
 
-    deltas = [d for d in (result["delta_flexible"], result["delta_strict"])
-              if d is not None]
+    deltas = [
+        d for d in (result["delta_flexible"], result["delta_strict"]) if d is not None
+    ]
     if result["verdict"] != "PASS":
         result["reason"] = "verdict is {}".format(result["verdict"])
     elif not deltas:
         result["reason"] = "no accuracy delta available to compare"
     elif any(d < result["delta_tolerance"] for d in deltas):
         result["reason"] = "accuracy delta {} below tolerance {:.4f}{}".format(
-            deltas, result["delta_tolerance"],
-            " ({} sigma of the measured noise)".format(LM_EVAL_DELTA_SIGMAS)
-            if se is not None else "")
+            deltas,
+            result["delta_tolerance"],
+            (
+                f" ({LM_EVAL_DELTA_SIGMAS} sigma of the measured noise)"
+                if se is not None
+                else ""
+            ),
+        )
     elif result["flexible"] is not None and result["flexible"] < LM_EVAL_MIN_ABSOLUTE:
         result["reason"] = "absolute score {} below floor {}".format(
-            result["flexible"], LM_EVAL_MIN_ABSOLUTE)
+            result["flexible"], LM_EVAL_MIN_ABSOLUTE
+        )
     else:
         result["pass"] = True
     return result
@@ -245,9 +283,17 @@ def parse_comment_resolution(path):
         STATUS: fixed
         REPLY: <one-line answer to the reviewer>
     """
-    summary = {"total": 0, "fixed": 0, "explained": 0, "unresolved": 0,
-               "comment_ids": [], "unresolved_ids": [], "entries": [],
-               "pass": False, "reason": ""}
+    summary = {
+        "total": 0,
+        "fixed": 0,
+        "explained": 0,
+        "unresolved": 0,
+        "comment_ids": [],
+        "unresolved_ids": [],
+        "entries": [],
+        "pass": False,
+        "reason": "",
+    }
     if not os.path.isfile(path):
         summary["reason"] = "comment_resolution.md not written"
         return summary
@@ -259,9 +305,12 @@ def parse_comment_resolution(path):
     for line in lines:
         header = re.match(r"^##\s*Comment\s+(\d+)\s*(?::\s*(.*))?$", line.strip())
         if header:
-            current = {"comment_id": int(header.group(1)),
-                       "location": (header.group(2) or "").strip(),
-                       "status": "unresolved", "reply": ""}
+            current = {
+                "comment_id": int(header.group(1)),
+                "location": (header.group(2) or "").strip(),
+                "status": "unresolved",
+                "reply": "",
+            }
             summary["entries"].append(current)
             continue
         if current is None:
@@ -275,19 +324,24 @@ def parse_comment_resolution(path):
         if reply:
             current["reply"] = reply.group(1).strip()
 
+    status_counts: dict[str, int] = {}
     for entry in summary["entries"]:
-        summary[entry["status"]] = summary.get(entry["status"], 0) + 1
+        status_counts[entry["status"]] = status_counts.get(entry["status"], 0) + 1
         summary["comment_ids"].append(entry["comment_id"])
         if entry["status"] == "unresolved":
             summary["unresolved_ids"].append(entry["comment_id"])
 
     summary["total"] = len(summary["entries"])
+    summary["fixed"] = status_counts.get("fixed", 0)
+    summary["explained"] = status_counts.get("explained", 0)
+    summary["unresolved"] = status_counts.get("unresolved", 0)
     summary["pass"] = summary["total"] > 0 and summary["unresolved"] == 0
     if summary["total"] == 0:
         summary["reason"] = "no '## Comment <id>' blocks found"
     elif summary["unresolved"]:
         summary["reason"] = "{} unresolved comment(s): {}".format(
-            summary["unresolved"], summary["unresolved_ids"])
+            summary["unresolved"], summary["unresolved_ids"]
+        )
     return summary
 
 
@@ -318,8 +372,11 @@ def committed_fingerprint(repo_dir, files, commit="HEAD"):
 
     result = {}
     for rel in sorted(set(files)):
-        proc = subprocess.run(["git", "-C", repo_dir, "show", "{}:{}".format(commit, rel)],
-                              capture_output=True, text=True)
+        proc = subprocess.run(
+            ["git", "-C", repo_dir, "show", f"{commit}:{rel}"],
+            capture_output=True,
+            text=True,
+        )
         result[rel] = _sha256(proc.stdout) if proc.returncode == 0 else "MISSING"
     return result
 
@@ -333,8 +390,11 @@ def write_measured_content(iter_dir, pr_head_sha, base_commit, files, repo_dir):
     exactly what was measured -- commit identity cannot prove that.
     """
     fingerprint = worktree_fingerprint(repo_dir, files)
-    payload = {"pr_head_sha": pr_head_sha, "base_commit": base_commit,
-               "files": fingerprint}
+    payload = {
+        "pr_head_sha": pr_head_sha,
+        "base_commit": base_commit,
+        "files": fingerprint,
+    }
     write_verdict(os.path.join(iter_dir, MEASURED_CONTENT_FILE), payload)
     return payload
 
@@ -342,8 +402,9 @@ def write_measured_content(iter_dir, pr_head_sha, base_commit, files, repo_dir):
 def _read_measured_content(verdict_path):
     if not verdict_path:
         return None
-    path = os.path.join(os.path.dirname(os.path.abspath(verdict_path)),
-                        MEASURED_CONTENT_FILE)
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(verdict_path)), MEASURED_CONTENT_FILE
+    )
     try:
         with open(path) as f:
             return json.load(f)
@@ -362,13 +423,16 @@ def measured_content_matches_head(state, verdict_path):
         return None, "no measured_content.json beside the verdict"
     repo_dir = state["repo_dir"]
     now = committed_fingerprint(repo_dir, recorded["files"].keys())
-    differ = sorted(rel for rel, digest in recorded["files"].items()
-                    if now.get(rel) != digest)
+    differ = sorted(
+        rel for rel, digest in recorded["files"].items() if now.get(rel) != digest
+    )
     if differ:
         return False, "content differs from what was measured in: {}".format(
-            ", ".join(differ[:10]))
+            ", ".join(differ[:10])
+        )
     return True, "{} file(s) verified byte-for-byte against the measured tree".format(
-        len(recorded["files"]))
+        len(recorded["files"])
+    )
 
 
 def baseline_is_valid(state, baseline_kind, current_base_commit):
@@ -380,8 +444,7 @@ def baseline_is_valid(state, baseline_kind, current_base_commit):
     """
     if not current_base_commit:
         return False
-    recorded = (state.get("baselines") or {}).get(
-        "{}_base_commit".format(baseline_kind), "")
+    recorded = (state.get("baselines") or {}).get(f"{baseline_kind}_base_commit", "")
     return bool(recorded) and recorded == current_base_commit
 
 
@@ -416,12 +479,22 @@ def baseline_toggle_is_valid(state, baseline_kind, fingerprint):
     if fingerprint is None:
         return True
     recorded = (state.get("baselines") or {}).get(
-        "{}_toggle_fingerprint".format(baseline_kind), "")
+        f"{baseline_kind}_toggle_fingerprint", ""
+    )
     return recorded == fingerprint
 
 
-def build_verdict(round_no, iteration, pr_head_sha, perf, lm_eval, closure,
-                  nsys_run, notes=None, mode="review-round"):
+def build_verdict(
+    round_no,
+    iteration,
+    pr_head_sha,
+    perf,
+    lm_eval,
+    closure,
+    nsys_run,
+    notes=None,
+    mode="review-round",
+):
     overall = bool(perf["pass"] and lm_eval["pass"] and closure["pass"])
     return {
         "mode": mode,
@@ -430,9 +503,18 @@ def build_verdict(round_no, iteration, pr_head_sha, perf, lm_eval, closure,
         "pr_head_sha": pr_head_sha,
         "perf": perf,
         "lm_eval": lm_eval,
-        "closure": {key: closure[key] for key in
-                    ("pass", "total", "fixed", "explained", "unresolved",
-                     "unresolved_ids", "reason")},
+        "closure": {
+            key: closure[key]
+            for key in (
+                "pass",
+                "total",
+                "fixed",
+                "explained",
+                "unresolved",
+                "unresolved_ids",
+                "reason",
+            )
+        },
         "nsys_run": bool(nsys_run),
         "overall": "PASS" if overall else "FAIL",
         "notes": notes or [],
@@ -481,8 +563,12 @@ def latest_runtime_iteration(output_dir):
     from llm.auto_code_gen.code_gen_prompts import RUNTIME_DIR
 
     root = os.path.join(output_dir, RUNTIME_DIR)
-    found = [int(m.group(1)) for name in (os.listdir(root) if os.path.isdir(root) else [])
-             for m in [re.match(r"^V(\d+)$", name)] if m]
+    found = [
+        int(m.group(1))
+        for name in (os.listdir(root) if os.path.isdir(root) else [])
+        for m in [re.match(r"^V(\d+)$", name)]
+        if m
+    ]
     return max(found) if found else 0
 
 
@@ -501,7 +587,10 @@ def verify_rebase(base_commit, state=None):
         "base_commit": base_commit,
         "overall": "PENDING",
         "stale_baselines": invalid,
-        "reason": ("shared OFF baseline(s) {} were measured on the previous base and must be "
-                   "re-measured".format(", ".join(invalid)) if invalid
-                   else "baselines already valid for this base"),
+        "reason": (
+            "shared OFF baseline(s) {} were measured on the previous base and must be "
+            "re-measured".format(", ".join(invalid))
+            if invalid
+            else "baselines already valid for this base"
+        ),
     }

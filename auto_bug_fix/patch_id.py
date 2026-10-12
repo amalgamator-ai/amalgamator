@@ -1,4 +1,5 @@
 """Content-stable patch-id hashing and duplicate-patch detection for CVE backporting triage."""
+
 from __future__ import annotations
 
 from auto_bug_fix.git_tools import git_log_commits, git_patch_id

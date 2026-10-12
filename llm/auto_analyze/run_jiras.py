@@ -25,28 +25,27 @@ Output:
     jira_tasks_output.txt in the analysis results directory.
 """
 
-import sys as _sys
 import os as _os
+import sys as _sys
+
 _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
+import argparse
+import asyncio
 import os
 import sys
 import time
-import asyncio
-import argparse
 
-from common.utils import setup_logging
 from common.claude_utils import PipelineStep
+from common.iteration_utils import resolve_output_file
+from common.utils import setup_logging
 from llm.agents import agent_run
 from llm.auto_analyze.agent_support import add_agent_arguments, make_agent_config
-
-from llm.auto_analyze.prompts.jira_prompts import JiraTasksPrompt, JIRA_TASKS_FILE
-from llm.auto_analyze.configs.single_trace_config import PERF_ANALYSIS_SINGLE_FILE
 from llm.auto_analyze.configs.cross_trace_config import CROSS_COMPARE_FILE
-from common.iteration_utils import resolve_output_file
-
+from llm.auto_analyze.configs.single_trace_config import PERF_ANALYSIS_SINGLE_FILE
+from llm.auto_analyze.prompts.jira_prompts import JIRA_TASKS_FILE, JiraTasksPrompt
 
 if __name__ == "__main__":
     setup_logging("create_jiras")
@@ -72,6 +71,7 @@ if __name__ == "__main__":
 
     if args.single_config:
         from llm.auto_analyze.configs.single_trace_config import SingleTraceConfig
+
         config = SingleTraceConfig.from_json(args.single_config)
         results_dir = os.path.abspath(config.output_dir)
         mode = "single"
@@ -79,6 +79,7 @@ if __name__ == "__main__":
         analysis_file = resolve_output_file(results_dir, PERF_ANALYSIS_SINGLE_FILE)
     else:
         from llm.auto_analyze.configs.cross_trace_config import CrossTraceConfig
+
         config = CrossTraceConfig.from_json(args.cross_config)
         config.load_all_trace_params()
         results_dir = os.path.abspath(config.output_dir)

@@ -22,17 +22,17 @@ any model's context limit (100K, 262K, etc.):
   middle of the conversation while preserving the system prompt, original
   task, and recent tail.
 """
+
 from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from colorama import Fore, Style
 
@@ -41,7 +41,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-MAX_AGENT_ITERATIONS = 9999  # Effectively unlimited — agent stops when it has no more tool calls
+MAX_AGENT_ITERATIONS = (
+    9999  # Effectively unlimited — agent stops when it has no more tool calls
+)
 
 
 def _litellm_completion_with_streaming(stream: bool = True, **kwargs):
@@ -62,7 +64,7 @@ def _litellm_completion_with_streaming(stream: bool = True, **kwargs):
     try:
         response_stream = litellm.completion(stream=True, **kwargs)
         return litellm.stream_chunk_builder(
-            list(response_stream),
+            list(cast(Any, response_stream)),
             messages=kwargs.get("messages", []),
         )
     except Exception as e:
@@ -85,7 +87,19 @@ _CLAUDE_TO_LITELLM_TOOL = {
     "Bash": "bash",
 }
 
-ALL_TOOL_SCHEMAS = [
+
+class ToolFunction(TypedDict):
+    name: str
+    description: str
+    parameters: dict[str, object]
+
+
+class ToolSchema(TypedDict):
+    type: str
+    function: ToolFunction
+
+
+ALL_TOOL_SCHEMAS: list[ToolSchema] = [
     {
         "type": "function",
         "function": {
@@ -144,7 +158,7 @@ ALL_TOOL_SCHEMAS = [
 ]
 
 
-def _filter_tools(allowed_tools: list[str] | None) -> list[dict]:
+def _filter_tools(allowed_tools: list[str] | None) -> list[ToolSchema]:
     """Return tool schemas filtered by the config's allowed_tools list.
 
     Maps Claude SDK names (Read, Write, Bash) to LiteLLM names
@@ -160,6 +174,7 @@ def _filter_tools(allowed_tools: list[str] | None) -> list[dict]:
 
 # ── Context window management ────────────────────────────────────────────────
 
+
 def _resolve_context_length(model: str, configured: int | None) -> int:
     """Determine the context window size for the model.
 
@@ -169,6 +184,7 @@ def _resolve_context_length(model: str, configured: int | None) -> int:
         return configured
     try:
         import litellm
+
         info = litellm.get_model_info(model)
         max_input = info.get("max_input_tokens") or info.get("max_tokens")
         if max_input and max_input > 0:
@@ -191,6 +207,7 @@ def _estimate_tokens(model: str, messages: list[dict]) -> int:
     """Fast local token estimate via LiteLLM (tiktoken fallback)."""
     try:
         import litellm
+
         return litellm.token_counter(model=model, messages=messages)
     except Exception:
         total_chars = sum(len(m.get("content", "")) for m in messages)
@@ -229,7 +246,7 @@ def _compact_messages(
     context_length: int,
     keep_recent_tokens: int = KEEP_RECENT_TOKENS,
     timing: StepTiming | None = None,
-    profile: "ModelProfile | None" = None,
+    profile: ModelProfile | None = None,
 ) -> list[dict]:
     """Compress the message history to fit within the context budget.
 
@@ -262,8 +279,10 @@ def _compact_messages(
 
     tail_start = _find_pair_boundary(messages, tail_start)
     if tail_start <= 2:
-        log.warning("Context compaction: recent tail covers entire history, "
-                    "nothing to compact")
+        log.warning(
+            "Context compaction: recent tail covers entire history, "
+            "nothing to compact"
+        )
         return messages
 
     tail = messages[tail_start:]
@@ -272,28 +291,46 @@ def _compact_messages(
     if not stale:
         return messages
 
-    log.info("Context compaction: %d stale messages → summarize, "
-             "keeping %d recent tail messages", len(stale), len(tail))
+    log.info(
+        "Context compaction: %d stale messages → summarize, "
+        "keeping %d recent tail messages",
+        len(stale),
+        len(tail),
+    )
 
     # ── 3. Summarize the stale middle ────────────────────────────────────
-    summary_text = _summarize_stale(model, stale, context_length,
-                                    timing=timing, profile=profile)
+    summary_text = _summarize_stale(
+        model, stale, context_length, timing=timing, profile=profile
+    )
 
     if summary_text:
-        compacted = head + [
-            {"role": "user", "content": (
-                "[Context Compaction — earlier conversation summarized]\n\n"
-                + summary_text
-            )},
-        ] + tail
+        compacted = (
+            head
+            + [
+                {
+                    "role": "user",
+                    "content": (
+                        "[Context Compaction — earlier conversation summarized]\n\n"
+                        + summary_text
+                    ),
+                },
+            ]
+            + tail
+        )
         new_estimate = _estimate_tokens(model, compacted)
         if new_estimate < budget:
-            log.info("Context compaction: %d tokens after summarization "
-                     "(budget %d)", new_estimate, budget)
+            log.info(
+                "Context compaction: %d tokens after summarization " "(budget %d)",
+                new_estimate,
+                budget,
+            )
             return compacted
-        log.warning("Context compaction: summarized result still %d tokens "
-                    "(budget %d), falling back to sliding window",
-                    new_estimate, budget)
+        log.warning(
+            "Context compaction: summarized result still %d tokens "
+            "(budget %d), falling back to sliding window",
+            new_estimate,
+            budget,
+        )
 
     # ── 4. Fallback: sliding window ──────────────────────────────────────
     return _sliding_window_compact(model, messages, budget)
@@ -304,7 +341,7 @@ def _summarize_stale(
     stale: list[dict],
     context_length: int,
     timing: StepTiming | None = None,
-    profile: "ModelProfile | None" = None,
+    profile: ModelProfile | None = None,
 ) -> str | None:
     """Call the LLM to summarize stale conversation turns.
 
@@ -317,8 +354,7 @@ def _summarize_stale(
         content = msg.get("content", "")
         if role == "assistant" and msg.get("tool_calls"):
             calls = ", ".join(
-                tc["function"]["name"]
-                for tc in msg.get("tool_calls", [])
+                tc["function"]["name"] for tc in msg.get("tool_calls", [])
             )
             conversation_text.append(f"[assistant called: {calls}]")
         elif role == "tool":
@@ -352,8 +388,7 @@ def _summarize_stale(
         "FORMAT: Write structured bullet points per file/topic. "
         "Do NOT compress code details into vague prose — "
         "exact names and signatures matter for the agent to continue correctly.\n\n"
-        "CONVERSATION:\n"
-        + joined
+        "CONVERSATION:\n" + joined
     )
     try:
         from common.llm_client import build_request_kwargs
@@ -383,7 +418,9 @@ def _summarize_stale(
 
 
 def _sliding_window_compact(
-    model: str, messages: list[dict], budget: int,
+    model: str,
+    messages: list[dict],
+    budget: int,
 ) -> list[dict]:
     """Drop oldest tool_call/tool pairs until messages fit within budget.
 
@@ -398,9 +435,12 @@ def _sliding_window_compact(
         msg = result[idx]
         if msg["role"] == "assistant" and msg.get("tool_calls"):
             n_tools = len(msg["tool_calls"])
-            del result[idx:idx + 1 + n_tools]
-            log.debug("Sliding window: dropped assistant + %d tool results "
-                      "at idx %d", n_tools, idx)
+            del result[idx : idx + 1 + n_tools]
+            log.debug(
+                "Sliding window: dropped assistant + %d tool results " "at idx %d",
+                n_tools,
+                idx,
+            )
             continue
         if msg["role"] in ("assistant", "user") and not msg.get("tool_calls"):
             del result[idx]
@@ -408,12 +448,17 @@ def _sliding_window_compact(
         idx += 1
 
     est = _estimate_tokens(model, result)
-    log.info("Sliding window compaction: %d messages, %d tokens (budget %d)",
-             len(result), est, budget)
+    log.info(
+        "Sliding window compaction: %d messages, %d tokens (budget %d)",
+        len(result),
+        est,
+        budget,
+    )
     return result
 
 
 # ── Tool execution ───────────────────────────────────────────────────────────
+
 
 def _normalize_args(name: str, arguments: dict) -> dict:
     """Fix common malformed argument patterns from weaker models.
@@ -426,10 +471,14 @@ def _normalize_args(name: str, arguments: dict) -> dict:
     return arguments
 
 
-def _execute_tool(name: str, arguments: dict, cwd: str,
-                   bash_timeout: int = DEFAULT_BASH_TIMEOUT,
-                   read_cap: int = 50_000,
-                   bash_cap: int = 30_000) -> str:
+def _execute_tool(
+    name: str,
+    arguments: dict,
+    cwd: str,
+    bash_timeout: int = DEFAULT_BASH_TIMEOUT,
+    read_cap: int = 50_000,
+    bash_cap: int = 30_000,
+) -> str:
     """Execute a single tool call and return the result as a string."""
     arguments = _normalize_args(name, arguments)
     try:
@@ -438,8 +487,9 @@ def _execute_tool(name: str, arguments: dict, cwd: str,
         elif name == "write_file":
             return _tool_write_file(arguments["path"], arguments["content"], cwd)
         elif name == "bash":
-            return _tool_bash(arguments["command"], cwd, timeout=bash_timeout,
-                              max_chars=bash_cap)
+            return _tool_bash(
+                arguments["command"], cwd, timeout=bash_timeout, max_chars=bash_cap
+            )
         else:
             return f"Error: unknown tool '{name}'"
     except KeyError as e:
@@ -461,9 +511,8 @@ def _tool_read_file(path: str, cwd: str, max_chars: int = 50_000) -> str:
         content = resolved.read_text(errors="replace")
         if len(content) > max_chars:
             return (
-                content[:max_chars]
-                + f"\n\n[... truncated at {max_chars} chars — "
-                  f"file is {len(content)} chars total]"
+                content[:max_chars] + f"\n\n[... truncated at {max_chars} chars — "
+                f"file is {len(content)} chars total]"
             )
         return content
     except Exception as e:
@@ -480,8 +529,9 @@ def _tool_write_file(path: str, content: str, cwd: str) -> str:
         return f"Error writing {resolved}: {e}"
 
 
-def _tool_bash(command: str, cwd: str, timeout: int = DEFAULT_BASH_TIMEOUT,
-               max_chars: int = 30_000) -> str:
+def _tool_bash(
+    command: str, cwd: str, timeout: int = DEFAULT_BASH_TIMEOUT, max_chars: int = 30_000
+) -> str:
     try:
         result = subprocess.run(
             command,
@@ -515,6 +565,7 @@ def _tool_bash(command: str, cwd: str, timeout: int = DEFAULT_BASH_TIMEOUT,
 
 # ── Step timing record ───────────────────────────────────────────────────────
 
+
 @dataclass
 class StepTiming:
     name: str
@@ -525,6 +576,7 @@ class StepTiming:
 
 
 # ── Abstract base ────────────────────────────────────────────────────────────
+
 
 class AgentRunner(ABC):
     @abstractmethod
@@ -540,15 +592,18 @@ class AgentRunner(ABC):
 
 # ── Claude Agent SDK runner ──────────────────────────────────────────────────
 
+
 class ClaudeAgentRunner(AgentRunner):
     """Thin wrapper around the existing ``claude_run()``."""
 
-    async def run(self, config, steps, resume=False):
+    async def run(self, config, steps: list, resume: bool = False) -> list[dict]:
         from common.claude_utils import claude_run as _claude_run
-        return await _claude_run(config, steps, resume=resume)
+
+        return cast(list, await _claude_run(config, steps, resume=resume))
 
 
 # ── LiteLLM agent runner (generic tool-use loop) ────────────────────────────
+
 
 class LiteLLMAgentRunner(AgentRunner):
     """Agentic tool-use loop powered by LiteLLM function calling.
@@ -557,7 +612,7 @@ class LiteLLMAgentRunner(AgentRunner):
     calling: Qwen 2.5+, Llama 3.1+, Mistral, GPT-4o, Gemini, etc.
     """
 
-    async def run(self, config, steps, resume=False):
+    async def run(self, config, steps: list, resume: bool = False) -> list[dict]:
         from common.claude_utils import PipelineStep, print_claude_config
         from common.llm_client import _resolve_model
 
@@ -566,10 +621,12 @@ class LiteLLMAgentRunner(AgentRunner):
             if isinstance(s, PipelineStep):
                 wrapped_steps.append(s)
             else:
-                wrapped_steps.append(PipelineStep(
-                    name=f"step_{i + 1}",
-                    prompt=s,
-                ))
+                wrapped_steps.append(
+                    PipelineStep(
+                        name=f"step_{i + 1}",
+                        prompt=s,
+                    )
+                )
         steps = wrapped_steps
 
         print_claude_config(config)
@@ -592,8 +649,10 @@ class LiteLLMAgentRunner(AgentRunner):
                 continue
 
             start_time = time.time()
-            print(f"{Fore.GREEN} STEP {i + 1} ({step.name}): "
-                  f"SEND QUERY PROMPT:{Style.RESET_ALL}")
+            print(
+                f"{Fore.GREEN} STEP {i + 1} ({step.name}): "
+                f"SEND QUERY PROMPT:{Style.RESET_ALL}"
+            )
             print(f"{Fore.GREEN}{'=' * 44}{Style.RESET_ALL}")
             print(prompt)
             print(f"{Fore.CYAN}{'=' * 44}{Style.RESET_ALL}")
@@ -615,16 +674,20 @@ class LiteLLMAgentRunner(AgentRunner):
             mins, secs = divmod(int(duration), 60)
             hrs, mins = divmod(mins, 60)
             human = f"{hrs}h {mins}m {secs}s" if hrs else f"{mins}m {secs}s"
-            print(f"FINISHED STEP {i + 1} ({step.name}): "
-                  f"duration = {duration:.1f}s ({human})")
+            print(
+                f"FINISHED STEP {i + 1} ({step.name}): "
+                f"duration = {duration:.1f}s ({human})"
+            )
 
-            step_timings.append({
-                "name": timing.name,
-                "duration": timing.duration,
-                "input_tokens": timing.input_tokens,
-                "output_tokens": timing.output_tokens,
-                "cost_usd": timing.cost_usd,
-            })
+            step_timings.append(
+                {
+                    "name": timing.name,
+                    "duration": timing.duration,
+                    "input_tokens": timing.input_tokens,
+                    "output_tokens": timing.output_tokens,
+                    "cost_usd": timing.cost_usd,
+                }
+            )
 
         return step_timings
 
@@ -637,7 +700,7 @@ class LiteLLMAgentRunner(AgentRunner):
         allowed_tools: list[str] | None = None,
         bash_timeout: int | None = None,
         context_length: int | None = None,
-        profile: "ModelProfile | None" = None,
+        profile: ModelProfile | None = None,
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
 
@@ -649,21 +712,28 @@ class LiteLLMAgentRunner(AgentRunner):
         - Adaptive context window management (Tiers 1–3) to stay within
           the model's context limit.
         """
-        import litellm
         from common.llm_client import (
-            _strip_thinking, build_request_kwargs,
+            _strip_thinking,
+            build_request_kwargs,
         )
 
         # ── Resolve context budget ───────────────────────────────────────
         ctx_limit = _resolve_context_length(model, context_length)
         ctx_budget = int(ctx_limit * COMPACTION_THRESHOLD_PCT)
         read_cap, bash_cap = _tool_output_caps(ctx_limit)
-        log.info("Context window: limit=%d, budget=%d (%.0f%%), "
-                 "tool caps read=%d bash=%d",
-                 ctx_limit, ctx_budget, COMPACTION_THRESHOLD_PCT * 100,
-                 read_cap, bash_cap)
+        log.info(
+            "Context window: limit=%d, budget=%d (%.0f%%), "
+            "tool caps read=%d bash=%d",
+            ctx_limit,
+            ctx_budget,
+            COMPACTION_THRESHOLD_PCT * 100,
+            read_cap,
+            bash_cap,
+        )
 
-        extra_kwargs = build_request_kwargs(model, profile=profile, default_max_tokens=16384)
+        extra_kwargs = build_request_kwargs(
+            model, profile=profile, default_max_tokens=16384
+        )
 
         tools = _filter_tools(allowed_tools)
         allowed_names = {t["function"]["name"] for t in tools}
@@ -682,8 +752,12 @@ class LiteLLMAgentRunner(AgentRunner):
 
         while iteration < MAX_AGENT_ITERATIONS:
             iteration += 1
-            log.info("Agent iteration %d/%d (model=%s)",
-                     iteration, MAX_AGENT_ITERATIONS, model)
+            log.info(
+                "Agent iteration %d/%d (model=%s)",
+                iteration,
+                MAX_AGENT_ITERATIONS,
+                model,
+            )
 
             # ── Tier 2: pre-call budget check ────────────────────────────
             est_tokens = _estimate_tokens(model, messages)
@@ -691,21 +765,29 @@ class LiteLLMAgentRunner(AgentRunner):
                 compaction_count += 1
                 log.warning(
                     "Context compaction #%d triggered: %d tokens > budget %d "
-                    "(limit %d)", compaction_count, est_tokens, ctx_budget,
+                    "(limit %d)",
+                    compaction_count,
+                    est_tokens,
+                    ctx_budget,
                     ctx_limit,
                 )
-                print(f"{Fore.MAGENTA}[Context compaction #{compaction_count}: "
-                      f"{est_tokens:,} tokens → compacting to fit "
-                      f"{ctx_budget:,} budget]{Style.RESET_ALL}")
+                print(
+                    f"{Fore.MAGENTA}[Context compaction #{compaction_count}: "
+                    f"{est_tokens:,} tokens → compacting to fit "
+                    f"{ctx_budget:,} budget]{Style.RESET_ALL}"
+                )
                 messages = _compact_messages(
-                    model, messages, ctx_limit,
+                    model,
+                    messages,
+                    ctx_limit,
                     keep_recent_tokens=KEEP_RECENT_TOKENS,
                     timing=timing,
                     profile=profile,
                 )
                 est_tokens = _estimate_tokens(model, messages)
-                log.info("Post-compaction: %d tokens, %d messages",
-                         est_tokens, len(messages))
+                log.info(
+                    "Post-compaction: %d tokens, %d messages", est_tokens, len(messages)
+                )
 
             try:
                 response = _litellm_completion_with_streaming(
@@ -729,7 +811,10 @@ class LiteLLMAgentRunner(AgentRunner):
 
             content_text = _strip_thinking(message.content or "")
 
-            assistant_msg: dict = {"role": "assistant", "content": message.content or ""}
+            assistant_msg: dict = {
+                "role": "assistant",
+                "content": message.content or "",
+            }
             if message.tool_calls:
                 assistant_msg["tool_calls"] = [
                     {
@@ -758,28 +843,43 @@ class LiteLLMAgentRunner(AgentRunner):
             if tool_sig == last_tool_sig:
                 repeat_count += 1
                 if repeat_count >= 3:
-                    log.warning("Breaking loop: same tool call repeated %d times", repeat_count + 1)
-                    print(f"{Fore.RED}Agent loop detected — same tool call repeated "
-                          f"{repeat_count + 1} times, stopping.{Style.RESET_ALL}")
-                    messages.append({
-                        "role": "user",
-                        "content": "You have already called the same tool with the same "
-                                   "arguments multiple times. Please provide your final "
-                                   "answer now based on the information you have gathered.",
-                    })
+                    log.warning(
+                        "Breaking loop: same tool call repeated %d times",
+                        repeat_count + 1,
+                    )
+                    print(
+                        f"{Fore.RED}Agent loop detected — same tool call repeated "
+                        f"{repeat_count + 1} times, stopping.{Style.RESET_ALL}"
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "You have already called the same tool with the same "
+                            "arguments multiple times. Please provide your final "
+                            "answer now based on the information you have gathered.",
+                        }
+                    )
                     try:
                         final_kwargs = {**extra_kwargs, "max_tokens": 4096}
                         final = _litellm_completion_with_streaming(
-                            model=model, messages=messages,
-                            **final_kwargs,
+                            model=model,
+                            messages=messages,
+                            **final_kwargs,  # pyrefly: ignore [bad-argument-type] (dynamic LiteLLM option passthrough)
                         )
                         final_text = _strip_thinking(
-                            final.choices[0].message.content or "")
+                            final.choices[0].message.content or ""
+                        )
                         if final_text:
-                            print(f"{Fore.CYAN}Agent:{Style.RESET_ALL} {final_text[:500]}")
+                            print(
+                                f"{Fore.CYAN}Agent:{Style.RESET_ALL} {final_text[:500]}"
+                            )
                         if final.usage:
-                            timing.input_tokens += getattr(final.usage, "prompt_tokens", 0)
-                            timing.output_tokens += getattr(final.usage, "completion_tokens", 0)
+                            timing.input_tokens += getattr(
+                                final.usage, "prompt_tokens", 0
+                            )
+                            timing.output_tokens += getattr(
+                                final.usage, "completion_tokens", 0
+                            )
                     except Exception:
                         pass
                     break
@@ -795,27 +895,42 @@ class LiteLLMAgentRunner(AgentRunner):
                     fn_args = {}
 
                 if fn_name not in allowed_names:
-                    log.warning("Rejecting tool call %s — not in allowed_tools", fn_name)
+                    log.warning(
+                        "Rejecting tool call %s — not in allowed_tools", fn_name
+                    )
                     result = f"Error: tool '{fn_name}' is not allowed by the pipeline configuration."
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                    messages.append(
+                        {"role": "tool", "tool_call_id": tc.id, "content": result}
+                    )
                     continue
-                print(f"{Fore.YELLOW}  Tool: {fn_name}({_summarize_args(fn_args)}){Style.RESET_ALL}")
-                result = _execute_tool(fn_name, fn_args, cwd,
-                                       bash_timeout=effective_timeout,
-                                       read_cap=read_cap, bash_cap=bash_cap)
+                print(
+                    f"{Fore.YELLOW}  Tool: {fn_name}({_summarize_args(fn_args)}){Style.RESET_ALL}"
+                )
+                result = _execute_tool(
+                    fn_name,
+                    fn_args,
+                    cwd,
+                    bash_timeout=effective_timeout,
+                    read_cap=read_cap,
+                    bash_cap=bash_cap,
+                )
                 print(f"  Result: {result[:200]}{'...' if len(result) > 200 else ''}")
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    }
+                )
         else:
             log.warning("Agent hit max iterations (%d)", MAX_AGENT_ITERATIONS)
 
         if compaction_count:
-            log.info("Context compaction was triggered %d time(s) during "
-                     "this agent loop", compaction_count)
+            log.info(
+                "Context compaction was triggered %d time(s) during " "this agent loop",
+                compaction_count,
+            )
 
         return timing
 
@@ -850,7 +965,8 @@ async def agent_run(config, steps, resume=False):
     if profile:
         use_claude = profile.provider == "anthropic"
     else:
-        from common.llm_client import is_claude_model
+        from common.model_identity import is_claude_model
+
         use_claude = is_claude_model(config.model)
 
     if use_claude:

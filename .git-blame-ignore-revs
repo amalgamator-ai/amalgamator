@@ -1,0 +1,12 @@
+# Commits that only reformat or mechanically transform code, listed so
+# `git blame` keeps pointing at the commit that last changed the logic.
+#
+# Git >= 2.23 picks this up automatically when configured:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub's blame UI honors this file with no configuration.
+#
+# Tool-derived mechanical normalization (black, ruff safe autofixes,
+# whitespace hygiene) plus the tooling config that introduced it. No
+# behavior changes: every manual fix and latent-bug fix from the same
+# effort lives in the immediately following, fully blameable commit.
+dcf1ba127bf7e0d8798e91c9de474ed8eaedf906

@@ -1,7 +1,6 @@
 import json
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -26,8 +25,12 @@ def git_repo(tmp_path):
     repo.mkdir()
 
     def run(*args):
-        return subprocess.run(["git", "-C", str(repo)] + list(args),
-                              check=True, capture_output=True, text=True).stdout
+        return subprocess.run(
+            ["git", "-C", str(repo)] + list(args),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
 
     run("init", "-q", "-b", "perf/branch")
     run("config", "user.email", "dev@example.com")
@@ -55,7 +58,8 @@ def test_classifier_accepts_formatter_output(git_repo):
     _commit_change(repo, run, "mod.py", new, "fix(lint): import order")
     prev = run("rev-parse", "HEAD~1").strip()
     kind, detail = lint_only.classify_lint_only(
-        str(repo), prev, ["mod.py"], ruff_bin=RUFF_BIN)
+        str(repo), prev, ["mod.py"], ruff_bin=RUFF_BIN
+    )
     assert kind == "lint_only", detail
 
 
@@ -65,17 +69,20 @@ def test_classifier_accepts_ruff_format_join(git_repo):
     prev1 = run("rev-parse", "HEAD").strip()
     _commit_change(repo, run, "extra.py", WRAPPED_NEW, "fix(lint): ruff format")
     kind, detail = lint_only.classify_lint_only(
-        str(repo), prev1, ["extra.py"], ruff_bin=RUFF_BIN)
+        str(repo), prev1, ["extra.py"], ruff_bin=RUFF_BIN
+    )
     assert kind == "lint_only", detail
 
 
 def test_classifier_rejects_semantic_changes(git_repo):
     repo, run = git_repo
-    _commit_change(repo, run, "mod.py", "import sys\nimport os\n\nprint(42)\n",
-                   "tweak constant")
+    _commit_change(
+        repo, run, "mod.py", "import sys\nimport os\n\nprint(42)\n", "tweak constant"
+    )
     prev = run("rev-parse", "HEAD~1").strip()
     kind, detail = lint_only.classify_lint_only(
-        str(repo), prev, ["mod.py"], ruff_bin=RUFF_BIN)
+        str(repo), prev, ["mod.py"], ruff_bin=RUFF_BIN
+    )
     assert kind == "not_lint_only", detail
     assert "mod.py" in detail
 
@@ -87,7 +94,8 @@ def test_classifier_rejects_function_rename(git_repo):
     # Same shape, different function: format-identical but semantically new.
     _commit_change(repo, run, "extra.py", WRAPPED_BAD, "rename function")
     kind, _ = lint_only.classify_lint_only(
-        str(repo), prev1, ["extra.py"], ruff_bin=RUFF_BIN)
+        str(repo), prev1, ["extra.py"], ruff_bin=RUFF_BIN
+    )
     assert kind == "not_lint_only"
 
 
@@ -96,23 +104,39 @@ def test_classifier_reports_error_on_missing_ruff(git_repo):
     _commit_change(repo, run, "mod.py", "import sys\nimport os\n\nprint(2)\n")
     prev = run("rev-parse", "HEAD~1").strip()
     kind, detail = lint_only.classify_lint_only(
-        str(repo), prev, ["mod.py"], ruff_bin="/nonexistent/ruff")
+        str(repo), prev, ["mod.py"], ruff_bin="/nonexistent/ruff"
+    )
     assert kind == "error"
     assert "ruff" in detail.lower()
 
 
 def _write_source_verdict(output_dir, iteration, head, actual_pct=1.35):
     """A prior cluster-measured PASS verdict to carry from."""
-    iter_dir = output_dir / "runtime" / "V{}".format(iteration)
+    iter_dir = output_dir / "runtime" / f"V{iteration}"
     iter_dir.mkdir(parents=True)
     verdict = {
-        "mode": "review-round", "round": 1, "iteration": iteration,
-        "pr_head_sha": head, "overall": "PASS", "nsys_run": True,
-        "perf": {"pass": True, "measured": True, "actual_pct": actual_pct,
-                 "required_pct": 1.08},
+        "mode": "review-round",
+        "round": 1,
+        "iteration": iteration,
+        "pr_head_sha": head,
+        "overall": "PASS",
+        "nsys_run": True,
+        "perf": {
+            "pass": True,
+            "measured": True,
+            "actual_pct": actual_pct,
+            "required_pct": 1.08,
+        },
         "lm_eval": {"pass": True, "measured": True, "score": 0.955},
-        "closure": {"pass": True, "total": 26, "fixed": 26, "explained": 0,
-                    "unresolved": 0, "unresolved_ids": [], "reason": ""},
+        "closure": {
+            "pass": True,
+            "total": 26,
+            "fixed": 26,
+            "explained": 0,
+            "unresolved": 0,
+            "unresolved_ids": [],
+            "reason": "",
+        },
         "notes": [],
     }
     (iter_dir / "verify_verdict.json").write_text(json.dumps(verdict))
@@ -126,9 +150,12 @@ class _Config:
 
 def _state(repo, run, output_dir, base):
     return {
-        "repo_dir": str(repo), "output_dir": str(output_dir),
-        "base_commit": base, "head_sha": base,
-        "round": 1, "gates": [],
+        "repo_dir": str(repo),
+        "output_dir": str(output_dir),
+        "base_commit": base,
+        "head_sha": base,
+        "round": 1,
+        "gates": [],
     }
 
 
@@ -148,10 +175,13 @@ def test_record_creates_carried_v17(git_repo, tmp_path):
     head = run("rev-parse", "HEAD").strip()
 
     iteration = lint_only.record_lint_only_iteration(
-        _Config(output_dir), "pre-commit fixes", ruff_bin=RUFF_BIN)
+        _Config(output_dir), "pre-commit fixes", ruff_bin=RUFF_BIN
+    )
     assert iteration == 17
 
-    verdict = json.loads((output_dir / "runtime" / "V17" / "verify_verdict.json").read_text())
+    verdict = json.loads(
+        (output_dir / "runtime" / "V17" / "verify_verdict.json").read_text()
+    )
     assert verdict["overall"] == "PASS"
     assert verdict["lint_only"] is True
     assert verdict["perf"]["measured"] is False
@@ -161,7 +191,9 @@ def test_record_creates_carried_v17(git_repo, tmp_path):
     assert verdict["lint_only_proof"]["verified_against"] != head
 
     # Fresh fingerprint at the new HEAD covering the PR's files.
-    measured = json.loads((output_dir / "runtime" / "V17" / "measured_content.json").read_text())
+    measured = json.loads(
+        (output_dir / "runtime" / "V17" / "measured_content.json").read_text()
+    )
     assert measured["pr_head_sha"] == head
     assert "mod.py" in measured["files"]
 
@@ -181,11 +213,13 @@ def test_record_refuses_semantic_change(git_repo, tmp_path):
     state_path.write_text(json.dumps(_state(repo, run, output_dir, base)))
     _write_source_verdict(output_dir, 16, base)
 
-    _commit_change(repo, run, "mod.py", "import sys\nimport os\n\nprint(99)\n",
-                   "change behavior")
+    _commit_change(
+        repo, run, "mod.py", "import sys\nimport os\n\nprint(99)\n", "change behavior"
+    )
     with pytest.raises(SystemExit, match="not_lint_only"):
         lint_only.record_lint_only_iteration(
-            _Config(output_dir), "test", ruff_bin=RUFF_BIN)
+            _Config(output_dir), "test", ruff_bin=RUFF_BIN
+        )
     assert not (output_dir / "runtime" / "V17").exists()
 
 
@@ -202,7 +236,8 @@ def test_record_refuses_when_no_measured_verdict(git_repo, tmp_path):
     _commit_change(repo, run, "mod.py", new, "fix(lint): import order")
     with pytest.raises(SystemExit, match="cluster-measured"):
         lint_only.record_lint_only_iteration(
-            _Config(output_dir), "test", ruff_bin=RUFF_BIN)
+            _Config(output_dir), "test", ruff_bin=RUFF_BIN
+        )
 
 
 def test_record_refuses_non_python_diff(git_repo, tmp_path):
@@ -219,7 +254,8 @@ def test_record_refuses_non_python_diff(git_repo, tmp_path):
     run("commit", "-qm", "docs")
     with pytest.raises(SystemExit, match="not lint-only"):
         lint_only.record_lint_only_iteration(
-            _Config(output_dir), "test", ruff_bin=RUFF_BIN)
+            _Config(output_dir), "test", ruff_bin=RUFF_BIN
+        )
 
 
 def test_record_accepts_ci_wiring_addition(git_repo, tmp_path):
@@ -245,19 +281,24 @@ def test_record_accepts_ci_wiring_addition(git_repo, tmp_path):
     new = old.replace("import sys\nimport os\n", "import os\nimport sys\n")
     (repo / "mod.py").write_text(new)
     # Addition-only wiring edit: one new line referencing the existing test.
-    bk.write_text("- label: CPU job\n  commands:\n    - pytest -v -s mod.py\n"
-                  "    - pytest -v -s tests/test_mod.py\n")
+    bk.write_text(
+        "- label: CPU job\n  commands:\n    - pytest -v -s mod.py\n"
+        "    - pytest -v -s tests/test_mod.py\n"
+    )
     run("add", "mod.py", ".buildkite")
     run("commit", "-qm", "fix(lint): ruff + wire test")
-    head = run("rev-parse", "HEAD").strip()
+    run("rev-parse", "HEAD").strip()
 
-    iteration = lint_only.record_lint_only_iteration(
-        _Config(output_dir), "pre-commit fixes", ruff_bin=RUFF_BIN)
+    lint_only.record_lint_only_iteration(
+        _Config(output_dir), "pre-commit fixes", ruff_bin=RUFF_BIN
+    )
     verdict = json.loads(
-        (output_dir / "runtime" / "V17" / "verify_verdict.json").read_text())
+        (output_dir / "runtime" / "V17" / "verify_verdict.json").read_text()
+    )
     assert verdict["lint_only_proof"]["files"] == ["mod.py"]
     assert verdict["lint_only_proof"]["ci_wiring_files"] == [
-        ".buildkite/test_areas/models_basic.yaml"]
+        ".buildkite/test_areas/models_basic.yaml"
+    ]
 
 
 def test_record_refuses_ci_wiring_removal(git_repo, tmp_path):
@@ -271,8 +312,10 @@ def test_record_refuses_ci_wiring_removal(git_repo, tmp_path):
 
     bk = repo / ".buildkite" / "test_areas" / "models_basic.yaml"
     bk.parent.mkdir(parents=True)
-    bk.write_text("- label: CPU job\n  commands:\n    - pytest -v -s mod.py\n"
-                  "    - pytest -v -s missing_test.py\n")
+    bk.write_text(
+        "- label: CPU job\n  commands:\n    - pytest -v -s mod.py\n"
+        "    - pytest -v -s missing_test.py\n"
+    )
     run("add", ".buildkite")
     run("commit", "-qm", "add wiring")
     # Now remove a line -- not an addition-only edit.
@@ -281,7 +324,8 @@ def test_record_refuses_ci_wiring_removal(git_repo, tmp_path):
     run("commit", "-qm", "drop wiring")
     with pytest.raises(SystemExit, match="not lint-only"):
         lint_only.record_lint_only_iteration(
-            _Config(output_dir), "test", ruff_bin=RUFF_BIN)
+            _Config(output_dir), "test", ruff_bin=RUFF_BIN
+        )
 
 
 def test_record_refuses_ci_wiring_pointing_at_missing_test(git_repo, tmp_path):
@@ -296,13 +340,16 @@ def test_record_refuses_ci_wiring_pointing_at_missing_test(git_repo, tmp_path):
     bk = repo / ".buildkite" / "test_areas" / "models_basic.yaml"
     bk.parent.mkdir(parents=True)
     # References a test path that does not exist on disk.
-    bk.write_text("- label: CPU job\n  commands:\n"
-                  "    - pytest -v -s tests/nope/test_missing.py\n")
+    bk.write_text(
+        "- label: CPU job\n  commands:\n"
+        "    - pytest -v -s tests/nope/test_missing.py\n"
+    )
     run("add", ".buildkite")
     run("commit", "-qm", "wire missing test")
     with pytest.raises(SystemExit, match="not lint-only"):
         lint_only.record_lint_only_iteration(
-            _Config(output_dir), "test", ruff_bin=RUFF_BIN)
+            _Config(output_dir), "test", ruff_bin=RUFF_BIN
+        )
 
 
 def test_record_refuses_failing_source_verdict(git_repo, tmp_path):
@@ -322,4 +369,5 @@ def test_record_refuses_failing_source_verdict(git_repo, tmp_path):
     _commit_change(repo, run, "mod.py", new, "fix(lint): import order")
     with pytest.raises(SystemExit, match="not PASS"):
         lint_only.record_lint_only_iteration(
-            _Config(output_dir), "test", ruff_bin=RUFF_BIN)
+            _Config(output_dir), "test", ruff_bin=RUFF_BIN
+        )

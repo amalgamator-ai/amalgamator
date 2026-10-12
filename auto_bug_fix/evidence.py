@@ -21,6 +21,7 @@ post-resolution check receives facts instead of homework:
 Everything here reads only the upstream history and the target branch — never
 the eval ground truth or unrelated refs.
 """
+
 from __future__ import annotations
 
 import difflib
@@ -38,21 +39,140 @@ TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 
 # Language keywords and ubiquitous identifiers — not worth auditing, they
 # exist in every tree and only cost grep time.
-STOPWORDS = frozenset("""
-auto break case char const continue default do double else enum extern float
-for goto if inline int long register restrict return short signed sizeof
-static struct switch typedef union unsigned void volatile while bool true
-false NULL nullptr
-u8 u16 u32 u64 s8 s16 s32 s64 __u8 __u16 __u32 __u64 __s8 __s16 __s32 __s64
-size_t ssize_t uint8_t uint16_t uint32_t uint64_t int8_t int16_t int32_t
-int64_t uintptr_t intptr_t ptrdiff_t
-func var type range map chan interface package import defer select
-fallthrough nil err error string byte rune uint len cap new make append copy
-delete panic recover iota
-def class lambda None True False not and or elif except finally raise with
-yield assert async await pass del global nonlocal from try
-self this let function undefined null out ret val
-""".split())
+STOPWORDS = frozenset(
+    [
+        "auto",
+        "break",
+        "case",
+        "char",
+        "const",
+        "continue",
+        "default",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "extern",
+        "float",
+        "for",
+        "goto",
+        "if",
+        "inline",
+        "int",
+        "long",
+        "register",
+        "restrict",
+        "return",
+        "short",
+        "signed",
+        "sizeof",
+        "static",
+        "struct",
+        "switch",
+        "typedef",
+        "union",
+        "unsigned",
+        "void",
+        "volatile",
+        "while",
+        "bool",
+        "true",
+        "false",
+        "NULL",
+        "nullptr",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "s8",
+        "s16",
+        "s32",
+        "s64",
+        "__u8",
+        "__u16",
+        "__u32",
+        "__u64",
+        "__s8",
+        "__s16",
+        "__s32",
+        "__s64",
+        "size_t",
+        "ssize_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "uintptr_t",
+        "intptr_t",
+        "ptrdiff_t",
+        "func",
+        "var",
+        "type",
+        "range",
+        "map",
+        "chan",
+        "interface",
+        "package",
+        "import",
+        "defer",
+        "select",
+        "fallthrough",
+        "nil",
+        "err",
+        "error",
+        "string",
+        "byte",
+        "rune",
+        "uint",
+        "len",
+        "cap",
+        "new",
+        "make",
+        "append",
+        "copy",
+        "delete",
+        "panic",
+        "recover",
+        "iota",
+        "def",
+        "class",
+        "lambda",
+        "None",
+        "True",
+        "False",
+        "not",
+        "and",
+        "or",
+        "elif",
+        "except",
+        "finally",
+        "raise",
+        "with",
+        "yield",
+        "assert",
+        "async",
+        "await",
+        "pass",
+        "del",
+        "global",
+        "nonlocal",
+        "from",
+        "try",
+        "self",
+        "this",
+        "let",
+        "function",
+        "undefined",
+        "null",
+        "out",
+        "ret",
+        "val",
+    ]
+)
 
 MAX_AUDIT_TOKENS = 200
 MAX_FIX_DIFF_BYTES = 2_000_000
@@ -76,6 +196,7 @@ class TokenFinding:
 @dataclass
 class LineFinding:
     """A port line whose provenance violates three-way discipline."""
+
     file: str
     kind: str  # "removed_target_line" | "adapted_line" | "novel_line" | "ws_drift"
     line: str
@@ -121,7 +242,8 @@ def token_exists_on_ref(repo_path: str, ref: str, token: str) -> bool:
     """True if the token appears (word-bounded) anywhere in the ref's tree."""
     result = subprocess.run(
         ["git", "grep", "-q", "-w", "-F", "-e", token, ref],
-        cwd=repo_path, capture_output=True,
+        cwd=repo_path,
+        capture_output=True,
     )
     return result.returncode == 0
 
@@ -142,12 +264,27 @@ _MAX_HIERARCHY_DEPTH = 5
 
 
 def _find_parent_classes(
-    repo_path: str, ref: str, class_name: str,
+    repo_path: str,
+    ref: str,
+    class_name: str,
 ) -> list[str]:
     """Return the direct parent class names of *class_name* on *ref*."""
     result = subprocess.run(
-        ["git", "grep", "-n", "-E", rf"class\s+{re.escape(class_name)}\s*\(", ref, "--", "*.py"],
-        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        [
+            "git",
+            "grep",
+            "-n",
+            "-E",
+            rf"class\s+{re.escape(class_name)}\s*\(",
+            ref,
+            "--",
+            "*.py",
+        ],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     parents: list[str] = []
     for line in result.stdout.splitlines():
@@ -162,18 +299,47 @@ def _find_parent_classes(
 
 
 def _class_defines_method(
-    repo_path: str, ref: str, class_name: str, method: str,
+    repo_path: str,
+    ref: str,
+    class_name: str,
+    method: str,
 ) -> bool:
     """True if *class_name* directly defines *method* (``def method``) on *ref*."""
     result = subprocess.run(
-        ["git", "grep", "-q", "-E", rf"^\s+def\s+{re.escape(method)}\s*\(", ref, "--", "*.py"],
-        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        [
+            "git",
+            "grep",
+            "-q",
+            "-E",
+            rf"^\s+def\s+{re.escape(method)}\s*\(",
+            ref,
+            "--",
+            "*.py",
+        ],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode != 0:
         return False
     result = subprocess.run(
-        ["git", "grep", "-l", "-E", rf"^\s+def\s+{re.escape(method)}\s*\(", ref, "--", "*.py"],
-        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        [
+            "git",
+            "grep",
+            "-l",
+            "-E",
+            rf"^\s+def\s+{re.escape(method)}\s*\(",
+            ref,
+            "--",
+            "*.py",
+        ],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     for fpath in result.stdout.strip().splitlines():
         fpath = fpath.split(":", 1)[-1] if ":" in fpath else fpath
@@ -193,7 +359,10 @@ def _class_defines_method(
 
 
 def method_exists_on_class_hierarchy(
-    repo_path: str, ref: str, class_name: str, method: str,
+    repo_path: str,
+    ref: str,
+    class_name: str,
+    method: str,
 ) -> bool:
     """True if *method* is available on *class_name* via direct definition or inheritance."""
     visited: set[str] = set()
@@ -214,6 +383,7 @@ def method_exists_on_class_hierarchy(
 @dataclass
 class TriageCorrection:
     """A factual correction to a triage prerequisite claim."""
+
     symbol: str
     original_reason: str
     correction: str
@@ -289,53 +459,64 @@ def validate_triage_prerequisites(
             class_name, method = parsed
 
             if method_exists_on_class_hierarchy(
-                repo_path, target_ref, class_name, method,
+                repo_path,
+                target_ref,
+                class_name,
+                method,
             ):
                 if claims_nonexistence:
-                    corrections.append(TriageCorrection(
-                        symbol=symbol,
-                        original_reason=reason,
-                        correction=(
-                            f"{class_name}.{method} DOES exist on the target "
-                            f"branch (via inheritance). The resolution agent "
-                            f"should keep {class_name} in any isinstance/type "
-                            f"checks."
-                        ),
-                    ))
+                    corrections.append(
+                        TriageCorrection(
+                            symbol=symbol,
+                            original_reason=reason,
+                            correction=(
+                                f"{class_name}.{method} DOES exist on the target "
+                                f"branch (via inheritance). The resolution agent "
+                                f"should keep {class_name} in any isinstance/type "
+                                f"checks."
+                            ),
+                        )
+                    )
                 else:
-                    corrections.append(TriageCorrection(
-                        symbol=symbol,
-                        original_reason=reason,
-                        correction=(
-                            f"{reason} [pipeline note: `{class_name}.{method}`"
-                            f" does word-grep on the target tree — verify this"
-                            f" claim before adapting]"
-                        ),
-                    ))
+                    corrections.append(
+                        TriageCorrection(
+                            symbol=symbol,
+                            original_reason=reason,
+                            correction=(
+                                f"{reason} [pipeline note: `{class_name}.{method}`"
+                                f" does word-grep on the target tree — verify this"
+                                f" claim before adapting]"
+                            ),
+                        )
+                    )
         else:
             bare = _parse_bare_symbol(symbol)
             if not bare:
                 continue
             if token_exists_on_ref(repo_path, target_ref, bare):
                 if claims_nonexistence:
-                    corrections.append(TriageCorrection(
-                        symbol=symbol,
-                        original_reason=reason,
-                        correction=(
-                            f"{bare} exists on the target branch. The triage "
-                            f"claim that it is missing is incorrect."
-                        ),
-                    ))
+                    corrections.append(
+                        TriageCorrection(
+                            symbol=symbol,
+                            original_reason=reason,
+                            correction=(
+                                f"{bare} exists on the target branch. The triage "
+                                f"claim that it is missing is incorrect."
+                            ),
+                        )
+                    )
                 else:
-                    corrections.append(TriageCorrection(
-                        symbol=symbol,
-                        original_reason=reason,
-                        correction=(
-                            f"{reason} [pipeline note: `{bare}` does word-grep"
-                            f" on the target tree — verify this claim before"
-                            f" adapting]"
-                        ),
-                    ))
+                    corrections.append(
+                        TriageCorrection(
+                            symbol=symbol,
+                            original_reason=reason,
+                            correction=(
+                                f"{reason} [pipeline note: `{bare}` does word-grep"
+                                f" on the target tree — verify this claim before"
+                                f" adapting]"
+                            ),
+                        )
+                    )
 
     return corrections
 
@@ -344,7 +525,9 @@ def _fix_added_tokens(repo_path: str, fix_commit: str) -> set[str]:
     """Tokens introduced by the upstream fix commit's own added lines."""
     result = _run_git(repo_path, ["diff", f"{fix_commit}^1..{fix_commit}"])
     diff_text = result.stdout[:MAX_FIX_DIFF_BYTES]
-    added = [l for lines in added_lines_by_file(diff_text).values() for l in lines]
+    added = [
+        line for lines in added_lines_by_file(diff_text).values() for line in lines
+    ]
     tokens: set[str] = set()
     for line in added:
         tokens.update(TOKEN_RE.findall(line))
@@ -352,7 +535,9 @@ def _fix_added_tokens(repo_path: str, fix_commit: str) -> set[str]:
 
 
 def _check_token_paste_hint(
-    repo_path: str, ref: str, token: str,
+    repo_path: str,
+    ref: str,
+    token: str,
 ) -> str | None:
     """Check if *token* could be generated on *ref* via ``##`` token-pasting.
 
@@ -371,14 +556,22 @@ def _check_token_paste_hint(
         # e.g.  #define MAKE(name) void helper_##name(void)
         # matches: prefix_## (the macro builds prefix_ then pastes)
         result = subprocess.run(
-            ["git", "grep", "-n", "-E",
-             rf"{re.escape(prefix)}_\s*##"
-             rf"|##\s*{re.escape(tail)}"
-             rf"|TRACE_EVENT\(\s*{re.escape(tail)}"
-             rf"|DEFINE_\w+\(\s*{re.escape(tail)}",
-             ref],
-            cwd=repo_path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
+            [
+                "git",
+                "grep",
+                "-n",
+                "-E",
+                rf"{re.escape(prefix)}_\s*##"
+                rf"|##\s*{re.escape(tail)}"
+                rf"|TRACE_EVENT\(\s*{re.escape(tail)}"
+                rf"|DEFINE_\w+\(\s*{re.escape(tail)}",
+                ref,
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().splitlines()[0]
@@ -431,10 +624,14 @@ def audit_added_tokens(
         )
         if in_parent:
             hint = _check_token_paste_hint(repo_path, target_ref, token)
-            findings.append(TokenFinding(
-                token, "upstream_only", token_files[token],
-                generated_hint=hint,
-            ))
+            findings.append(
+                TokenFinding(
+                    token,
+                    "upstream_only",
+                    token_files[token],
+                    generated_hint=hint,
+                )
+            )
         elif token not in fix_added:
             findings.append(TokenFinding(token, "unknown", token_files[token]))
     return findings
@@ -464,9 +661,9 @@ def mine_substitutions(
         removed: list[str] = []
         added: list[str] = []
 
-        def flush() -> None:
+        def flush(removed=removed, added=added) -> None:  # noqa: B023
             if removed and len(removed) == len(added):
-                for old_line, new_line in zip(removed, added):
+                for old_line, new_line in zip(removed, added, strict=False):
                     pair = _single_token_diff(old_line, new_line)
                     if pair:
                         pair_counts[pair] += 1
@@ -501,7 +698,7 @@ def _single_token_diff(old_line: str, new_line: str) -> tuple[str, str] | None:
     new_tokens = TOKEN_RE.findall(new_line)
     if len(old_tokens) != len(new_tokens) or not old_tokens:
         return None
-    diffs = [(a, b) for a, b in zip(old_tokens, new_tokens) if a != b]
+    diffs = [(a, b) for a, b in zip(old_tokens, new_tokens, strict=False) if a != b]
     if len(diffs) != 1:
         return None
     old, new = diffs[0]
@@ -656,7 +853,11 @@ def target_config_state(repo_path: str, ref: str, symbol: str) -> bool | None:
             enabled += 1
         # "=m" is deliberately unknown: the plain preprocessor macro is not
         # defined for modules, so #ifdef/#ifndef reasoning would be wrong.
-    state = True if (enabled and not disabled) else False if (disabled and not enabled) else None
+    state = (
+        True
+        if (enabled and not disabled)
+        else False if (disabled and not enabled) else None
+    )
     _config_state_cache[skey] = state
     return state
 
@@ -740,12 +941,12 @@ def audit_line_provenance(
 
         pre = _git_blob(repo_path, base_head, f) or ""
         pre_lines = set(pre.split("\n"))
-        pre_norm = {normalize_ws(l) for l in pre_lines}
+        pre_norm = {normalize_ws(line) for line in pre_lines}
 
         cur = (current_texts or {}).get(f)
         guards = conditional_guards(cur) if cur else []
 
-        def dead_at(lineno: int) -> str | None:
+        def dead_at(lineno: int, guards=guards) -> str | None:  # noqa: B023
             if guards and 0 < lineno <= len(guards):
                 return dead_config_symbol(guards[lineno - 1], state_lookup)
             return None
@@ -755,17 +956,22 @@ def audit_line_provenance(
         # lone seven-equals line counts only alongside one of those, since
         # by itself it is legitimate content (doc underlines).
         added_markers = [
-            (lineno, a) for lineno, a in changes["added"]
+            (lineno, a)
+            for lineno, a in changes["added"]
             if _MARKER_LINE_RE.match(a.strip())
         ]
         has_unambiguous = any(not a.strip().startswith("=") for _, a in added_markers)
         for _lineno, a in added_markers:
             if a.strip().startswith("=") and not has_unambiguous:
                 continue
-            marker_findings.append(LineFinding(
-                f, "conflict_marker", a,
-                detail="a leftover conflict marker was committed",
-            ))
+            marker_findings.append(
+                LineFinding(
+                    f,
+                    "conflict_marker",
+                    a,
+                    detail="a leftover conflict marker was committed",
+                )
+            )
 
         for lineno, a in changes["added"]:
             if len(findings) >= MAX_LINE_FINDINGS:
@@ -778,26 +984,38 @@ def audit_line_provenance(
             if a in pre_lines:
                 continue  # the target's own bytes — three-way OK
             if key in up_added_norm or key in pre_norm:
-                findings.append(LineFinding(f, "ws_drift", a, dead_config=dead_at(lineno)))
+                findings.append(
+                    LineFinding(f, "ws_drift", a, dead_config=dead_at(lineno))
+                )
                 continue
             a_tokens = TOKEN_RE.findall(a)
             best, best_line = 0.0, ""
-            for text, tokens in zip(up_added, up_tokens):
+            for text, tokens in zip(up_added, up_tokens, strict=False):
                 if not tokens:
                     continue
-                ratio = difflib.SequenceMatcher(None, a_tokens, tokens, autojunk=False).ratio()
+                ratio = difflib.SequenceMatcher(
+                    None, a_tokens, tokens, autojunk=False
+                ).ratio()
                 if ratio > best:
                     best, best_line = ratio, text
             if best >= 0.5:
-                findings.append(LineFinding(
-                    f, "adapted_line", a, detail=best_line.strip(),
-                    dead_config=dead_at(lineno),
-                ))
+                findings.append(
+                    LineFinding(
+                        f,
+                        "adapted_line",
+                        a,
+                        detail=best_line.strip(),
+                        dead_config=dead_at(lineno),
+                    )
+                )
             else:
-                findings.append(LineFinding(f, "novel_line", a, dead_config=dead_at(lineno)))
+                findings.append(
+                    LineFinding(f, "novel_line", a, dead_config=dead_at(lineno))
+                )
 
         port_removed_counts = Counter(
-            normalize_ws(t) for t in changes["removed"]
+            normalize_ws(t)
+            for t in changes["removed"]
             if len(normalize_ws(t)) >= _TRIVIAL_KEY_LEN
             and not _MARKER_LINE_RE.match(t.strip())
         )
@@ -806,12 +1024,15 @@ def audit_line_provenance(
                 break
             excess = n - up_removed_counts.get(key, 0)
             if excess > 0:
-                sample = next(
-                    t for t in changes["removed"] if normalize_ws(t) == key)
-                findings.append(LineFinding(
-                    f, "removed_target_line", sample,
-                    detail=f"removed {n}x, the fix removes {up_removed_counts.get(key, 0)}x",
-                ))
+                sample = next(t for t in changes["removed"] if normalize_ws(t) == key)
+                findings.append(
+                    LineFinding(
+                        f,
+                        "removed_target_line",
+                        sample,
+                        detail=f"removed {n}x, the fix removes {up_removed_counts.get(key, 0)}x",
+                    )
+                )
 
         # Stale lines: the fix REPLACES a line the target also had, but the
         # port still carries the old bytes (an incompletely applied hunk —
@@ -823,8 +1044,9 @@ def audit_line_provenance(
             for r_line, r_n in Counter(upc["removed"]).items():
                 if len(findings) >= MAX_LINE_FINDINGS:
                     break
-                if (len(normalize_ws(r_line)) < _TRIVIAL_KEY_LEN
-                        or _MARKER_LINE_RE.match(r_line.strip())):
+                if len(
+                    normalize_ws(r_line)
+                ) < _TRIVIAL_KEY_LEN or _MARKER_LINE_RE.match(r_line.strip()):
                     continue
                 had = pre_counts.get(r_line, 0)
                 if not had:
@@ -833,10 +1055,14 @@ def audit_line_provenance(
                 # a faithful port legitimately still carries them.
                 expected = max(0, had - r_n) + up_readd_counts.get(r_line, 0)
                 if cur_counts.get(r_line, 0) > expected:
-                    findings.append(LineFinding(
-                        f, "stale_line", r_line,
-                        detail=f"the fix removes this line {r_n}x; the port still carries it",
-                    ))
+                    findings.append(
+                        LineFinding(
+                            f,
+                            "stale_line",
+                            r_line,
+                            detail=f"the fix removes this line {r_n}x; the port still carries it",
+                        )
+                    )
 
     # Marker findings take priority over ordinary findings for the cap.
     return (marker_findings + findings)[:MAX_LINE_FINDINGS]
@@ -863,9 +1089,7 @@ def find_pure_rename_restorations(
     the file are skipped: restoring would manufacture a duplicate statement.
     Returns {file: [(lineno, current_line, fix_line)]}.
     """
-    fix_diff = _run_git(
-        repo_path, ["diff", f"{fix_commit}^1..{fix_commit}"]
-    ).stdout
+    fix_diff = _run_git(repo_path, ["diff", f"{fix_commit}^1..{fix_commit}"]).stdout
     if len(fix_diff) > MAX_FIX_DIFF_BYTES:
         return {}
     fix_changes = port_line_changes(fix_diff)
@@ -884,17 +1108,19 @@ def find_pure_rename_restorations(
         for lineno, a in changes["added"]:
             if total >= MAX_RESTORATIONS:
                 break
-            if (a in up_added_set
-                    or len(normalize_ws(a)) < _TRIVIAL_KEY_LEN
-                    or _MARKER_LINE_RE.match(a.strip())):
+            if (
+                a in up_added_set
+                or len(normalize_ws(a)) < _TRIVIAL_KEY_LEN
+                or _MARKER_LINE_RE.match(a.strip())
+            ):
                 continue
             a_tokens = TOKEN_RE.findall(a)
-            for fix_line, f_tokens in zip(up_added, up_tokens):
+            for fix_line, f_tokens in zip(up_added, up_tokens, strict=False):
                 if len(f_tokens) != len(a_tokens) or f_tokens == a_tokens:
                     continue
                 mapping: dict[str, str] = {}
                 consistent = True
-                for at, ft in zip(a_tokens, f_tokens):
+                for at, ft in zip(a_tokens, f_tokens, strict=False):
                     if at == ft:
                         continue
                     if mapping.setdefault(at, ft) != ft:
@@ -928,9 +1154,7 @@ def annotate_dead_config(
     state_lookup,
 ) -> None:
     """Mark token findings whose added occurrences all sit in compiled-out code."""
-    guards_cache = {
-        f: conditional_guards(text) for f, text in current_texts.items()
-    }
+    guards_cache = {f: conditional_guards(text) for f, text in current_texts.items()}
     for finding in token_findings:
         if finding.status != "upstream_only":
             # An unknown/hallucinated token in a dead region is still wrong;
@@ -970,13 +1194,15 @@ def scan_followup_fixes(
     result = _run_git(
         repo_path,
         [
-            "log", "--format=%h %s", f"--grep=Fixes: {full_sha[:7]}",
+            "log",
+            "--format=%h %s",
+            f"--grep=Fixes: {full_sha[:7]}",
             f"{full_sha}..{source_ref}",
         ],
     )
     if not result.success:
         return []
-    return [l for l in result.stdout.splitlines() if l.strip()][:limit]
+    return [line for line in result.stdout.splitlines() if line.strip()][:limit]
 
 
 def run_file_checks(
@@ -1000,8 +1226,13 @@ def run_file_checks(
         cmd = command_template.replace("{file}", shlex.quote(abs_path))
         try:
             result = subprocess.run(
-                cmd, shell=True, cwd=repo_path,
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cmd,
+                shell=True,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout or 120,
             )
         except subprocess.TimeoutExpired:
@@ -1035,7 +1266,9 @@ def render_evidence(
         sections.append("\n".join(lines))
 
     if findings:
-        lines = ["### Token audit (added identifiers checked against the target branch)"]
+        lines = [
+            "### Token audit (added identifiers checked against the target branch)"
+        ]
         for f in findings:
             where = ", ".join(sorted(set(f.files))[:3])
             if f.dead_config:
@@ -1071,7 +1304,9 @@ def render_evidence(
         sections.append("\n".join(lines))
 
     if line_findings:
-        lines = ["### Three-way discipline check (port lines vs the upstream fix and the target)"]
+        lines = [
+            "### Three-way discipline check (port lines vs the upstream fix and the target)"
+        ]
         for lf in line_findings:
             text = lf.line.strip()[:100]
             if lf.kind == "removed_target_line":
@@ -1084,7 +1319,8 @@ def render_evidence(
                 note = (
                     f" This line is compiled out on the target (`{lf.dead_config}` "
                     f"disabled) — dead code MUST keep the fix's bytes."
-                    if lf.dead_config else ""
+                    if lf.dead_config
+                    else ""
                 )
                 lines.append(
                     f"- {lf.file}: `{text}` diverges from the fix's `{lf.detail[:100]}` — "
@@ -1116,7 +1352,9 @@ def render_evidence(
         sections.append("\n".join(lines))
 
     if auto_restored:
-        lines = ["### Fix lines auto-restored (pure renames reverted to the fix's bytes)"]
+        lines = [
+            "### Fix lines auto-restored (pure renames reverted to the fix's bytes)"
+        ]
         lines += [f"- {f}: {n} lines" for f, n in sorted(auto_restored.items())]
         lines.append(
             "These ported lines had been token-renamed away from the fix; the fix's "
@@ -1129,14 +1367,21 @@ def render_evidence(
         sections.append("\n".join(lines))
 
     if applied_substitutions:
-        lines = ["### Substitutions auto-applied (mined from the upstream/target file delta)"]
+        lines = [
+            "### Substitutions auto-applied (mined from the upstream/target file delta)"
+        ]
         lines += [f"- `{o}` -> `{n}`" for o, n in sorted(applied_substitutions.items())]
         lines.append("Verify these landed correctly; they were applied mechanically.")
         sections.append("\n".join(lines))
 
     if advisory_substitutions:
-        lines = ["### Downstream rename patterns (advisory — both forms exist on target)"]
-        lines += [f"- upstream `{o}` is usually `{n}` on the target" for o, n in sorted(advisory_substitutions.items())]
+        lines = [
+            "### Downstream rename patterns (advisory — both forms exist on target)"
+        ]
+        lines += [
+            f"- upstream `{o}` is usually `{n}` on the target"
+            for o, n in sorted(advisory_substitutions.items())
+        ]
         sections.append("\n".join(lines))
 
     if followup_fixes:

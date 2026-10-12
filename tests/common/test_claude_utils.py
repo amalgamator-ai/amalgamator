@@ -1,18 +1,19 @@
 """Tests for the shared Claude Agent SDK glue and its per-package personas."""
+
 import asyncio
+
 import pytest
 
+from auto_bug_fix.claude_utils import BUG_FIX_SYSTEM_PROMPT, BugFixClaudeConfig
 from common.claude_utils import (
+    DEFAULT_SYSTEM_PROMPT,
+    PROFILING_SYSTEM_PROMPT,
     ClaudeConfig,
     PipelineStep,
     ProfilingClaudeConfig,
-    DEFAULT_SYSTEM_PROMPT,
-    PROFILING_SYSTEM_PROMPT,
     claude_run,
 )
-from auto_bug_fix.claude_utils import BugFixClaudeConfig, BUG_FIX_SYSTEM_PROMPT
 from llm.auto_code_gen.claude_utils import CodeGenClaudeConfig
-
 
 BASE_KWARGS = dict(
     model="claude-opus-4-6",
@@ -25,20 +26,28 @@ BASE_KWARGS = dict(
 class TestPersonas:
     """Each package extends the common config with its own system prompt."""
 
-    @pytest.mark.parametrize("cls,expected", [
-        (ClaudeConfig, DEFAULT_SYSTEM_PROMPT),
-        (ProfilingClaudeConfig, PROFILING_SYSTEM_PROMPT),
-        (BugFixClaudeConfig, BUG_FIX_SYSTEM_PROMPT),
-        # auto_code_gen is pinned to the profiling persona it ran with before
-        # the persona was configurable -- see CodeGenClaudeConfig's docstring.
-        (CodeGenClaudeConfig, PROFILING_SYSTEM_PROMPT),
-    ])
+    @pytest.mark.parametrize(
+        "cls,expected",
+        [
+            (ClaudeConfig, DEFAULT_SYSTEM_PROMPT),
+            (ProfilingClaudeConfig, PROFILING_SYSTEM_PROMPT),
+            (BugFixClaudeConfig, BUG_FIX_SYSTEM_PROMPT),
+            # auto_code_gen is pinned to the profiling persona it ran with before
+            # the persona was configurable -- see CodeGenClaudeConfig's docstring.
+            (CodeGenClaudeConfig, PROFILING_SYSTEM_PROMPT),
+        ],
+    )
     def test_default_system_prompt(self, cls, expected):
         assert cls(**BASE_KWARGS).system_prompt == expected
 
-    @pytest.mark.parametrize("cls", [
-        ProfilingClaudeConfig, BugFixClaudeConfig, CodeGenClaudeConfig,
-    ])
+    @pytest.mark.parametrize(
+        "cls",
+        [
+            ProfilingClaudeConfig,
+            BugFixClaudeConfig,
+            CodeGenClaudeConfig,
+        ],
+    )
     def test_specializations_are_claude_configs(self, cls):
         assert issubclass(cls, ClaudeConfig)
         assert isinstance(cls(**BASE_KWARGS), ClaudeConfig)
@@ -48,8 +57,10 @@ class TestPersonas:
         assert cfg.system_prompt == "custom"
 
     def test_personas_are_distinct(self):
-        assert len({DEFAULT_SYSTEM_PROMPT, PROFILING_SYSTEM_PROMPT,
-                    BUG_FIX_SYSTEM_PROMPT}) == 3
+        assert (
+            len({DEFAULT_SYSTEM_PROMPT, PROFILING_SYSTEM_PROMPT, BUG_FIX_SYSTEM_PROMPT})
+            == 3
+        )
 
     def test_specializations_inherit_common_defaults(self):
         """Subclassing must not disturb the fields it does not override."""
@@ -72,15 +83,21 @@ class TestLegacyBehaviourIsPinned:
 
     def test_auto_code_gen_persona_is_unchanged(self):
         from llm.auto_code_gen.code_gen_configs import CodeGenConfig
+
         cfg = CodeGenConfig(output_dir="/tmp", thinking_mode="deep")
         assert cfg.make_claude_config().system_prompt == _LEGACY_HARDCODED_PROMPT
 
     def test_profiling_persona_is_unchanged(self):
-        assert ProfilingClaudeConfig(**BASE_KWARGS).system_prompt == _LEGACY_HARDCODED_PROMPT
+        assert (
+            ProfilingClaudeConfig(**BASE_KWARGS).system_prompt
+            == _LEGACY_HARDCODED_PROMPT
+        )
 
     def test_only_auto_bug_fix_deviates(self):
         """auto_bug_fix is the one pipeline that deliberately differs."""
-        assert BugFixClaudeConfig(**BASE_KWARGS).system_prompt != _LEGACY_HARDCODED_PROMPT
+        assert (
+            BugFixClaudeConfig(**BASE_KWARGS).system_prompt != _LEGACY_HARDCODED_PROMPT
+        )
 
 
 class _StubClient:
@@ -105,6 +122,7 @@ def stub_sdk(monkeypatch):
     collection order. Stub it explicitly instead of depending on that.
     """
     import common.claude_utils as cu
+
     captured = {}
 
     def _options(**kwargs):
@@ -136,5 +154,7 @@ class TestNonLLMSteps:
     def test_persona_reaches_the_agent_options(self, tmp_path, stub_sdk):
         """The config's system_prompt is what the SDK is actually given."""
         cfg = BugFixClaudeConfig(**{**BASE_KWARGS, "cwd": str(tmp_path)})
-        asyncio.run(claude_run(cfg, [PipelineStep(name="noop", prompt={"fn": lambda: None})]))
+        asyncio.run(
+            claude_run(cfg, [PipelineStep(name="noop", prompt={"fn": lambda: None})])
+        )
         assert stub_sdk["system_prompt"] == BUG_FIX_SYSTEM_PROMPT

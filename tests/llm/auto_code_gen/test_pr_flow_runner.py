@@ -24,10 +24,11 @@ def test_state_without_a_repo_falls_back_to_the_config(tmp_path):
 
 
 def _write_pending(tmp_path, round_no, count):
-    inbox = tmp_path / "pr_p3" / "inbox" / "round_{}".format(round_no)
+    inbox = tmp_path / "pr_p3" / "inbox" / f"round_{round_no}"
     inbox.mkdir(parents=True)
-    (inbox / "pending_comments.json").write_text(json.dumps(
-        {"round": round_no, "pending": [{"comment_id": 1}] * count}))
+    (inbox / "pending_comments.json").write_text(
+        json.dumps({"round": round_no, "pending": [{"comment_id": 1}] * count})
+    )
 
 
 def test_round_defaults_to_the_fetched_one(tmp_path):

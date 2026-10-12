@@ -1,4 +1,5 @@
 """Capture actual request boundaries, without making model API calls."""
+
 import asyncio
 import sys
 from types import SimpleNamespace
@@ -13,7 +14,9 @@ from common.model_registry import ModelProfile, RegistryError, load_registry
 @pytest.fixture
 def capture_request(monkeypatch, tmp_path):
     response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="done", tool_calls=None))],
+        choices=[
+            SimpleNamespace(message=SimpleNamespace(content="done", tool_calls=None))
+        ],
         usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
     )
     request = Mock(return_value=response)
@@ -28,26 +31,44 @@ def capture_request(monkeypatch, tmp_path):
 
     def capture(path, profile=None, *, model=None):
         model = profile.model if profile else model
+        assert isinstance(model, str)
         request.reset_mock()
         if path == "completion":
             llm_client.completion(model, [], profile=profile)
         elif path == "agent":
-            asyncio.run(agent_runner.LiteLLMAgentRunner()._agent_loop(
-                model=model, system_prompt="s", user_prompt="u", cwd=str(tmp_path),
-                context_length=128000, profile=profile,
-            ))
+            asyncio.run(
+                agent_runner.LiteLLMAgentRunner()._agent_loop(
+                    model=model,
+                    system_prompt="s",
+                    user_prompt="u",
+                    cwd=str(tmp_path),
+                    context_length=128000,
+                    profile=profile,
+                )
+            )
         else:
             agent_runner._summarize_stale(model, [], 128000, profile=profile)
         request.assert_called_once()
         return request.call_args.kwargs
+
     return capture
 
 
 @pytest.mark.parametrize("path", ["completion", "agent", "summary"])
-@pytest.mark.parametrize("model", ["gpt-4o", "anthropic/claude-sonnet-4-6", "vertex_ai/claude-sonnet-4-6",
-                                  "ollama_chat/example", "openai/local"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gpt-4o",
+        "anthropic/claude-sonnet-4-6",
+        "vertex_ai/claude-sonnet-4-6",
+        "ollama_chat/example",
+        "openai/local",
+    ],
+)
 @pytest.mark.parametrize("source", ["configured", "environment"])
-def test_legacy_transport_is_scoped_to_custom_openai(capture_request, monkeypatch, path, model, source):
+def test_legacy_transport_is_scoped_to_custom_openai(
+    capture_request, monkeypatch, path, model, source
+):
     endpoint, key = "http://local-vllm.invalid/v1", "LOCAL_FAKE_KEY"
     if source == "configured":
         llm_client.configure(api_base=endpoint, api_key=key)
@@ -67,7 +88,9 @@ def test_legacy_transport_is_scoped_to_custom_openai(capture_request, monkeypatc
 
 
 @pytest.mark.parametrize("path", ["completion", "agent", "summary"])
-def test_legacy_key_without_endpoint_uses_provider_defaults(capture_request, monkeypatch, path):
+def test_legacy_key_without_endpoint_uses_provider_defaults(
+    capture_request, monkeypatch, path
+):
     monkeypatch.setattr(llm_client, "_api_base", None)
     sent = capture_request(path, model="openai/gpt-4o")
     assert "api_base" not in sent
@@ -75,11 +98,23 @@ def test_legacy_key_without_endpoint_uses_provider_defaults(capture_request, mon
 
 
 @pytest.mark.parametrize("path", ["completion", "agent", "summary"])
-@pytest.mark.parametrize("model", ["gpt-4o", "openai/gpt-4o", "anthropic/claude-sonnet-4-6",
-                                  "together_ai/example", "ollama_chat/example"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gpt-4o",
+        "openai/gpt-4o",
+        "anthropic/claude-sonnet-4-6",
+        "together_ai/example",
+        "ollama_chat/example",
+    ],
+)
 @pytest.mark.parametrize("endpoint", [None, "http://custom/v1"])
-def test_profile_transport_forwarded_for_each_provider(capture_request, path, model, endpoint):
-    profile = ModelProfile("test", "litellm", model, api_base=endpoint, api_key="PROFILE_KEY")
+def test_profile_transport_forwarded_for_each_provider(
+    capture_request, path, model, endpoint
+):
+    profile = ModelProfile(
+        "test", "litellm", model, api_base=endpoint, api_key="PROFILE_KEY"
+    )
     sent = capture_request(path, profile)
     assert sent["api_key"] == "PROFILE_KEY"
     assert sent.get("api_base") == endpoint
@@ -87,37 +122,59 @@ def test_profile_transport_forwarded_for_each_provider(capture_request, path, mo
 
 
 @pytest.mark.parametrize("path", ["completion", "agent", "summary"])
-@pytest.mark.parametrize("model,endpoint,expected", [
-    ("gpt-4o", None, None), ("openai/gpt-4o", None, None),
-    ("openai/local", "http://local/v1", "dummy"), ("ollama/test", "http://ollama", None),
-])
-def test_dummy_key_only_for_custom_openai(capture_request, path, model, endpoint, expected):
-    sent = capture_request(path, ModelProfile("test", "litellm", model, api_base=endpoint))
+@pytest.mark.parametrize(
+    "model,endpoint,expected",
+    [
+        ("gpt-4o", None, None),
+        ("openai/gpt-4o", None, None),
+        ("openai/local", "http://local/v1", "dummy"),
+        ("ollama/test", "http://ollama", None),
+    ],
+)
+def test_dummy_key_only_for_custom_openai(
+    capture_request, path, model, endpoint, expected
+):
+    sent = capture_request(
+        path, ModelProfile("test", "litellm", model, api_base=endpoint)
+    )
     assert sent.get("api_key") == expected
 
 
-@pytest.mark.parametrize("field", ["model", "provider", "api_base", "api_key", "api_key_file"])
+@pytest.mark.parametrize(
+    "field", ["model", "provider", "api_base", "api_key", "api_key_file"]
+)
 def test_registry_rejects_routing_fields_in_params(tmp_path, field):
     path = tmp_path / "models.yaml"
-    path.write_text(f"models:\n  a:\n    model: gpt-4o\n    params:\n      {field}: SECRET\ndefault: a\n")
+    path.write_text(
+        f"models:\n  a:\n    model: gpt-4o\n    params:\n      {field}: SECRET\ndefault: a\n"
+    )
     with pytest.raises(RegistryError, match="top-level") as exc:
         load_registry(path)
     assert "SECRET" not in str(exc.value)
 
 
-def test_explicit_claude_transport_does_not_inherit_vertex(capture_request, monkeypatch):
+def test_explicit_claude_transport_does_not_inherit_vertex(
+    capture_request, monkeypatch
+):
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
     profile = ModelProfile("direct", "litellm", "claude-sonnet-4-6", api_key="DIRECT")
     assert capture_request("completion", profile)["model"] == profile.model
 
 
-@pytest.mark.parametrize("path,default", [("completion", 4096), ("agent", 16384), ("summary", 32768)])
+@pytest.mark.parametrize(
+    "path,default", [("completion", 4096), ("agent", 16384), ("summary", 32768)]
+)
 @pytest.mark.parametrize("limit", [None, "max_tokens", "max_completion_tokens"])
 def test_shared_parameters_and_output_limits(capture_request, path, default, limit):
-    params = {"temperature": 0.2, "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+    params = {
+        "temperature": 0.2,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
     if limit:
         params[limit] = 512
-    profile = ModelProfile("test", "litellm", "openai/test", api_base="http://local/v1", params=params)
+    profile = ModelProfile(
+        "test", "litellm", "openai/test", api_base="http://local/v1", params=params
+    )
     sent = capture_request(path, profile)
     assert sent["temperature"] == 0.2
     assert sent["extra_body"] == params["extra_body"]
@@ -127,12 +184,16 @@ def test_shared_parameters_and_output_limits(capture_request, path, default, lim
     if path == "summary":
         assert "tools" not in sent
     sent["extra_body"]["chat_template_kwargs"]["enable_thinking"] = True
-    assert profile.params["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert (
+        profile.params["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    )
 
 
 @pytest.mark.parametrize("path", ["completion", "agent", "summary"])
 def test_ollama_defaults_do_not_mutate_nested_params(capture_request, path):
-    profile = ModelProfile("test", "litellm", "ollama/test", params={"extra_body": {"nested": []}})
+    profile = ModelProfile(
+        "test", "litellm", "ollama/test", params={"extra_body": {"nested": []}}
+    )
     sent = capture_request(path, profile)
     assert sent["extra_body"]["think"] is False
     sent["extra_body"]["nested"].append("changed")
@@ -141,10 +202,21 @@ def test_ollama_defaults_do_not_mutate_nested_params(capture_request, path):
 
 def test_request_override_precedence_and_isolation(monkeypatch):
     monkeypatch.setattr(llm_client, "_model_params", {"extra_body": {"think": True}})
-    overrides = {"temperature": 0.9, "api_key": "OVERRIDE", "extra_body": {"think": True}}
-    profile = ModelProfile("test", "litellm", "ollama/test", api_key="PROFILE",
-                           params={"temperature": 0.1, "max_tokens": 100})
-    sent = llm_client.build_request_kwargs(profile.model, profile=profile, default_max_tokens=200, overrides=overrides)
+    overrides = {
+        "temperature": 0.9,
+        "api_key": "OVERRIDE",
+        "extra_body": {"think": True},
+    }
+    profile = ModelProfile(
+        "test",
+        "litellm",
+        "ollama/test",
+        api_key="PROFILE",
+        params={"temperature": 0.1, "max_tokens": 100},
+    )
+    sent = llm_client.build_request_kwargs(
+        profile.model, profile=profile, default_max_tokens=200, overrides=overrides
+    )
     assert sent["api_key"] == "OVERRIDE"
     assert sent["temperature"] == 0.9
     assert sent["max_tokens"] == 100

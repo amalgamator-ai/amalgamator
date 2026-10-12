@@ -35,7 +35,7 @@ STATE_VERSION = 1
 PR_FLOW_DIR = "pr_p3"
 STATE_FILE = "pr_state.json"
 INBOX_DIR = "inbox"
-PR_DESCS_DIR = "pr-generate"          # must match code_gen_prompts.PR_COMMANDS_DIR
+PR_DESCS_DIR = "pr-generate"  # must match code_gen_prompts.PR_COMMANDS_DIR
 COMMENTS_DIR = "comments"
 COMMIT_DESC_FILE = "commit_desc.txt"
 PR_DESC_FILE = "pr_desc.txt"
@@ -45,18 +45,35 @@ DEFAULT_UPSTREAM_BRANCH = "main"
 DEFAULT_BRANCH_PREFIX = "perf/"
 
 SCALAR_FIELDS = (
-    "config_path", "output_dir", "repo_dir", "logs_dir",
-    "upstream_repo", "upstream_remote", "upstream_branch",
-    "fork_repo", "fork_owner", "fork_remote", "fork_url",
-    "local_branch", "remote_branch", "branch_prefix",
-    "base_branch", "base_commit", "head_sha",
+    "config_path",
+    "output_dir",
+    "repo_dir",
+    "logs_dir",
+    "upstream_repo",
+    "upstream_remote",
+    "upstream_branch",
+    "fork_repo",
+    "fork_owner",
+    "fork_remote",
+    "fork_url",
+    "local_branch",
+    "remote_branch",
+    "branch_prefix",
+    "base_branch",
+    "base_commit",
+    "head_sha",
     # head_sha is what the worktree holds; remote_head_sha is what the fork
     # holds. They diverge on purpose during a rebase, which rewrites history.
-    "remote_head_sha", "pre_rebase_head", "rebase_target",
-    "pr_number", "pr_url", "descs_sha256",
+    "remote_head_sha",
+    "pre_rebase_head",
+    "rebase_target",
+    "pr_number",
+    "pr_url",
+    "descs_sha256",
     # Reviewer-suggestion comment (steps 2b/2c): the draft's content hash at
     # generation time and, once posted, the comment's URL/id.
-    "reviewers_draft_sha256", "reviewers_comment_url",
+    "reviewers_draft_sha256",
+    "reviewers_comment_url",
     "reviewers_comment_id",
 )
 INT_FIELDS = ("round", "iteration")
@@ -72,7 +89,7 @@ def state_path(output_dir):
 
 
 def inbox_dir(output_dir, round_no):
-    return os.path.join(pr_flow_dir(output_dir), INBOX_DIR, "round_{}".format(round_no))
+    return os.path.join(pr_flow_dir(output_dir), INBOX_DIR, f"round_{round_no}")
 
 
 def descs_dir(output_dir):
@@ -123,7 +140,7 @@ def parse_git_url(url):
         return None
     path = path.strip("/")
     if path.endswith(".git"):
-        path = path[:-len(".git")]
+        path = path[: -len(".git")]
     return path if GIT_PATH_RE.match(path) else None
 
 
@@ -134,26 +151,37 @@ def url_owner(url):
     return full.split("/")[0]
 
 
-def new_state(output_dir, repo_dir, fork_url, fork_owner,
-              upstream_repo=DEFAULT_UPSTREAM_REPO,
-              upstream_branch=DEFAULT_UPSTREAM_BRANCH,
-              upstream_remote="upstream", fork_remote="fork",
-              local_branch="", base_branch="", base_commit="",
-              config_path="", branch_prefix=DEFAULT_BRANCH_PREFIX):
+def new_state(
+    output_dir,
+    repo_dir,
+    fork_url,
+    fork_owner,
+    upstream_repo=DEFAULT_UPSTREAM_REPO,
+    upstream_branch=DEFAULT_UPSTREAM_BRANCH,
+    upstream_remote="upstream",
+    fork_remote="fork",
+    local_branch="",
+    base_branch="",
+    base_commit="",
+    config_path="",
+    branch_prefix=DEFAULT_BRANCH_PREFIX,
+):
     """Build a state document. Raises ValueError on an unusable configuration."""
     if fork_url.startswith("file://") or fork_url.startswith("/"):
         raise ValueError(
-            "fork URL is a local path ({}); a PR needs a real remote".format(fork_url))
+            f"fork URL is a local path ({fork_url}); a PR needs a real remote"
+        )
     fork_repo = parse_git_url(fork_url)
     if not fork_repo:
-        raise ValueError("cannot parse fork URL: {}".format(fork_url))
+        raise ValueError(f"cannot parse fork URL: {fork_url}")
     if fork_repo == upstream_repo:
         raise ValueError(
-            "fork URL points at the upstream repo ({}); push to a fork".format(fork_repo))
+            f"fork URL points at the upstream repo ({fork_repo}); push to a fork"
+        )
     if not fork_owner:
         raise ValueError("fork_owner is required (GitHub login that owns the fork)")
     if not re.match(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$", fork_owner):
-        raise ValueError("fork_owner does not look like a GitHub login: {}".format(fork_owner))
+        raise ValueError(f"fork_owner does not look like a GitHub login: {fork_owner}")
 
     return {
         "version": STATE_VERSION,
@@ -177,7 +205,7 @@ def new_state(output_dir, repo_dir, fork_url, fork_owner,
         "head_sha": "",
         "remote_head_sha": "",
         "pre_rebase_head": "",
-        "rebase_target": "{}/{}".format(upstream_remote, upstream_branch),
+        "rebase_target": f"{upstream_remote}/{upstream_branch}",
         "pr_number": None,
         "pr_url": "",
         "descs_sha256": "",
@@ -193,12 +221,12 @@ def load_state(path):
     with open(path) as f:
         state = json.load(f)
     if not isinstance(state, dict):
-        raise ValueError("state file is not a JSON object: {}".format(path))
+        raise ValueError(f"state file is not a JSON object: {path}")
     version = state.get("version", 0)
     if version > STATE_VERSION:
         raise ValueError(
-            "state file version {} is newer than this code supports ({})".format(
-                version, STATE_VERSION))
+            f"state file version {version} is newer than this code supports ({STATE_VERSION})"
+        )
     return state
 
 
@@ -222,9 +250,12 @@ def update(path, **values):
     """Merge values into the state file. Unknown keys are rejected."""
     state = load_state(path)
     for key, value in values.items():
-        if key not in SCALAR_FIELDS and key not in INT_FIELDS and key not in (
-                STRUCTURED_FIELDS):
-            raise ValueError("unknown state field: {}".format(key))
+        if (
+            key not in SCALAR_FIELDS
+            and key not in INT_FIELDS
+            and key not in (STRUCTURED_FIELDS)
+        ):
+            raise ValueError(f"unknown state field: {key}")
         if key in INT_FIELDS and value is not None:
             value = int(value)
         elif key in STRUCTURED_FIELDS and isinstance(value, str):
@@ -234,9 +265,9 @@ def update(path, **values):
             try:
                 value = json.loads(value)
             except json.JSONDecodeError as exc:
-                raise ValueError("field {} must be JSON ({}): {}".format(key, exc, value))
+                raise ValueError(f"field {key} must be JSON ({exc}): {value}") from exc
             if not isinstance(value, (dict, list)):
-                raise ValueError("field {} must be a JSON object or array".format(key))
+                raise ValueError(f"field {key} must be a JSON object or array")
         state[key] = value
     state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     save_state(path, state)
@@ -277,8 +308,9 @@ def state_path_for_config(config_path):
 
 def _require_state(args):
     if not args.state or not os.path.isfile(args.state):
-        raise SystemExit("state file not found: {} (run 'pr_state init' first)".format(
-            args.state))
+        raise SystemExit(
+            f"state file not found: {args.state} (run 'pr_state init' first)"
+        )
     return args.state
 
 
@@ -333,15 +365,21 @@ def main():
         config = _load_config_quietly(args.config)
         path = state_path(config.output_dir)
         if os.path.isfile(path) and not args.force:
-            raise SystemExit("state exists: {} (use --force to overwrite)".format(path))
+            raise SystemExit(f"state exists: {path} (use --force to overwrite)")
         fork_owner = args.fork_owner or url_owner(args.fork_url) or ""
         state = new_state(
-            output_dir=config.output_dir, repo_dir=args.repo_dir,
-            fork_url=args.fork_url, fork_owner=fork_owner,
-            upstream_repo=args.upstream_repo, upstream_branch=args.upstream_branch,
-            upstream_remote=args.upstream_remote, fork_remote=args.fork_remote,
-            local_branch=args.local_branch, base_branch=args.base_branch,
-            base_commit=args.base_commit, config_path=os.path.abspath(args.config),
+            output_dir=config.output_dir,
+            repo_dir=args.repo_dir,
+            fork_url=args.fork_url,
+            fork_owner=fork_owner,
+            upstream_repo=args.upstream_repo,
+            upstream_branch=args.upstream_branch,
+            upstream_remote=args.upstream_remote,
+            fork_remote=args.fork_remote,
+            local_branch=args.local_branch,
+            base_branch=args.base_branch,
+            base_commit=args.base_commit,
+            config_path=os.path.abspath(args.config),
             branch_prefix=args.branch_prefix,
         )
         os.makedirs(descs_dir(config.output_dir), exist_ok=True)
@@ -361,7 +399,7 @@ def main():
         values = {}
         for item in args.assignments:
             if "=" not in item:
-                raise SystemExit("expected key=value, got: {}".format(item))
+                raise SystemExit(f"expected key=value, got: {item}")
             key, value = item.split("=", 1)
             values[key.strip()] = value.strip()
         update(path, **values)

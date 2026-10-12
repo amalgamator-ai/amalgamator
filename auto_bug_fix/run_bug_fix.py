@@ -5,8 +5,10 @@ Usage:
 
         python -m auto_bug_fix.run_bug_fix
 """
+
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -15,19 +17,19 @@ import shutil
 import subprocess
 import sys
 import time
-import asyncio
-from dataclasses import dataclass, field, asdict, replace
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, TextIO, TypedDict, cast
 
-from common.utils import Tee
 from auto_bug_fix.claude_utils import (
     BugFixClaudeConfig,
     ClaudeConfig,
     PipelineStep,
-    agent_run as _agent_run,
-    claude_run as _claude_run,
 )
+from auto_bug_fix.claude_utils import (
+    agent_run as _agent_run,
+)
+from common.utils import Tee
 
 if TYPE_CHECKING:
     from common.model_registry import ModelProfile
@@ -35,12 +37,12 @@ if TYPE_CHECKING:
 
 def _phase_config(
     claude_config: ClaudeConfig,
-    config: "BugFixConfig",
+    config: BugFixConfig,
     *,
     model: str | None = None,
     thinking: dict | None = None,
     effort: str | None = None,
-    profile: "ModelProfile | None" = None,
+    profile: ModelProfile | None = None,
 ) -> BugFixClaudeConfig:
     """Create a per-phase ClaudeConfig that inherits transport settings.
 
@@ -54,7 +56,9 @@ def _phase_config(
     effective_model = model or (profile.model if profile else claude_config.model)
 
     if model and effective_profile and effective_profile.model != effective_model:
-        raise ConfigError("Phase model does not match its profile; supply a resolved profile")
+        raise ConfigError(
+            "Phase model does not match its profile; supply a resolved profile"
+        )
 
     return BugFixClaudeConfig(
         model=effective_model,
@@ -82,7 +86,10 @@ async def _run_llm(claude_config, prompts, tracker=None):
     if tracker and step_timings:
         cursor = batch_start
         for st in step_timings:
-            dur = st.get("duration", 0)
+            # A recorded duration of 0 is a valid measurement; only a missing
+            # entry falls back to the default.
+            raw_dur = st.get("duration")
+            dur = float(raw_dur) if raw_dur is not None else 0
             sdk_cost = st.get("cost_usd")
             record = tracker.record_query(
                 prompt_name=st.get("name", "query"),
@@ -94,10 +101,15 @@ async def _run_llm(claude_config, prompts, tracker=None):
                 model=claude_config.model,
                 profile=claude_config.profile,
             )
-            log.info("LLM query %s: duration=%.1fs, tokens=%d/%d, cost=$%.4f (sdk=$%s)",
-                     st.get("name", "query"), dur,
-                     st.get("input_tokens", 0), st.get("output_tokens", 0),
-                     record.cost_usd, sdk_cost)
+            log.info(
+                "LLM query %s: duration=%.1fs, tokens=%d/%d, cost=$%.4f (sdk=$%s)",
+                st.get("name", "query"),
+                dur,
+                st.get("input_tokens", 0),
+                st.get("output_tokens", 0),
+                record.cost_usd,
+                sdk_cost,
+            )
             cursor += dur
 
     return step_timings
@@ -105,76 +117,94 @@ async def _run_llm(claude_config, prompts, tracker=None):
 
 claude_run = _run_llm
 
+from auto_bug_fix.allowlist import (
+    derive_seed,
+    enforce_allowlist,
+    enforce_test_file_veto,
+    resolve_renames,
+)
+from auto_bug_fix.baseline import (
+    TIMEOUT_EXIT_CODE,
+    check_regression,
+    parse_test_failures,
+    run_test_suite,
+)
 from auto_bug_fix.bug_fix_config import BugFixConfig
-from auto_bug_fix.git_tools import (
-    COAUTHOR_TRAILERS as _COAUTHOR_TRAILERS,
-    _run_git,
-    git_cherry_pick,
-    git_cherry_pick_abort,
-    git_status_porcelain,
-    git_diff_name_only,
-    git_diff_name_only_range,
-    git_format_patch,
-    git_format_patch_bytes,
-    git_merge_base,
-    git_show_files,
-    git_reset_hard,
-    git_commit as _git_commit_raw,
-    git_rev_parse,
-    resolve_merge_commit,
-    git_is_ancestor,
-    git_cat_file_exists,
-    is_merge_commit,
-)
-from auto_bug_fix.patch_id import forward_patch_id_check, backward_patch_id_check
-from auto_bug_fix.signature import capture_output
-from auto_bug_fix.mechanical import resolve_mechanically
-from auto_bug_fix.snapback import (
-    snap_back_files,
-    _git_blob,
-)
-from auto_bug_fix.evidence import (
-    added_lines_by_file,
-    audit_added_tokens,
-    audit_line_provenance,
-    annotate_dead_config,
-    target_config_state,
-    port_line_changes,
-    mine_substitutions,
-    apply_substitutions,
-    find_pure_rename_restorations,
-    token_exists_on_ref,
-    scan_followup_fixes,
-    run_file_checks,
-    render_evidence,
-    validate_triage_prerequisites,
-)
-from auto_bug_fix.allowlist import derive_seed, resolve_renames, enforce_allowlist, enforce_test_file_veto
-from auto_bug_fix.baseline import check_regression, run_test_suite, parse_test_failures, TIMEOUT_EXIT_CODE
-from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
-from auto_bug_fix.config_loader import load_multi_target_config, TargetSpec, _sanitize_ref, ConfigError
-from auto_bug_fix.ingest import ingest_patch, IngestError, PATCH_TRAILER_KEY
-from auto_bug_fix.range_diff import run_range_diff, parse_equivalence
-from auto_bug_fix.dossier import Dossier, build_trailers, format_dossier
-from auto_bug_fix.tracker import Tracker
 from auto_bug_fix.bug_fix_prompts import (
-    create_context_str,
-    SemanticTriagePrompt,
-    TestPortAgentPrompt,
-    NarrowResolutionAgentPrompt,
-    PostResolutionCheckPrompt,
-    TriageBlindReviewPrompt,
-    BuildErrorRecoveryPrompt,
-    RedTriagePrompt,
+    RED_TRIAGE_FILE,
     SEMANTIC_TRIAGE_FILE,
     TEST_PORT_MANIFEST_FILE,
-    RED_TRIAGE_FILE,
+    BuildErrorRecoveryPrompt,
+    NarrowResolutionAgentPrompt,
+    PostResolutionCheckPrompt,
+    RedTriagePrompt,
+    SemanticTriagePrompt,
+    TestPortAgentPrompt,
+    TriageBlindReviewPrompt,
+    create_context_str,
 )
+from auto_bug_fix.config_loader import (
+    ConfigError,
+    TargetSpec,
+    _sanitize_ref,
+    load_multi_target_config,
+)
+from auto_bug_fix.dossier import Dossier, build_trailers, format_dossier
+from auto_bug_fix.evidence import (
+    added_lines_by_file,
+    annotate_dead_config,
+    apply_substitutions,
+    audit_added_tokens,
+    audit_line_provenance,
+    find_pure_rename_restorations,
+    mine_substitutions,
+    port_line_changes,
+    render_evidence,
+    run_file_checks,
+    scan_followup_fixes,
+    target_config_state,
+    token_exists_on_ref,
+    validate_triage_prerequisites,
+)
+from auto_bug_fix.git_tools import (
+    COAUTHOR_TRAILERS as _COAUTHOR_TRAILERS,
+)
+from auto_bug_fix.git_tools import (
+    _run_git,
+    git_cat_file_exists,
+    git_cherry_pick,
+    git_cherry_pick_abort,
+    git_diff_name_only,
+    git_diff_name_only_range,
+    git_format_patch_bytes,
+    git_is_ancestor,
+    git_merge_base,
+    git_reset_hard,
+    git_rev_parse,
+    git_show_files,
+    git_status_porcelain,
+    is_merge_commit,
+    resolve_merge_commit,
+)
+from auto_bug_fix.git_tools import (
+    git_commit as _git_commit_raw,
+)
+from auto_bug_fix.ingest import PATCH_TRAILER_KEY, IngestError, ingest_patch
+from auto_bug_fix.mechanical import resolve_mechanically
+from auto_bug_fix.patch_id import backward_patch_id_check, forward_patch_id_check
 from auto_bug_fix.phase_4b import (
-    gen_RunAndFixPrompt,
     RUN_AND_FIX_FAILURE_FILE,
     RUN_AND_FIX_SUCCESS_FILE,
+    gen_RunAndFixPrompt,
 )
+from auto_bug_fix.range_diff import parse_equivalence, run_range_diff
+from auto_bug_fix.signature import capture_output
+from auto_bug_fix.snapback import (
+    _git_blob,
+    snap_back_files,
+)
+from auto_bug_fix.tracker import Tracker
+from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
 
 LOG_FILE = "__run_log_bug_fix.txt"
 DOSSIER_FILE = "dossier.md"
@@ -191,6 +221,7 @@ _PIPELINE_ARTIFACTS = (
 
 log = logging.getLogger(__name__)
 
+
 def _sanitize_branch_slug(raw: str) -> str:
     """Make *raw* safe for use inside a git branch name (``git check-ref-format``)."""
     s = re.sub(r"[~^: \t\\]+", "-", raw)
@@ -205,11 +236,14 @@ def _unstage_pipeline_artifacts(repo_path: str) -> None:
     for artifact in _PIPELINE_ARTIFACTS:
         subprocess.run(
             ["git", "rm", "--cached", "--ignore-unmatch", "-f", artifact],
-            cwd=repo_path, capture_output=True,
+            cwd=repo_path,
+            capture_output=True,
         )
 
 
-def git_commit(repo_path: str, message: str, trailers: dict[str, str] | None = None) -> None:
+def git_commit(
+    repo_path: str, message: str, trailers: dict[str, str] | None = None
+) -> None:
     """Wrapper around git_commit that unstages pipeline artifacts first."""
     _unstage_pipeline_artifacts(repo_path)
     _git_commit_raw(repo_path, message, trailers=trailers)
@@ -220,11 +254,16 @@ def git_amend(repo_path: str) -> None:
     _unstage_pipeline_artifacts(repo_path)
     result = subprocess.run(
         ["git", "commit", "--amend", "--no-edit"],
-        cwd=repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode != 0:
-        log.warning("git commit --amend failed: %s",
-                    (result.stderr or result.stdout)[:300])
+        log.warning(
+            "git commit --amend failed: %s", (result.stderr or result.stdout)[:300]
+        )
 
 
 class PipelineEscalation(Exception):
@@ -252,12 +291,20 @@ def _validate_shell_command(cmd: str) -> bool:
 
 def _conflicted_files(status_lines: list[str]) -> list[str]:
     """Extract conflicted file paths from porcelain status output."""
-    return [l[3:] for l in status_lines if any(l.startswith(p) for p in _CONFLICT_PREFIXES)]
+    return [
+        line[3:]
+        for line in status_lines
+        if any(line.startswith(p) for p in _CONFLICT_PREFIXES)
+    ]
 
 
 def _has_conflicts(status_lines: list[str]) -> list[str]:
     """Return status lines that represent merge conflicts."""
-    return [l for l in status_lines if any(l.startswith(p) for p in _CONFLICT_PREFIXES)]
+    return [
+        line
+        for line in status_lines
+        if any(line.startswith(p) for p in _CONFLICT_PREFIXES)
+    ]
 
 
 @dataclass
@@ -267,7 +314,7 @@ class PipelineState:
     baseline: set[str] = field(default_factory=set)
     ported_test_files: list[str] = field(default_factory=list)
     cherry_pick_path: str = ""
-    dossier: Dossier | None = None
+    dossier: Dossier = field(default_factory=Dossier)
     triage_assessment: dict = field(default_factory=dict)
     priority_files: list[str] = field(default_factory=list)
     baseline_build_exit: int = 0
@@ -293,17 +340,34 @@ def phase_0_triage(
 
     state.seed = derive_seed(repo, config.source_fix_commit)
     if not state.seed:
-        seed_from_diff = subprocess.run(
-            ["git", "diff", "--name-only", f"{config.source_fix_commit}^1", config.source_fix_commit],
-            cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        ).stdout.strip().splitlines()
+        seed_from_diff = (
+            subprocess.run(
+                [
+                    "git",
+                    "diff",
+                    "--name-only",
+                    f"{config.source_fix_commit}^1",
+                    config.source_fix_commit,
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            .stdout.strip()
+            .splitlines()
+        )
         state.seed = [f for f in seed_from_diff if f.strip()]
         if state.seed:
             log.info("Seed derived from diff range (%d files)", len(state.seed))
 
     fork_point = git_merge_base(repo, config.source_branch, target)
     resolved, _ = resolve_renames(
-        repo, state.seed, target, fork_point,
+        repo,
+        state.seed,
+        target,
+        fork_point,
         cap=config.allowlist_rename_expansion_cap,
     )
     state.allowed_modules = resolved
@@ -334,7 +398,9 @@ def phase_0_triage(
             )
         else:
             ancestry_status = "seed_files_only"
-            log.info("Ancestry/patch-id checks failed but seed files exist on target — proceeding with caution")
+            log.info(
+                "Ancestry/patch-id checks failed but seed files exist on target — proceeding with caution"
+            )
 
     return {"forward_patch_id": "not_found", "ancestry": ancestry_status}
 
@@ -356,7 +422,9 @@ def _diff_char_caps(config: BugFixConfig) -> tuple[int, int]:
     return max_diff, max_chunk
 
 
-def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files: list[str] | None = None) -> str:
+def _compute_fix_diff(
+    config: BugFixConfig, commit: str | None = None, for_files: list[str] | None = None
+) -> str:
     """Compute the fix diff with truncation for large commits.
 
     When for_files is provided, only include diffs for those specific files
@@ -368,55 +436,91 @@ def _compute_fix_diff(config: BugFixConfig, commit: str | None = None, for_files
     sha = commit or config.source_fix_commit
     max_diff_chars, max_chunk_chars = _diff_char_caps(config)
 
-
     if for_files:
         if is_merge_commit(config.repo_path, sha):
             stat = subprocess.run(
                 ["git", "diff", "--stat", f"{sha}^1..{sha}"],
-                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=config.repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             ).stdout
             partial_diff = subprocess.run(
                 ["git", "diff", f"{sha}^1..{sha}", "--"] + for_files,
-                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=config.repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             ).stdout
         else:
             stat = subprocess.run(
                 ["git", "show", "--stat", sha],
-                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=config.repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             ).stdout
             partial_diff = subprocess.run(
                 ["git", "show", sha, "--"] + for_files,
-                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=config.repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             ).stdout
         fix_diff = stat + "\n\n--- Diff for chunk files ---\n\n" + partial_diff
         if len(fix_diff) > max_chunk_chars:
-            fix_diff = stat + "\n\n[Chunk diffs too large — stat only. Agent must read files directly.]"
+            fix_diff = (
+                stat
+                + "\n\n[Chunk diffs too large — stat only. Agent must read files directly.]"
+            )
         return fix_diff
-
 
     if is_merge_commit(config.repo_path, sha):
         fix_diff = subprocess.run(
             ["git", "diff", f"{sha}^1..{sha}"],
-            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=config.repo_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         ).stdout
     else:
         fix_diff = subprocess.run(
             ["git", "show", sha],
-            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=config.repo_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         ).stdout
 
     if len(fix_diff) > max_diff_chars:
-        log.warning("fix_diff too large (%d chars, cap %d), using --stat only",
-                    len(fix_diff), max_diff_chars)
+        log.warning(
+            "fix_diff too large (%d chars, cap %d), using --stat only",
+            len(fix_diff),
+            max_diff_chars,
+        )
         if is_merge_commit(config.repo_path, sha):
             fix_diff = subprocess.run(
                 ["git", "diff", "--stat", f"{sha}^1..{sha}"],
-                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=config.repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             ).stdout
         else:
             fix_diff = subprocess.run(
                 ["git", "show", "--stat", sha],
-                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=config.repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             ).stdout
 
     return fix_diff
@@ -441,13 +545,23 @@ def phase_3b_regeneration(
         log.info("Phase 3b: running regeneration command: %s", cmd)
         try:
             result = subprocess.run(
-                cmd, shell=True, cwd=config.repo_path,
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
+                cmd,
+                shell=True,
+                cwd=config.repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=config.command_timeout,
             )
         except subprocess.TimeoutExpired:
             log.warning("Phase 3b: regeneration timed out (30min): %s", cmd)
             git_reset_hard(config.repo_path, safe_point)
-            state.dossier.add(f"Regeneration timed out: {cmd}", "Timed out after 30 minutes", "Phase 3b")
+            state.dossier.add(
+                f"Regeneration timed out: {cmd}",
+                "Timed out after 30 minutes",
+                "Phase 3b",
+            )
             continue
 
         if result.returncode == 0:
@@ -458,15 +572,23 @@ def phase_3b_regeneration(
             log.warning("Phase 3b: regeneration exited %d: %s", result.returncode, cmd)
             try:
                 build_check = subprocess.run(
-                    config.build_command, shell=True, cwd=config.build_dir,
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
+                    config.build_command,
+                    shell=True,
+                    cwd=config.build_dir,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=config.command_timeout,
                 )
             except subprocess.TimeoutExpired:
                 log.warning("Phase 3b: build check timed out, rolling back")
                 git_reset_hard(config.repo_path, safe_point)
                 continue
             if build_check.returncode == 0:
-                log.info("Phase 3b: codegen exited non-zero but build still passes — keeping partial regeneration")
+                log.info(
+                    "Phase 3b: codegen exited non-zero but build still passes — keeping partial regeneration"
+                )
                 any_succeeded = True
                 state.dossier.add(
                     f"Regeneration partial (kept): {cmd}",
@@ -474,7 +596,10 @@ def phase_3b_regeneration(
                     "Phase 3b",
                 )
             else:
-                log.warning("Phase 3b: build broken after codegen, rolling back to %s", safe_point[:12])
+                log.warning(
+                    "Phase 3b: build broken after codegen, rolling back to %s",
+                    safe_point[:12],
+                )
                 git_reset_hard(config.repo_path, safe_point)
                 state.dossier.add(
                     f"Regeneration failed (rolled back): {cmd}",
@@ -487,16 +612,23 @@ def phase_3b_regeneration(
         log.info("Phase 3b: %d files regenerated, committing", len(changed))
         subprocess.run(
             ["git", "add", "-A"],
-            cwd=config.repo_path, capture_output=True,
+            cwd=config.repo_path,
+            capture_output=True,
         )
-        git_commit(config.repo_path, f"Regenerate files for {config.issue_id}\n\nCommands: {', '.join(regen_cmds)}")
+        git_commit(
+            config.repo_path,
+            f"Regenerate files for {config.issue_id}\n\nCommands: {', '.join(regen_cmds)}",
+        )
         state.dossier.add(
             "Regenerated files",
-            "\n".join(changed[:50]) + (f"\n... and {len(changed)-50} more" if len(changed) > 50 else ""),
+            "\n".join(changed[:50])
+            + (f"\n... and {len(changed)-50} more" if len(changed) > 50 else ""),
             "Phase 3b",
         )
     else:
-        log.info("Phase 3b: no successful regeneration — keeping auto-resolved versions")
+        log.info(
+            "Phase 3b: no successful regeneration — keeping auto-resolved versions"
+        )
 
 
 def phase_0_5_semantic_triage(
@@ -507,18 +639,24 @@ def phase_0_5_semantic_triage(
 ) -> dict:
     """LLM-powered analysis of the commit before cherry-pick."""
 
-
-
     sha = config.source_fix_commit
     if is_merge_commit(config.repo_path, sha):
         fix_diff = subprocess.run(
             ["git", "diff", "--stat", f"{sha}^1..{sha}"],
-            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=config.repo_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         ).stdout
     else:
         fix_diff = subprocess.run(
             ["git", "show", "--stat", sha],
-            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=config.repo_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         ).stdout
 
     context = create_context_str(claude_config, config)
@@ -544,9 +682,11 @@ def phase_0_5_semantic_triage(
         try:
             with open(triage_path) as f:
                 assessment = json.load(f)
-            log.info("Semantic triage: difficulty=%s, recommendation=%s",
-                     assessment.get("estimated_difficulty", "?"),
-                     assessment.get("recommendation", "?"))
+            log.info(
+                "Semantic triage: difficulty=%s, recommendation=%s",
+                assessment.get("estimated_difficulty", "?"),
+                assessment.get("recommendation", "?"),
+            )
         except (json.JSONDecodeError, OSError) as e:
             log.warning("Failed to parse semantic triage output: %s", e)
 
@@ -556,7 +696,16 @@ def phase_0_5_semantic_triage(
     return assessment
 
 
-_TEST_PATTERNS = ("_test.", "test_", "tests/", "/test/", "testing/", "spec/", "_spec.", "testdata/")
+_TEST_PATTERNS = (
+    "_test.",
+    "test_",
+    "tests/",
+    "/test/",
+    "testing/",
+    "spec/",
+    "_spec.",
+    "testdata/",
+)
 
 
 def identify_test_files(seed_files: list[str]) -> list[str]:
@@ -583,8 +732,11 @@ def phase_0_5c_test_port(
         log.info("Phase 0.5c: no test files found in fix commit — skipping test port")
         return []
 
-    log.info("Phase 0.5c: found %d test files in fix commit: %s",
-             len(test_files), ", ".join(test_files))
+    log.info(
+        "Phase 0.5c: found %d test files in fix commit: %s",
+        len(test_files),
+        ", ".join(test_files),
+    )
 
     manifest_abs = os.path.join(config.repo_path, TEST_PORT_MANIFEST_FILE)
     context = create_context_str(claude_config, config)
@@ -631,39 +783,57 @@ def phase_1_baseline_and_red(
     # Step 1: Build baseline
     if config.build_command:
         build_exit, build_output = capture_output(
-            [config.build_command], config.build_dir, timeout=config.command_timeout,
+            [config.build_command],
+            config.build_dir,
+            timeout=config.command_timeout,
         )
         state.baseline_build_exit = build_exit
         state.baseline_build_output = build_output
         if build_exit == 0:
             log.info("Baseline build: PASSED")
         else:
-            log.warning("Baseline build: FAILED (exit %d) — target branch has pre-existing build issues", build_exit)
+            log.warning(
+                "Baseline build: FAILED (exit %d) — target branch has pre-existing build issues",
+                build_exit,
+            )
     else:
         log.info("Baseline build: skipped (no build command)")
 
     # Step 2: Test baseline (existing logic)
     if config.test_command:
         red_exit, red_output = capture_output(
-            [config.test_command], config.build_dir, timeout=config.command_timeout,
+            [config.test_command],
+            config.build_dir,
+            timeout=config.command_timeout,
         )
 
         state.baseline_test_exit = red_exit
         state.baseline = parse_test_failures(red_output, "")
-        is_bugfix = state.triage_assessment.get("commit_type", "").lower() in _BUGFIX_TYPES
+        is_bugfix = (
+            state.triage_assessment.get("commit_type", "").lower() in _BUGFIX_TYPES
+        )
         if red_exit == 0:
             if state.ported_test_files and is_bugfix:
                 log.warning("RED check passed — deferring to Phase 1.5 triage")
                 state.red_passed_output = red_output
             else:
-                log.info("Baseline tests pass — %s",
-                         "feature/refactor commit, RED check not applicable" if not is_bugfix
-                         else "no ported vulnerability test available — proceeding")
+                log.info(
+                    "Baseline tests pass — %s",
+                    (
+                        "feature/refactor commit, RED check not applicable"
+                        if not is_bugfix
+                        else "no ported vulnerability test available — proceeding"
+                    ),
+                )
     else:
         log.info("Baseline test: skipped (no test command)")
 
     # Step 3: Extended verification baseline (lint + optionally triage-discovered tests)
-    lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
+    lint_cmds = [
+        c
+        for c in state.triage_assessment.get("lint_commands", [])
+        if _validate_shell_command(c)
+    ]
     if config.lint_command and config.lint_command not in lint_cmds:
         lint_cmds.insert(0, config.lint_command)
     verification_cmds = list(lint_cmds)
@@ -675,17 +845,35 @@ def phase_1_baseline_and_red(
     for vcmd in verification_cmds:
         try:
             vresult = subprocess.run(
-                vcmd, shell=True, cwd=config.build_dir,
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
+                vcmd,
+                shell=True,
+                cwd=config.build_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=config.command_timeout,
             )
-            entry = {"cmd": vcmd, "exit_code": vresult.returncode, "output": (vresult.stdout + "\n" + vresult.stderr)[-3000:]}
+            entry = {
+                "cmd": vcmd,
+                "exit_code": vresult.returncode,
+                "output": (vresult.stdout + "\n" + vresult.stderr)[-3000:],
+            }
         except subprocess.TimeoutExpired:
-            entry = {"cmd": vcmd, "exit_code": TIMEOUT_EXIT_CODE, "output": f"Timed out after {config.command_timeout}s"}
+            entry = {
+                "cmd": vcmd,
+                "exit_code": TIMEOUT_EXIT_CODE,
+                "output": f"Timed out after {config.command_timeout}s",
+            }
         state.baseline_verification.append(entry)
         if entry["exit_code"] == 0:
             log.info("Baseline verification passed: %s", vcmd)
         else:
-            log.info("Baseline verification failed (exit %d, pre-existing): %s", entry["exit_code"], vcmd)
+            log.info(
+                "Baseline verification failed (exit %d, pre-existing): %s",
+                entry["exit_code"],
+                vcmd,
+            )
 
 
 def phase_1_5_red_triage(
@@ -696,7 +884,11 @@ def phase_1_5_red_triage(
 ) -> dict:
     """LLM triage when RED check passes — determine if vulnerability exists via a different vector."""
     context = create_context_str(claude_config, config)
-    triage_json = json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "{}"
+    triage_json = (
+        json.dumps(state.triage_assessment, indent=2)
+        if state.triage_assessment
+        else "{}"
+    )
 
     prompt = RedTriagePrompt(
         context=context,
@@ -740,7 +932,8 @@ def _safe_git_diff(repo_path: str, *refs: str) -> str:
     """
     result = subprocess.run(
         ["git", "diff", *refs],
-        cwd=repo_path, capture_output=True,
+        cwd=repo_path,
+        capture_output=True,
     )
     try:
         text = result.stdout.decode("utf-8")
@@ -753,13 +946,16 @@ def _safe_git_diff(repo_path: str, *refs: str) -> str:
     log.warning("git diff output too large (%d chars), truncating", len(text))
     stat = subprocess.run(
         ["git", "diff", "--stat", *refs],
-        cwd=repo_path, capture_output=True,
+        cwd=repo_path,
+        capture_output=True,
     )
     try:
         stat_text = stat.stdout.decode("utf-8")
     except UnicodeDecodeError:
         stat_text = stat.stdout.decode("utf-8", errors="replace")
-    return text[:MAX_DIFF_PROMPT_CHARS] + f"\n\n[TRUNCATED — full stat below]\n{stat_text}"
+    return (
+        text[:MAX_DIFF_PROMPT_CHARS] + f"\n\n[TRUNCATED — full stat below]\n{stat_text}"
+    )
 
 
 def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
@@ -771,14 +967,20 @@ def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
     if config.lint_command:
         cmd = config.lint_command
     else:
-        triage_lints = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c)]
+        triage_lints = [
+            c
+            for c in state.triage_assessment.get("lint_commands", [])
+            if _validate_shell_command(c)
+        ]
         cmd = triage_lints[0] if triage_lints else ""
     if cmd and cmd == config.test_command:
         return ""
     return cmd
 
 
-def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[bool, str, str, str, str]:
+def _run_build_and_test(
+    config: BugFixConfig, state: PipelineState
+) -> tuple[bool, str, str, str, str]:
     """Run build, test, and lint commands. Return (passed, build_out, build_err, test_out, test_err).
 
     Empty build/test commands are skipped (for interpreted languages).
@@ -786,16 +988,21 @@ def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[boo
     build_stdout = build_stderr = ""
     if config.build_command:
         build_exit, build_stdout, build_stderr = run_test_suite(
-            config.build_command, config.build_dir, timeout=config.command_timeout)
+            config.build_command, config.build_dir, timeout=config.command_timeout
+        )
         if build_exit != 0:
             return False, build_stdout, build_stderr, "", ""
 
     test_stdout = test_stderr = ""
     if config.test_command:
         test_exit, test_stdout, test_stderr = run_test_suite(
-            config.test_command, config.build_dir, timeout=config.command_timeout)
+            config.test_command, config.build_dir, timeout=config.command_timeout
+        )
         if test_exit == TIMEOUT_EXIT_CODE:
-            log.warning("Test command timed out — treating as verification failure: %s", config.test_command)
+            log.warning(
+                "Test command timed out — treating as verification failure: %s",
+                config.test_command,
+            )
             return False, build_stdout, build_stderr, test_stdout, test_stderr
         failures = parse_test_failures(test_stdout, test_stderr)
         if failures:
@@ -809,13 +1016,21 @@ def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[boo
             # lint check below already applies.
             passed = state.baseline_test_exit != 0
             if passed:
-                log.info("Test command failed (exit %d) with no parseable failures, "
-                         "but the baseline failed the same way — treating as "
-                         "pre-existing: %s", test_exit, config.test_command)
+                log.info(
+                    "Test command failed (exit %d) with no parseable failures, "
+                    "but the baseline failed the same way — treating as "
+                    "pre-existing: %s",
+                    test_exit,
+                    config.test_command,
+                )
             else:
-                log.warning("Test command failed (exit %d) with no parseable "
-                            "failures and a clean baseline — treating as a "
-                            "verification failure: %s", test_exit, config.test_command)
+                log.warning(
+                    "Test command failed (exit %d) with no parseable "
+                    "failures and a clean baseline — treating as a "
+                    "verification failure: %s",
+                    test_exit,
+                    config.test_command,
+                )
         else:
             passed = True
     else:
@@ -827,7 +1042,8 @@ def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[boo
     lint_cmd = _resolve_lint_command(config, state)
     if lint_cmd:
         lint_exit, lint_stdout, lint_stderr = run_test_suite(
-            lint_cmd, config.build_dir, timeout=config.command_timeout)
+            lint_cmd, config.build_dir, timeout=config.command_timeout
+        )
         if lint_exit == TIMEOUT_EXIT_CODE:
             log.warning("Lint command timed out — treating as failure: %s", lint_cmd)
             return False, build_stdout, build_stderr, lint_stdout, lint_stderr
@@ -843,7 +1059,9 @@ def _run_build_and_test(config: BugFixConfig, state: PipelineState) -> tuple[boo
                 return False, build_stdout, build_stderr, lint_stdout, lint_stderr
 
     repo = config.repo_path
-    ok, extra_files = enforce_allowlist(repo, state.allowed_modules, config.disallowed_modules)
+    ok, extra_files = enforce_allowlist(
+        repo, state.allowed_modules, config.disallowed_modules
+    )
     if not ok:
         log.info("Files modified outside priority list (advisory): %s", extra_files)
     test_ok, vetoed = enforce_test_file_veto(repo, state.seed)
@@ -906,8 +1124,14 @@ def _rerun_verification(config: BugFixConfig, commands: list[str]) -> list[str]:
     for vcmd in commands:
         try:
             result = subprocess.run(
-                vcmd, shell=True, cwd=config.build_dir,
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
+                vcmd,
+                shell=True,
+                cwd=config.build_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=config.command_timeout,
             )
         except subprocess.TimeoutExpired:
             still_failing.append(vcmd)
@@ -977,10 +1201,12 @@ def phase_4a_build_recovery(
 
     for attempt in range(1, config.max_build_test_retries + 1):
         build_exit, build_stdout, build_stderr = run_test_suite(
-            config.build_command, config.build_dir, timeout=config.command_timeout)
+            config.build_command, config.build_dir, timeout=config.command_timeout
+        )
         if build_exit == 0:
             test_exit, test_stdout, test_stderr = run_test_suite(
-                config.test_command, config.build_dir, timeout=config.command_timeout)
+                config.test_command, config.build_dir, timeout=config.command_timeout
+            )
 
             failures = parse_test_failures(test_stdout, test_stderr)
             no_regression, _ = check_regression(failures, state.baseline)
@@ -1018,8 +1244,11 @@ def phase_4a_build_recovery(
             max_retries=config.max_build_test_retries,
         )
 
-        log.info("Phase 4a attempt %d/%d — agent diagnosing build/test errors",
-                 attempt, config.max_build_test_retries)
+        log.info(
+            "Phase 4a attempt %d/%d — agent diagnosing build/test errors",
+            attempt,
+            config.max_build_test_retries,
+        )
         asyncio.run(claude_run(claude_config_4a, [prompt.prompt()], tracker=tracker))
 
         post_fix_files = set(git_diff_name_only(config.repo_path))
@@ -1029,10 +1258,12 @@ def phase_4a_build_recovery(
             )
 
     build_exit, _, _ = run_test_suite(
-        config.build_command, config.build_dir, timeout=config.command_timeout)
+        config.build_command, config.build_dir, timeout=config.command_timeout
+    )
     if build_exit == 0:
         test_exit, test_stdout, test_stderr = run_test_suite(
-            config.test_command, config.build_dir, timeout=config.command_timeout)
+            config.test_command, config.build_dir, timeout=config.command_timeout
+        )
 
         failures = parse_test_failures(test_stdout, test_stderr)
         no_regression, _ = check_regression(failures, state.baseline)
@@ -1071,7 +1302,11 @@ def phase_4b_run_and_fix(
     """
     extra_verification = list(extra_verification or [])
     dossier_text = format_dossier(state.dossier) if state.dossier else ""
-    triage_json = json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "{}"
+    triage_json = (
+        json.dumps(state.triage_assessment, indent=2)
+        if state.triage_assessment
+        else "{}"
+    )
 
     enriched_context = f"""
 <context>
@@ -1106,20 +1341,25 @@ def phase_4b_run_and_fix(
         elif claude_config.profile is not None:
             # A bare override must not inherit an unrelated profile's credentials.
             from common.model_registry import build_legacy_profile
+
             phase_4b_profile = build_legacy_profile(phase_4b_model)
         # Truly unprofiled programmatic callers retain legacy transport lookup.
     if phase_4b_profile is not None:
         phase_4b_model = phase_4b_profile.model
     ext_claude_config = _phase_config(
-        claude_config, config,
+        claude_config,
+        config,
         model=phase_4b_model,
         thinking={"type": "adaptive"},
         effort="max",
         profile=phase_4b_profile,
     )
     ext_claude_config.max_thinking_tokens = 1048576
-    log.info("Phase 4b: recovery with %s (pipeline model is %s)",
-             phase_4b_model, claude_config.model)
+    log.info(
+        "Phase 4b: recovery with %s (pipeline model is %s)",
+        phase_4b_model,
+        claude_config.model,
+    )
 
     prompt = gen_RunAndFixPrompt(
         context=enriched_context,
@@ -1141,21 +1381,25 @@ def phase_4b_run_and_fix(
     phase_4b_json_path = None
     phase_4b_data: dict = {}
     if tracker:
-        phase_4b_data.update({
-            "output_dir": tracker._output_dir,
-            "repo_path": config.repo_path,
-            "build_dir": config.build_dir,
-            "source_branch": config.source_branch,
-            "target_branch": config.target_branch,
-            "source_fix_commit": config.source_fix_commit,
-            "issue_id": config.issue_id,
-            "build_command": config.build_command,
-            "test_command": config.test_command,
-            "max_build_test_retries": config.max_build_test_retries,
-            "model": ext_claude_config.model,
-            "dossier": dossier_text,
-            "semantic_triage": state.triage_assessment if state.triage_assessment else {},
-        })
+        phase_4b_data.update(
+            {
+                "output_dir": tracker._output_dir,
+                "repo_path": config.repo_path,
+                "build_dir": config.build_dir,
+                "source_branch": config.source_branch,
+                "target_branch": config.target_branch,
+                "source_fix_commit": config.source_fix_commit,
+                "issue_id": config.issue_id,
+                "build_command": config.build_command,
+                "test_command": config.test_command,
+                "max_build_test_retries": config.max_build_test_retries,
+                "model": ext_claude_config.model,
+                "dossier": dossier_text,
+                "semantic_triage": (
+                    state.triage_assessment if state.triage_assessment else {}
+                ),
+            }
+        )
         phase_4b_json_path = os.path.join(tracker._output_dir, "phase_4b_input.json")
         with open(phase_4b_json_path, "w") as f:
             json.dump(phase_4b_data, f, indent=2)
@@ -1184,17 +1428,21 @@ def phase_4b_run_and_fix(
 
     _4b_start = time.time()
 
-    phase_4b_log_path = os.path.join(tracker._output_dir, "phase_4b_log.txt") if tracker else None
+    phase_4b_log_path = (
+        os.path.join(tracker._output_dir, "phase_4b_log.txt") if tracker else None
+    )
+    _4b_log_file: TextIO | None = None
+    _prev_stdout = sys.stdout
     if phase_4b_log_path:
-
-        _4b_log_file = open(phase_4b_log_path, "w", encoding="utf-8")
-        _prev_stdout = sys.stdout
+        _4b_log_file = open(  # noqa: SIM115 (tee target, closed in finally)
+            phase_4b_log_path, "w", encoding="utf-8"
+        )
         sys.stdout = Tee(_prev_stdout, _4b_log_file)
 
     try:
         timings = asyncio.run(_agent_run(ext_claude_config, steps))
     finally:
-        if phase_4b_log_path:
+        if _4b_log_file is not None:
             sys.stdout = _prev_stdout
             _4b_log_file.close()
             log.info("Phase 4b log written to %s", phase_4b_log_path)
@@ -1204,25 +1452,34 @@ def phase_4b_run_and_fix(
     query_records = []
     if tracker and timings:
         for st in timings:
-            dur = st.get("duration", _4b_end - _4b_start)
+            # A recorded duration of 0 is a valid measurement; only a missing
+            # entry falls back to the whole-phase span.
+            raw_dur = st.get("duration")
+            dur = float(raw_dur) if raw_dur is not None else (_4b_end - _4b_start)
             sdk_cost = st.get("cost_usd")
-            query_records.append(tracker.record_query(
-                prompt_name=st.get("name", "phase_4b"),
-                start_time=_4b_start,
-                end_time=_4b_start + dur,
-                input_tokens=st.get("input_tokens", 0),
-                output_tokens=st.get("output_tokens", 0),
-                sdk_cost_usd=sdk_cost,
-                model=ext_claude_config.model,
-                profile=ext_claude_config.profile,
-            ))
+            query_records.append(
+                tracker.record_query(
+                    prompt_name=st.get("name", "phase_4b"),
+                    start_time=_4b_start,
+                    end_time=_4b_start + dur,
+                    input_tokens=st.get("input_tokens", 0),
+                    output_tokens=st.get("output_tokens", 0),
+                    sdk_cost_usd=sdk_cost,
+                    model=ext_claude_config.model,
+                    profile=ext_claude_config.profile,
+                )
+            )
 
     if tracker and phase_4b_json_path:
         phase_4b_data["duration_seconds"] = _4b_end - _4b_start
         if timings:
             phase_4b_data["cost_usd"] = sum(record.cost_usd for record in query_records)
-            phase_4b_data["input_tokens"] = sum(st.get("input_tokens", 0) for st in timings)
-            phase_4b_data["output_tokens"] = sum(st.get("output_tokens", 0) for st in timings)
+            phase_4b_data["input_tokens"] = sum(
+                int(cast(Any, st.get("input_tokens", 0))) for st in timings
+            )
+            phase_4b_data["output_tokens"] = sum(
+                int(cast(Any, st.get("output_tokens", 0))) for st in timings
+            )
 
         # Failure first — must match the decision precedence below, so a
         # session that somehow writes both files is recorded as a failure.
@@ -1233,7 +1490,8 @@ def phase_4b_run_and_fix(
                 log.info("Phase 4b result copied to %s", dest)
                 with open(result_file) as f:
                     phase_4b_data["agent_reported"] = (
-                        "success" if result_file == success_file else "failure")
+                        "success" if result_file == success_file else "failure"
+                    )
                     phase_4b_data["result_summary"] = f.read()
                 break
         # The agent's marker is a claim, not the verdict — build/test and the
@@ -1250,7 +1508,9 @@ def phase_4b_run_and_fix(
         _finalize("failure")
         raise PipelineEscalation("Phase 4b: run-and-fix loop exhausted retries")
     elif os.path.exists(success_file):
-        state.dossier.add("Run-and-fix loop", "Build-test-fix loop succeeded", "Phase 4b")
+        state.dossier.add(
+            "Run-and-fix loop", "Build-test-fix loop succeeded", "Phase 4b"
+        )
         log.info("Phase 4b: run-and-fix loop reported success — verifying")
 
         # The marker says the agent believes it is done. Prove it: on the
@@ -1268,7 +1528,7 @@ def phase_4b_run_and_fix(
             _finalize("verification_failed")
             raise PipelineEscalation(
                 f"Phase 4b: reported success while build/test still fails ({e})"
-            )
+            ) from None
 
         still_failing = _rerun_verification(config, extra_verification)
         if still_failing:
@@ -1318,23 +1578,36 @@ def cherry_pick_and_resolve(
 ) -> str:
     """Cherry-pick a single commit trying multiple strategies. Returns 'clean', 'resolved', or raises."""
 
+    class _CherryPickStrategy(TypedDict):
+        strategy: str | None
+        strategy_option: str | None
+        name: str
 
-    strategies = [
+    strategies: list[_CherryPickStrategy] = [
         {"strategy": None, "strategy_option": None, "name": "default"},
         {"strategy": None, "strategy_option": "patience", "name": "patience"},
         {"strategy": "ort", "strategy_option": None, "name": "ort"},
     ]
 
-    best_strategy = None
+    best_strategy: tuple[_CherryPickStrategy, int] | None = None
     for strat in strategies:
-        result = git_cherry_pick(config.repo_path, commit,
-                                 strategy=strat["strategy"],
-                                 strategy_option=strat["strategy_option"])
+        result = git_cherry_pick(
+            config.repo_path,
+            commit,
+            strategy=strat["strategy"],
+            strategy_option=strat["strategy_option"],
+        )
         status = git_status_porcelain(config.repo_path)
         uu_files = _conflicted_files(status)
 
-        log.info("%s: strategy %s: exit=%d, conflicts=%d, success=%s",
-                 label, strat["name"], result.exit_code, len(uu_files), result.success)
+        log.info(
+            "%s: strategy %s: exit=%d, conflicts=%d, success=%s",
+            label,
+            strat["name"],
+            result.exit_code,
+            len(uu_files),
+            result.success,
+        )
 
         if result.success and not uu_files:
             log.info("%s: clean cherry-pick (strategy: %s)", label, strat["name"])
@@ -1343,25 +1616,41 @@ def cherry_pick_and_resolve(
             return "clean"
 
         if uu_files:
-            if best_strategy is None or len(uu_files) < best_strategy["count"]:
-                best_strategy = {"strat": strat, "count": len(uu_files)}
+            if best_strategy is None or len(uu_files) < best_strategy[1]:
+                best_strategy = (strat, len(uu_files))
             if state.dossier:
-                state.dossier.add_strategy(strat["name"], f"conflict ({len(uu_files)} files)")
+                state.dossier.add_strategy(
+                    strat["name"], f"conflict ({len(uu_files)} files)"
+                )
         else:
-            log.warning("%s: strategy %s: no conflicts but exit=%d, stderr=%s",
-                        label, strat["name"], result.exit_code, result.stderr[:500])
+            log.warning(
+                "%s: strategy %s: no conflicts but exit=%d, stderr=%s",
+                label,
+                strat["name"],
+                result.exit_code,
+                result.stderr[:500],
+            )
 
         git_cherry_pick_abort(config.repo_path)
 
     if best_strategy is None:
-        raise PipelineEscalation(f"{label}: unmappable cherry-pick (all strategies failed)")
+        raise PipelineEscalation(
+            f"{label}: unmappable cherry-pick (all strategies failed)"
+        )
 
-    log.info("%s: using strategy %s (%d conflicts, fewest)",
-             label, best_strategy["strat"]["name"], best_strategy["count"])
-    strat = best_strategy["strat"]
-    git_cherry_pick(config.repo_path, commit,
-                    strategy=strat["strategy"],
-                    strategy_option=strat["strategy_option"])
+    log.info(
+        "%s: using strategy %s (%d conflicts, fewest)",
+        label,
+        best_strategy[0]["name"],
+        best_strategy[1],
+    )
+    strat = best_strategy[0]
+    git_cherry_pick(
+        config.repo_path,
+        commit,
+        strategy=strat["strategy"],
+        strategy_option=strat["strategy_option"],
+    )
     status = git_status_porcelain(config.repo_path)
     uu_files = _conflicted_files(status)
 
@@ -1373,25 +1662,50 @@ def cherry_pick_and_resolve(
     skip_set = set(files_to_skip or [])
     if skip_set:
         # Reset ALL skip files to target version — both conflicting and cleanly-applied
-        all_changed = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD"],
-            cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        ).stdout.strip().splitlines()
-        skip_applied_clean = [f for f in all_changed if f in skip_set and f not in uu_files]
+        all_changed = (
+            subprocess.run(
+                ["git", "diff", "--name-only", "HEAD"],
+                cwd=config.repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            .stdout.strip()
+            .splitlines()
+        )
+        skip_applied_clean = [
+            f for f in all_changed if f in skip_set and f not in uu_files
+        ]
         if skip_applied_clean:
-            log.info("%s: reverting %d skip files that applied cleanly", label, len(skip_applied_clean))
+            log.info(
+                "%s: reverting %d skip files that applied cleanly",
+                label,
+                len(skip_applied_clean),
+            )
             for f in skip_applied_clean:
-                subprocess.run(["git", "checkout", "HEAD", "--", f],
-                               cwd=config.repo_path, capture_output=True)
+                subprocess.run(
+                    ["git", "checkout", "HEAD", "--", f],
+                    cwd=config.repo_path,
+                    capture_output=True,
+                )
 
         auto_resolved = [f for f in uu_files if f in skip_set]
         if auto_resolved:
-            log.info("%s: reverting %d conflicting skip files to target version", label, len(auto_resolved))
+            log.info(
+                "%s: reverting %d conflicting skip files to target version",
+                label,
+                len(auto_resolved),
+            )
             for f in auto_resolved:
-                subprocess.run(["git", "checkout", "HEAD", "--", f],
-                               cwd=config.repo_path, capture_output=True)
-                subprocess.run(["git", "add", "--", f],
-                               cwd=config.repo_path, capture_output=True)
+                subprocess.run(
+                    ["git", "checkout", "HEAD", "--", f],
+                    cwd=config.repo_path,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "add", "--", f], cwd=config.repo_path, capture_output=True
+                )
 
         total_skipped = len(skip_applied_clean) + len(auto_resolved)
         if total_skipped:
@@ -1401,7 +1715,9 @@ def cherry_pick_and_resolve(
             uu_files = [f for f in uu_files if f not in skip_set]
 
     if not uu_files:
-        msg = f"Port {label}\n\n[ Conflict summary: {'; '.join(conflict_summary_parts)} ]"
+        msg = (
+            f"Port {label}\n\n[ Conflict summary: {'; '.join(conflict_summary_parts)} ]"
+        )
         git_commit(config.repo_path, msg)
         return "resolved"
 
@@ -1417,11 +1733,17 @@ def cherry_pick_and_resolve(
         try:
             mech = resolve_mechanically(config.repo_path, commit, uu_files)
         except Exception as e:
-            log.warning("%s: mechanical resolution failed (continuing to LLM): %s", label, e)
+            log.warning(
+                "%s: mechanical resolution failed (continuing to LLM): %s", label, e
+            )
             mech = {}
         if mech:
-            log.info("%s: mechanically re-applied %d/%d conflicted files",
-                     label, len(mech), len(uu_files))
+            log.info(
+                "%s: mechanically re-applied %d/%d conflicted files",
+                label,
+                len(mech),
+                len(uu_files),
+            )
             if state.dossier:
                 for f, rung in sorted(mech.items()):
                     state.dossier.add_strategy(f"mechanical:{rung}", f"resolved {f}")
@@ -1431,12 +1753,21 @@ def cherry_pick_and_resolve(
             uu_files = [f for f in uu_files if f not in mech]
             if tracker:
                 tracker.record_gate(
-                    "mechanical_resolution", f"{len(mech)}/{len(original_uu_files)}")
+                    "mechanical_resolution", f"{len(mech)}/{len(original_uu_files)}"
+                )
 
     if not uu_files:
         return _finalize_resolution(
-            config, claude_config_resolve, state, tracker, commit, label,
-            conflict_summary_parts, base_head, fix_diff, context,
+            config,
+            claude_config_resolve,
+            state,
+            tracker,
+            commit,
+            label,
+            conflict_summary_parts,
+            base_head,
+            fix_diff,
+            context,
         )
 
     followup_note = ""
@@ -1454,38 +1785,68 @@ def cherry_pick_and_resolve(
                 chunk_size = 15 if max_chunk <= 50_000 else 20
             else:
                 chunk_size = CHUNK_SIZE
-            log.info("%s attempt %d/%d — resolving %d conflicts in chunks of %d",
-                     label, attempt, config.max_resolution_retries, len(uu_files), chunk_size)
+            log.info(
+                "%s attempt %d/%d — resolving %d conflicts in chunks of %d",
+                label,
+                attempt,
+                config.max_resolution_retries,
+                len(uu_files),
+                chunk_size,
+            )
             for chunk_start in range(0, len(uu_files), chunk_size):
-                chunk = uu_files[chunk_start:chunk_start + chunk_size]
-                log.info("%s: chunk %d-%d of %d",
-                         label, chunk_start + 1, chunk_start + len(chunk), len(uu_files))
+                chunk = uu_files[chunk_start : chunk_start + chunk_size]
+                log.info(
+                    "%s: chunk %d-%d of %d",
+                    label,
+                    chunk_start + 1,
+                    chunk_start + len(chunk),
+                    len(uu_files),
+                )
                 chunk_diff = _compute_fix_diff(config, commit, for_files=chunk)
                 prompt = NarrowResolutionAgentPrompt(
                     fix_diff=chunk_diff,
                     conflicted_files=chunk,
                     context=context,
                     allowed_modules=priority,
-                    triage_assessment=json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "",
+                    triage_assessment=(
+                        json.dumps(state.triage_assessment, indent=2)
+                        if state.triage_assessment
+                        else ""
+                    ),
                     target_branch=config.target_branch,
                     baseline_ref=base_head,
                     followup_fixes=followup_note,
                 )
-                asyncio.run(claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker))
+                asyncio.run(
+                    claude_run(
+                        claude_config_resolve, [prompt.prompt()], tracker=tracker
+                    )
+                )
         else:
             prompt = NarrowResolutionAgentPrompt(
                 fix_diff=fix_diff,
                 conflicted_files=uu_files,
                 context=context,
                 allowed_modules=priority,
-                triage_assessment=json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "",
+                triage_assessment=(
+                    json.dumps(state.triage_assessment, indent=2)
+                    if state.triage_assessment
+                    else ""
+                ),
                 target_branch=config.target_branch,
                 baseline_ref=base_head,
                 followup_fixes=followup_note,
             )
-            log.info("%s attempt %d/%d — resolving %d conflicts",
-                     label, attempt, config.max_resolution_retries, len(uu_files))
-            asyncio.run(claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker))
+            log.info(
+                "%s attempt %d/%d — resolving %d conflicts",
+                label,
+                attempt,
+                config.max_resolution_retries,
+                len(uu_files),
+            )
+            asyncio.run(
+                claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker)
+            )
 
         remaining = git_status_porcelain(config.repo_path)
         still_conflicted = _has_conflicts(remaining)
@@ -1494,14 +1855,26 @@ def cherry_pick_and_resolve(
                 f"LLM resolved {len(original_uu_files)} source conflicts ({attempt} attempt(s))"
             )
             return _finalize_resolution(
-                config, claude_config_resolve, state, tracker, commit, label,
-                conflict_summary_parts, base_head, fix_diff, context,
+                config,
+                claude_config_resolve,
+                state,
+                tracker,
+                commit,
+                label,
+                conflict_summary_parts,
+                base_head,
+                fix_diff,
+                context,
             )
-        log.warning("%s: attempt %d: %d conflicts remain", label, attempt, len(still_conflicted))
+        log.warning(
+            "%s: attempt %d: %d conflicts remain", label, attempt, len(still_conflicted)
+        )
         uu_files = _conflicted_files(still_conflicted)
 
     git_cherry_pick_abort(config.repo_path)
-    raise PipelineEscalation(f"{label}: failed after {config.max_resolution_retries} attempts")
+    raise PipelineEscalation(
+        f"{label}: failed after {config.max_resolution_retries} attempts"
+    )
 
 
 def _is_followup_target(repo_path: str, commit: str, state: PipelineState) -> bool:
@@ -1544,12 +1917,20 @@ def _finalize_resolution(
     # The resolution agent is instructed to commit; conclude the cherry-pick
     # ourselves if it didn't.
     if git_rev_parse(repo, "HEAD") == base_head:
-        summary = "; ".join(conflict_summary_parts) if conflict_summary_parts else "resolved"
-        git_commit(repo, f"Port {label}\n\n[ Conflict summary: {summary} ]", trailers=_COAUTHOR_TRAILERS)
+        summary = (
+            "; ".join(conflict_summary_parts) if conflict_summary_parts else "resolved"
+        )
+        git_commit(
+            repo,
+            f"Port {label}\n\n[ Conflict summary: {summary} ]",
+            trailers=_COAUTHOR_TRAILERS,
+        )
         if git_rev_parse(repo, "HEAD") == base_head:
             # Empty resolution or a rejecting commit hook — never amend or
             # post-process base_head itself.
-            log.warning("%s: resolution commit did not move HEAD — skipping post-passes", label)
+            log.warning(
+                "%s: resolution commit did not move HEAD — skipping post-passes", label
+            )
             return "resolved"
 
     changed_files = git_diff_name_only_range(repo, base_head, "HEAD")
@@ -1567,7 +1948,11 @@ def _finalize_resolution(
         try:
             port_diff = subprocess.run(
                 ["git", "diff", base_head, "HEAD"],
-                cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             ).stdout
             added_by_file = added_lines_by_file(port_diff)
             # Mining references base_head — the tree the port actually lands
@@ -1575,9 +1960,11 @@ def _finalize_resolution(
             # target branch would mine a ported prerequisite's own rename
             # backwards and mechanically revert it.
             mined = mine_substitutions(
-                repo, f"{commit}^1", base_head, sorted(added_by_file))
+                repo, f"{commit}^1", base_head, sorted(added_by_file)
+            )
             guarded = {
-                old: new for old, new in mined.items()
+                old: new
+                for old, new in mined.items()
                 if not token_exists_on_ref(repo, base_head, old)
             }
             advisory_subs = {o: n for o, n in mined.items() if o not in guarded}
@@ -1598,12 +1985,16 @@ def _finalize_resolution(
                     for token in hits:
                         applied_subs[token] = guarded[token]
             if applied_subs:
-                log.info("Auto-applied downstream substitutions: %s",
-                         ", ".join(f"{o}->{n}" for o, n in sorted(applied_subs.items())))
+                log.info(
+                    "Auto-applied downstream substitutions: %s",
+                    ", ".join(f"{o}->{n}" for o, n in sorted(applied_subs.items())),
+                )
                 if state.dossier:
                     state.dossier.add(
                         "Auto-applied downstream substitutions",
-                        "\n".join(f"{o} -> {n}" for o, n in sorted(applied_subs.items())),
+                        "\n".join(
+                            f"{o} -> {n}" for o, n in sorted(applied_subs.items())
+                        ),
                         "Phase 3a post-pass (mined from upstream-base vs target delta)",
                     )
 
@@ -1612,7 +2003,8 @@ def _finalize_resolution(
             # obedience. Guards inside the finder ensure every restored token
             # exists on the target.
             restorations = find_pure_rename_restorations(
-                repo, base_head, commit, port_diff)
+                repo, base_head, commit, port_diff
+            )
             for f, items in restorations.items():
                 abs_path = os.path.join(repo, f)
                 if not os.path.isfile(abs_path):
@@ -1637,12 +2029,17 @@ def _finalize_resolution(
                     with open(abs_path, "w", encoding="utf-8", newline="") as fh:
                         fh.write("\n".join(lines))
             if auto_restored:
-                log.info("Auto-restored fix bytes for %d pure-renamed lines in %d files",
-                         sum(auto_restored.values()), len(auto_restored))
+                log.info(
+                    "Auto-restored fix bytes for %d pure-renamed lines in %d files",
+                    sum(auto_restored.values()),
+                    len(auto_restored),
+                )
                 if state.dossier:
                     state.dossier.add(
                         "Fix lines auto-restored (pure renames)",
-                        "\n".join(f"{f}: {n} lines" for f, n in sorted(auto_restored.items())),
+                        "\n".join(
+                            f"{f}: {n} lines" for f, n in sorted(auto_restored.items())
+                        ),
                         "Phase 3a post-pass",
                     )
         except Exception as e:
@@ -1652,12 +2049,17 @@ def _finalize_resolution(
         try:
             snap_counts = snap_back_files(repo, changed_files, base_head, commit)
             if snap_counts:
-                log.info("Snap-back: restored source bytes in %d files (%d lines)",
-                         len(snap_counts), sum(snap_counts.values()))
+                log.info(
+                    "Snap-back: restored source bytes in %d files (%d lines)",
+                    len(snap_counts),
+                    sum(snap_counts.values()),
+                )
                 if state.dossier:
                     state.dossier.add(
                         "Snap-back (drifted formatting restored to source bytes)",
-                        "\n".join(f"{f}: {n} lines" for f, n in sorted(snap_counts.items())),
+                        "\n".join(
+                            f"{f}: {n} lines" for f, n in sorted(snap_counts.items())
+                        ),
                         "Phase 3a post-pass",
                     )
         except Exception as e:
@@ -1684,12 +2086,16 @@ def _finalize_resolution(
         # Require BOTH an opening and closing marker: a lone seven-equals
         # line is legitimate content (doc tables, setext underlines).
         marker_files = [
-            f for f, text in current_texts.items()
+            f
+            for f, text in current_texts.items()
             if _MARKER_START_RE.search(text) and _MARKER_END_RE.search(text)
         ]
         if marker_files:
-            log.warning("Conflict markers committed in %d files: %s",
-                        len(marker_files), ", ".join(marker_files))
+            log.warning(
+                "Conflict markers committed in %d files: %s",
+                len(marker_files),
+                ", ".join(marker_files),
+            )
             if tracker:
                 tracker.record_gate("conflict_markers", f"{len(marker_files)} files")
             if state.dossier:
@@ -1705,28 +2111,44 @@ def _finalize_resolution(
         try:
             port_diff = subprocess.run(
                 ["git", "diff", base_head, "HEAD"],
-                cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             ).stdout
             added_by_file = added_lines_by_file(port_diff)
             findings = audit_added_tokens(repo, base_head, commit, added_by_file)
             port_changes = port_line_changes(port_diff)
             annotate_dead_config(
-                findings, port_changes, current_texts,
+                findings,
+                port_changes,
+                current_texts,
                 lambda s: target_config_state(repo, base_head, s),
             )
             if findings:
-                log.info("Token audit: %d identifiers flagged (%s)",
-                         len(findings), ", ".join(f.token for f in findings[:8]))
+                log.info(
+                    "Token audit: %d identifiers flagged (%s)",
+                    len(findings),
+                    ", ".join(f.token for f in findings[:8]),
+                )
             if tracker:
                 tracker.record_gate("token_audit", f"{len(findings)} flagged")
 
             line_findings = audit_line_provenance(
-                repo, base_head, commit, port_diff, current_texts,
-                substitutions=applied_subs)
+                repo,
+                base_head,
+                commit,
+                port_diff,
+                current_texts,
+                substitutions=applied_subs,
+            )
             if line_findings:
-                log.info("Three-way discipline: %d line findings (%s)",
-                         len(line_findings),
-                         ", ".join(sorted({lf.kind for lf in line_findings})))
+                log.info(
+                    "Three-way discipline: %d line findings (%s)",
+                    len(line_findings),
+                    ", ".join(sorted({lf.kind for lf in line_findings})),
+                )
             if tracker:
                 tracker.record_gate("line_provenance", f"{len(line_findings)} findings")
         except Exception as e:
@@ -1735,9 +2157,12 @@ def _finalize_resolution(
     if config.file_check_command:
         try:
             file_check_failures = run_file_checks(
-                repo, changed_files, config.file_check_command, config.command_timeout)
+                repo, changed_files, config.file_check_command, config.command_timeout
+            )
             if file_check_failures:
-                log.warning("Per-file checks failed for %d files", len(file_check_failures))
+                log.warning(
+                    "Per-file checks failed for %d files", len(file_check_failures)
+                )
                 if state.dossier:
                     state.dossier.add(
                         "Per-file check failures",
@@ -1747,14 +2172,17 @@ def _finalize_resolution(
         except Exception as e:
             log.warning("Per-file checks failed to run (continuing): %s", e)
 
-    followups = (
-        state.followup_fixes
-        if _is_followup_target(repo, commit, state) else []
-    )
+    followups = state.followup_fixes if _is_followup_target(repo, commit, state) else []
     evidence_report = render_evidence(
-        findings, applied_subs, advisory_subs, followups, file_check_failures,
-        line_findings=line_findings, conflict_marker_files=marker_files,
-        auto_restored=auto_restored)
+        findings,
+        applied_subs,
+        advisory_subs,
+        followups,
+        file_check_failures,
+        line_findings=line_findings,
+        conflict_marker_files=marker_files,
+        auto_restored=auto_restored,
+    )
 
     current_diff = _safe_git_diff(repo, base_head)
     if config.post_resolution_check and current_diff.strip():
@@ -1764,14 +2192,24 @@ def _finalize_resolution(
             fix_diff=fix_diff,
             current_diff=current_diff,
             target_branch=config.target_branch,
-            triage_assessment=json.dumps(state.triage_assessment, indent=2) if state.triage_assessment else "",
+            triage_assessment=(
+                json.dumps(state.triage_assessment, indent=2)
+                if state.triage_assessment
+                else ""
+            ),
             evidence_report=evidence_report,
             baseline_ref=base_head,
         )
         try:
-            asyncio.run(claude_run(claude_config_resolve, [check_prompt.prompt()], tracker=tracker))
+            asyncio.run(
+                claude_run(
+                    claude_config_resolve, [check_prompt.prompt()], tracker=tracker
+                )
+            )
         except Exception:
-            log.warning("Phase 3a.1 — post-resolution check failed, continuing with existing resolution")
+            log.warning(
+                "Phase 3a.1 — post-resolution check failed, continuing with existing resolution"
+            )
         else:
             # No snap-back after the verifier: its deliberate corrections must
             # never be rewritten, and every pre-verifier line was already
@@ -1780,21 +2218,34 @@ def _finalize_resolution(
             post_status = git_status_porcelain(repo)
             if post_status:
                 subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
-                git_commit(repo, "fixup: adapt backport to target branch API", trailers=_COAUTHOR_TRAILERS)
+                git_commit(
+                    repo,
+                    "fixup: adapt backport to target branch API",
+                    trailers=_COAUTHOR_TRAILERS,
+                )
                 log.info("Phase 3a.1 — post-resolution check committed adaptations")
             if config.evidence_checks and findings:
                 try:
                     port_diff = subprocess.run(
                         ["git", "diff", base_head, "HEAD"],
-                        cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        cwd=repo,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
                     ).stdout
                     remaining = audit_added_tokens(
-                        repo, base_head, commit, added_lines_by_file(port_diff))
+                        repo, base_head, commit, added_lines_by_file(port_diff)
+                    )
                     if tracker:
-                        tracker.record_gate("token_audit_post", f"{len(remaining)} remaining")
+                        tracker.record_gate(
+                            "token_audit_post", f"{len(remaining)} remaining"
+                        )
                     if remaining:
-                        log.warning("Token audit: %d identifiers still flagged after Phase 3a.1",
-                                    len(remaining))
+                        log.warning(
+                            "Token audit: %d identifiers still flagged after Phase 3a.1",
+                            len(remaining),
+                        )
                         if state.dossier:
                             state.dossier.add(
                                 "Token audit — unresolved after Phase 3a.1",
@@ -1819,20 +2270,22 @@ def _finalize_resolution(
                 baseline_ref=base_head,
             )
             try:
-                asyncio.run(claude_run(
-                    claude_config_resolve, [blind_prompt.prompt()],
-                    tracker=tracker))
+                asyncio.run(
+                    claude_run(
+                        claude_config_resolve, [blind_prompt.prompt()], tracker=tracker
+                    )
+                )
             except Exception:
                 log.warning("Phase 3a.2 — blind review failed, continuing")
             else:
                 blind_status = git_status_porcelain(repo)
                 if blind_status:
-                    subprocess.run(
-                        ["git", "add", "-u"], cwd=repo, capture_output=True)
+                    subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
                     git_commit(
                         repo,
                         "fixup: independent review corrections (Phase 3a.2)",
-                        trailers=_COAUTHOR_TRAILERS)
+                        trailers=_COAUTHOR_TRAILERS,
+                    )
                     log.info("Phase 3a.2 — blind review committed corrections")
                     if state.dossier:
                         state.dossier.add(
@@ -1853,12 +2306,16 @@ def port_prerequisite_chain(
 ) -> list[dict]:
     """Port prerequisite commits identified by Phase 0.5 before the main commit."""
     prerequisites = state.triage_assessment.get("prerequisites", [])
-    portable = [p for p in prerequisites if p.get("portable", False) and p.get("introduced_by")]
+    portable = [
+        p for p in prerequisites if p.get("portable", False) and p.get("introduced_by")
+    ]
 
     if not portable:
         return []
 
-    log.info("Phase 0.5 identified %d portable prerequisites to port first", len(portable))
+    log.info(
+        "Phase 0.5 identified %d portable prerequisites to port first", len(portable)
+    )
     ported = []
 
     for i, prereq in enumerate(portable[:MAX_PREREQUISITE_DEPTH]):
@@ -1878,7 +2335,10 @@ def port_prerequisite_chain(
         try:
             config.source_fix_commit = sha
             result = cherry_pick_and_resolve(
-                config, claude_config, state, tracker,
+                config,
+                claude_config,
+                state,
+                tracker,
                 commit=sha,
                 label=label,
                 files_to_skip=state.triage_assessment.get("files_to_skip", []),
@@ -1923,9 +2383,20 @@ def _squashed_backport_range(config: BugFixConfig, state: PipelineState) -> str 
         if not target_base or not head or target_base == head:
             return None
         result = subprocess.run(
-            ["git", "commit-tree", f"{head}^{{tree}}", "-p", target_base,
-             "-m", f"squashed backport for {config.issue_id}"],
-            cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            [
+                "git",
+                "commit-tree",
+                f"{head}^{{tree}}",
+                "-p",
+                target_base,
+                "-m",
+                f"squashed backport for {config.issue_id}",
+            ],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode != 0:
             return None
@@ -1938,7 +2409,9 @@ def _squashed_backport_range(config: BugFixConfig, state: PipelineState) -> str 
         return None
 
 
-def _backport_completeness(config: BugFixConfig, state: PipelineState) -> tuple[str, str]:
+def _backport_completeness(
+    config: BugFixConfig, state: PipelineState
+) -> tuple[str, str]:
     """Classify the finished backport as "success" or "partial_success".
 
     Fires ONLY for non-bugfix commits (feature/api-change ports). A bug fix
@@ -1948,7 +2421,7 @@ def _backport_completeness(config: BugFixConfig, state: PipelineState) -> tuple[
     mostly proves the target still compiles. Returns (outcome, detail).
     """
     raw_type = state.triage_assessment.get("commit_type")
-    commit_type = (raw_type if isinstance(raw_type, str) else "")
+    commit_type = raw_type if isinstance(raw_type, str) else ""
     # Normalize LLM variants ("Bug Fix", " bug_fix ") before matching, so a
     # sloppily-labeled bug fix can never be downgraded.
     commit_type = commit_type.strip().lower().replace("_", "-").replace(" ", "-")
@@ -1966,15 +2439,22 @@ def _backport_completeness(config: BugFixConfig, state: PipelineState) -> tuple[
         # state.seed is the fix's file set with merge-commit (-m1) handling;
         # git show --name-only is the fallback and is empty for merges.
         fix_files = set(state.seed) or set(
-            git_show_files(config.repo_path, config.source_fix_commit))
+            git_show_files(config.repo_path, config.source_fix_commit)
+        )
         skipped = set(state.triage_assessment.get("files_to_skip", [])) & fix_files
         if fix_files and skipped:
             target_base = git_merge_base(config.repo_path, config.target_branch, "HEAD")
             result = subprocess.run(
                 ["git", "diff", "--name-only", f"{target_base}..HEAD"],
-                cwd=config.repo_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=config.repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
-            backported = set(result.stdout.splitlines()) if result.returncode == 0 else set()
+            backported = (
+                set(result.stdout.splitlines()) if result.returncode == 0 else set()
+            )
             # A skipped file that reappears in the final diff was regenerated
             # (Phase 3b) or otherwise recovered — only count real drops.
             dropped = sorted(skipped - backported)
@@ -2014,7 +2494,11 @@ def _changed_payload_lines(repo: str, diff_args: list[str]) -> set[tuple[str, st
     """
     result = subprocess.run(
         ["git", "diff", "--unified=0", *diff_args],
-        cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode != 0:
         return set()
@@ -2067,17 +2551,22 @@ def _shares_content_with_fix(config: BugFixConfig, state: PipelineState) -> bool
         if not target_base:
             return True
         backport_lines = _changed_payload_lines(
-            config.repo_path, [f"{target_base}..HEAD"])
+            config.repo_path, [f"{target_base}..HEAD"]
+        )
         if not backport_lines:
             return False
 
         shared = fix_lines & backport_lines
         overlap = len(shared) / len(fix_lines)
         if overlap < _RELATEDNESS_MIN_OVERLAP:
-            log.info("Relatedness: only %d/%d of the fix's changed lines appear "
-                     "in the backport (%.0f%%, below %.0f%%)",
-                     len(shared), len(fix_lines),
-                     overlap * 100, _RELATEDNESS_MIN_OVERLAP * 100)
+            log.info(
+                "Relatedness: only %d/%d of the fix's changed lines appear "
+                "in the backport (%.0f%%, below %.0f%%)",
+                len(shared),
+                len(fix_lines),
+                overlap * 100,
+                _RELATEDNESS_MIN_OVERLAP * 100,
+            )
             return False
         return True
     except Exception as e:
@@ -2124,13 +2613,16 @@ def phase_4_5_semantic_equivalence(
         return "unmatched"
 
     equivalence = parse_equivalence(rd_output)
-    if equivalence != "unmatched" and creation_factor is not None:
-        if not _shares_content_with_fix(config, state):
-            log.warning(
-                "Phase 4.5: range-diff paired the commits, but the backport "
-                "changes none of the lines the fix changed — reporting unmatched"
-            )
-            return "unmatched"
+    if (
+        equivalence != "unmatched"
+        and creation_factor is not None
+        and not _shares_content_with_fix(config, state)
+    ):
+        log.warning(
+            "Phase 4.5: range-diff paired the commits, but the backport "
+            "changes none of the lines the fix changed — reporting unmatched"
+        )
+        return "unmatched"
     return equivalence
 
 
@@ -2141,11 +2633,9 @@ def run_pipeline(
 ) -> tuple[Dossier, Tracker]:
     """Orchestrate the full pipeline: triage, baseline, cherry-pick, resolve, verify, equivalence."""
     if config is None:
-        from auto_bug_fix.bug_fix_config import bug_fix_config as _default
-        config = _default
+        raise ConfigError("run_pipeline() requires a config")
     if claude_config is None:
-        from auto_bug_fix.bug_fix_config import claude_config as _default
-        claude_config = _default
+        raise ConfigError("run_pipeline() requires a claude_config")
 
     if not config.source_fix_commit:
         raise ConfigError(
@@ -2194,8 +2684,14 @@ def _run_pipeline_phases(
 ) -> tuple[Dossier, Tracker]:
     """Execute all pipeline phases. Separated from run_pipeline for try/finally tracker saving."""
     if config.fix_patch:
-        msg = _run_git(config.repo_path, ["log", "-1", "--format=%B", config.source_fix_commit])
-        trailer_match = [l for l in msg.stdout.splitlines() if l.startswith(f"{PATCH_TRAILER_KEY}:")]
+        msg = _run_git(
+            config.repo_path, ["log", "-1", "--format=%B", config.source_fix_commit]
+        )
+        trailer_match = [
+            line
+            for line in msg.stdout.splitlines()
+            if line.startswith(f"{PATCH_TRAILER_KEY}:")
+        ]
         ingest_lines = [
             f"Patch file: {config.fix_patch}",
             f"Source fix commit (synthetic): {config.source_fix_commit}",
@@ -2216,18 +2712,23 @@ def _run_pipeline_phases(
                 # unrelated-history setups) the scan would walk the target's
                 # entire history for upstream follow-ups — wrong corpus.
                 followup_ref = config.fix_upstream_ref or config.source_fix_commit
-                if git_rev_parse(config.repo_path, config.source_branch) != \
-                        git_rev_parse(config.repo_path, config.target_branch):
+                if git_rev_parse(
+                    config.repo_path, config.source_branch
+                ) != git_rev_parse(config.repo_path, config.target_branch):
                     state.followup_fixes = scan_followup_fixes(
-                        config.repo_path, followup_ref, config.source_branch)
+                        config.repo_path, followup_ref, config.source_branch
+                    )
                 if state.followup_fixes:
                     state.followup_fixes_commit = git_rev_parse(
-                        config.repo_path, config.source_fix_commit)
+                        config.repo_path, config.source_fix_commit
+                    )
             except Exception as e:
                 log.warning("Follow-up fix scan failed: %s", e)
             if state.followup_fixes:
-                log.info("Upstream has %d follow-up fixes to the ported commit",
-                         len(state.followup_fixes))
+                log.info(
+                    "Upstream has %d follow-up fixes to the ported commit",
+                    len(state.followup_fixes),
+                )
                 state.dossier.add(
                     "Upstream follow-up fixes to the ported commit",
                     "\n".join(state.followup_fixes),
@@ -2236,11 +2737,20 @@ def _run_pipeline_phases(
                 tracker.record_gate("followup_fixes", str(len(state.followup_fixes)))
 
     with tracker.phase("Phase 0.5 — Semantic triage"):
-    
+
         assessment = phase_0_5_semantic_triage(config, claude_config, state, tracker)
-        state.dossier.add("Semantic triage", json.dumps(assessment, indent=2) if assessment else "no assessment", "Phase 0.5")
-        tracker.record_gate("difficulty", assessment.get("estimated_difficulty", "unknown"))
-        tracker.record_gate("recommendation", assessment.get("recommendation", "unknown"))
+        state.dossier.add(
+            "Semantic triage",
+            json.dumps(assessment, indent=2) if assessment else "no assessment",
+            "Phase 0.5",
+        )
+        tracker.record_gate(
+            "difficulty", assessment.get("estimated_difficulty", "unknown")
+        )
+        tracker.record_gate(
+            "recommendation", assessment.get("recommendation", "unknown")
+        )
+        triage_dest: str | None = None
         if assessment:
             triage_dest = os.path.join(tracker._output_dir, "semantic_triage.json")
             with open(triage_dest, "w") as f:
@@ -2251,14 +2761,15 @@ def _run_pipeline_phases(
             if prereqs:
                 try:
                     corrections = validate_triage_prerequisites(
-                        config.repo_path, config.target_branch, prereqs)
+                        config.repo_path, config.target_branch, prereqs
+                    )
                 except Exception as e:
                     log.warning("Triage prerequisite validation failed: %s", e)
                     corrections = []
                 for corr in corrections:
                     log.warning(
-                        "Triage correction: %s — %s",
-                        corr.symbol, corr.correction)
+                        "Triage correction: %s — %s", corr.symbol, corr.correction
+                    )
                     for p in prereqs:
                         if p.get("symbol") == corr.symbol:
                             p["corrected"] = True
@@ -2271,16 +2782,17 @@ def _run_pipeline_phases(
                         "Phase 0.5.1 — deterministic prerequisite validation",
                     )
                 if corrections:
-                    tracker.record_gate(
-                        "triage_corrections", str(len(corrections)))
-                    if assessment:
+                    tracker.record_gate("triage_corrections", str(len(corrections)))
+                    if assessment and triage_dest is not None:
                         with open(triage_dest, "w") as f:
                             json.dump(assessment, f, indent=2)
 
     cherry_pick_succeeded = False
     try:
         prereqs = state.triage_assessment.get("prerequisites", [])
-        portable_prereqs = [p for p in prereqs if p.get("portable", False) and p.get("introduced_by")]
+        portable_prereqs = [
+            p for p in prereqs if p.get("portable", False) and p.get("introduced_by")
+        ]
         if portable_prereqs:
             with tracker.phase("Phase 0.5b — Prerequisite chain"):
                 ported = port_prerequisite_chain(config, claude_config, state, tracker)
@@ -2294,7 +2806,9 @@ def _run_pipeline_phases(
         test_files_in_commit = identify_test_files(state.seed)
         if test_files_in_commit:
             with tracker.phase("Phase 0.5c — Test port"):
-                ported_tests = phase_0_5c_test_port(config, claude_config, state, tracker)
+                ported_tests = phase_0_5c_test_port(
+                    config, claude_config, state, tracker
+                )
                 state.dossier.add(
                     "Test port",
                     "\n".join(ported_tests) if ported_tests else "no tests ported",
@@ -2302,8 +2816,13 @@ def _run_pipeline_phases(
                 )
                 tracker.record_gate("test_files_ported", str(len(ported_tests)))
                 if ported_tests:
-                    subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
-                    git_commit(config.repo_path, f"Port test files for {config.issue_id} (Phase 0.5c)\n\nPorted before fix to enable RED/GREEN checking")
+                    subprocess.run(
+                        ["git", "add", "-A"], cwd=config.repo_path, capture_output=True
+                    )
+                    git_commit(
+                        config.repo_path,
+                        f"Port test files for {config.issue_id} (Phase 0.5c)\n\nPorted before fix to enable RED/GREEN checking",
+                    )
 
         with tracker.phase("Phase 1 — Baseline + RED"):
             phase_1_baseline_and_red(config, claude_config, state)
@@ -2311,13 +2830,21 @@ def _run_pipeline_phases(
             baseline_summary = f"Build: {'PASSED' if state.baseline_build_exit == 0 else 'FAILED (exit ' + str(state.baseline_build_exit) + ')'}"
             baseline_summary += f"\nTest ({config.test_command}): {'PASSED' if not state.baseline else str(len(state.baseline)) + ' pre-existing failures'}"
             for entry in state.baseline_verification:
-                status = "PASSED" if entry["exit_code"] == 0 else f"FAILED (exit {entry['exit_code']}, pre-existing)"
+                status = (
+                    "PASSED"
+                    if entry["exit_code"] == 0
+                    else f"FAILED (exit {entry['exit_code']}, pre-existing)"
+                )
                 baseline_summary += f"\n{entry['cmd']}: {status}"
-            state.dossier.add("Baseline (clean target branch)", baseline_summary, "Phase 1")
+            state.dossier.add(
+                "Baseline (clean target branch)", baseline_summary, "Phase 1"
+            )
 
         if state.red_passed_output:
             with tracker.phase("Phase 1.5 — RED triage"):
-                triage_result = phase_1_5_red_triage(config, claude_config, state, tracker)
+                triage_result = phase_1_5_red_triage(
+                    config, claude_config, state, tracker
+                )
                 verdict = triage_result.get("verdict", "inconclusive").strip().lower()
                 tracker.record_gate("red_triage_verdict", verdict)
                 state.dossier.add(
@@ -2327,44 +2854,77 @@ def _run_pipeline_phases(
                 )
 
                 if verdict == "not_vulnerable":
-                    raise PipelineStop(f"RED triage: target branch is not vulnerable — {triage_result.get('reasoning', '')[:200]}")
+                    raise PipelineStop(
+                        f"RED triage: target branch is not vulnerable — {triage_result.get('reasoning', '')[:200]}"
+                    )
 
                 if verdict == "mitigated":
-                    log.info("RED triage: root cause present but mitigated — porting fix for defense-in-depth")
+                    log.info(
+                        "RED triage: root cause present but mitigated — porting fix for defense-in-depth"
+                    )
                     state.red_passed_output = ""
 
                 elif verdict == "vulnerable":
                     replacement = triage_result.get("replacement_test_file")
                     if replacement and os.path.exists(replacement):
-                        log.info("RED triage produced replacement test — rerunning RED check")
-                        subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
-                        git_commit(config.repo_path, f"RED triage replacement test for {config.issue_id} (Phase 1.5)")
+                        log.info(
+                            "RED triage produced replacement test — rerunning RED check"
+                        )
+                        subprocess.run(
+                            ["git", "add", "-A"],
+                            cwd=config.repo_path,
+                            capture_output=True,
+                        )
+                        git_commit(
+                            config.repo_path,
+                            f"RED triage replacement test for {config.issue_id} (Phase 1.5)",
+                        )
                         rerun_exit, rerun_output = capture_output(
-                            [config.test_command], config.build_dir, timeout=config.command_timeout,
+                            [config.test_command],
+                            config.build_dir,
+                            timeout=config.command_timeout,
                         )
                         if rerun_exit != 0:
-                            log.info("RED triage replacement test confirms vulnerability (exit %d) — continuing", rerun_exit)
+                            log.info(
+                                "RED triage replacement test confirms vulnerability (exit %d) — continuing",
+                                rerun_exit,
+                            )
                             state.baseline = parse_test_failures(rerun_output, "")
                             state.red_passed_output = ""
                         else:
-                            log.warning("RED triage replacement test also passes — escalating to Phase 4b")
-                            raise PipelineEscalation("RED triage: replacement test also passes on unmodified code")
+                            log.warning(
+                                "RED triage replacement test also passes — escalating to Phase 4b"
+                            )
+                            raise PipelineEscalation(
+                                "RED triage: replacement test also passes on unmodified code"
+                            )
                     else:
-                        log.warning("RED triage says vulnerable but no valid replacement test — escalating")
-                        raise PipelineEscalation("RED triage: vulnerable verdict but no replacement test produced")
+                        log.warning(
+                            "RED triage says vulnerable but no valid replacement test — escalating"
+                        )
+                        raise PipelineEscalation(
+                            "RED triage: vulnerable verdict but no replacement test produced"
+                        )
                 else:
-                    raise PipelineEscalation("RED triage inconclusive — escalating to Phase 4b")
+                    raise PipelineEscalation(
+                        "RED triage inconclusive — escalating to Phase 4b"
+                    )
 
         subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
         status = git_status_porcelain(config.repo_path)
         if status:
-            git_commit(config.repo_path, f"Pre-cherry-pick cleanup for {config.issue_id}")
+            git_commit(
+                config.repo_path, f"Pre-cherry-pick cleanup for {config.issue_id}"
+            )
         git_reset_hard(config.repo_path, "HEAD")
 
         with tracker.phase("Phase 2+3a — Cherry-pick and resolve"):
             files_to_skip = state.triage_assessment.get("files_to_skip", [])
             cp_result = cherry_pick_and_resolve(
-                config, claude_config, state, tracker,
+                config,
+                claude_config,
+                state,
+                tracker,
                 commit=config.source_fix_commit,
                 label=f"main commit ({config.issue_id})",
                 files_to_skip=files_to_skip,
@@ -2381,7 +2941,11 @@ def _run_pipeline_phases(
                     "Phase 0.5 semantic triage",
                 )
 
-        regen_cmds = [c for c in state.triage_assessment.get("regeneration_commands", []) if _validate_shell_command(c)]
+        regen_cmds = [
+            c
+            for c in state.triage_assessment.get("regeneration_commands", [])
+            if _validate_shell_command(c)
+        ]
         files_skipped = state.triage_assessment.get("files_to_skip", [])
         if regen_cmds and files_skipped:
             with tracker.phase("Phase 3b — Regeneration"):
@@ -2390,47 +2954,84 @@ def _run_pipeline_phases(
         cherry_pick_succeeded = True
 
     except (PipelineEscalation, RuntimeError, OSError, subprocess.SubprocessError) as e:
-        log.warning("Cherry-pick resolution failed (%s: %s) — force-resolving and escalating to Phase 4b",
-                     type(e).__name__, str(e)[:200])
-        state.dossier.add("Cherry-pick resolution failed", f"{type(e).__name__}: {e}", "Phase 2+3a")
+        log.warning(
+            "Cherry-pick resolution failed (%s: %s) — force-resolving and escalating to Phase 4b",
+            type(e).__name__,
+            str(e)[:200],
+        )
+        state.dossier.add(
+            "Cherry-pick resolution failed", f"{type(e).__name__}: {e}", "Phase 2+3a"
+        )
 
         status = git_status_porcelain(config.repo_path)
         remaining_conflicts = _conflicted_files(status)
         if remaining_conflicts:
-            log.info("Force-resolving %d remaining conflicts with --theirs before Phase 4b", len(remaining_conflicts))
+            log.info(
+                "Force-resolving %d remaining conflicts with --theirs before Phase 4b",
+                len(remaining_conflicts),
+            )
             for f in remaining_conflicts:
-                subprocess.run(["git", "checkout", "--theirs", "--", f],
-                               cwd=config.repo_path, capture_output=True)
-                subprocess.run(["git", "add", "--", f],
-                               cwd=config.repo_path, capture_output=True)
-            subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
-            git_commit(config.repo_path,
-                       f"Port {config.issue_id} (partial — force-resolved for Phase 4b)\n\n"
-                       f"[ {len(remaining_conflicts)} conflicts force-resolved with --theirs ]",
-                       trailers=_COAUTHOR_TRAILERS)
+                subprocess.run(
+                    ["git", "checkout", "--theirs", "--", f],
+                    cwd=config.repo_path,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "add", "--", f], cwd=config.repo_path, capture_output=True
+                )
+            subprocess.run(
+                ["git", "add", "-A"], cwd=config.repo_path, capture_output=True
+            )
+            git_commit(
+                config.repo_path,
+                f"Port {config.issue_id} (partial — force-resolved for Phase 4b)\n\n"
+                f"[ {len(remaining_conflicts)} conflicts force-resolved with --theirs ]",
+                trailers=_COAUTHOR_TRAILERS,
+            )
         else:
-            cherry_pick_in_progress = subprocess.run(
-                ["git", "rev-parse", "--verify", "CHERRY_PICK_HEAD"],
-                cwd=config.repo_path, capture_output=True).returncode == 0
+            cherry_pick_in_progress = (
+                subprocess.run(
+                    ["git", "rev-parse", "--verify", "CHERRY_PICK_HEAD"],
+                    cwd=config.repo_path,
+                    capture_output=True,
+                ).returncode
+                == 0
+            )
             if cherry_pick_in_progress:
-                subprocess.run(["git", "cherry-pick", "--abort"], cwd=config.repo_path,
-                                capture_output=True)
+                subprocess.run(
+                    ["git", "cherry-pick", "--abort"],
+                    cwd=config.repo_path,
+                    capture_output=True,
+                )
             git_reset_hard(config.repo_path, config.target_branch)
             git_cherry_pick(config.repo_path, config.source_fix_commit)
             status = git_status_porcelain(config.repo_path)
             force_conflicts = _conflicted_files(status)
             if force_conflicts:
-                log.info("Re-applied cherry-pick, force-resolving %d conflicts with --theirs", len(force_conflicts))
+                log.info(
+                    "Re-applied cherry-pick, force-resolving %d conflicts with --theirs",
+                    len(force_conflicts),
+                )
                 for f in force_conflicts:
-                    subprocess.run(["git", "checkout", "--theirs", "--", f],
-                                   cwd=config.repo_path, capture_output=True)
-                    subprocess.run(["git", "add", "--", f],
-                                   cwd=config.repo_path, capture_output=True)
-            subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
-            git_commit(config.repo_path,
-                       f"Port {config.issue_id} (force-resolved for Phase 4b)\n\n"
-                       f"[ All conflicts force-resolved with --theirs ]",
-                       trailers=_COAUTHOR_TRAILERS)
+                    subprocess.run(
+                        ["git", "checkout", "--theirs", "--", f],
+                        cwd=config.repo_path,
+                        capture_output=True,
+                    )
+                    subprocess.run(
+                        ["git", "add", "--", f],
+                        cwd=config.repo_path,
+                        capture_output=True,
+                    )
+            subprocess.run(
+                ["git", "add", "-A"], cwd=config.repo_path, capture_output=True
+            )
+            git_commit(
+                config.repo_path,
+                f"Port {config.issue_id} (force-resolved for Phase 4b)\n\n"
+                f"[ All conflicts force-resolved with --theirs ]",
+                trailers=_COAUTHOR_TRAILERS,
+            )
 
         with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
             phase_4b_run_and_fix(config, claude_config, state, tracker)
@@ -2449,7 +3050,9 @@ def _run_pipeline_phases(
         try:
             with tracker.phase("Phase 4a — Build error recovery"):
                 phase_4a_build_recovery(config, claude_config, state, tracker, fix_diff)
-                state.dossier.add("Build recovery", "Agent-assisted fix applied", "Phase 4a")
+                state.dossier.add(
+                    "Build recovery", "Agent-assisted fix applied", "Phase 4a"
+                )
 
             with tracker.phase("Phase 4 — Verify (post-recovery)"):
                 phase_4_verify(config, state)
@@ -2459,14 +3062,22 @@ def _run_pipeline_phases(
                 phase_4b_run_and_fix(config, claude_config, state, tracker)
 
     phase4_lint = _resolve_lint_command(config, state)
-    lint_cmds = [c for c in state.triage_assessment.get("lint_commands", []) if _validate_shell_command(c) and c != phase4_lint]
+    lint_cmds = [
+        c
+        for c in state.triage_assessment.get("lint_commands", [])
+        if _validate_shell_command(c) and c != phase4_lint
+    ]
     verification_cmds = list(lint_cmds)
     if config.auto_discover_tests:
         for c in state.triage_assessment.get("verification_commands", []):
             if _validate_shell_command(c):
                 verification_cmds.append(c)
 
-    baseline_failures = {e["cmd"]: e["exit_code"] for e in state.baseline_verification if e["exit_code"] != 0}
+    baseline_failures = {
+        e["cmd"]: e["exit_code"]
+        for e in state.baseline_verification
+        if e["exit_code"] != 0
+    }
 
     if verification_cmds:
         ext_failures = []
@@ -2475,23 +3086,49 @@ def _run_pipeline_phases(
                 log.info("Phase 4.1: running verification command: %s", vcmd)
                 try:
                     vresult = subprocess.run(
-                        vcmd, shell=True, cwd=config.build_dir,
-                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
+                        vcmd,
+                        shell=True,
+                        cwd=config.build_dir,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=config.command_timeout,
                     )
                 except subprocess.TimeoutExpired:
                     # A timeout is never treated as a pre-existing failure — we
                     # cannot conclude anything from a command that didn't finish.
-                    log.warning("Phase 4.1: verification timed out — treating as failure: %s", vcmd)
-                    ext_failures.append({"cmd": vcmd, "output": f"Timed out after {config.command_timeout}s"})
-                    state.dossier.add(f"Extended verification timed out: {vcmd}", f"Timed out after {config.command_timeout}s", "Phase 4.1")
+                    log.warning(
+                        "Phase 4.1: verification timed out — treating as failure: %s",
+                        vcmd,
+                    )
+                    ext_failures.append(
+                        {
+                            "cmd": vcmd,
+                            "output": f"Timed out after {config.command_timeout}s",
+                        }
+                    )
+                    state.dossier.add(
+                        f"Extended verification timed out: {vcmd}",
+                        f"Timed out after {config.command_timeout}s",
+                        "Phase 4.1",
+                    )
                     continue
                 if vresult.returncode == 0:
                     log.info("Phase 4.1: verification passed: %s", vcmd)
                 elif vcmd in baseline_failures:
-                    log.info("Phase 4.1: verification failed (pre-existing, exit %d): %s", vresult.returncode, vcmd)
+                    log.info(
+                        "Phase 4.1: verification failed (pre-existing, exit %d): %s",
+                        vresult.returncode,
+                        vcmd,
+                    )
                 else:
                     output = (vresult.stdout + "\n" + vresult.stderr)[-3000:]
-                    log.warning("Phase 4.1: verification failed (NEW, exit %d): %s", vresult.returncode, vcmd)
+                    log.warning(
+                        "Phase 4.1: verification failed (NEW, exit %d): %s",
+                        vresult.returncode,
+                        vcmd,
+                    )
                     ext_failures.append({"cmd": vcmd, "output": output})
                     state.dossier.add(
                         f"Extended verification failed: {vcmd}",
@@ -2500,22 +3137,37 @@ def _run_pipeline_phases(
                     )
 
         if ext_failures:
-            log.info("Phase 4.1: %d verification commands failed — triggering Phase 4a recovery", len(ext_failures))
+            log.info(
+                "Phase 4.1: %d verification commands failed — triggering Phase 4a recovery",
+                len(ext_failures),
+            )
             # Bound before the try: Phase 4a can raise before the post-recovery
             # sweep runs, and the handler below reads this.
             still_failing: list[str] = []
             try:
                 with tracker.phase("Phase 4a — Build error recovery (from 4.1)"):
-                    phase_4a_build_recovery(config, claude_config, state, tracker, fix_diff)
-                    state.dossier.add("Build recovery (from extended verification)", "Agent-assisted fix applied", "Phase 4a")
+                    phase_4a_build_recovery(
+                        config, claude_config, state, tracker, fix_diff
+                    )
+                    state.dossier.add(
+                        "Build recovery (from extended verification)",
+                        "Agent-assisted fix applied",
+                        "Phase 4a",
+                    )
 
                 with tracker.phase("Phase 4.1 — Extended verification (post-recovery)"):
                     still_failing = []
                     for vcmd in verification_cmds:
                         try:
                             vresult = subprocess.run(
-                                vcmd, shell=True, cwd=config.build_dir,
-                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=config.command_timeout,
+                                vcmd,
+                                shell=True,
+                                cwd=config.build_dir,
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                                timeout=config.command_timeout,
                             )
                         except subprocess.TimeoutExpired:
                             still_failing.append(vcmd)
@@ -2523,8 +3175,11 @@ def _run_pipeline_phases(
                         if vresult.returncode != 0 and vcmd not in baseline_failures:
                             still_failing.append(vcmd)
                     if still_failing:
-                        log.warning("Phase 4.1: %d commands still failing after recovery: %s",
-                                    len(still_failing), ", ".join(still_failing))
+                        log.warning(
+                            "Phase 4.1: %d commands still failing after recovery: %s",
+                            len(still_failing),
+                            ", ".join(still_failing),
+                        )
                         state.dossier.add(
                             "Extended verification still failing after Phase 4a",
                             "\n".join(still_failing),
@@ -2534,18 +3189,28 @@ def _run_pipeline_phases(
                             f"Extended verification still failing: {', '.join(still_failing)}"
                         )
                     else:
-                        log.info("Phase 4.1: all verification commands pass after recovery")
+                        log.info(
+                            "Phase 4.1: all verification commands pass after recovery"
+                        )
             except PipelineEscalation as e:
-                log.warning("Phase 4a recovery failed — escalating to run-and-fix loop: %s", e)
+                log.warning(
+                    "Phase 4a recovery failed — escalating to run-and-fix loop: %s", e
+                )
 
                 # Hand 4b the commands that got us here. Its own success
                 # criteria cover only build and test, so without these it can
                 # report success while the failing command is untouched.
-                escalated_cmds = still_failing or [c for c in verification_cmds
-                                                   if c not in baseline_failures]
+                escalated_cmds = still_failing or [
+                    c for c in verification_cmds if c not in baseline_failures
+                ]
                 with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
-                    phase_4b_run_and_fix(config, claude_config, state, tracker,
-                                         extra_verification=escalated_cmds)
+                    phase_4b_run_and_fix(
+                        config,
+                        claude_config,
+                        state,
+                        tracker,
+                        extra_verification=escalated_cmds,
+                    )
 
     with tracker.phase("Phase 4.5 — Semantic equivalence"):
         eq_result = phase_4_5_semantic_equivalence(config, state)
@@ -2568,7 +3233,8 @@ def _run_pipeline_phases(
             if rd_output.strip():
                 state.dossier.add(
                     "Range-diff (upstream vs backport)",
-                    rd_output[:10000] + ("\n[TRUNCATED]" if len(rd_output) > 10000 else ""),
+                    rd_output[:10000]
+                    + ("\n[TRUNCATED]" if len(rd_output) > 10000 else ""),
                     f"Phase 4.5 — for reviewer: shows how the backport differs from the "
                     f"original fix. Commit pairing is forced for display, so this renders "
                     f"a diff even when the verdict is 'unmatched' (verdict: {eq_result}).",
@@ -2582,12 +3248,15 @@ def _run_pipeline_phases(
     )
 
     log.info("Phase 5 — Dossier ready for human review")
-    patch_bytes = git_format_patch_bytes(config.repo_path, base_ref=config.target_branch)
+    patch_bytes = git_format_patch_bytes(
+        config.repo_path, base_ref=config.target_branch
+    )
     # Written as bytes: the patch has to apply, and a repo carrying non-UTF-8
     # source would otherwise be handed a patch full of replacement characters.
     # The dossier copy is for humans, so a lossy decode is fine there.
-    state.dossier.add("Candidate patch", patch_bytes.decode("utf-8", "replace"),
-                      "git format-patch")
+    state.dossier.add(
+        "Candidate patch", patch_bytes.decode("utf-8", "replace"), "git format-patch"
+    )
     os.makedirs(tracker._output_dir, exist_ok=True)
     patch_path = os.path.join(tracker._output_dir, PATCH_FILE)
     with open(patch_path, "wb") as f:
@@ -2601,10 +3270,14 @@ def _run_pipeline_phases(
 
     with tracker.phase("Phase 5 — Completeness check"):
         outcome, completeness_detail = _backport_completeness(config, state)
-        tracker.record_gate("completeness", "partial" if outcome != "success" else "complete")
+        tracker.record_gate(
+            "completeness", "partial" if outcome != "success" else "complete"
+        )
         if outcome != "success":
             log.warning("Backport is partial: %s", completeness_detail)
-            state.dossier.add("Partial backport", completeness_detail, "completeness check")
+            state.dossier.add(
+                "Partial backport", completeness_detail, "completeness check"
+            )
     tracker.set_outcome(outcome)
     return state.dossier, tracker
 
@@ -2624,6 +3297,7 @@ class TargetResult:
 def _read_tracker_cost(target_run_dir: str, issue_id: str) -> tuple[float, str]:
     """Read cost and path from the tracker JSON written by run_pipeline's finally block."""
     import glob
+
     pattern = os.path.join(target_run_dir, f"{issue_id}_*.json")
     matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
     if not matches:
@@ -2689,35 +3363,56 @@ def run_targets(
             issue_id=spec.issue_id or base_config.issue_id,
             bug_description=spec.bug_description or base_config.bug_description,
             # is not None: build_command="" means "skip build", not "inherit"
-            build_command=spec.build_command if spec.build_command is not None else base_config.build_command,
-            test_command=spec.test_command if spec.test_command is not None else base_config.test_command,
-            lint_command=spec.lint_command if spec.lint_command is not None else base_config.lint_command,
+            build_command=(
+                spec.build_command
+                if spec.build_command is not None
+                else base_config.build_command
+            ),
+            test_command=(
+                spec.test_command
+                if spec.test_command is not None
+                else base_config.test_command
+            ),
+            lint_command=(
+                spec.lint_command
+                if spec.lint_command is not None
+                else base_config.lint_command
+            ),
         )
         sanitized = _sanitize_ref(spec.branch)
         target_run_dir = os.path.join(parent_run_dir, sanitized)
         os.makedirs(target_run_dir, exist_ok=True)
 
-        log.info("=== Target %d/%d: %s (issue_id=%s) ===",
-                 i, len(targets), spec.branch, target_config.issue_id)
+        log.info(
+            "=== Target %d/%d: %s (issue_id=%s) ===",
+            i,
+            len(targets),
+            spec.branch,
+            target_config.issue_id,
+        )
 
         target_start = time.time()
         worktree_created = False
         worktree_path = os.path.join(workdir, f"{target_config.issue_id}_{sanitized}")
 
         try:
-            target_log_file = open(os.path.join(target_run_dir, "run_log.txt"), "w", encoding="utf-8")
+            target_log_file = open(  # noqa: SIM115 (tee target, closed in finally)
+                os.path.join(target_run_dir, "run_log.txt"), "w", encoding="utf-8"
+            )
         except OSError as e:
             log.warning("Target %s: cannot open run log: %s", spec.branch, e)
-            results.append(TargetResult(
-                target_branch=spec.branch,
-                issue_id=target_config.issue_id,
-                outcome="error",
-                duration_s=round(time.time() - target_start, 1),
-                cost_usd=0.0,
-                dossier_path="",
-                tracker_path="",
-                error=f"cannot open run log: {e}",
-            ))
+            results.append(
+                TargetResult(
+                    target_branch=spec.branch,
+                    issue_id=target_config.issue_id,
+                    outcome="error",
+                    duration_s=round(time.time() - target_start, 1),
+                    cost_usd=0.0,
+                    dossier_path="",
+                    tracker_path="",
+                    error=f"cannot open run log: {e}",
+                )
+            )
             continue
 
         saved_stdout = sys.stdout
@@ -2735,16 +3430,18 @@ def run_targets(
             except RuntimeError as e:
                 print(f"ERROR: {e}")
                 log.warning("Target %s: worktree creation failed: %s", spec.branch, e)
-                results.append(TargetResult(
-                    target_branch=spec.branch,
-                    issue_id=target_config.issue_id,
-                    outcome="worktree_error",
-                    duration_s=round(time.time() - target_start, 1),
-                    cost_usd=0.0,
-                    dossier_path="",
-                    tracker_path="",
-                    error=str(e),
-                ))
+                results.append(
+                    TargetResult(
+                        target_branch=spec.branch,
+                        issue_id=target_config.issue_id,
+                        outcome="worktree_error",
+                        duration_s=round(time.time() - target_start, 1),
+                        cost_usd=0.0,
+                        dossier_path="",
+                        tracker_path="",
+                        error=str(e),
+                    )
+                )
                 continue
             worktree_created = True
             target_config.repo_path = worktree_path
@@ -2753,10 +3450,16 @@ def run_targets(
 
             # --- Pipeline ---
             try:
-                dossier, run_tracker = run_pipeline(target_config, claude_config, output_dir=target_run_dir)
+                dossier, run_tracker = run_pipeline(
+                    target_config, claude_config, output_dir=target_run_dir
+                )
                 # The tracker may have downgraded a clean finish (e.g. to
                 # partial_success for an incomplete non-bugfix port).
-                outcome = run_tracker.outcome if run_tracker.outcome != "in_progress" else "success"
+                outcome = (
+                    run_tracker.outcome
+                    if run_tracker.outcome != "in_progress"
+                    else "success"
+                )
             except PipelineStop as e:
                 dossier = None
                 outcome = "pipeline_stop"
@@ -2786,8 +3489,14 @@ def run_targets(
                     log.warning("Failed to write dossier: %s", e)
 
             # --- Cost retrieval (unified, both paths) ---
-            cost_usd, tracker_json = _read_tracker_cost(target_run_dir, target_config.issue_id)
-            tracker_rel = os.path.join(sanitized, os.path.basename(tracker_json)) if tracker_json else ""
+            cost_usd, tracker_json = _read_tracker_cost(
+                target_run_dir, target_config.issue_id
+            )
+            tracker_rel = (
+                os.path.join(sanitized, os.path.basename(tracker_json))
+                if tracker_json
+                else ""
+            )
 
             if not dossier_path:
                 dp = os.path.join(target_run_dir, DOSSIER_FILE)
@@ -2795,17 +3504,21 @@ def run_targets(
                     dossier_path = os.path.join(sanitized, DOSSIER_FILE)
 
             duration = round(time.time() - target_start, 1)
-            results.append(TargetResult(
-                target_branch=spec.branch,
-                issue_id=target_config.issue_id,
-                outcome=outcome,
-                duration_s=duration,
-                cost_usd=cost_usd,
-                dossier_path=dossier_path,
-                tracker_path=tracker_rel,
-                error=error_msg,
-            ))
-            print(f"FINISHED target {spec.branch}: outcome={outcome}, duration={duration}s, cost=${cost_usd:.4f}")
+            results.append(
+                TargetResult(
+                    target_branch=spec.branch,
+                    issue_id=target_config.issue_id,
+                    outcome=outcome,
+                    duration_s=duration,
+                    cost_usd=cost_usd,
+                    dossier_path=dossier_path,
+                    tracker_path=tracker_rel,
+                    error=error_msg,
+                )
+            )
+            print(
+                f"FINISHED target {spec.branch}: outcome={outcome}, duration={duration}s, cost=${cost_usd:.4f}"
+            )
 
             # Preserve partial backports too — an incomplete port is exactly
             # what a human needs to inspect and finish.
@@ -2821,7 +3534,11 @@ def run_targets(
                         branch_name += f"/{sanitized}"
                     result = subprocess.run(
                         ["git", "branch", "-f", branch_name, head_sha],
-                        cwd=source_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        cwd=source_path,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
                     )
                     if result.returncode == 0:
                         log.info("Commits preserved on branch %s", branch_name)
@@ -2841,35 +3558,52 @@ def run_targets(
     log.info("=== Multi-target summary ===")
     for r in results:
         status = "OK" if r.outcome == "success" else f"FAILED ({r.outcome})"
-        log.info("  %s [%s]: %s  (%.1fs, $%.4f)", r.issue_id, r.target_branch, status, r.duration_s, r.cost_usd)
+        log.info(
+            "  %s [%s]: %s  (%.1fs, $%.4f)",
+            r.issue_id,
+            r.target_branch,
+            status,
+            r.duration_s,
+            r.cost_usd,
+        )
 
     return results
 
 
 def main(argv=None) -> int:
     import argparse
+
     from common.model_registry import RegistryError
 
-    parser = argparse.ArgumentParser(description="Port a bug fix using a pipeline configuration.")
+    parser = argparse.ArgumentParser(
+        description="Port a bug fix using a pipeline configuration."
+    )
     parser.add_argument("config", help="Pipeline YAML/JSON configuration")
-    parser.add_argument("--models", metavar="PATH", help="Explicit model registry (overrides discovery)")
+    parser.add_argument(
+        "--models", metavar="PATH", help="Explicit model registry (overrides discovery)"
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     try:
-        targets, base_config, claude_config, workdir, source_path = load_multi_target_config(
-            args.config, models_path=args.models,
+        targets, base_config, claude_config, workdir, source_path = (
+            load_multi_target_config(
+                args.config,
+                models_path=args.models,
+            )
         )
     except (ConfigError, RegistryError, OSError) as e:
         parser.error(str(e))
 
     yaml_basename = os.path.splitext(os.path.basename(args.config))[0]
-    run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     parent_run_dir = os.path.join("runs", f"{yaml_basename}_{run_timestamp}")
     os.makedirs(parent_run_dir, exist_ok=True)
 
     log_path = os.path.join(parent_run_dir, "run_log.txt")
-    log_file = open(log_path, "w", encoding="utf-8")
+    log_file = open(  # noqa: SIM115 (tee target, closed at end of main)
+        log_path, "w", encoding="utf-8"
+    )
     original_stdout = sys.stdout
     sys.stdout = Tee(original_stdout, log_file)
 
@@ -2878,7 +3612,11 @@ def main(argv=None) -> int:
         print("Fetching latest refs from origin...")
         fetch_result = subprocess.run(
             ["git", "fetch", "--all", "--quiet"],
-            cwd=source_path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=source_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         fetch_warning = ""
         if fetch_result.returncode != 0:
@@ -2894,28 +3632,46 @@ def main(argv=None) -> int:
         if base_config.fix_patch:
             print(f"Phase -1: ingesting patch {base_config.fix_patch}...")
             ingest_result = ingest_patch(
-                source_path, base_config.fix_patch,
-                base_config.source_branch, base_config.issue_id,
-                base_config.bug_description, workdir,
+                source_path,
+                base_config.fix_patch,
+                base_config.source_branch,
+                base_config.issue_id,
+                base_config.bug_description,
+                workdir,
             )
             base_config.source_fix_commit = ingest_result.synthetic_commit
-            print(f"Patch ingested as {ingest_result.synthetic_commit[:12]} "
-                  f"(method={ingest_result.method}, base={ingest_result.base_sha[:12]})")
+            print(
+                f"Patch ingested as {ingest_result.synthetic_commit[:12]} "
+                f"(method={ingest_result.method}, base={ingest_result.base_sha[:12]})"
+            )
             ingest_path = os.path.join(parent_run_dir, "ingest.json")
             with open(ingest_path, "w") as f:
-                json.dump({
-                    "synthetic_commit": ingest_result.synthetic_commit,
-                    "base_ref": ingest_result.base_ref,
-                    "base_sha": ingest_result.base_sha,
-                    "method": ingest_result.method,
-                    "patch_sha256": ingest_result.patch_sha256,
-                    "patch_path": base_config.fix_patch,
-                    "warnings": ingest_result.warnings,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }, f, indent=2)
+                json.dump(
+                    {
+                        "synthetic_commit": ingest_result.synthetic_commit,
+                        "base_ref": ingest_result.base_ref,
+                        "base_sha": ingest_result.base_sha,
+                        "method": ingest_result.method,
+                        "patch_sha256": ingest_result.patch_sha256,
+                        "patch_path": base_config.fix_patch,
+                        "warnings": ingest_result.warnings,
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    },
+                    f,
+                    indent=2,
+                )
             run_warnings.extend(ingest_result.warnings)
 
-        results = run_targets(targets, base_config, claude_config, source_path, workdir, parent_run_dir, build_subdir, run_warnings=run_warnings)
+        results = run_targets(
+            targets,
+            base_config,
+            claude_config,
+            source_path,
+            workdir,
+            parent_run_dir,
+            build_subdir,
+            run_warnings=run_warnings,
+        )
     except IngestError as e:
         print(f"INGEST ERROR: {e}")
         return 1

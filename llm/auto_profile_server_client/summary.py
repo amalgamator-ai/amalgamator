@@ -76,7 +76,9 @@ class SummaryWriter:
         all_fixes = []
 
         for i, step in enumerate(self.steps, 1):
-            lines.append(f"--- Step {i}: {step.step_name} [{step.status}] ({step.duration_sec:.1f}s) ---")
+            lines.append(
+                f"--- Step {i}: {step.step_name} [{step.status}] ({step.duration_sec:.1f}s) ---"
+            )
             if step.details:
                 for key, val in step.details.items():
                     if isinstance(val, (dict, list)):

@@ -19,16 +19,15 @@ _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..",
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
+import argparse
+import asyncio
 import os
 import sys
 import time
-import argparse
-import asyncio
 
-from common.utils import setup_logging
 from common.claude_utils import ClaudeConfig, PipelineStep
+from common.utils import setup_logging
 from llm.auto_code_gen.agents import agent_run
-
 from llm.auto_code_gen.code_gen_configs import CodeGenConfig
 from llm.auto_code_gen.pr_review.prompts import gen_FixReviewCommentsPrompt
 from llm.auto_code_gen.pr_review.step2_fetch_review_comments import (
@@ -37,16 +36,13 @@ from llm.auto_code_gen.pr_review.step2_fetch_review_comments import (
     REVIEW_COMMENTS_SUMMARY_FILE,
 )
 
-
 FIX_SUMMARY_FILE = "fix_summary.txt"
 
 _MODE_PARAMS = CodeGenConfig._MODE_PARAMS
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Fix PR review comments using Claude."
-    )
+    parser = argparse.ArgumentParser(description="Fix PR review comments using Claude.")
     parser.add_argument(
         "--output-dir",
         required=True,
@@ -64,6 +60,7 @@ def parse_args() -> argparse.Namespace:
         help="Thinking mode: 'deep' (Opus, max effort) or 'normal' (Sonnet, medium). Default: deep.",
     )
     from llm.auto_code_gen.agents import add_agent_argument
+
     add_agent_argument(parser)
     return parser.parse_args()
 
@@ -85,47 +82,58 @@ def _validate_inputs(output_dir: str, repo_dir: str):
     errors = []
 
     if not os.path.isdir(output_dir):
-        errors.append("Output directory not found: {}".format(output_dir))
+        errors.append(f"Output directory not found: {output_dir}")
 
-    required_files = [PR_METADATA_FILE, REVIEW_COMMENTS_FILE, REVIEW_COMMENTS_SUMMARY_FILE]
+    required_files = [
+        PR_METADATA_FILE,
+        REVIEW_COMMENTS_FILE,
+        REVIEW_COMMENTS_SUMMARY_FILE,
+    ]
     for f in required_files:
         path = os.path.join(output_dir, f)
         if not os.path.isfile(path):
-            errors.append("Required file not found: {}".format(path))
+            errors.append(f"Required file not found: {path}")
         elif os.path.getsize(path) == 0:
-            errors.append("Required file is empty: {}".format(path))
+            errors.append(f"Required file is empty: {path}")
 
     if not os.path.isdir(repo_dir):
-        errors.append("Repository directory not found: {}".format(repo_dir))
+        errors.append(f"Repository directory not found: {repo_dir}")
 
     if errors:
         print("ERROR: Cannot proceed:")
         for e in errors:
-            print("  - {}".format(e))
+            print(f"  - {e}")
         print("\nRun step2_fetch_review_comments first to generate the required files.")
         sys.exit(1)
 
 
-async def run_fix_review_comments(output_dir: str, repo_dir: str, mode: str = "deep", agent_config_path=None):
+async def run_fix_review_comments(
+    output_dir: str, repo_dir: str, mode: str = "deep", agent_config_path=None
+):
     output_dir = os.path.abspath(output_dir)
     repo_dir = os.path.abspath(repo_dir)
 
     _validate_inputs(output_dir, repo_dir)
 
     from llm.auto_code_gen.agents import resolve_agent_config
-    claude_config = resolve_agent_config(cwd=repo_dir, mode=mode, agent_config_path=agent_config_path)
+
+    claude_config = resolve_agent_config(
+        cwd=repo_dir, mode=mode, agent_config_path=agent_config_path
+    )
 
     print("\n" + "=" * 70)
     print("FIX PR REVIEW COMMENTS")
     print("=" * 70)
-    print("  Repo: {}".format(repo_dir))
-    print("  Output dir: {}".format(output_dir))
-    print("  Mode: {} ({})".format(mode, claude_config.model))
+    print(f"  Repo: {repo_dir}")
+    print(f"  Output dir: {output_dir}")
+    print(f"  Mode: {mode} ({claude_config.model})")
     print("=" * 70 + "\n")
 
     prompt_obj = gen_FixReviewCommentsPrompt(
         repo_dir=repo_dir,
-        review_comments_summary_file=os.path.join(output_dir, REVIEW_COMMENTS_SUMMARY_FILE),
+        review_comments_summary_file=os.path.join(
+            output_dir, REVIEW_COMMENTS_SUMMARY_FILE
+        ),
         review_comments_json_file=os.path.join(output_dir, REVIEW_COMMENTS_FILE),
         pr_metadata_file=os.path.join(output_dir, PR_METADATA_FILE),
         output_dir=output_dir,
@@ -150,25 +158,31 @@ if __name__ == "__main__":
 
     start_time = time.time()
     timings = asyncio.run(
-        run_fix_review_comments(args.output_dir, args.repo_dir, args.mode, args.agent_config)
+        run_fix_review_comments(
+            args.output_dir, args.repo_dir, args.mode, args.agent_config
+        )
     )
     total_duration = time.time() - start_time
 
     fix_summary_path = os.path.join(os.path.abspath(args.output_dir), FIX_SUMMARY_FILE)
     if os.path.isfile(fix_summary_path):
-        print("\nFix summary: {}".format(fix_summary_path))
+        print(f"\nFix summary: {fix_summary_path}")
     else:
         print("\nWARNING: Fix summary was not generated.")
 
     mins, secs = divmod(int(total_duration), 60)
     hrs, mins = divmod(mins, 60)
-    human_time = "{}h {}m {}s".format(hrs, mins, secs) if hrs else "{}m {}s".format(mins, secs)
-    print("Total duration: {:.1f}s ({})".format(total_duration, human_time))
+    human_time = f"{hrs}h {mins}m {secs}s" if hrs else f"{mins}m {secs}s"
+    print(f"Total duration: {total_duration:.1f}s ({human_time})")
 
     if timings:
         for t in timings:
-            print("  Step '{}': {:.1f}s, in={} out={} cost=${:.4f}".format(
-                t["name"], t["duration"],
-                t["input_tokens"], t["output_tokens"],
-                t["cost_usd"],
-            ))
+            print(
+                "  Step '{}': {:.1f}s, in={} out={} cost=${:.4f}".format(
+                    t["name"],
+                    t["duration"],
+                    t["input_tokens"],
+                    t["output_tokens"],
+                    t["cost_usd"],
+                )
+            )

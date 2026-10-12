@@ -28,24 +28,22 @@ _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
+import argparse
+import asyncio
 import os
 import sys
 import time
-import argparse
-import asyncio
 
 from common.utils import setup_logging
-
 from llm.auto_code_gen.code_gen_configs import CodeGenConfig
-from llm.auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase
-
 from llm.auto_code_gen.code_gen_prompts import (
-    RUNTIME_DIR,
-    RUNTIME_SUCCESS_FILE,
     PR_COMMANDS_DIR,
     PR_COMMIT_DESC_FILE,
     PR_PR_DESC_FILE,
+    RUNTIME_DIR,
+    RUNTIME_SUCCESS_FILE,
 )
+from llm.auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,12 +61,14 @@ def parse_args() -> argparse.Namespace:
         help="Only regenerate commit_desc.txt and pr_desc.txt (skip script generation).",
     )
     from llm.auto_code_gen.agents import add_agent_argument
+
     add_agent_argument(parser)
     return parser.parse_args()
 
 
-async def run_standalone_generate_pr_commands(code_gen_config, claude_config,
-                                              descs_only=False):
+async def run_standalone_generate_pr_commands(
+    code_gen_config, claude_config, descs_only=False
+):
     output_dir = code_gen_config.output_dir
     use_case = LLMFrameworkUseCase()
     context = use_case.create_context_str(claude_config, code_gen_config)
@@ -77,9 +77,9 @@ async def run_standalone_generate_pr_commands(code_gen_config, claude_config,
         os.path.join(output_dir, RUNTIME_DIR, RUNTIME_SUCCESS_FILE)
     )
     if not has_success:
-        print("ERROR: No successful runtime iterations found (no {})".format(
-            RUNTIME_SUCCESS_FILE
-        ))
+        print(
+            f"ERROR: No successful runtime iterations found (no {RUNTIME_SUCCESS_FILE})"
+        )
         print("  Run the pipeline first and ensure runtime iterations succeed.")
         sys.exit(1)
 
@@ -89,22 +89,29 @@ async def run_standalone_generate_pr_commands(code_gen_config, claude_config,
         print("\n" + "=" * 80)
         print("REGENERATE PR DESCRIPTIONS")
         print("=" * 80)
-        print("  Output directory: {}".format(output_dir))
-        print("  PR dir: {}".format(pr_dir))
+        print(f"  Output directory: {output_dir}")
+        print(f"  PR dir: {pr_dir}")
         print("=" * 80 + "\n")
     else:
         print("\n" + "=" * 80)
         print("GENERATE PR COMMANDS")
         print("=" * 80)
-        print("  Output directory: {}".format(output_dir))
-        print("  PR scripts dir: {}".format(pr_dir))
-        print("  Target repo: {}".format(code_gen_config.source_code_dir))
-        print("  Push: {}/{}".format(code_gen_config.pr_remote, code_gen_config.get_target_branch_name()))
-        print("  PR: {} <- {}".format(code_gen_config.pr_base_branch, code_gen_config.get_target_branch_name()))
+        print(f"  Output directory: {output_dir}")
+        print(f"  PR scripts dir: {pr_dir}")
+        print(f"  Target repo: {code_gen_config.source_code_dir}")
+        print(
+            f"  Push: {code_gen_config.pr_remote}/{code_gen_config.get_target_branch_name()}"
+        )
+        print(
+            f"  PR: {code_gen_config.pr_base_branch} <- {code_gen_config.get_target_branch_name()}"
+        )
         print("=" * 80 + "\n")
 
     phase_results, all_step_timings = await use_case.run_generate_pr_commands(
-        context, code_gen_config, claude_config, descs_only=descs_only,
+        context,
+        code_gen_config,
+        claude_config,
+        descs_only=descs_only,
     )
 
     return phase_results, all_step_timings
@@ -121,7 +128,9 @@ if __name__ == "__main__":
     start_time = time.time()
     phase_results, all_step_timings = asyncio.run(
         run_standalone_generate_pr_commands(
-            code_gen_config, claude_config, descs_only=args.descs_only,
+            code_gen_config,
+            claude_config,
+            descs_only=args.descs_only,
         )
     )
     total_duration = time.time() - start_time
@@ -132,17 +141,17 @@ if __name__ == "__main__":
         for f in [PR_COMMIT_DESC_FILE, PR_PR_DESC_FILE]:
             path = os.path.join(pr_dir, f)
             if os.path.isfile(path):
-                print("  Updated: {}".format(path))
+                print(f"  Updated: {path}")
     else:
         if os.path.isdir(pr_dir) and os.listdir(pr_dir):
-            print("\nPR command scripts generated in: {}".format(pr_dir))
+            print(f"\nPR command scripts generated in: {pr_dir}")
             scripts = sorted(f for f in os.listdir(pr_dir) if f.endswith(".sh"))
             for s in scripts:
-                print("  {}".format(s))
+                print(f"  {s}")
             print("\nRun them in order:")
             for s in scripts:
-                print("  bash {}/{}".format(pr_dir, s))
+                print(f"  bash {pr_dir}/{s}")
         else:
             print("\nWARNING: PR command scripts were not generated.")
 
-    print("Duration: {:.1f}s".format(total_duration))
+    print(f"Duration: {total_duration:.1f}s")

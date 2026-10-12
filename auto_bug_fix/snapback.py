@@ -12,6 +12,7 @@ The pass never invents content: replacements always come verbatim from one
 of the two source texts, and ambiguous matches (the same token stream
 appearing with more than one byte layout in a source) are left untouched.
 """
+
 from __future__ import annotations
 
 import os
@@ -99,7 +100,9 @@ def _git_blob(repo_path: str, ref: str, path: str) -> str | None:
     are preserved/detected rather than silently normalized.
     """
     result = subprocess.run(
-        ["git", "show", f"{ref}:{path}"], cwd=repo_path, capture_output=True,
+        ["git", "show", f"{ref}:{path}"],
+        cwd=repo_path,
+        capture_output=True,
     )
     if result.returncode != 0:
         return None

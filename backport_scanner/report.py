@@ -5,27 +5,27 @@ Report generation — JSON and human-readable table output.
 import json
 from pathlib import Path
 
-from .triage import FixStatus
 from .scanner import ScanReport
+from .triage import FixStatus
 
 STATUS_ICON = {
-    FixStatus.EXACT_MATCH:    "✓  ALREADY FIXED (exact commit)",
-    FixStatus.EQUIVALENT:     "✓  ALREADY FIXED (equivalent patch)",
-    FixStatus.NOT_AFFECTED:   "—  NOT AFFECTED  (predates the bug)",
+    FixStatus.EXACT_MATCH: "✓  ALREADY FIXED (exact commit)",
+    FixStatus.EQUIVALENT: "✓  ALREADY FIXED (equivalent patch)",
+    FixStatus.NOT_AFFECTED: "—  NOT AFFECTED  (predates the bug)",
     FixStatus.LIKELY_PRESENT: "~  LIKELY FIXED  (file diff)",
-    FixStatus.NEEDS_FIX:      "✗  NEEDS FIX",
-    FixStatus.AMBIGUOUS:      "?  AMBIGUOUS     (recommend LLM check)",
-    FixStatus.ERROR:          "!  ERROR",
+    FixStatus.NEEDS_FIX: "✗  NEEDS FIX",
+    FixStatus.AMBIGUOUS: "?  AMBIGUOUS     (recommend LLM check)",
+    FixStatus.ERROR: "!  ERROR",
 }
 
 STATUS_SYMBOL = {
-    FixStatus.EXACT_MATCH:    "ALREADY_FIXED",
-    FixStatus.EQUIVALENT:     "ALREADY_FIXED",
-    FixStatus.NOT_AFFECTED:   "NOT_AFFECTED",
+    FixStatus.EXACT_MATCH: "ALREADY_FIXED",
+    FixStatus.EQUIVALENT: "ALREADY_FIXED",
+    FixStatus.NOT_AFFECTED: "NOT_AFFECTED",
     FixStatus.LIKELY_PRESENT: "LIKELY_FIXED",
-    FixStatus.NEEDS_FIX:      "NEEDS_FIX",
-    FixStatus.AMBIGUOUS:      "AMBIGUOUS",
-    FixStatus.ERROR:          "ERROR",
+    FixStatus.NEEDS_FIX: "NEEDS_FIX",
+    FixStatus.AMBIGUOUS: "AMBIGUOUS",
+    FixStatus.ERROR: "ERROR",
 }
 
 

@@ -1,5 +1,11 @@
 """Tests for auto_bug_fix.baseline — test failure parsing and regression detection."""
-from auto_bug_fix.baseline import parse_test_failures, check_regression, run_test_suite, TIMEOUT_EXIT_CODE
+
+from auto_bug_fix.baseline import (
+    TIMEOUT_EXIT_CODE,
+    check_regression,
+    parse_test_failures,
+    run_test_suite,
+)
 
 
 def test_parse_test_failures_fail_colon():
@@ -46,7 +52,9 @@ def test_parse_go_per_test_fail():
 
 
 def test_parse_go_package_fail():
-    stdout = "FAIL\tgithub.com/org/repo/pkg\t0.123s\nok\tgithub.com/org/repo/other\t0.050s"
+    stdout = (
+        "FAIL\tgithub.com/org/repo/pkg\t0.123s\nok\tgithub.com/org/repo/other\t0.050s"
+    )
     failures = parse_test_failures(stdout, "")
     assert "github.com/org/repo/pkg" in failures
     assert len(failures) == 1
@@ -71,7 +79,9 @@ def test_parse_ginkgo_fail():
 
 
 def test_parse_pytest_fail():
-    stdout = "FAILED tests/test_main.py::test_login\nPASSED tests/test_main.py::test_logout"
+    stdout = (
+        "FAILED tests/test_main.py::test_login\nPASSED tests/test_main.py::test_logout"
+    )
     failures = parse_test_failures(stdout, "")
     assert failures == {"tests/test_main.py::test_login"}
 
@@ -83,6 +93,7 @@ def test_parse_jest_fail():
 
 
 # --- timeout handling ---
+
 
 def test_run_test_suite_timeout_returns_sentinel():
     exit_code, _, _ = run_test_suite("sleep 3", "/tmp", timeout=1)

@@ -5,10 +5,18 @@ import pytest
 from llm.auto_code_gen.pr_flow import gh_publish, review_comments
 
 
-def _comment(cid, body="use a constant", author="reviewer", parent=None, path="vllm/x.py"):
-    item = {"id": cid, "body": body, "user": {"login": author}, "path": path, "line": 10 + cid,
-            "created_at": "2026-09-2{}T10:00:00Z".format(cid % 9),
-            "updated_at": "2026-09-2{}T11:00:00Z".format(cid % 9)}
+def _comment(
+    cid, body="use a constant", author="reviewer", parent=None, path="vllm/x.py"
+):
+    item = {
+        "id": cid,
+        "body": body,
+        "user": {"login": author},
+        "path": path,
+        "line": 10 + cid,
+        "created_at": f"2026-09-2{cid % 9}T10:00:00Z",
+        "updated_at": f"2026-09-2{cid % 9}T11:00:00Z",
+    }
     if parent is not None:
         item["in_reply_to_id"] = parent
     return item
@@ -33,28 +41,48 @@ def test_pending_excludes_our_own_replies_bots_and_cursor_backlog():
     assert [item["comment_id"] for item in pending] == [10, 30]
     assert pending[0]["replies"] == [{"author": "us", "body": "fixed in the last push"}]
 
-    after = review_comments.select_pending(data, cursor={"max_comment_id": 30},
-                                           our_logins=["us"])
+    after = review_comments.select_pending(
+        data, cursor={"max_comment_id": 30}, our_logins=["us"]
+    )
     assert after == []
-    partial = review_comments.select_pending(data, cursor={"max_comment_id": 29},
-                                             our_logins=["us"])
+    partial = review_comments.select_pending(
+        data, cursor={"max_comment_id": 29}, our_logins=["us"]
+    )
     assert [item["comment_id"] for item in partial] == [30]
 
 
 def test_resolved_threads_are_dropped():
     comments = [_comment(10), _comment(11, author="us", parent=10), _comment(20)]
-    graphql = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
-        {"isResolved": True,
-         "comments": {"nodes": [{"databaseId": 10}, {"databaseId": 11}]}},
-    ]}}}}}
-    pending = review_comments.select_pending({"comments": comments, "threads": graphql},
-                                             our_logins=["us"])
+    graphql = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "nodes": [
+                            {
+                                "isResolved": True,
+                                "comments": {
+                                    "nodes": [{"databaseId": 10}, {"databaseId": 11}]
+                                },
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    pending = review_comments.select_pending(
+        {"comments": comments, "threads": graphql}, our_logins=["us"]
+    )
     assert [item["comment_id"] for item in pending] == [20]
 
 
 def test_paginated_slurp_output_is_flattened():
-    assert review_comments.flatten_pages([[{"id": 1}], [{"id": 2}, {"id": 3}]]) == \
-        [{"id": 1}, {"id": 2}, {"id": 3}]
+    assert review_comments.flatten_pages([[{"id": 1}], [{"id": 2}, {"id": 3}]]) == [
+        {"id": 1},
+        {"id": 2},
+        {"id": 3},
+    ]
     assert review_comments.flatten_pages([{"id": 1}]) == [{"id": 1}]
     assert review_comments.flatten_pages({"a": 1}) == {"a": 1}
     assert review_comments.flatten_pages(None) is None
@@ -63,17 +91,38 @@ def test_paginated_slurp_output_is_flattened():
 def test_round_directory_is_rendered_for_the_agent(tmp_path):
     inbox = tmp_path / "round_1"
     inbox.mkdir()
-    (inbox / "pr_view.json").write_text(json.dumps(
-        {"number": 4321, "url": "https://github.com/vllm-project/vllm/pull/4321",
-         "state": "OPEN", "headRefOid": "abc", "mergeable": "MERGEABLE",
-         "reviewDecision": "CHANGES_REQUESTED"}))
-    (inbox / "comments.json").write_text(json.dumps(
-        [[_comment(10, body="please use a named constant")], [_comment(11)]]))
+    (inbox / "pr_view.json").write_text(
+        json.dumps(
+            {
+                "number": 4321,
+                "url": "https://github.com/vllm-project/vllm/pull/4321",
+                "state": "OPEN",
+                "headRefOid": "abc",
+                "mergeable": "MERGEABLE",
+                "reviewDecision": "CHANGES_REQUESTED",
+            }
+        )
+    )
+    (inbox / "comments.json").write_text(
+        json.dumps([[_comment(10, body="please use a named constant")], [_comment(11)]])
+    )
     (inbox / "reviews.json").write_text(json.dumps([]))
-    (inbox / "issue_comments.json").write_text(json.dumps(
-        [{"id": 99, "body": "Overall this looks reasonable.", "user": {"login": "maintainer"}}]))
-    (inbox / "checks.json").write_text(json.dumps(
-        [[{"name": "build", "status": "completed", "conclusion": "success"}]]))
+    (inbox / "issue_comments.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": 99,
+                    "body": "Overall this looks reasonable.",
+                    "user": {"login": "maintainer"},
+                }
+            ]
+        )
+    )
+    (inbox / "checks.json").write_text(
+        json.dumps(
+            [[{"name": "build", "status": "completed", "conclusion": "success"}]]
+        )
+    )
 
     summary = review_comments.summarize(str(inbox), our_logins=["us"], round_no=1)
     assert summary["pending_count"] == 2
@@ -93,9 +142,21 @@ def test_round_directory_is_rendered_for_the_agent(tmp_path):
 def test_round_with_only_our_own_comments_is_empty(tmp_path):
     inbox = tmp_path / "round_2"
     inbox.mkdir()
-    (inbox / "comments.json").write_text(json.dumps(
-        [{"id": 5, "body": "done", "user": {"login": "us"}, "path": "vllm/x.py", "line": 1,
-         "created_at": "2026-09-20T10:00:00Z", "updated_at": "2026-09-20T10:00:00Z"}]))
+    (inbox / "comments.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": 5,
+                    "body": "done",
+                    "user": {"login": "us"},
+                    "path": "vllm/x.py",
+                    "line": 1,
+                    "created_at": "2026-09-20T10:00:00Z",
+                    "updated_at": "2026-09-20T10:00:00Z",
+                }
+            ]
+        )
+    )
     summary = review_comments.summarize(str(inbox), our_logins=["us"], round_no=2)
     assert summary["pending_count"] == 0
 
@@ -105,11 +166,23 @@ def _state(tmp_path):
         "output_dir": str(tmp_path),
         "upstream_repo": "vllm-project/vllm",
         "pr_number": 4321,
-        "gates": [{"round": 1, "iteration": 3, "overall": "PASS", "accepted": True,
-                   "perf": {"pass": True, "actual_pct": 2.86},
-                   "lm_eval": {"pass": True, "verdict": "PASS"},
-                   "closure": {"pass": True, "total": 4, "fixed": 3, "explained": 1,
-                               "unresolved": 0}}],
+        "gates": [
+            {
+                "round": 1,
+                "iteration": 3,
+                "overall": "PASS",
+                "accepted": True,
+                "perf": {"pass": True, "actual_pct": 2.86},
+                "lm_eval": {"pass": True, "verdict": "PASS"},
+                "closure": {
+                    "pass": True,
+                    "total": 4,
+                    "fixed": 3,
+                    "explained": 1,
+                    "unresolved": 0,
+                },
+            }
+        ],
     }
 
 
@@ -127,11 +200,17 @@ def test_round_comment_fails_closed_without_a_gate(tmp_path):
 
 def test_thread_replies_are_bounded_and_cleaned(tmp_path):
     path = tmp_path / "thread_replies.json"
-    path.write_text(json.dumps({"replies": [
-        {"comment_id": 10, "status": "fixed", "body": "  done  "},
-        {"comment_id": 11, "status": "explained", "body": "   "},
-        {"status": "fixed", "body": "no id"},
-    ]}))
+    path.write_text(
+        json.dumps(
+            {
+                "replies": [
+                    {"comment_id": 10, "status": "fixed", "body": "  done  "},
+                    {"comment_id": 11, "status": "explained", "body": "   "},
+                    {"status": "fixed", "body": "no id"},
+                ]
+            }
+        )
+    )
     assert gh_publish.render_thread_replies(str(path)) == [(10, "done")]
 
 

@@ -1,7 +1,8 @@
 """Tests for auto_bug_fix.tracker — analytics tracker with timing, tokens, and cost."""
+
+import asyncio
 import json
 import time
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -9,11 +10,7 @@ import pytest
 
 from auto_bug_fix.tracker import (
     Tracker,
-    QueryRecord,
-    PhaseRecord,
-    PipelineRun,
     compute_cost,
-    MODEL_PRICING,
 )
 from common.model_registry import ModelProfile
 
@@ -54,9 +51,8 @@ def test_phase_timing(tracker):
 
 
 def test_phase_records_exception_outcome(tracker):
-    with pytest.raises(ValueError):
-        with tracker.phase("Phase 0 — Triage") as phase:
-            raise ValueError("test error")
+    with pytest.raises(ValueError), tracker.phase("Phase 0 — Triage") as phase:
+        raise ValueError("test error")
     assert phase.outcome == "ValueError"
 
 
@@ -171,20 +167,29 @@ def test_multiple_phases_recorded(tracker):
 
 def test_query_profile_precedence_and_public_metadata(tmp_path, monkeypatch):
     import auto_bug_fix.tracker as module
-    local = ModelProfile("local", "litellm", "openai/local", api_base="http://local/v1", api_key="SECRET")
+
+    local = ModelProfile(
+        "local", "litellm", "openai/local", api_base="http://local/v1", api_key="SECRET"
+    )
     cloud = ModelProfile("cloud", "litellm", "gpt-4o", api_key="OTHER_SECRET")
     tracker = Tracker("profiles", {}, profile=local, output_dir=str(tmp_path))
     calls = []
+
     def estimate(model, input_tokens, output_tokens, profile=None):
         calls.append((model, profile))
         return 0 if profile and profile.is_self_hosted() else 1.234567
+
     monkeypatch.setattr(module, "compute_cost", estimate)
     with tracker.phase("profiles"):
         local_record = tracker.record_query("default", 0, 1)
-        cloud_record = tracker.record_query("override", 1, 2, model="ignored", profile=cloud)
+        cloud_record = tracker.record_query(
+            "override", 1, 2, model="ignored", profile=cloud
+        )
         bare_record = tracker.record_query("bare", 2, 3, model="different")
         zero = tracker.record_query("zero", 3, 4, profile=cloud, sdk_cost_usd=0.0)
-        paid = tracker.record_query("paid", 4, 5, profile=cloud, sdk_cost_usd=0.123456789)
+        paid = tracker.record_query(
+            "paid", 4, 5, profile=cloud, sdk_cost_usd=0.123456789
+        )
     assert calls == [(local.model, local), (cloud.model, cloud), ("different", None)]
     assert local_record.cost_usd == 0
     assert cloud_record.model == cloud.model
@@ -195,19 +200,35 @@ def test_query_profile_precedence_and_public_metadata(tmp_path, monkeypatch):
     text = Path(tracker.save()).read_text()
     data = json.loads(text)
     assert "SECRET" not in text
-    assert data["total_cost_usd"] == round(sum(q.cost_usd for q in tracker._run.phases[0].queries), 6)
+    assert data["total_cost_usd"] == round(
+        sum(q.cost_usd for q in tracker._run.phases[0].queries), 6
+    )
 
 
 @pytest.mark.parametrize("reported", [None, 0.0, 0.123456789])
 def test_run_llm_accounts_for_active_profile(claude_cfg, monkeypatch, reported):
     from auto_bug_fix import run_bug_fix
-    profile = ModelProfile("active", "litellm", "openai/local", api_base="http://local/v1")
+
+    profile = ModelProfile(
+        "active", "litellm", "openai/local", api_base="http://local/v1"
+    )
     claude_cfg.profile, claude_cfg.model = profile, profile.model
     tracker = Tracker("test", {}, model="gpt-4o")
-    monkeypatch.setattr(run_bug_fix, "_agent_run", AsyncMock(return_value=[{
-        "name": "query", "duration": 1, "input_tokens": 1234, "output_tokens": 567,
-        "cost_usd": reported,
-    }]))
+    monkeypatch.setattr(
+        run_bug_fix,
+        "_agent_run",
+        AsyncMock(
+            return_value=[
+                {
+                    "name": "query",
+                    "duration": 1,
+                    "input_tokens": 1234,
+                    "output_tokens": 567,
+                    "cost_usd": reported,
+                }
+            ]
+        ),
+    )
     with tracker.phase("test"):
         asyncio.run(run_bug_fix._run_llm(claude_cfg, [], tracker))
     record = tracker._run.phases[0].queries[0]

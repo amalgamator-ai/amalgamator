@@ -34,6 +34,7 @@ class CodeGenClaudeConfig(ClaudeConfig):
     Changing it is a one-line edit here, but it is a behaviour change to the
     pipeline and should be validated on a real run, not assumed.
     """
+
     system_prompt: str = PROFILING_SYSTEM_PROMPT
 
 

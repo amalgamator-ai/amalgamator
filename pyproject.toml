@@ -3,8 +3,9 @@ name = "amalgamator"
 version = "0.1.0"
 description = "AI-driven bug-fix backporting and GPU performance analysis"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=0.40.0",
     "claude-agent-sdk>=0.2.87",
     "colorama>=0.4.6",
     "litellm>=1.100.1,<2",
@@ -19,6 +20,52 @@ test = [
     # The subprocess smoke test intentionally exercises private SDK machinery.
     "claude-agent-sdk==0.2.161",
 ]
+dev = [
+    # Editor/convenience mirrors of the CI toolchain. The CI source of truth
+    # for black/ruff versions is the pinned revs in .pre-commit-config.yaml;
+    # keep the constraint floors here compatible with those revs. pyrefly has
+    # no pre-commit-managed env (it needs the project's imports) and runs from
+    # this environment in CI, so uv.lock is its source of truth.
+    "black>=26.0.0",
+    "pre-commit>=4.0.0",
+    "pyrefly>=1.3.0",
+    "ruff>=0.17.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["auto_bug_fix*", "backport_scanner*", "common*", "llm*"]
+
+[tool.black]
+target-version = ["py312"]
+line-length = 88
+extend-exclude = "/(\\.claude|runs|build|dist|__pycache__)/"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+extend-exclude = [".claude", "runs", "build", "dist"]
+
+[tool.ruff.lint]
+# Curated rule set: pyflakes + pycodestyle (E/W/F), isort (I), pyupgrade (UP),
+# bugbear (B), and flake8-simplify (SIM). Intentionally excludes:
+#   - E402: modules bootstrap sys.path before imports (many run_*.py entrypoints)
+#   - E501: line length is owned by black
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E402", "E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["auto_bug_fix", "backport_scanner", "common", "llm"]
+
+[tool.pyrefly]
+# NOTE: pyrefly's config keys are project-includes/project-excludes (glob
+# patterns, relative to the project root). Plain include/exclude/strict are
+# silently ignored (pyrefly warns about extra keys on every run).
+python-version = "3.12"
+project-includes = [
+    "auto_bug_fix/**/*.py",
+    "backport_scanner/**/*.py",
+    "common/**/*.py",
+    "llm/**/*.py",
+    "tests/**/*.py",
+]
+project-excludes = [".claude/**", "runs/**", "build/**", "dist/**"]

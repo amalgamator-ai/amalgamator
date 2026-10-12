@@ -1,4 +1,5 @@
 """Capture and normalize test-run output to create comparable failure signatures."""
+
 from __future__ import annotations
 
 import re
@@ -8,7 +9,9 @@ from typing import Literal
 from auto_bug_fix.baseline import TIMEOUT_EXIT_CODE
 
 
-def capture_output(cmd: list[str], cwd: str, timeout: int | None = None) -> tuple[int, str]:
+def capture_output(
+    cmd: list[str], cwd: str, timeout: int | None = None
+) -> tuple[int, str]:
     """Run a command and return (exit_code, combined_stdout_stderr).
 
     ``timeout`` is in seconds; ``None`` (the default) means no limit. A command
@@ -17,18 +20,33 @@ def capture_output(cmd: list[str], cwd: str, timeout: int | None = None) -> tupl
     try:
         if len(cmd) == 1:
             result = subprocess.run(
-                cmd[0], cwd=cwd, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", shell=True,
+                cmd[0],
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=True,
                 timeout=timeout,
             )
         else:
             result = subprocess.run(
-                cmd, cwd=cwd, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                cmd,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
     except subprocess.TimeoutExpired as e:
-        partial = (e.stdout or "") if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
+        partial = (
+            (e.stdout or "")
+            if isinstance(e.stdout, str)
+            else (e.stdout.decode() if e.stdout else "")
+        )
         return (TIMEOUT_EXIT_CODE, partial + f"\n[TIMED OUT after {timeout}s]")
     return (result.returncode, result.stdout)
 
@@ -41,7 +59,11 @@ def normalize_signature(raw: str) -> str:
     s = re.sub(r"0x[0-9a-fA-F]{4,16}", "0xADDR", s)
 
     # ISO 8601 timestamps (before hex, which would consume digit-only timestamps)
-    s = re.sub(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?", "TIMESTAMP", s)
+    s = re.sub(
+        r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
+        "TIMESTAMP",
+        s,
+    )
 
     # Unix timestamps (10-digit integers)
     s = re.sub(r"\b\d{10}\b", "TIMESTAMP", s)

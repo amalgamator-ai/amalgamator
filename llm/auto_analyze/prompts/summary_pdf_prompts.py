@@ -2,8 +2,8 @@ import os
 from dataclasses import dataclass
 from typing import ClassVar
 
-from llm.auto_analyze.configs.single_trace_config import PERF_ANALYSIS_SINGLE_FILE
 from llm.auto_analyze.configs.cross_trace_config import CROSS_COMPARE_FILE
+from llm.auto_analyze.configs.single_trace_config import PERF_ANALYSIS_SINGLE_FILE
 
 SUMMARY_PDF_FILE = "summary_report.pdf"
 
@@ -126,7 +126,7 @@ and the improvement plan for the target framework."""
 
 1. COVER BLOCK
    - Title: "Performance Analysis Report"
-   - Subtitle: model, GPU, execution parameters (from [run_params_file]). 
+   - Subtitle: model, GPU, execution parameters (from [run_params_file]).
         - For each framework's commit_id provide also the concrete date it relates to.
         - For the "execution mode" (ISL/OSL and batch size) provide a comment that briefly describes its goal.
    - Date line: "Generated: [today's date]"

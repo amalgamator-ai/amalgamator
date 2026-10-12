@@ -53,23 +53,28 @@ WEIGHTS = {"blame": 3.0, "history": 1.5, "reviews": 2.5, "owners": 1.5}
 
 BOT_LOGIN_PATTERN = re.compile(
     r"(bot($|[-_\[])|\[bot\]$|claude|github-actions|copilot|semantic"
-    r"|dependabot|renovate)", re.IGNORECASE)
+    r"|dependabot|renovate)",
+    re.IGNORECASE,
+)
 
 
 def _git(repo_dir, *args, check=True):
-    r = subprocess.run(["git", "-C", repo_dir] + list(args),
-                       capture_output=True, text=True)
+    r = subprocess.run(
+        ["git", "-C", repo_dir] + list(args), capture_output=True, text=True
+    )
     if check and r.returncode != 0:
-        raise RuntimeError("git {} failed: {}".format(
-            " ".join(args[:2]), r.stderr.strip()[:200]))
+        raise RuntimeError(
+            "git {} failed: {}".format(" ".join(args[:2]), r.stderr.strip()[:200])
+        )
     return r.stdout
 
 
 def _gh(*args, check=True):
     r = subprocess.run(["gh"] + list(args), capture_output=True, text=True)
     if check and r.returncode != 0:
-        raise RuntimeError("gh {} failed: {}".format(
-            " ".join(args[:2]), r.stderr.strip()[:200]))
+        raise RuntimeError(
+            "gh {} failed: {}".format(" ".join(args[:2]), r.stderr.strip()[:200])
+        )
     return r.stdout
 
 
@@ -94,8 +99,7 @@ def blame_candidates(repo_dir, base, changed_files):
     """
     counts = {}
     for path in changed_files:
-        hunks = _git(repo_dir, "diff", "-U0", "{}..HEAD".format(base), "--", path,
-                     check=False)
+        hunks = _git(repo_dir, "diff", "-U0", f"{base}..HEAD", "--", path, check=False)
         ranges = []
         for match in re.finditer(r"^@@ -(\d+)(?:,(\d+))? ", hunks, re.MULTILINE):
             start = int(match.group(1))
@@ -104,8 +108,7 @@ def blame_candidates(repo_dir, base, changed_files):
                 ranges.append((start, start + max(length, 1) - 1))
         if not ranges:
             continue
-        blame = _git(repo_dir, "blame", "--porcelain", base, "--", path,
-                     check=False)
+        blame = _git(repo_dir, "blame", "--porcelain", base, "--", path, check=False)
         if not blame:
             continue
         lineno = 0
@@ -115,10 +118,10 @@ def blame_candidates(repo_dir, base, changed_files):
             header = re.match(r"^[0-9a-f]{40} (\d+) \d+", line)
             if header:
                 lineno = int(header.group(1))
-                email = None              # reset; header precedes its metadata
+                email = None  # reset; header precedes its metadata
                 continue
             if line.startswith("author-mail "):
-                email = line[len("author-mail "):].strip(" <>")
+                email = line[len("author-mail ") :].strip(" <>")
                 if email and any(a <= lineno <= b for a, b in ranges):
                     counts[email] = counts.get(email, 0) + 1
     return counts
@@ -126,12 +129,18 @@ def blame_candidates(repo_dir, base, changed_files):
 
 def history_candidates(repo_dir, changed_files, months=6):
     """Top committers to the owned files in the recent window."""
-    since = (datetime.date.today()
-             - datetime.timedelta(days=30 * months)).isoformat()
+    since = (datetime.date.today() - datetime.timedelta(days=30 * months)).isoformat()
     counts = {}
     for path in changed_files:
-        log = _git(repo_dir, "log", "--since={}".format(since),
-                   "--format=%ae", "--", path, check=False)
+        log = _git(
+            repo_dir,
+            "log",
+            f"--since={since}",
+            "--format=%ae",
+            "--",
+            path,
+            check=False,
+        )
         for email in log.splitlines():
             if email.strip():
                 counts[email.strip()] = counts.get(email.strip(), 0) + 1
@@ -150,17 +159,34 @@ def review_candidates(upstream_repo, changed_files, max_prs=10):
         basename = os.path.basename(path)
         if not basename:
             continue
-        q = "repo:{} is:pr is:merged {}".format(upstream_repo, basename)
-        out = _gh_json("api", "-X", "GET", "search/issues",
-                       "-f", "q={}".format(q), "-f", "per_page={}".format(max_prs),
-                       check=False) or {}
+        q = f"repo:{upstream_repo} is:pr is:merged {basename}"
+        out = (
+            _gh_json(
+                "api",
+                "-X",
+                "GET",
+                "search/issues",
+                "-f",
+                f"q={q}",
+                "-f",
+                f"per_page={max_prs}",
+                check=False,
+            )
+            or {}
+        )
         items = out.get("items", []) if isinstance(out, dict) else []
         for item in items:
             number = item.get("number")
             if not number:
                 continue
-            reviews = _gh_json("api", "repos/{}/pulls/{}/reviews".format(
-                upstream_repo, number), check=False) or []
+            reviews = (
+                _gh_json(
+                    "api",
+                    f"repos/{upstream_repo}/pulls/{number}/reviews",
+                    check=False,
+                )
+                or []
+            )
             if not isinstance(reviews, list):
                 continue
             for review in reviews:
@@ -172,10 +198,13 @@ def review_candidates(upstream_repo, changed_files, max_prs=10):
 
 def codeowners_entries(repo_dir, base, changed_files):
     """Logins from CODEOWNERS rules matching the owned files."""
-    for candidate in (".github/CODEOWNERS", "CODEOWNERS",
-                      "docs/CODEOWNERS", ".github/CODEOWNERS.txt"):
-        content = _git(repo_dir, "show", "{}:{}".format(base, candidate),
-                       check=False)
+    for candidate in (
+        ".github/CODEOWNERS",
+        "CODEOWNERS",
+        "docs/CODEOWNERS",
+        ".github/CODEOWNERS.txt",
+    ):
+        content = _git(repo_dir, "show", f"{base}:{candidate}", check=False)
         if content:
             return _match_codeowners(content, changed_files)
     return {}
@@ -197,7 +226,7 @@ def _match_codeowners(content, changed_files):
         parts = line.split()
         pattern, owners = parts[0], [o for o in parts[1:] if o != "*"]
         if pattern == "*":
-            continue        # matches everything -- never a useful suggestion
+            continue  # matches everything -- never a useful suggestion
         rules.append((pattern, owners))
 
     matches = {}
@@ -217,7 +246,7 @@ def _match_codeowners(content, changed_files):
 def _codeowners_match(pattern, path):
     """True if a CODEOWNERS pattern applies to a repo path."""
     if pattern == "*":
-        return True                      # matches everything (incl. later rules)
+        return True  # matches everything (incl. later rules)
     directory = pattern.endswith("/")
     if pattern.startswith("/"):
         pattern = pattern[1:]
@@ -226,15 +255,14 @@ def _codeowners_match(pattern, path):
         anchored = False
     # Translate the glob (** = anything, * = within one segment).
     parts = pattern.split("**")
-    regex = ".*".join(
-        re.escape(p).replace(r"\*", "[^/]*") for p in parts)
+    regex = ".*".join(re.escape(p).replace(r"\*", "[^/]*") for p in parts)
     if directory:
         regex += ".*"
     full = "^" + regex + "$"
     if anchored or directory:
         return re.match(full, path) is not None
     # Unanchored file rule: also matches inside any directory.
-    return re.match("^(.*/)?{}$".format(regex), path) is not None
+    return re.match(f"^(.*/)?{regex}$", path) is not None
     if anchored:
         return re.match("^" + regex + "$", path) is not None
     return re.search(regex + "$", path) is not None
@@ -242,10 +270,20 @@ def _codeowners_match(pattern, path):
 
 def _email_to_login(upstream_repo, email):
     """Best-effort GitHub login for a commit email, via commit search."""
-    out = _gh_json("api", "-X", "GET", "search/commits",
-                   "-f", "q={}".format("repo:{} author-email:{}".format(
-                       upstream_repo, email)),
-                   "-f", "per_page=1", check=False) or {}
+    out = (
+        _gh_json(
+            "api",
+            "-X",
+            "GET",
+            "search/commits",
+            "-f",
+            "q={}".format(f"repo:{upstream_repo} author-email:{email}"),
+            "-f",
+            "per_page=1",
+            check=False,
+        )
+        or {}
+    )
     items = out.get("items", []) if isinstance(out, dict) else []
     for item in items:
         login = (item.get("author") or {}).get("login")
@@ -265,8 +303,9 @@ def is_bot(login):
 def rank_candidates(state, repo_dir, max_reviewers, log=print):
     """Blend the sources into a ranked list with evidence per candidate."""
     changed = _patch_files_from_state(state)
-    base = state.get("base_commit") or _git(repo_dir, "merge-base",
-                                            "HEAD", state.get("base_branch") or "main")
+    base = state.get("base_commit") or _git(
+        repo_dir, "merge-base", "HEAD", state.get("base_branch") or "main"
+    )
     author = _git(repo_dir, "log", "-1", "--format=%ae", "HEAD").strip()
     upstream = state.get("upstream_repo") or "vllm-project/vllm"
 
@@ -288,8 +327,7 @@ def rank_candidates(state, repo_dir, max_reviewers, log=print):
     scores = {}
 
     def add(login, kind, weight, detail):
-        entry = scores.setdefault(login, {"login": login, "score": 0.0,
-                                          "evidence": []})
+        entry = scores.setdefault(login, {"login": login, "score": 0.0, "evidence": []})
         entry["score"] += weight
         entry["evidence"].append(detail)
 
@@ -301,9 +339,12 @@ def rank_candidates(state, repo_dir, max_reviewers, log=print):
             continue
         if is_bot(login):
             continue
-        add(login, "blame", WEIGHTS["blame"] * min(count, 10),
-            "authored {} of the changed lines (git blame at merge base)".format(
-                count))
+        add(
+            login,
+            "blame",
+            WEIGHTS["blame"] * min(count, 10),
+            f"authored {count} of the changed lines (git blame at merge base)",
+        )
 
     for email, count in sorted(history.items(), key=lambda kv: -kv[1]):
         if email == author:
@@ -313,26 +354,40 @@ def rank_candidates(state, repo_dir, max_reviewers, log=print):
             continue
         if is_bot(login):
             continue
-        add(login, "history", WEIGHTS["history"] * min(count, 20) / 20.0,
-            "top recent committer to the touched files ({} commits, 6mo)".format(
-                count))
+        add(
+            login,
+            "history",
+            WEIGHTS["history"] * min(count, 20) / 20.0,
+            f"top recent committer to the touched files ({count} commits, 6mo)",
+        )
 
     for login, count in sorted(reviews.items(), key=lambda kv: -kv[1]):
         if login == author or is_bot(login):
             continue
-        add(login, "reviews", WEIGHTS["reviews"] * min(count, 5),
-            "reviewed {} recent merged PRs touching these files".format(count))
+        add(
+            login,
+            "reviews",
+            WEIGHTS["reviews"] * min(count, 5),
+            f"reviewed {count} recent merged PRs touching these files",
+        )
 
     for login in owners:
         if login == author or is_bot(login):
             continue
-        add(login, "owners", WEIGHTS["owners"],
-            "listed in CODEOWNERS for the touched paths")
+        add(
+            login,
+            "owners",
+            WEIGHTS["owners"],
+            "listed in CODEOWNERS for the touched paths",
+        )
 
     ranked = sorted(scores.values(), key=lambda e: -e["score"])
     return ranked[:max_reviewers], {
-        "blame": blame, "history": history, "reviews": reviews,
-        "owners": sorted(owners), "ranked": ranked,
+        "blame": blame,
+        "history": history,
+        "reviews": reviews,
+        "owners": sorted(owners),
+        "ranked": ranked,
     }
 
 
@@ -342,8 +397,7 @@ def _patch_files_from_state(state):
     head = state.get("head_sha") or "HEAD"
     base = state.get("base_commit")
     if repo_dir and base:
-        out = _git(repo_dir, "diff", "--name-only", "{}..{}".format(base, head),
-                   check=False)
+        out = _git(repo_dir, "diff", "--name-only", f"{base}..{head}", check=False)
         files = [f for f in out.splitlines() if f.strip()]
         if files:
             return files
@@ -351,11 +405,12 @@ def _patch_files_from_state(state):
     output_dir = state.get("output_dir")
     if output_dir:
         import glob
-        patches = sorted(glob.glob(os.path.join(
-            output_dir, "runtime", "V*", "pr_candidate.patch")))
+
+        patches = sorted(
+            glob.glob(os.path.join(output_dir, "runtime", "V*", "pr_candidate.patch"))
+        )
         if patches:
-            out = _git(repo_dir or ".", "show", "--name-only", "--format=",
-                       check=False)
+            out = _git(repo_dir or ".", "show", "--name-only", "--format=", check=False)
             files = []
             with open(patches[-1]) as f:
                 for line in f:
@@ -366,7 +421,8 @@ def _patch_files_from_state(state):
                 return files
     raise RuntimeError(
         "cannot determine the PR's owned files -- state has no base/head diff "
-        "and no runtime patch was found")
+        "and no runtime patch was found"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -381,13 +437,14 @@ def render_draft(pr_url, candidates, derived_note=True):
     """
     pings = " ".join("@{}".format(entry["login"]) for entry in candidates)
     lines = [
-        "{} could you review this PR?".format(pings),
+        f"{pings} could you review this PR?",
     ]
     if derived_note:
         lines += [
             "",
             "<sub>Reviewer selection was automated. {}</sub>".format(
-                "Human reviewed changes."),
+                "Human reviewed changes."
+            ),
         ]
     lines += [
         "",
@@ -408,7 +465,8 @@ def _load(path):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate a reviewer-suggestion draft for a published PR")
+        description="Generate a reviewer-suggestion draft for a published PR"
+    )
     sub = parser.add_subparsers(dest="command")
     gen = sub.add_parser("generate", help="write pr_reviewers.txt + .json")
     gen.add_argument("--state", required=True)
@@ -428,8 +486,7 @@ def main():
         return 22
     pr_url = state.get("pr_url") or ""
 
-    print("Reviewers: ranking candidates for PR #{} ...".format(
-        state["pr_number"]))
+    print("Reviewers: ranking candidates for PR #{} ...".format(state["pr_number"]))
     top, evidence = rank_candidates(state, repo_dir, args.max_reviewers)
 
     draft = render_draft(pr_url, top)
@@ -445,7 +502,8 @@ def main():
         "candidates": top,
         "evidence": {k: v for k, v in evidence.items() if k != "ranked"},
         "post_command": "gh pr comment {} --repo {} --body-file {}".format(
-            state["pr_number"], state.get("upstream_repo"), txt_path),
+            state["pr_number"], state.get("upstream_repo"), txt_path
+        ),
     }
     if args.dry_run:
         print(draft)
@@ -456,10 +514,12 @@ def main():
     with open(json_path, "w") as f:
         json.dump(payload, f, indent=2)
     import hashlib
-    pr_state.update(args.state, reviewers_draft_sha256=hashlib.sha256(
-        draft.encode()).hexdigest())
-    print("Draft written: {}".format(txt_path))
-    print("Evidence     : {}".format(json_path))
+
+    pr_state.update(
+        args.state, reviewers_draft_sha256=hashlib.sha256(draft.encode()).hexdigest()
+    )
+    print(f"Draft written: {txt_path}")
+    print(f"Evidence     : {json_path}")
     print("Review it, edit if needed, then run step 2c to post.")
     return 0
 

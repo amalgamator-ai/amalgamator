@@ -1,4 +1,5 @@
 """Tests for auto_bug_fix.mechanical — git-native lenient conflict resolution."""
+
 from __future__ import annotations
 
 import subprocess
@@ -40,13 +41,21 @@ def _git(cwd, *args):
 
 def _sha(cwd, ref="HEAD"):
     return subprocess.run(
-        ["git", "rev-parse", ref], cwd=cwd, capture_output=True, text=True, check=True,
+        ["git", "rev-parse", ref],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
 def _status(cwd):
     return subprocess.run(
-        ["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True, check=True,
+        ["git", "status", "--porcelain"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
 
 
@@ -76,7 +85,10 @@ def _make_conflicted_repo(tmp_path, target_content):
     _git(rp, "commit", "-m", "target divergence")
 
     result = subprocess.run(
-        ["git", "cherry-pick", fix_sha], cwd=rp, capture_output=True, text=True,
+        ["git", "cherry-pick", fix_sha],
+        cwd=rp,
+        capture_output=True,
+        text=True,
     )
     assert result.returncode != 0, "fixture must produce a conflict"
     assert "UU base.c" in _status(rp)
@@ -129,7 +141,10 @@ def test_crlf_line_endings_are_preserved(tmp_path):
     _git(rp, "commit", "-m", "target divergence")
 
     result = subprocess.run(
-        ["git", "cherry-pick", fix_sha], cwd=rp, capture_output=True, text=True,
+        ["git", "cherry-pick", fix_sha],
+        cwd=rp,
+        capture_output=True,
+        text=True,
     )
     assert result.returncode != 0 and "UU base.c" in _status(rp)
 
@@ -141,14 +156,17 @@ def test_crlf_line_endings_are_preserved(tmp_path):
     assert content.count(b"\n") == content.count(b"\r\n")
 
 
-@pytest.mark.parametrize("path,sensitive", [
-    ("pkg/module.py", True),
-    ("deploy/app.yaml", True),
-    ("Makefile", True),
-    ("build/Makefile.inc", True),
-    ("rules.mk", True),
-    ("drivers/misc/sample_driver.c", False),
-    ("include/linux/mm.h", False),
-])
+@pytest.mark.parametrize(
+    "path,sensitive",
+    [
+        ("pkg/module.py", True),
+        ("deploy/app.yaml", True),
+        ("Makefile", True),
+        ("build/Makefile.inc", True),
+        ("rules.mk", True),
+        ("drivers/misc/sample_driver.c", False),
+        ("include/linux/mm.h", False),
+    ],
+)
 def test_ws_sensitive_detection(path, sensitive):
     assert _is_ws_sensitive(path) is sensitive

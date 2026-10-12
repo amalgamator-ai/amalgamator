@@ -29,13 +29,13 @@ for p in "${PROFILES[@]}"; do
 
     model_dir=${SGL_DOCKER_RESULTS_DIR}/${model_dirname}
     create_dir_if_missing ${model_dir}
-    
+
     for concurrency in ${PROFILE_CONCURRENCIES}; do
         (
             set -euo pipefail
-            
+
             log_info "      Run concurrency = ${concurrency}"
-            
+
             ((num_requests = concurrency * NUM_WAVES))
 
             EXTRA_PREPARE_CMDS=()
@@ -62,7 +62,7 @@ for p in "${PROFILES[@]}"; do
                     ${output_len} \
                     ${mode_name}
                 )"
-            
+
             # Create test dir (for outputs)
             test_dir="$(
                 make_test_dirname \
@@ -70,32 +70,32 @@ for p in "${PROFILES[@]}"; do
                     ${test_name}
                 )"
             create_dir_if_missing ${test_dir}
-            
+
             # Create output filenames
             result_filename="$(
                 make_result_filename \
                     ${test_dir} \
                     ${test_name}
                 )"
-            
+
             run_prepare_filename="$(
                 make_prepare_log_filename \
                     ${test_dir} \
                     ${test_name}
                 )"
-            
+
             run_log_filename="$(
                 make_run_log_filename \
                     ${test_dir} \
                     ${test_name}
                 )"
-            
+
             run_log_profile_filename="$(
                 make_run_log_profile_filename \
                     ${test_dir} \
                     ${test_name}
                 )"
-            
+
             # This will speedup capture for low batch sizes
             CUDA_GRAPH_FLAG=""
             if (( concurrency < 64 )); then
@@ -135,8 +135,8 @@ for p in "${PROFILES[@]}"; do
                 profile_prefix="nsys profile ${NSYS_DEFAULT_FLAGS} -o ${trace_file_prefix}"
             fi
 
-            
-            # Increase watchdog timeout to 30min to avoid timeout 
+
+            # Increase watchdog timeout to 30min to avoid timeout
             # due to long 10-20min DeepGEMM compilations
             DIST_TIMEOUT_FLAG="--dist-timeout 1800"
 
@@ -152,7 +152,7 @@ for p in "${PROFILES[@]}"; do
                 ${DIST_TIMEOUT_FLAG} \
                 ${CUDA_GRAPH_FLAG} \
                 ${EXTRA_RUN_FLAGS}"
-                
+
 
             # Run prepare cmds
             if [[ ${#EXTRA_PREPARE_CMDS[@]} -gt 0 ]]; then
@@ -163,13 +163,13 @@ for p in "${PROFILES[@]}"; do
                         bash -c "${prep_cmd}"
                 done
             fi
-            
+
             # Run main cmd
             log_info "RUN NORMAL"
             run_and_log ${run_log_filename} \
                 env CUDA_VISIBLE_DEVICES=${gpu_ids} \
                 ${run_cmd}
-            
+
             if is_trace_enabled sgl; then
                 log_info "RUN PROFILE"
                 run_and_log ${run_log_profile_filename} \
@@ -181,8 +181,7 @@ for p in "${PROFILES[@]}"; do
                     --type=sqlite \
                     --output="${trace_file_prefix}.sqlite" \
                     ${trace_file_prefix}.nsys-rep
-            fi  
-        )    
+            fi
+        )
     done
 done
-

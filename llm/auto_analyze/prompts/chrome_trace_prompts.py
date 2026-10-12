@@ -2,19 +2,19 @@ import os
 from dataclasses import dataclass
 from typing import ClassVar
 
+from common.iteration_utils import resolve_output_file
+from llm.auto_analyze.configs.cross_trace_config import (
+    CROSS_COMPARE_FILE,
+    CROSS_MATCHING_FILE,
+    CrossTraceConfig,
+)
 from llm.auto_analyze.configs.single_trace_config import (
-    SingleTraceConfig,
-    HIGH_LEVEL_OPS_FILE,
     GPU_OPS_TXT_FILE,
+    HIGH_LEVEL_OPS_FILE,
     MEDIAN_BLOCK_FILE,
     PERF_ANALYSIS_SINGLE_FILE,
+    SingleTraceConfig,
 )
-from llm.auto_analyze.configs.cross_trace_config import (
-    CrossTraceConfig,
-    CROSS_MATCHING_FILE,
-    CROSS_COMPARE_FILE,
-)
-from common.iteration_utils import resolve_output_file
 
 SINGLE_TRACE_JSON_FILE = "single_trace_transformer_block.json"
 SINGLE_TRACE_TXT_FILE = "single_trace_transformer_block.txt"
@@ -28,9 +28,19 @@ SCRIPT_ERROR_HANDLING = (
 )
 
 
-def _format_trace_entry(idx, framework_name, framework_source_code, model,
-                        gpu_type, batch_size, prefill_size, output_size,
-                        result_dir, marker="", include_perf_analysis=True):
+def _format_trace_entry(
+    idx,
+    framework_name,
+    framework_source_code,
+    model,
+    gpu_type,
+    batch_size,
+    prefill_size,
+    output_size,
+    result_dir,
+    marker="",
+    include_perf_analysis=True,
+):
     lines = [
         f"Trace [{idx}]{marker}:",
         f"  framework_name: {framework_name}",
@@ -43,29 +53,35 @@ def _format_trace_entry(idx, framework_name, framework_source_code, model,
         f"  gpu_ops_txt_file: {os.path.join(result_dir, GPU_OPS_TXT_FILE)}",
     ]
     if include_perf_analysis:
-        lines.append(f"  perf_analysis_file: {resolve_output_file(result_dir, PERF_ANALYSIS_SINGLE_FILE)}")
+        lines.append(
+            f"  perf_analysis_file: {resolve_output_file(result_dir, PERF_ANALYSIS_SINGLE_FILE)}"
+        )
     lines.append("")
     return lines
 
 
-def _build_trace_context_single(config: SingleTraceConfig, include_perf_analysis: bool = True) -> str:
+def _build_trace_context_single(
+    config: SingleTraceConfig, include_perf_analysis: bool = True
+) -> str:
     output_dir = os.path.abspath(config.output_dir)
     lines = [
         "MODE: Single-trace visualization (one median transformer block).",
         "",
     ]
-    lines.extend(_format_trace_entry(
-        idx=0,
-        framework_name=config.framework_name,
-        framework_source_code=config.framework_source_code,
-        model=config.model,
-        gpu_type=config.gpu_type,
-        batch_size=config.batch_size_range,
-        prefill_size=config.prefill_size_range,
-        output_size=config.output_size_range,
-        result_dir=output_dir,
-        include_perf_analysis=include_perf_analysis,
-    ))
+    lines.extend(
+        _format_trace_entry(
+            idx=0,
+            framework_name=config.framework_name,
+            framework_source_code=config.framework_source_code,
+            model=config.model,
+            gpu_type=config.gpu_type,
+            batch_size=config.batch_size_range,
+            prefill_size=config.prefill_size_range,
+            output_size=config.output_size_range,
+            result_dir=output_dir,
+            include_perf_analysis=include_perf_analysis,
+        )
+    )
     return "\n".join(lines)
 
 
@@ -83,18 +99,20 @@ def _build_trace_context_cross(config: CrossTraceConfig) -> str:
 
     for i, tr in enumerate(config.traces):
         marker = " (TARGET)" if i == config.target_trace_id else ""
-        lines.extend(_format_trace_entry(
-            idx=i,
-            framework_name=tr.framework_name,
-            framework_source_code=tr.framework_source_code,
-            model=tr.model,
-            gpu_type=tr.gpu_type,
-            batch_size=tr.batch_size_range,
-            prefill_size=tr.prefill_size_range,
-            output_size=tr.output_size_range,
-            result_dir=tr.result_dir,
-            marker=marker,
-        ))
+        lines.extend(
+            _format_trace_entry(
+                idx=i,
+                framework_name=tr.framework_name,
+                framework_source_code=tr.framework_source_code,
+                model=tr.model,
+                gpu_type=tr.gpu_type,
+                batch_size=tr.batch_size_range,
+                prefill_size=tr.prefill_size_range,
+                output_size=tr.output_size_range,
+                result_dir=tr.result_dir,
+                marker=marker,
+            )
+        )
 
     return "\n".join(lines)
 
@@ -154,7 +172,7 @@ OPERATION NAMING: Prepend a brief high-level prefix per kernel (e.g., "Attn: ...
 OPERATION ARGS: For each kernel event, add "args" with:
 - "high_level_op": correlated operation name
 - "source_code": file:line references with explanations
-- "call_chain": The source code call-chain that invokes this kernel. Make sure to provide file/line references here as well 
+- "call_chain": The source code call-chain that invokes this kernel. Make sure to provide file/line references here as well
 {perf_args_instruction}
 
 TIMING: All blocks start at time 0.

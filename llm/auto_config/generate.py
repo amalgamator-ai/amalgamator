@@ -10,12 +10,12 @@ import urllib.request
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
-from llm.auto_config.vllm_fetcher import (
-    fetch_recipe,
-    _parse_args_list,
-    _pairs_to_flags_str,
-)
 from llm.auto_config.sglang_fetcher import fetch_sglang_recipe
+from llm.auto_config.vllm_fetcher import (
+    _pairs_to_flags_str,
+    _parse_args_list,
+    fetch_recipe,
+)
 
 log = logging.getLogger(__name__)
 
@@ -145,32 +145,38 @@ def generate_config(
             merged_env = {**recipe.extra_env, **extra_env}
             resolved_model_id = recipe.model_id
 
-            framework_entries.append({
-                "name": fw,
-                "enable_trace": enable_trace,
-                "server_args": {
-                    "extra_flags": merged_flags,
-                    "extra_env": merged_env,
-                },
-                "client_args": {"extra_flags": ""},
-            })
+            framework_entries.append(
+                {
+                    "name": fw,
+                    "enable_trace": enable_trace,
+                    "server_args": {
+                        "extra_flags": merged_flags,
+                        "extra_env": merged_env,
+                    },
+                    "client_args": {"extra_flags": ""},
+                }
+            )
             docker_images[fw] = _resolve_latest_image(fw, recipe.docker_image)
         else:
-            framework_entries.append({
-                "name": fw,
-                "enable_trace": enable_trace,
-                "server_args": {"extra_flags": "", "extra_env": {}},
-                "client_args": {"extra_flags": ""},
-            })
+            framework_entries.append(
+                {
+                    "name": fw,
+                    "enable_trace": enable_trace,
+                    "server_args": {"extra_flags": "", "extra_env": {}},
+                    "client_args": {"extra_flags": ""},
+                }
+            )
             docker_images.setdefault(fw, f"<SET_{fw.upper()}_DOCKER_IMAGE>")
 
     config = {
-        "profiles": [{
-            "model": resolved_model_id,
-            "num_gpus": num_gpus,
-            "exec_mode": exec_mode,
-            "frameworks": framework_entries,
-        }],
+        "profiles": [
+            {
+                "model": resolved_model_id,
+                "num_gpus": num_gpus,
+                "exec_mode": exec_mode,
+                "frameworks": framework_entries,
+            }
+        ],
         "concurrencies": concurrencies,
         "docker_images": docker_images,
         "exec_modes": {

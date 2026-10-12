@@ -1,21 +1,20 @@
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
+from common.claude_utils import PipelineStep
+from common.iteration_utils import prev_iteration_section as _prev_iteration_section
 from llm.auto_analyze.configs.single_trace_config import (
-    SingleTraceParams,
-    SingleTraceConfig,
-    TRACE_FILE_TYPE_NSYS,
-    TRACE_FILE_TYPE_PYTORCH,
-    HIGH_LEVEL_OPS_FILE,
-    GPU_OPS_TXT_FILE,
     GPU_OPS_TO_BLOCKS_FILE,
+    GPU_OPS_TXT_FILE,
+    HIGH_LEVEL_OPS_FILE,
     MEDIAN_BLOCK_FILE,
     PERF_ANALYSIS_SINGLE_FILE,
+    TRACE_FILE_TYPE_NSYS,
+    TRACE_FILE_TYPE_PYTORCH,
+    SingleTraceConfig,
+    SingleTraceParams,
 )
 from llm.auto_analyze.prompts.chrome_trace_prompts import build_single_trace_json_prompt
-from common.iteration_utils import prev_iteration_section as _prev_iteration_section
-from common.claude_utils import PipelineStep
-
 
 HIGH_LEVEL_OPS_PREFIX = "transformer_block_high_level_ops"
 CORRELATION_PREFIX = "gpu_ops_to_blocks"
@@ -155,7 +154,7 @@ Additionally, write a summary to [output_summary_file] with:
                 "confirm or override the code path analysis from flags.\n"
                 "- Extract and record every runtime backend/mode/path selection decision from the run log. "
                 "Look for lines where the framework logs which implementation was selected — these are typically "
-                "logged as \"Using X\", \"Selected X backend\", \"Resolved X to Y\", or \"X backend: Y\". "
+                'logged as "Using X", "Selected X backend", "Resolved X to Y", or "X backend: Y". '
                 "Common categories include:\n"
                 "  - MoE backend selection (which MoE kernel implementation was chosen)\n"
                 "  - Attention backend selection (which attention kernel/cache format was chosen)\n"
@@ -175,14 +174,14 @@ Additionally, write a summary to [output_summary_file] with:
 
         focus_section = ""
         if p.high_level_focus:
-            focus_section = (
-                "Focus area for this analysis: <high_level_focus>"
-            )
+            focus_section = "Focus area for this analysis: <high_level_focus>"
 
         return self.prompt_template.format(
             context=p.context_header(),
             output_file=self.output_file,
-            prev_iteration_section=_prev_iteration_section(self.prev_output_file, self.prev_output_summary_file),
+            prev_iteration_section=_prev_iteration_section(
+                self.prev_output_file, self.prev_output_summary_file
+            ),
             output_summary_file=self.output_summary_file,
             iteration=self.iteration,
             run_command_section=run_command_section,
@@ -340,7 +339,7 @@ FILE 1 — [output_file]: Structured text with:
     - Header (model, framework, GPU, block counts, warmup/cooldown, consistency)
     - A FULL properly aligned pipe-separated table for EACH AND EVERY detected block (not just the median — ALL blocks including warmup and cooldown). Each table has columns for:
         - index
-        - high_level_op 
+        - high_level_op
         - kernel name
         - cuda stream
         - duration
@@ -424,7 +423,9 @@ Additionally, write a summary to [output_summary_file] with:
     def prompt(self):
         return self.prompt_template.format(
             context=self.params.context_header(),
-            prev_iteration_section=_prev_iteration_section(self.prev_output_file, self.prev_output_summary_file),
+            prev_iteration_section=_prev_iteration_section(
+                self.prev_output_file, self.prev_output_summary_file
+            ),
             high_level_ops_file=self.high_level_ops_file,
             gpu_ops_txt_file=self.gpu_ops_txt_file,
             output_file=self.output_file,
@@ -639,7 +640,9 @@ Additionally, write a summary to [output_summary_file] with:
 
         return self.prompt_template.format(
             context=self.params.context_header(),
-            prev_iteration_section=_prev_iteration_section(self.prev_output_file, self.prev_output_summary_file),
+            prev_iteration_section=_prev_iteration_section(
+                self.prev_output_file, self.prev_output_summary_file
+            ),
             median_block_file=self.median_block_file,
             high_level_ops_file=self.high_level_ops_file,
             gpu_ops_to_blocks_file=self.gpu_ops_to_blocks_file,
@@ -723,9 +726,7 @@ PRODUCE OUTPUT:
 
         focus_section = ""
         if p.high_level_focus:
-            focus_section = (
-                "Focus area for this analysis: <high_level_focus>"
-            )
+            focus_section = "Focus area for this analysis: <high_level_focus>"
 
         return self.prompt_template.format(
             context=p.context_header(),
@@ -919,16 +920,19 @@ PRODUCE OUTPUT:
         )
 
 
-def gen_high_level_ops_iter_steps(config, prev_output_file, prev_output_summary_file, iteration):
+def gen_high_level_ops_iter_steps(
+    config, prev_output_file, prev_output_summary_file, iteration
+):
     """Generate (gen + review) pipeline steps for high-level ops iteration."""
     import os
+
     output_dir = os.path.abspath(config.output_dir)
     params: SingleTraceParams = config
 
-    gen_output = "{}_V{}.txt".format(HIGH_LEVEL_OPS_PREFIX, iteration)
-    gen_summary = "{}_summary_V{}.txt".format(HIGH_LEVEL_OPS_PREFIX, iteration)
-    review_output = "{}_review_V{}.txt".format(HIGH_LEVEL_OPS_PREFIX, iteration)
-    review_summary = "{}_review_summary_V{}.txt".format(HIGH_LEVEL_OPS_PREFIX, iteration)
+    gen_output = f"{HIGH_LEVEL_OPS_PREFIX}_V{iteration}.txt"
+    gen_summary = f"{HIGH_LEVEL_OPS_PREFIX}_summary_V{iteration}.txt"
+    review_output = f"{HIGH_LEVEL_OPS_PREFIX}_review_V{iteration}.txt"
+    review_summary = f"{HIGH_LEVEL_OPS_PREFIX}_review_summary_V{iteration}.txt"
 
     gen_prompt = TransformerBlockHighLevelPrompt(
         params=params,
@@ -949,12 +953,12 @@ def gen_high_level_ops_iter_steps(config, prev_output_file, prev_output_summary_
     )
 
     gen_step = PipelineStep(
-        name="high_level_ops_V{}".format(iteration),
+        name=f"high_level_ops_V{iteration}",
         prompt=gen_prompt.prompt(),
         output_files=[gen_output, gen_summary],
     )
     review_step = PipelineStep(
-        name="high_level_ops_review_V{}".format(iteration),
+        name=f"high_level_ops_review_V{iteration}",
         prompt=review_prompt.prompt(),
         output_files=[review_output, review_summary],
     )
@@ -962,19 +966,26 @@ def gen_high_level_ops_iter_steps(config, prev_output_file, prev_output_summary_
     return [gen_step, review_step], review_step
 
 
-def gen_correlation_iter_steps(config, high_level_ops_file, gpu_ops_txt_file,
-                               prev_output_file, prev_output_summary_file, iteration):
+def gen_correlation_iter_steps(
+    config,
+    high_level_ops_file,
+    gpu_ops_txt_file,
+    prev_output_file,
+    prev_output_summary_file,
+    iteration,
+):
     """Generate (gen + review) pipeline steps for correlation iteration."""
     import os
+
     output_dir = os.path.abspath(config.output_dir)
     params: SingleTraceParams = config
 
-    gen_output = "{}_V{}.txt".format(CORRELATION_PREFIX, iteration)
-    gen_summary = "{}_summary_V{}.txt".format(CORRELATION_PREFIX, iteration)
-    gen_median = "{}_V{}.txt".format(MEDIAN_BLOCK_PREFIX, iteration)
-    review_output = "{}_review_V{}.txt".format(CORRELATION_PREFIX, iteration)
-    review_summary = "{}_review_summary_V{}.txt".format(CORRELATION_PREFIX, iteration)
-    review_median = "{}_review_V{}.txt".format(MEDIAN_BLOCK_PREFIX, iteration)
+    gen_output = f"{CORRELATION_PREFIX}_V{iteration}.txt"
+    gen_summary = f"{CORRELATION_PREFIX}_summary_V{iteration}.txt"
+    gen_median = f"{MEDIAN_BLOCK_PREFIX}_V{iteration}.txt"
+    review_output = f"{CORRELATION_PREFIX}_review_V{iteration}.txt"
+    review_summary = f"{CORRELATION_PREFIX}_review_summary_V{iteration}.txt"
+    review_median = f"{MEDIAN_BLOCK_PREFIX}_review_V{iteration}.txt"
 
     gen_prompt = GpuOpsToTransformerBlocksPrompt(
         params=params,
@@ -1002,12 +1013,12 @@ def gen_correlation_iter_steps(config, high_level_ops_file, gpu_ops_txt_file,
     )
 
     gen_step = PipelineStep(
-        name="correlation_V{}".format(iteration),
+        name=f"correlation_V{iteration}",
         prompt=gen_prompt.prompt(),
         output_files=[gen_output, gen_summary, gen_median],
     )
     review_step = PipelineStep(
-        name="correlation_review_V{}".format(iteration),
+        name=f"correlation_review_V{iteration}",
         prompt=review_prompt.prompt(),
         output_files=[review_output, review_summary, review_median],
     )
@@ -1015,18 +1026,26 @@ def gen_correlation_iter_steps(config, high_level_ops_file, gpu_ops_txt_file,
     return [gen_step, review_step], review_step
 
 
-def gen_perf_analysis_iter_steps(config, median_block_file, high_level_ops_file,
-                                  gpu_ops_to_blocks_file, gpu_ops_txt_file,
-                                  prev_output_file, prev_output_summary_file, iteration):
+def gen_perf_analysis_iter_steps(
+    config,
+    median_block_file,
+    high_level_ops_file,
+    gpu_ops_to_blocks_file,
+    gpu_ops_txt_file,
+    prev_output_file,
+    prev_output_summary_file,
+    iteration,
+):
     """Generate (gen + review) pipeline steps for perf analysis iteration."""
     import os
+
     output_dir = os.path.abspath(config.output_dir)
     params: SingleTraceParams = config
 
-    gen_output = "{}_V{}.txt".format(PERF_ANALYSIS_PREFIX, iteration)
-    gen_summary = "{}_summary_V{}.txt".format(PERF_ANALYSIS_PREFIX, iteration)
-    review_output = "{}_review_V{}.txt".format(PERF_ANALYSIS_PREFIX, iteration)
-    review_summary = "{}_review_summary_V{}.txt".format(PERF_ANALYSIS_PREFIX, iteration)
+    gen_output = f"{PERF_ANALYSIS_PREFIX}_V{iteration}.txt"
+    gen_summary = f"{PERF_ANALYSIS_PREFIX}_summary_V{iteration}.txt"
+    review_output = f"{PERF_ANALYSIS_PREFIX}_review_V{iteration}.txt"
+    review_summary = f"{PERF_ANALYSIS_PREFIX}_review_summary_V{iteration}.txt"
 
     gen_prompt = PerfAnalysisPrompt(
         params=params,
@@ -1055,12 +1074,12 @@ def gen_perf_analysis_iter_steps(config, median_block_file, high_level_ops_file,
     )
 
     gen_step = PipelineStep(
-        name="perf_analysis_V{}".format(iteration),
+        name=f"perf_analysis_V{iteration}",
         prompt=gen_prompt.prompt(),
         output_files=[gen_output, gen_summary],
     )
     review_step = PipelineStep(
-        name="perf_analysis_review_V{}".format(iteration),
+        name=f"perf_analysis_review_V{iteration}",
         prompt=review_prompt.prompt(),
         output_files=[review_output, review_summary],
     )
@@ -1070,6 +1089,7 @@ def gen_perf_analysis_iter_steps(config, median_block_file, high_level_ops_file,
 
 def gen_single_trace_prompts(config: SingleTraceConfig, file_prefix=""):
     import os
+
     output_dir = os.path.abspath(config.output_dir)
 
     def _path(rel):
@@ -1083,7 +1103,7 @@ def gen_single_trace_prompts(config: SingleTraceConfig, file_prefix=""):
 
     params: SingleTraceParams = config
 
-    prompt_objects = [
+    prompt_objects: list[Any] = [
         TransformerBlockHighLevelPrompt(
             params=params,
             output_file=high_level_ops_file,
@@ -1131,21 +1151,22 @@ def gen_single_trace_prompts(config: SingleTraceConfig, file_prefix=""):
     trace_prompt = build_single_trace_json_prompt(config)
     prompt_objects.append(trace_prompt)
     step_names.append("Generating transformer block trace")
-    output_files.update({
-        "transformer_block_trace_json": trace_prompt.output_json_file,
-        "transformer_block_trace_txt": trace_prompt.output_txt_file,
-    })
+    output_files.update(
+        {
+            "transformer_block_trace_json": trace_prompt.output_json_file,
+            "transformer_block_trace_txt": trace_prompt.output_txt_file,
+        }
+    )
 
     total_steps = len(step_names)
-    prompts = []
+    prompts: list[Any] = []
     for i, (step_name, prompt_obj) in enumerate(
-        zip(step_names, prompt_objects), 1
+        zip(step_names, prompt_objects, strict=False), 1
     ):
         prompts.append(
             {
                 "cmd": (
-                    f"print('\\n=== [Step {i}/{total_steps}]"
-                    f" {step_name}... ===')"
+                    f"print('\\n=== [Step {i}/{total_steps}]" f" {step_name}... ===')"
                 )
             }
         )

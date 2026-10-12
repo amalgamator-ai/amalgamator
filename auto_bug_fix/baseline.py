@@ -1,4 +1,5 @@
 """Test suite baseline capture and regression detection for the verify phase."""
+
 from __future__ import annotations
 
 import re
@@ -10,7 +11,9 @@ import subprocess
 TIMEOUT_EXIT_CODE = 124
 
 
-def run_test_suite(test_command: str, cwd: str, timeout: int | None = None) -> tuple[int, str, str]:
+def run_test_suite(
+    test_command: str, cwd: str, timeout: int | None = None
+) -> tuple[int, str, str]:
     """Run a shell test command and return (exit_code, stdout, stderr).
 
     ``timeout`` is in seconds; ``None`` (the default) means no limit. A command
@@ -18,13 +21,31 @@ def run_test_suite(test_command: str, cwd: str, timeout: int | None = None) -> t
     """
     try:
         result = subprocess.run(
-            test_command, shell=True, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            test_command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:
-        partial_out = (e.stdout or "") if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
-        partial_err = (e.stderr or "") if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")
-        return (TIMEOUT_EXIT_CODE, partial_out, partial_err + f"\nCommand timed out after {timeout}s: {test_command}")
+        partial_out = (
+            (e.stdout or "")
+            if isinstance(e.stdout, str)
+            else (e.stdout.decode() if e.stdout else "")
+        )
+        partial_err = (
+            (e.stderr or "")
+            if isinstance(e.stderr, str)
+            else (e.stderr.decode() if e.stderr else "")
+        )
+        return (
+            TIMEOUT_EXIT_CODE,
+            partial_out,
+            partial_err + f"\nCommand timed out after {timeout}s: {test_command}",
+        )
     return (result.returncode, result.stdout, result.stderr)
 
 
@@ -74,7 +95,8 @@ def capture_baseline(test_command: str, cwd: str) -> set[str]:
 
 
 def check_regression(
-    failures: set[str], baseline: set[str],
+    failures: set[str],
+    baseline: set[str],
 ) -> tuple[bool, set[str]]:
     """Compare current failures against baseline. Returns (no_regression, new_failures)."""
     new_failures = failures - baseline

@@ -1,8 +1,3 @@
-import pytest
-
-from auto_bug_fix.bug_fix_config import BugFixConfig
-
-
 def test_config_has_all_required_fields(bug_cfg):
     expected_attrs = [
         "repo_path",

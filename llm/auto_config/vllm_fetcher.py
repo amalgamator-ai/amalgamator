@@ -52,7 +52,7 @@ def _fetch_json(path: str) -> dict:
 
 def _parse_args_list(args: list[str]) -> list[tuple[str, str | None]]:
     """Parse a flat list of args into (flag, value) pairs."""
-    pairs = []
+    pairs: list[tuple[str, str | None]] = []
     i = 0
     while i < len(args):
         token = args[i]
@@ -187,8 +187,14 @@ def fetch_recipe(
 
     extra_flags = _pairs_to_flags_str(pairs)
 
-    log.info("Resolved recipe for %s on %s: flags=%r env=%r docker=%s",
-             model_id, hardware, extra_flags, env, docker_image)
+    log.info(
+        "Resolved recipe for %s on %s: flags=%r env=%r docker=%s",
+        model_id,
+        hardware,
+        extra_flags,
+        env,
+        docker_image,
+    )
 
     return ResolvedRecipe(
         model_id=model_id,

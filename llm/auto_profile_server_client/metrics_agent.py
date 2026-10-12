@@ -13,9 +13,17 @@ log = logging.getLogger(__name__)
 SAMPLES_TO_SEND = 15
 
 RELEVANT_METRIC_PATTERNS = [
-    "generation_tokens", "prompt_tokens", "num_requests_running",
-    "num_requests_waiting", "cache_usage", "kv_cache", "token_usage",
-    "throughput", "request_success", "num_running", "num_queue",
+    "generation_tokens",
+    "prompt_tokens",
+    "num_requests_running",
+    "num_requests_waiting",
+    "cache_usage",
+    "kv_cache",
+    "token_usage",
+    "throughput",
+    "request_success",
+    "num_running",
+    "num_queue",
 ]
 
 
@@ -46,15 +54,23 @@ def _downsample_raw_metrics(raw_text: str) -> str:
     # Sample evenly
     if len(blocks) > SAMPLES_TO_SEND:
         step = max(1, (len(blocks) - 2) // (SAMPLES_TO_SEND - 2))
-        indices = [0] + list(range(1, len(blocks) - 1, step))[:SAMPLES_TO_SEND - 2] + [len(blocks) - 1]
+        indices = (
+            [0]
+            + list(range(1, len(blocks) - 1, step))[: SAMPLES_TO_SEND - 2]
+            + [len(blocks) - 1]
+        )
         blocks = [blocks[i] for i in indices]
 
     # Filter each block to relevant metrics only
     filtered = [_filter_block(b) for b in blocks]
 
-    log.info("Downsampled raw metrics: %d snapshots, %d chars",
-             len(filtered), sum(len(b) for b in filtered))
+    log.info(
+        "Downsampled raw metrics: %d snapshots, %d chars",
+        len(filtered),
+        sum(len(b) for b in filtered),
+    )
     return "\n".join(filtered)
+
 
 def _call_llm(prompt: str) -> str:
     """Call the LLM via the claude CLI."""
@@ -69,8 +85,11 @@ def _call_llm(prompt: str) -> str:
     try:
         log.info("Calling claude CLI (%d chars prompt)", len(prompt))
         result = subprocess.run(
-            f'cat {prompt_file} | claude -p - --model sonnet --output-format text 2>/dev/null',
-            shell=True, capture_output=True, text=True, timeout=300,
+            f"cat {prompt_file} | claude -p - --model sonnet --output-format text 2>/dev/null",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         output = result.stdout.strip()
         if not output:
@@ -80,6 +99,7 @@ def _call_llm(prompt: str) -> str:
         return output
     finally:
         Path(prompt_file).unlink(missing_ok=True)
+
 
 ANALYSIS_PROMPT = """\
 You are analyzing raw Prometheus metrics from a GPU LLM inference benchmark.
@@ -187,6 +207,7 @@ def analyze_metrics(
     # Find JSON block inside markdown code fences
     if "```" in response:
         import re
+
         m = re.search(r"```(?:json)?\s*\n(.*?)```", response, re.DOTALL)
         if m:
             response = m.group(1).strip()
@@ -201,17 +222,24 @@ def analyze_metrics(
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"Metrics agent returned invalid JSON: {e}\nResponse: {response[:500]}"
-        )
+        ) from e
 
     # Validate required fields
-    for key in ("token_metric_name", "throughput_series", "pure_decode_phase",
-                "profile_window", "throughput_stats"):
+    for key in (
+        "token_metric_name",
+        "throughput_series",
+        "pure_decode_phase",
+        "profile_window",
+        "throughput_stats",
+    ):
         if key not in data:
             raise RuntimeError(f"Metrics agent response missing field: {key}")
 
     pw = data["profile_window"]
     if "profile_delay_sec" not in pw:
-        raise RuntimeError("Metrics agent response missing profile_window.profile_delay_sec")
+        raise RuntimeError(
+            "Metrics agent response missing profile_window.profile_delay_sec"
+        )
     if pw["profile_delay_sec"] < 0:
         raise RuntimeError(
             f"Metrics agent computed negative profile_delay_sec: {pw['profile_delay_sec']}"

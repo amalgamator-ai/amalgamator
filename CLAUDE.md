@@ -91,7 +91,7 @@ tests/              Test suite (pytest)
 
 ## Dependencies
 
-- Python >= 3.14
+- Python >= 3.12
 - claude-agent-sdk >= 0.2.87
 - litellm >= 1.100.1, < 2 (agent backends)
 - colorama, pyyaml

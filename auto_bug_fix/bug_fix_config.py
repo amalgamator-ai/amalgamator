@@ -1,4 +1,5 @@
 """Configuration dataclass for the auto_bug_fix pipeline."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -54,11 +55,11 @@ class BugFixConfig:
 
     # Deterministic adaptation machinery (Phase 3a/3a.1). Individually
     # toggleable so eval runs can ablate each mechanism.
-    mechanical_resolution: bool = True   # git-apply rungs before the LLM
-    snapback: bool = True                # snap drifted lines back to source bytes
-    evidence_checks: bool = True         # token audit + substitution mining + follow-up scan
-    post_resolution_check: bool = True   # Phase 3a.1 verification agent
-    blind_review: bool = True            # Phase 3a.2 triage-blind review agent
+    mechanical_resolution: bool = True  # git-apply rungs before the LLM
+    snapback: bool = True  # snap drifted lines back to source bytes
+    evidence_checks: bool = True  # token audit + substitution mining + follow-up scan
+    post_resolution_check: bool = True  # Phase 3a.1 verification agent
+    blind_review: bool = True  # Phase 3a.2 triage-blind review agent
     # Non-bugfix ports only: fraction of the fix's files that may be dropped
     # (skipped and never regenerated) before the outcome is downgraded from
     # success to partial_success.
@@ -66,7 +67,7 @@ class BugFixConfig:
     # Model for Phase 4b recovery. Defaults to the pipeline model.
     # Set a different profile id in models.yaml to use a stronger model.
     phase_4b_model: str = ""
-    phase_4b_profile: "ModelProfile | None" = None
+    phase_4b_profile: ModelProfile | None = None
     # Optional per-file check run over touched files after resolution,
     # e.g. "gcc -fsyntax-only {file}". {file} is replaced with the absolute path.
     file_check_command: str = ""

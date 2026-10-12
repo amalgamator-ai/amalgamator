@@ -89,8 +89,12 @@ class SglangAdapter(FrameworkAdapter):
                 result.e2e_latency_ms = data.get("mean_e2el_ms", 0)
                 result.total_time_sec = data.get("duration", 0)
                 result.num_prompts = data.get("num_requests", 0)
-                log.info("Parsed SGLang results: TTFT=%.2fms TPOT=%.2fms throughput=%.1f tok/s",
-                         result.ttft_ms, result.tpot_ms, result.throughput_tok_per_sec)
+                log.info(
+                    "Parsed SGLang results: TTFT=%.2fms TPOT=%.2fms throughput=%.1f tok/s",
+                    result.ttft_ms,
+                    result.tpot_ms,
+                    result.throughput_tok_per_sec,
+                )
             except Exception:
                 log.warning("Failed to parse SGLang JSON: %s", json_path, exc_info=True)
 
@@ -122,21 +126,29 @@ class SglangAdapter(FrameworkAdapter):
     def uses_metrics_based_profiling(self) -> bool:
         return True
 
-    def profiling_start_request(self, port: int, delay: int, active: int,
-                                profiler_type: str = "nsys") -> list[str]:
+    def profiling_start_request(
+        self, port: int, delay: int, active: int, profiler_type: str = "nsys"
+    ) -> list[str]:
         import json
-        if profiler_type == "nsys":
-            activities = ["CUDA_PROFILER"]
-        else:
-            activities = ["CPU", "GPU"]
-        body = json.dumps({
-            "num_steps": active,
-            "activities": activities,
-        })
-        return ["curl", "-sf", "-X", "POST",
-                f"http://localhost:{port}/start_profile",
-                "-H", "Content-Type: application/json",
-                "-d", body]
+
+        activities = ["CUDA_PROFILER"] if profiler_type == "nsys" else ["CPU", "GPU"]
+        body = json.dumps(
+            {
+                "num_steps": active,
+                "activities": activities,
+            }
+        )
+        return [
+            "curl",
+            "-sf",
+            "-X",
+            "POST",
+            f"http://localhost:{port}/start_profile",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            body,
+        ]
 
     def server_extra_flags_for_metrics(self) -> str:
         return "--enable-metrics"

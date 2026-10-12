@@ -6,6 +6,7 @@ command -- see the hard rules in the template.
 """
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 COMMENT_RESOLUTION_FILE = "comment_resolution.md"
 SUMMARY_DRAFT_FILE = "summary_draft_R0.txt"
@@ -31,7 +32,7 @@ class PRCommentFixPrompt:
     gate_report: str
     feature_toggle: str
     allowed_files: str
-    prompt_template: "ClassVar[str]" = """
+    prompt_template: ClassVar[str] = """
 
 {context}
 
@@ -150,17 +151,39 @@ the harness measures it after you finish.
         )
 
 
-def gen_PRCommentFixPrompt(context, repo_dir, output_dir, iteration_dir, iteration,
-                           round_no, pr_number, pr_url, new_comments_file,
-                           prev_summary_file, prev_verdict_file, gate_report,
-                           feature_toggle, allowed_files):
+def gen_PRCommentFixPrompt(
+    context,
+    repo_dir,
+    output_dir,
+    iteration_dir,
+    iteration,
+    round_no,
+    pr_number,
+    pr_url,
+    new_comments_file,
+    prev_summary_file,
+    prev_verdict_file,
+    gate_report,
+    feature_toggle,
+    allowed_files,
+):
     return PRCommentFixPrompt(
-        context=context, repo_dir=repo_dir, output_dir=output_dir,
-        iteration_dir=iteration_dir, iteration=iteration, round_no=round_no,
-        pr_number=pr_number, pr_url=pr_url, new_comments_file=new_comments_file,
-        prev_summary_file=prev_summary_file, prev_verdict_file=prev_verdict_file,
-        gate_report=gate_report, feature_toggle=feature_toggle,
-        allowed_files="\n    ".join(allowed_files) if allowed_files else "(none listed)",
+        context=context,
+        repo_dir=repo_dir,
+        output_dir=output_dir,
+        iteration_dir=iteration_dir,
+        iteration=iteration,
+        round_no=round_no,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        new_comments_file=new_comments_file,
+        prev_summary_file=prev_summary_file,
+        prev_verdict_file=prev_verdict_file,
+        gate_report=gate_report,
+        feature_toggle=feature_toggle,
+        allowed_files=(
+            "\n    ".join(allowed_files) if allowed_files else "(none listed)"
+        ),
     )
 
 
@@ -175,7 +198,7 @@ class RebaseConflictFixPrompt:
     prev_attempt_file: str
     pr_description_file: str
     feature_toggle: str
-    prompt_template: "ClassVar[str]" = """
+    prompt_template: ClassVar[str] = """
 
 {context}
 
@@ -273,14 +296,27 @@ and what the verification run must specifically confirm.
         )
 
 
-def gen_RebaseConflictFixPrompt(context, repo_dir, output_dir, stage_dir, attempt,
-                                conflicts_file, prev_attempt_file,
-                                pr_description_file, feature_toggle):
+def gen_RebaseConflictFixPrompt(
+    context,
+    repo_dir,
+    output_dir,
+    stage_dir,
+    attempt,
+    conflicts_file,
+    prev_attempt_file,
+    pr_description_file,
+    feature_toggle,
+):
     return RebaseConflictFixPrompt(
-        context=context, repo_dir=repo_dir, output_dir=output_dir,
-        stage_dir=stage_dir, attempt=attempt, conflicts_file=conflicts_file,
+        context=context,
+        repo_dir=repo_dir,
+        output_dir=output_dir,
+        stage_dir=stage_dir,
+        attempt=attempt,
+        conflicts_file=conflicts_file,
         prev_attempt_file=prev_attempt_file or "(first attempt)",
-        pr_description_file=pr_description_file, feature_toggle=feature_toggle,
+        pr_description_file=pr_description_file,
+        feature_toggle=feature_toggle,
     )
 
 
@@ -293,6 +329,7 @@ class RebaseRuntimeFixPrompt:
     performance or accuracy regression the measurement just reported -- and fixes
     it, exactly like a normal runtime iteration.
     """
+
     context: str
     repo_dir: str
     output_dir: str
@@ -310,7 +347,7 @@ class RebaseRuntimeFixPrompt:
     gate_report: str
     feature_toggle: str
     allowed_files: str
-    prompt_template: "ClassVar[str]" = """
+    prompt_template: ClassVar[str] = """
 
 {context}
 
@@ -463,20 +500,43 @@ a performance or correctness result -- the harness measures it after you.
         )
 
 
-def gen_RebaseRuntimeFixPrompt(context, repo_dir, output_dir, iteration_dir, iteration,
-                               pr_number, pr_url, rebase_report, drift_file,
-                               conflicts_file, resolution_file, pr_description_file,
-                               prev_summary_file, prev_verdict_file, gate_report,
-                               feature_toggle, allowed_files):
+def gen_RebaseRuntimeFixPrompt(
+    context,
+    repo_dir,
+    output_dir,
+    iteration_dir,
+    iteration,
+    pr_number,
+    pr_url,
+    rebase_report,
+    drift_file,
+    conflicts_file,
+    resolution_file,
+    pr_description_file,
+    prev_summary_file,
+    prev_verdict_file,
+    gate_report,
+    feature_toggle,
+    allowed_files,
+):
     return RebaseRuntimeFixPrompt(
-        context=context, repo_dir=repo_dir, output_dir=output_dir,
-        iteration_dir=iteration_dir, iteration=iteration, pr_number=pr_number,
-        pr_url=pr_url, rebase_report=rebase_report, drift_file=drift_file,
+        context=context,
+        repo_dir=repo_dir,
+        output_dir=output_dir,
+        iteration_dir=iteration_dir,
+        iteration=iteration,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        rebase_report=rebase_report,
+        drift_file=drift_file,
         conflicts_file=conflicts_file or "(none -- the rebase was clean)",
         resolution_file=resolution_file or "(none -- the rebase was clean)",
         pr_description_file=pr_description_file,
         prev_summary_file=prev_summary_file or "(none)",
         prev_verdict_file=prev_verdict_file or "(none)",
-        gate_report=gate_report, feature_toggle=feature_toggle,
-        allowed_files="\n    ".join(allowed_files) if allowed_files else "(none listed)",
+        gate_report=gate_report,
+        feature_toggle=feature_toggle,
+        allowed_files=(
+            "\n    ".join(allowed_files) if allowed_files else "(none listed)"
+        ),
     )

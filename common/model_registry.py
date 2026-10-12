@@ -8,6 +8,7 @@ When no registry is loaded, bare model strings are still accepted for
 backward compatibility — a synthetic profile is built from the model name
 and any legacy inline fields (api_base, api_key, model_params).
 """
+
 from __future__ import annotations
 
 import logging
@@ -26,6 +27,7 @@ log = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ModelProfile:
     """Everything needed to call a model: provider routing, endpoint, credentials."""
+
     id: str
     provider: str
     model: str
@@ -34,10 +36,17 @@ class ModelProfile:
     params: dict = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
-        reserved = {"model", "provider", "api_base", "api_key", "api_key_file"} & self.params.keys()
+        reserved = {
+            "model",
+            "provider",
+            "api_base",
+            "api_key",
+            "api_key_file",
+        } & self.params.keys()
         if reserved:
             raise RegistryError(
-                "Profile params must use top-level fields for: " + ", ".join(sorted(reserved))
+                "Profile params must use top-level fields for: "
+                + ", ".join(sorted(reserved))
             )
 
     def public_snapshot(self) -> dict[str, str]:
@@ -47,9 +56,7 @@ class ModelProfile:
     def is_self_hosted(self) -> bool:
         if is_ollama_model(self.model):
             return True
-        if self.model.startswith("openai/") and self.api_base:
-            return True
-        return False
+        return bool(self.model.startswith("openai/") and self.api_base)
 
 
 class RegistryError(Exception):
@@ -65,7 +72,10 @@ def public_config_snapshot(value: Any) -> Any:
     if isinstance(value, ModelProfile):
         return value.public_snapshot()
     if is_dataclass(value) and not isinstance(value, type):
-        return {f.name: public_config_snapshot(getattr(value, f.name)) for f in fields(value)}
+        return {
+            f.name: public_config_snapshot(getattr(value, f.name))
+            for f in fields(value)
+        }
     if isinstance(value, dict):
         if {"id", "provider", "model"} <= value.keys():
             return {key: value[key] for key in ("id", "provider", "model")}
@@ -240,7 +250,9 @@ def load_registry(path: Path) -> ModelRegistry:
 
     default_id = raw.get("default")
     if not default_id or not isinstance(default_id, str):
-        raise RegistryError(f"{path} must have a 'default' string pointing at a profile id")
+        raise RegistryError(
+            f"{path} must have a 'default' string pointing at a profile id"
+        )
 
     profiles: dict[str, ModelProfile] = {}
     for pid, praw in models_section.items():
@@ -250,7 +262,9 @@ def load_registry(path: Path) -> ModelRegistry:
         profiles[pid] = _parse_profile(pid, praw)
 
     return ModelRegistry(
-        profiles=profiles, default_id=default_id, strict=raw.get("strict", False),
+        profiles=profiles,
+        default_id=default_id,
+        strict=raw.get("strict", False),
         source_path=path.resolve(),
     )
 

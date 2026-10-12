@@ -59,4 +59,3 @@ NSYS_DEFAULT_FLAGS=" \
   --cuda-graph-trace=node \
   --trace-fork-before-exec=true \
 "
-

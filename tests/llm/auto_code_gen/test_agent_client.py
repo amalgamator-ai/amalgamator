@@ -6,14 +6,15 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 
+from common.claude_utils import PipelineStep
 from llm.auto_code_gen.agents.client import LLMClient, _merge_params, _message_reasoning
 from llm.auto_code_gen.agents.config import resolve_agent_config
 from llm.auto_code_gen.agents.runner import AgentError, LiteLLMSession
-from common.claude_utils import PipelineStep
 
 
 def test_unknown_model_does_not_use_silent_fallback_tokenizer(monkeypatch):
     import litellm
+
     calls = []
 
     def unknown(model):
@@ -21,7 +22,9 @@ def test_unknown_model_does_not_use_silent_fallback_tokenizer(monkeypatch):
         raise ValueError("unknown model")
 
     monkeypatch.setattr(litellm, "get_model_info", unknown)
-    monkeypatch.setattr(litellm, "token_counter", lambda **kwargs: pytest.fail("wrong tokenizer"))
+    monkeypatch.setattr(
+        litellm, "token_counter", lambda **kwargs: pytest.fail("wrong tokenizer")
+    )
     client = LLMClient(resolve_agent_config({"model": "openai/custom-model"}))
     assert client.count_tokens([{"role": "user", "content": "x" * 2000}]) > 1000
     assert client.output_limit() is None
@@ -43,17 +46,40 @@ async def endpoint(handler, port):
 
 
 def response(message, finish="stop"):
-    return {"id": "chatcmpl-test", "object": "chat.completion", "created": 1, "model": "test-model",
-            "choices": [{"index": 0, "message": {"role": "assistant", **message}, "finish_reason": finish}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "test-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", **message},
+                "finish_reason": finish,
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
 
 
-@pytest.mark.parametrize(("message", "expected"), [
-    (SimpleNamespace(reasoning="primary", reasoning_content="alternate"), "primary"),
-    (SimpleNamespace(reasoning=None, reasoning_content="alternate"), "alternate"),
-    (SimpleNamespace(reasoning=None, reasoning_content=None,
-                     provider_specific_fields={"reasoning": "provider"}), "provider"),
-])
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            SimpleNamespace(reasoning="primary", reasoning_content="alternate"),
+            "primary",
+        ),
+        (SimpleNamespace(reasoning=None, reasoning_content="alternate"), "alternate"),
+        (
+            SimpleNamespace(
+                reasoning=None,
+                reasoning_content=None,
+                provider_specific_fields={"reasoning": "provider"},
+            ),
+            "provider",
+        ),
+    ],
+)
 def test_message_reasoning_normalizes_provider_fields(message, expected):
     assert _message_reasoning(message) == expected
 
@@ -82,18 +108,47 @@ async def test_real_litellm_local_tool_protocol(tmp_path, unused_tcp_port):
         requests.append(body)
         assert body["model"] == "test-model"
         if len(requests) == 1:
-            return web.json_response(response({"content": None, "reasoning": "I should write the requested file.",
-                "tool_calls": [{"id": "write-1", "type": "function",
-                "function": {"name": "write_file", "arguments": json.dumps({"path": "result.txt", "content": "verified"})}}]}, "tool_calls"))
+            return web.json_response(
+                response(
+                    {
+                        "content": None,
+                        "reasoning": "I should write the requested file.",
+                        "tool_calls": [
+                            {
+                                "id": "write-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "write_file",
+                                    "arguments": json.dumps(
+                                        {"path": "result.txt", "content": "verified"}
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "tool_calls",
+                )
+            )
         assert body["messages"][-1]["role"] == "tool"
         assert body["messages"][-1]["tool_call_id"] == "write-1"
         return web.json_response(response({"content": "done"}))
 
     async with endpoint(handler, unused_tcp_port) as url:
-        config = resolve_agent_config({"model": "openai/test-model", "api_base": url, "api_key": "test-only",
-                                       "stream": False, "billing": "self_hosted", "context_length": 8192,
-                                       "model_params": {"max_tokens": 512}}, cwd=str(tmp_path))
-        result = await LiteLLMSession(config).run([PipelineStep("write", "write result", ["result.txt"])])
+        config = resolve_agent_config(
+            {
+                "model": "openai/test-model",
+                "api_base": url,
+                "api_key": "test-only",
+                "stream": False,
+                "billing": "self_hosted",
+                "context_length": 8192,
+                "model_params": {"max_tokens": 512},
+            },
+            cwd=str(tmp_path),
+        )
+        result = await LiteLLMSession(config).run(
+            [PipelineStep("write", "write result", ["result.txt"])]
+        )
     assert (tmp_path / "result.txt").read_text() == "verified"
     assert result[0]["input_tokens"] == 20
     assert result[0]["output_tokens"] == 10
@@ -111,19 +166,38 @@ async def test_real_litellm_stream_assembly(tmp_path, unused_tcp_port):
         assert body["stream"] is True
         events = []
         for delta, finish in [
-            ({"role": "assistant", "content": "hello ", "reasoning": "I should "}, None),
+            (
+                {"role": "assistant", "content": "hello ", "reasoning": "I should "},
+                None,
+            ),
             ({"content": "world", "reasoning": "reply briefly."}, "stop"),
         ]:
-            chunk = {"id": "chatcmpl-stream", "object": "chat.completion.chunk", "created": 1,
-                     "model": "test-model", "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+            chunk: dict[str, object] = {
+                "id": "chatcmpl-stream",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "test-model",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
             if finish:
-                chunk["usage"] = {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+                chunk["usage"] = {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                }
             events.append("data: " + json.dumps(chunk) + "\n\n")
-        return web.Response(text="".join(events) + "data: [DONE]\n\n", content_type="text/event-stream")
+        return web.Response(
+            text="".join(events) + "data: [DONE]\n\n", content_type="text/event-stream"
+        )
 
     async with endpoint(handler, unused_tcp_port) as url:
-        config = resolve_agent_config({"model": "openai/test-model", "api_base": url, "api_key": "dummy"}, cwd=str(tmp_path))
-        reply = await LLMClient(config).complete([{"role": "user", "content": "hi"}], max_tokens=64)
+        config = resolve_agent_config(
+            {"model": "openai/test-model", "api_base": url, "api_key": "dummy"},
+            cwd=str(tmp_path),
+        )
+        reply = await LLMClient(config).complete(
+            [{"role": "user", "content": "hi"}], max_tokens=64
+        )
     assert reply.text == "hello world"
     assert reply.reasoning == "I should reply briefly."
     assert reply.finish_reason == "stop"
@@ -135,10 +209,27 @@ async def test_auth_failure_is_not_retried(tmp_path, unused_tcp_port):
 
     async def handler(request):
         requests.append(await request.json())
-        return web.json_response({"error": {"message": "invalid key", "type": "authentication_error", "code": "invalid_api_key"}}, status=401)
+        return web.json_response(
+            {
+                "error": {
+                    "message": "invalid key",
+                    "type": "authentication_error",
+                    "code": "invalid_api_key",
+                }
+            },
+            status=401,
+        )
 
     async with endpoint(handler, unused_tcp_port) as url:
-        config = resolve_agent_config({"model": "openai/test-model", "api_base": url, "api_key": "dummy", "stream": False}, cwd=str(tmp_path))
+        config = resolve_agent_config(
+            {
+                "model": "openai/test-model",
+                "api_base": url,
+                "api_key": "dummy",
+                "stream": False,
+            },
+            cwd=str(tmp_path),
+        )
         with pytest.raises(AgentError, match="AuthenticationError"):
             await LiteLLMSession(config).run(["hello"])
     assert len(requests) == 1
@@ -147,6 +238,7 @@ async def test_auth_failure_is_not_retried(tmp_path, unused_tcp_port):
 @pytest.mark.asyncio
 async def test_transport_precedence_and_isolation(monkeypatch):
     import litellm
+
     requests = []
 
     async def completion(**kwargs):
@@ -154,9 +246,21 @@ async def test_transport_precedence_and_isolation(monkeypatch):
         return litellm.ModelResponse(**response({"content": "ok"}))
 
     monkeypatch.setattr(litellm, "acompletion", completion)
-    one = LLMClient(resolve_agent_config({"model": "openai/test", "api_key": "first", "stream": False,
-                                         "model_params": {"max_tokens": 100}}))
-    two = LLMClient(resolve_agent_config({"model": "openai/test", "api_key": "second", "stream": False}))
+    one = LLMClient(
+        resolve_agent_config(
+            {
+                "model": "openai/test",
+                "api_key": "first",
+                "stream": False,
+                "model_params": {"max_tokens": 100},
+            }
+        )
+    )
+    two = LLMClient(
+        resolve_agent_config(
+            {"model": "openai/test", "api_key": "second", "stream": False}
+        )
+    )
     await one.complete([{"role": "user", "content": "hi"}], max_tokens=17)
     await two.complete([{"role": "user", "content": "hi"}])
     assert requests[0]["api_key"] == "first" and requests[0]["max_tokens"] == 17
@@ -169,36 +273,77 @@ async def test_streaming_tool_argument_fragments(tmp_path, unused_tcp_port):
     async def handler(request):
         chunks = []
         pieces = [
-            {"role": "assistant", "tool_calls": [{"index": 0, "id": "call-1", "type": "function",
-                "function": {"name": "write_file", "arguments": '{"path": "out",'}}]},
-            {"tool_calls": [{"index": 0, "function": {"arguments": '"content": "ok"}'}}]},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": '{"path": "out",',
+                        },
+                    }
+                ],
+            },
+            {
+                "tool_calls": [
+                    {"index": 0, "function": {"arguments": '"content": "ok"}'}}
+                ]
+            },
             {},
         ]
         for i, delta in enumerate(pieces):
-            chunk = {"id": "chatcmpl-stream", "object": "chat.completion.chunk", "created": 1, "model": "test-model",
-                     "choices": [{"index": 0, "delta": delta, "finish_reason": "tool_calls" if i == 2 else None}]}
+            chunk: dict[str, object] = {
+                "id": "chatcmpl-stream",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "test-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": "tool_calls" if i == 2 else None,
+                    }
+                ],
+            }
             chunks.append("data: " + json.dumps(chunk) + "\n\n")
-        return web.Response(text="".join(chunks) + "data: [DONE]\n\n", content_type="text/event-stream")
+        return web.Response(
+            text="".join(chunks) + "data: [DONE]\n\n", content_type="text/event-stream"
+        )
 
     async with endpoint(handler, unused_tcp_port) as url:
-        config = resolve_agent_config({"model": "openai/test-model", "api_base": url, "api_key": "dummy"})
-        reply = await LLMClient(config).complete([{"role": "user", "content": "hi"}], max_tokens=64)
+        config = resolve_agent_config(
+            {"model": "openai/test-model", "api_base": url, "api_key": "dummy"}
+        )
+        reply = await LLMClient(config).complete(
+            [{"role": "user", "content": "hi"}], max_tokens=64
+        )
     assert reply.tool_calls[0]["function"]["name"] == "write_file"
-    assert json.loads(reply.tool_calls[0]["function"]["arguments"]) == {"path": "out", "content": "ok"}
+    assert json.loads(reply.tool_calls[0]["function"]["arguments"]) == {
+        "path": "out",
+        "content": "ok",
+    }
     assert reply.usage_incomplete
 
 
 @pytest.mark.asyncio
 async def test_transient_retry_and_stream_only_fallback(monkeypatch):
     import litellm
+
     seen = []
 
     async def completion(**kwargs):
         seen.append(kwargs)
         if len(seen) == 1:
-            raise litellm.APIConnectionError(message="temporary", llm_provider="openai", model="test")
+            raise litellm.APIConnectionError(
+                message="temporary", llm_provider="openai", model="test"
+            )
         if kwargs["stream"]:
-            raise litellm.UnsupportedParamsError(message="stream is unsupported", llm_provider="openai", model="test")
+            raise litellm.UnsupportedParamsError(
+                message="stream is unsupported", llm_provider="openai", model="test"
+            )
         return litellm.ModelResponse(**response({"content": "ok"}))
 
     async def no_sleep(seconds):
@@ -213,8 +358,12 @@ async def test_transient_retry_and_stream_only_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("billing", "replays"), [("self_hosted", True), ("provider", False)])
-async def test_aborted_stream_replays_only_when_not_billed(monkeypatch, tmp_path, billing, replays):
+@pytest.mark.parametrize(
+    ("billing", "replays"), [("self_hosted", True), ("provider", False)]
+)
+async def test_aborted_stream_replays_only_when_not_billed(
+    monkeypatch, tmp_path, billing, replays
+):
     import litellm
 
     attempts = []
@@ -236,27 +385,53 @@ async def test_aborted_stream_replays_only_when_not_billed(monkeypatch, tmp_path
             raise StopAsyncIteration
 
     final = SimpleNamespace(
-        choices=[SimpleNamespace(
-            message=SimpleNamespace(content="recovered", tool_calls=None),
-            finish_reason="stop")],
-        usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2))
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="recovered", tool_calls=None),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2),
+    )
 
     async def fake_acompletion(**kwargs):
         attempts.append(kwargs)
         if len(attempts) == 1:
             return Stream(
-                chunks=[SimpleNamespace(usage=None, choices=[SimpleNamespace(
-                    delta=SimpleNamespace(content="partial"), finish_reason=None)])],
+                chunks=[
+                    SimpleNamespace(
+                        usage=None,
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content="partial"),
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+                ],
                 failure=litellm.ServiceUnavailableError(
-                    message="repetition guard", llm_provider="openai", model="openai/test"))
+                    message="repetition guard",
+                    llm_provider="openai",
+                    model="openai/test",
+                ),
+            )
         return Stream(chunks=[SimpleNamespace(usage=final.usage, choices=[])])
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
-    monkeypatch.setattr(litellm, "stream_chunk_builder",
-                        lambda chunks, messages=None: final)
-    client = LLMClient(resolve_agent_config(
-        {"model": "openai/test", "billing": billing, "stream": True,
-         "model_params": {"max_tokens": 64}}, cwd=str(tmp_path)))
+    monkeypatch.setattr(
+        litellm, "stream_chunk_builder", lambda chunks, messages=None: final
+    )
+    client = LLMClient(
+        resolve_agent_config(
+            {
+                "model": "openai/test",
+                "billing": billing,
+                "stream": True,
+                "model_params": {"max_tokens": 64},
+            },
+            cwd=str(tmp_path),
+        )
+    )
 
     if replays:
         reply = await client.complete([{"role": "user", "content": "go"}])

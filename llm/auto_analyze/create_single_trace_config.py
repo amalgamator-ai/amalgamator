@@ -54,21 +54,21 @@ Advanced parameters:
     --max-gpu-ops          Max GPU ops to extract from the trace (default: 1000)
 """
 
-import sys as _sys
 import os as _os
+import sys as _sys
+
 _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
-import re
-import os
-import sys
-import json
 import argparse
+import json
+import os
+import re
 import subprocess
+import sys
 
 from llm.auto_analyze.configs.single_trace_config import VALID_TRACE_EXTENSIONS
-
 
 KNOWN_FRAMEWORKS = {
     "vllm": ["vllm"],
@@ -91,7 +91,6 @@ def infer_framework_name(run_log_path):
             if kw in head:
                 return fw_name
     return None
-
 
 
 def extract_run_command(path):
@@ -117,19 +116,31 @@ def extract_run_command_from_log(run_log_path):
     continuations.
     """
     command_prefixes = (
-        "python", "python3", "torchrun", "nsys ", "docker ",
-        "mpirun", "deepspeed", "accelerate", "vllm ", "sglang",
-        "trtllm", "mpiexec", "bash ", "sh ", "./",
+        "python",
+        "python3",
+        "torchrun",
+        "nsys ",
+        "docker ",
+        "mpirun",
+        "deepspeed",
+        "accelerate",
+        "vllm ",
+        "sglang",
+        "trtllm",
+        "mpiexec",
+        "bash ",
+        "sh ",
+        "./",
     )
 
     def _strip_shell_prompt(text):
         idx = text.find("$ ")
         if idx >= 0:
-            return text[idx + 2:]
+            return text[idx + 2 :]
         return text
 
     def _strip_env_vars(text):
-        return re.sub(r'^(\s*[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+', '', text)
+        return re.sub(r"^(\s*[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+", "", text)
 
     def _looks_like_command(text):
         lower = text.lower()
@@ -150,9 +161,7 @@ def extract_run_command_from_log(run_log_path):
             cmd_parts = [after_prompt.rstrip("\\").rstrip()]
             j = i + 1
             while after_prompt.rstrip().endswith("\\") or (
-                j < len(lines)
-                and j == i + 1
-                and cmd_parts[-1].endswith("\\")
+                j < len(lines) and j == i + 1 and cmd_parts[-1].endswith("\\")
             ):
                 if j >= len(lines):
                     break
@@ -176,54 +185,101 @@ def main():
     )
 
     required = parser.add_argument_group("required parameters")
-    required.add_argument("--model", required=True,
-                          help="HuggingFace model ID (e.g. nvidia/Kimi-K2.5-NVFP4)")
-    required.add_argument("--gpu-type", required=True,
-                          help="GPU type (e.g. B200, H200)")
-    required.add_argument("--batch-size-range", required=True,
-                          help="Batch size(s) used for the run")
-    required.add_argument("--prefill-size-range", required=True,
-                          help="Prefill / input sequence length(s)")
-    required.add_argument("--output-size-range", required=True,
-                          help="Output / decode sequence length(s)")
-    required.add_argument("--trace-file", required=True,
-                          help="Path to trace file (.nsys-rep, .sqlite, .json, .json.gz)")
-    required.add_argument("--run-log-file", required=True,
-                          help="Path to the run log file (run command is extracted from it)")
-    required.add_argument("--clean-source-code-path", required=True,
-                          help="Path to the framework source code directory. "
-                               "Must be a clean git repo with no modified or "
-                               "uncommitted files, and should be up to date "
-                               "(git pull). The analysis will automatically "
-                               "create a separate branch for the specific "
-                               "commit ID used for the run.")
-    required.add_argument("--analyze-output-dir", required=True,
-                          help="Directory where analysis outputs will be stored")
-    required.add_argument("--commit-id", required=True,
-                          help="Git commit ID or \"HEAD\" to use current source code state")
-    required.add_argument("--output-config-file", required=True,
-                          help="Output path for the config JSON (without .json suffix)")
+    required.add_argument(
+        "--model",
+        required=True,
+        help="HuggingFace model ID (e.g. nvidia/Kimi-K2.5-NVFP4)",
+    )
+    required.add_argument(
+        "--gpu-type", required=True, help="GPU type (e.g. B200, H200)"
+    )
+    required.add_argument(
+        "--batch-size-range", required=True, help="Batch size(s) used for the run"
+    )
+    required.add_argument(
+        "--prefill-size-range", required=True, help="Prefill / input sequence length(s)"
+    )
+    required.add_argument(
+        "--output-size-range", required=True, help="Output / decode sequence length(s)"
+    )
+    required.add_argument(
+        "--trace-file",
+        required=True,
+        help="Path to trace file (.nsys-rep, .sqlite, .json, .json.gz)",
+    )
+    required.add_argument(
+        "--run-log-file",
+        required=True,
+        help="Path to the run log file (run command is extracted from it)",
+    )
+    required.add_argument(
+        "--clean-source-code-path",
+        required=True,
+        help="Path to the framework source code directory. "
+        "Must be a clean git repo with no modified or "
+        "uncommitted files, and should be up to date "
+        "(git pull). The analysis will automatically "
+        "create a separate branch for the specific "
+        "commit ID used for the run.",
+    )
+    required.add_argument(
+        "--analyze-output-dir",
+        required=True,
+        help="Directory where analysis outputs will be stored",
+    )
+    required.add_argument(
+        "--commit-id",
+        required=True,
+        help='Git commit ID or "HEAD" to use current source code state',
+    )
+    required.add_argument(
+        "--output-config-file",
+        required=True,
+        help="Output path for the config JSON (without .json suffix)",
+    )
 
     optional = parser.add_argument_group("optional parameters")
-    optional.add_argument("--framework-name", default=None,
-                          help="Framework name (default: inferred from run log)")
-    optional.add_argument("--run-command-file", default=None,
-                          help="File containing the run command (default: extracted from run log)")
+    optional.add_argument(
+        "--framework-name",
+        default=None,
+        help="Framework name (default: inferred from run log)",
+    )
+    optional.add_argument(
+        "--run-command-file",
+        default=None,
+        help="File containing the run command (default: extracted from run log)",
+    )
 
     advanced = parser.add_argument_group("advanced parameters")
-    advanced.add_argument("--enable-single-trace-perf-analysis", action="store_true",
-                          default=False,
-                          help="Enable single-trace performance analysis (default: disabled)")
-    advanced.add_argument("--trace-gpu-focus", default=None,
-                          help="GPU focus for the trace (e.g. '0', 'ALL')")
-    advanced.add_argument("--high-level-focus", default=None,
-                          help="Focus guidance for source code analysis")
-    advanced.add_argument("--perf-analysis-focus", default=None,
-                          help="Focus guidance for performance analysis "
-                               "(e.g. 'Pay special attention to torch.compile "
-                               "fusion opportunities')")
-    advanced.add_argument("--max-gpu-ops", default=1000, type=int,
-                          help="Max GPU ops to extract from the trace (default: 1000)")
+    advanced.add_argument(
+        "--enable-single-trace-perf-analysis",
+        action="store_true",
+        default=False,
+        help="Enable single-trace performance analysis (default: disabled)",
+    )
+    advanced.add_argument(
+        "--trace-gpu-focus",
+        default=None,
+        help="GPU focus for the trace (e.g. '0', 'ALL')",
+    )
+    advanced.add_argument(
+        "--high-level-focus",
+        default=None,
+        help="Focus guidance for source code analysis",
+    )
+    advanced.add_argument(
+        "--perf-analysis-focus",
+        default=None,
+        help="Focus guidance for performance analysis "
+        "(e.g. 'Pay special attention to torch.compile "
+        "fusion opportunities')",
+    )
+    advanced.add_argument(
+        "--max-gpu-ops",
+        default=1000,
+        type=int,
+        help="Max GPU ops to extract from the trace (default: 1000)",
+    )
 
     args = parser.parse_args()
 
@@ -242,7 +298,9 @@ def main():
         errors.append(f"run log file not found: {args.run_log_file}")
 
     if not os.path.isdir(args.clean_source_code_path):
-        errors.append(f"source code path is not a directory: {args.clean_source_code_path}")
+        errors.append(
+            f"source code path is not a directory: {args.clean_source_code_path}"
+        )
 
     if args.run_command_file and not os.path.exists(args.run_command_file):
         errors.append(f"run command file not found: {args.run_command_file}")
@@ -271,12 +329,15 @@ def main():
     src = args.clean_source_code_path
     result = subprocess.run(
         ["git", "-C", src, "log", "-1", "--format=%H %ai", commit_id],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         print(f"ERROR: Commit '{commit_id}' not found in {src}")
         print(f"  git error: {result.stderr.strip()}")
-        print(f"  Please verify the commit ID and ensure the repo is up to date (git fetch --all).")
+        print(
+            "  Please verify the commit ID and ensure the repo is up to date (git fetch --all)."
+        )
         sys.exit(1)
     full_hash, commit_date = result.stdout.strip().split(" ", 1)
     print(f"  Commit ID: {commit_id} (verified: {full_hash[:12]}, {commit_date})")
@@ -295,7 +356,9 @@ def main():
             print(f"  Run command: {run_command[:80]}... (extracted from run log)")
         else:
             run_command = None
-            print("  WARNING: Could not extract run command from run log, setting to null")
+            print(
+                "  WARNING: Could not extract run command from run log, setting to null"
+            )
 
     # --- Resolve paths ---
     output_json = args.output_config_file

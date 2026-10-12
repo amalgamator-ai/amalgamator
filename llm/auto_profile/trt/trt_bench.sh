@@ -49,9 +49,9 @@ for p in "${PROFILES[@]}"; do
 
     for concurrency in ${PROFILE_CONCURRENCIES}; do
         log_info "      Run concurrency = ${concurrency}"
-        
+
         ((num_requests = concurrency * NUM_WAVES))
-        
+
         # Set extra options
         mode="none"
         yaml_flag=""
@@ -77,7 +77,7 @@ for p in "${PROFILES[@]}"; do
                 ${output_len} \
                 ${mode_name}
             )"
-        
+
         # Create test dir (for outputs)
         test_dir="$(
             make_test_dirname \
@@ -85,31 +85,31 @@ for p in "${PROFILES[@]}"; do
                 ${test_name}
             )"
         create_dir_if_missing ${test_dir}
-        
+
         # Create output filenames
         result_filename="$(
             make_result_filename \
                 ${test_dir} \
                 ${test_name}
             )"
-        
+
         run_log_filename="$(
             make_run_log_filename \
                 ${test_dir} \
                 ${test_name}
             )"
-        
+
         run_log_profile_filename="$(
             make_run_log_profile_filename \
                 ${test_dir} \
                 ${test_name}
             )"
-        
+
         # Set profile env vars
         profile_prefix=""
         if is_trace_enabled trt; then
             log_info "TRT profile is enabled."
-            
+
             start_iter=$(calc_start_iter ${NUM_WARMUPS} ${NUM_WAVES} ${output_len})
             finish_iter=$(calc_finish_iter ${start_iter} ${NUM_TRACE_ITERS})
 
@@ -139,12 +139,12 @@ for p in "${PROFILES[@]}"; do
             --warmup $NUM_WARMUPS \
             --trust-remote-code \
             ${yaml_flag}"
-        
+
         log_info "RUN NORMAL"
         run_and_log ${run_log_filename} \
             env CUDA_VISIBLE_DEVICES=${gpu_ids} \
             ${run_cmd}
-            
+
         if is_trace_enabled trt; then
             log_info "RUN PROFILE"
             run_and_log ${run_log_profile_filename} \
@@ -159,4 +159,3 @@ for p in "${PROFILES[@]}"; do
         fi
     done
 done
-

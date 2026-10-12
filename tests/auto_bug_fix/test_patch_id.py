@@ -1,4 +1,5 @@
 """Tests for auto_bug_fix.patch_id — patch-id computation and duplicate detection."""
+
 import re
 import subprocess
 
@@ -31,33 +32,45 @@ def test_forward_check_finds_match(tmp_git_repo):
     try:
         subprocess.run(
             ["git", "checkout", tmp_git_repo.target_branch],
-            check=True, cwd=rp, capture_output=True,
+            check=True,
+            cwd=rp,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "cherry-pick", fix],
-            check=True, cwd=rp, capture_output=True,
+            check=True,
+            cwd=rp,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "checkout", tmp_git_repo.source_branch],
-            check=True, cwd=rp, capture_output=True,
+            check=True,
+            cwd=rp,
+            capture_output=True,
         )
     except subprocess.CalledProcessError:
         # If cherry-pick has issues, verify the function degrades gracefully.
         subprocess.run(
             ["git", "cherry-pick", "--abort"],
-            cwd=rp, capture_output=True,
+            cwd=rp,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "checkout", tmp_git_repo.source_branch],
-            cwd=rp, capture_output=True,
+            cwd=rp,
+            capture_output=True,
         )
         result = forward_patch_id_check(
-            rp, fix, tmp_git_repo.target_branch,
+            rp,
+            fix,
+            tmp_git_repo.target_branch,
         )
         assert result is None, "should return None gracefully on cherry-pick failure"
         return
 
     result = forward_patch_id_check(
-        rp, fix, tmp_git_repo.target_branch,
+        rp,
+        fix,
+        tmp_git_repo.target_branch,
     )
     assert result is not None, "forward check should find the cherry-picked commit"

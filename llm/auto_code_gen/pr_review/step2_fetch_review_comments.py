@@ -18,14 +18,13 @@ _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..",
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
-import os
-import sys
-import json
 import argparse
+import json
+import os
 from collections import defaultdict
+from typing import Any
 
 from llm.auto_code_gen.pr_review import parse_pr_url, run_gh
-
 
 PR_METADATA_FILE = "pr_metadata.json"
 REVIEW_COMMENTS_FILE = "review_comments.json"
@@ -51,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _fetch_json(api_path: str, paginate: bool = False) -> object:
+def _fetch_json(api_path: str, paginate: bool = False) -> Any:
     args = ["api"]
     if paginate:
         args.append("--paginate")
@@ -61,26 +60,26 @@ def _fetch_json(api_path: str, paginate: bool = False) -> object:
 
 
 def _fetch_pr_metadata(owner: str, repo: str, number: int) -> dict:
-    return _fetch_json("repos/{}/{}/pulls/{}".format(owner, repo, number))
+    return _fetch_json(f"repos/{owner}/{repo}/pulls/{number}")
 
 
 def _fetch_review_comments(owner: str, repo: str, number: int) -> list:
     return _fetch_json(
-        "repos/{}/{}/pulls/{}/comments".format(owner, repo, number),
+        f"repos/{owner}/{repo}/pulls/{number}/comments",
         paginate=True,
     )
 
 
 def _fetch_reviews(owner: str, repo: str, number: int) -> list:
     return _fetch_json(
-        "repos/{}/{}/pulls/{}/reviews".format(owner, repo, number),
+        f"repos/{owner}/{repo}/pulls/{number}/reviews",
         paginate=True,
     )
 
 
 def _fetch_issue_comments(owner: str, repo: str, number: int) -> list:
     return _fetch_json(
-        "repos/{}/{}/issues/{}/comments".format(owner, repo, number),
+        f"repos/{owner}/{repo}/issues/{number}/comments",
         paginate=True,
     )
 
@@ -122,30 +121,33 @@ def _generate_summary(
 ) -> str:
     lines = []
     lines.append("# PR Review Comments Summary")
-    lines.append("## PR: {} (#{})".format(metadata.get("title", ""), metadata.get("number", "")))
-    lines.append("## URL: {}".format(pr_url))
-    lines.append("## Author: {}  |  Base: {} <- Head: {}".format(
-        metadata.get("user", {}).get("login", ""),
-        metadata.get("base", {}).get("ref", ""),
-        metadata.get("head", {}).get("ref", ""),
-    ))
+    lines.append(
+        "## PR: {} (#{})".format(metadata.get("title", ""), metadata.get("number", ""))
+    )
+    lines.append(f"## URL: {pr_url}")
+    lines.append(
+        "## Author: {}  |  Base: {} <- Head: {}".format(
+            metadata.get("user", {}).get("login", ""),
+            metadata.get("base", {}).get("ref", ""),
+            metadata.get("head", {}).get("ref", ""),
+        )
+    )
     lines.append("")
 
-    top_level_reviews = [
-        r for r in reviews
-        if r.get("body") and r["body"].strip()
-    ]
+    top_level_reviews = [r for r in reviews if r.get("body") and r["body"].strip()]
     if top_level_reviews:
         lines.append("=" * 70)
         lines.append("TOP-LEVEL REVIEWS")
         lines.append("=" * 70)
         for i, r in enumerate(top_level_reviews, 1):
             lines.append("")
-            lines.append("--- Top-Level Review {} (by {}, state: {}) ---".format(
-                i,
-                r.get("user", {}).get("login", "unknown"),
-                r.get("state", "UNKNOWN"),
-            ))
+            lines.append(
+                "--- Top-Level Review {} (by {}, state: {}) ---".format(
+                    i,
+                    r.get("user", {}).get("login", "unknown"),
+                    r.get("state", "UNKNOWN"),
+                )
+            )
             lines.append(r["body"].strip())
         lines.append("")
 
@@ -158,11 +160,13 @@ def _generate_summary(
         for i, thread in enumerate(threads, 1):
             root = thread[0]
             lines.append("")
-            lines.append("--- Inline Comment {} (by {}, {}) ---".format(
-                i,
-                root.get("user", {}).get("login", "unknown"),
-                root.get("created_at", "")[:10],
-            ))
+            lines.append(
+                "--- Inline Comment {} (by {}, {}) ---".format(
+                    i,
+                    root.get("user", {}).get("login", "unknown"),
+                    root.get("created_at", "")[:10],
+                )
+            )
             lines.append("File: {}".format(root.get("path", "")))
             if root.get("line"):
                 lines.append("Line: {}".format(root["line"]))
@@ -173,24 +177,28 @@ def _generate_summary(
             if diff_hunk:
                 lines.append("Diff context:")
                 for hunk_line in diff_hunk.split("\n"):
-                    lines.append("  {}".format(hunk_line))
+                    lines.append(f"  {hunk_line}")
 
             lines.append("")
             lines.append("Comment: {}".format(root.get("body", "").strip()))
 
             for reply in thread[1:]:
                 lines.append("")
-                lines.append("  [Reply by {} ({}):".format(
-                    reply.get("user", {}).get("login", "unknown"),
-                    reply.get("created_at", "")[:10],
-                ))
+                lines.append(
+                    "  [Reply by {} ({}):".format(
+                        reply.get("user", {}).get("login", "unknown"),
+                        reply.get("created_at", "")[:10],
+                    )
+                )
                 lines.append("   {}]".format(reply.get("body", "").strip()))
         lines.append("")
 
     if issue_comments:
         non_bot_comments = [
-            c for c in issue_comments
-            if c.get("body") and c["body"].strip()
+            c
+            for c in issue_comments
+            if c.get("body")
+            and c["body"].strip()
             and not c.get("user", {}).get("login", "").endswith("[bot]")
         ]
         if non_bot_comments:
@@ -199,11 +207,13 @@ def _generate_summary(
             lines.append("=" * 70)
             for i, c in enumerate(non_bot_comments, 1):
                 lines.append("")
-                lines.append("--- General Comment {} (by {}, {}) ---".format(
-                    i,
-                    c.get("user", {}).get("login", "unknown"),
-                    c.get("created_at", "")[:10],
-                ))
+                lines.append(
+                    "--- General Comment {} (by {}, {}) ---".format(
+                        i,
+                        c.get("user", {}).get("login", "unknown"),
+                        c.get("created_at", "")[:10],
+                    )
+                )
                 lines.append(c["body"].strip())
             lines.append("")
 
@@ -218,8 +228,8 @@ def fetch_review_comments(pr_url: str, output_dir: str):
     print("=" * 70)
     print("FETCH PR REVIEW COMMENTS")
     print("=" * 70)
-    print("  PR: {}/{} #{}".format(owner, repo, number))
-    print("  Output: {}".format(output_dir))
+    print(f"  PR: {owner}/{repo} #{number}")
+    print(f"  Output: {output_dir}")
     print("=" * 70)
 
     print("\nFetching PR metadata...")
@@ -227,44 +237,46 @@ def fetch_review_comments(pr_url: str, output_dir: str):
     metadata_path = os.path.join(output_dir, PR_METADATA_FILE)
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
-    print("  Saved: {}".format(metadata_path))
+    print(f"  Saved: {metadata_path}")
 
     print("Fetching inline review comments...")
     review_comments = _fetch_review_comments(owner, repo, number)
     rc_path = os.path.join(output_dir, REVIEW_COMMENTS_FILE)
     with open(rc_path, "w") as f:
         json.dump(review_comments, f, indent=2)
-    print("  Saved: {} ({} comments)".format(rc_path, len(review_comments)))
+    print(f"  Saved: {rc_path} ({len(review_comments)} comments)")
 
     print("Fetching top-level reviews...")
     reviews = _fetch_reviews(owner, repo, number)
     reviews_path = os.path.join(output_dir, REVIEWS_FILE)
     with open(reviews_path, "w") as f:
         json.dump(reviews, f, indent=2)
-    print("  Saved: {} ({} reviews)".format(reviews_path, len(reviews)))
+    print(f"  Saved: {reviews_path} ({len(reviews)} reviews)")
 
     print("Fetching general PR comments...")
     issue_comments = _fetch_issue_comments(owner, repo, number)
     ic_path = os.path.join(output_dir, ISSUE_COMMENTS_FILE)
     with open(ic_path, "w") as f:
         json.dump(issue_comments, f, indent=2)
-    print("  Saved: {} ({} comments)".format(ic_path, len(issue_comments)))
+    print(f"  Saved: {ic_path} ({len(issue_comments)} comments)")
 
     print("Generating review comments summary...")
-    summary = _generate_summary(metadata, review_comments, reviews, issue_comments, pr_url)
+    summary = _generate_summary(
+        metadata, review_comments, reviews, issue_comments, pr_url
+    )
     summary_path = os.path.join(output_dir, REVIEW_COMMENTS_SUMMARY_FILE)
     with open(summary_path, "w") as f:
         f.write(summary)
-    print("  Saved: {}".format(summary_path))
+    print(f"  Saved: {summary_path}")
 
     total_inline = len(review_comments)
     total_reviews = len([r for r in reviews if r.get("body") and r["body"].strip()])
     threads = _build_comment_threads(review_comments)
     print("\nSummary:")
-    print("  Inline comment threads: {}".format(len(threads)))
-    print("  Total inline comments: {}".format(total_inline))
-    print("  Top-level reviews with body: {}".format(total_reviews))
-    print("  General comments: {}".format(len(issue_comments)))
+    print(f"  Inline comment threads: {len(threads)}")
+    print(f"  Total inline comments: {total_inline}")
+    print(f"  Top-level reviews with body: {total_reviews}")
+    print(f"  General comments: {len(issue_comments)}")
 
 
 if __name__ == "__main__":

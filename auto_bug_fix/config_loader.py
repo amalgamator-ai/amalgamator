@@ -1,26 +1,29 @@
 """YAML/JSON configuration loader with validation for bug fix porting pipeline."""
+
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
 import re
-import yaml
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.claude_utils import BugFixClaudeConfig, ClaudeConfig
-from common.model_registry import resolve_api_key as _resolve_api_key
 from common.model_registry import ModelProfile, ModelRegistry, build_legacy_profile
+from common.model_registry import resolve_api_key as _resolve_api_key
 
 log = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
     """Raised when configuration is invalid."""
+
     pass
 
 
@@ -50,7 +53,9 @@ def advanced_float(
     if isinstance(raw, bool):
         log.warning(
             "advanced.%s=%r is a boolean, not a number — falling back to %s",
-            key, raw, default,
+            key,
+            raw,
+            default,
         )
         return default
     try:
@@ -58,20 +63,29 @@ def advanced_float(
     except (TypeError, ValueError):
         log.warning(
             "advanced.%s=%r is not a number — falling back to %s",
-            key, raw, default,
+            key,
+            raw,
+            default,
         )
         return default
     if not math.isfinite(value):
         log.warning(
             "advanced.%s=%r is not finite — falling back to %s",
-            key, raw, default,
+            key,
+            raw,
+            default,
         )
         return default
-    if (minimum is not None and value < minimum) or \
-       (maximum is not None and value > maximum):
+    if (minimum is not None and value < minimum) or (
+        maximum is not None and value > maximum
+    ):
         log.warning(
             "advanced.%s=%r is outside [%s, %s] — falling back to %s",
-            key, raw, minimum, maximum, default,
+            key,
+            raw,
+            minimum,
+            maximum,
+            default,
         )
         return default
     return value
@@ -91,7 +105,9 @@ def advanced_str(advanced: dict[str, Any], key: str, default: str) -> str:
     if not isinstance(raw, str) or not raw.strip():
         log.warning(
             "advanced.%s=%r is not a non-empty string — falling back to %s",
-            key, raw, default,
+            key,
+            raw,
+            default,
         )
         return default
     return raw.strip()
@@ -113,14 +129,18 @@ def load_config_file(config_path: str) -> dict[str, Any]:
             elif suffix == ".json":
                 data = json.load(f)
             else:
-                raise ConfigError(f"Unsupported config format: {suffix}. Use .yaml, .yml, or .json")
+                raise ConfigError(
+                    f"Unsupported config format: {suffix}. Use .yaml, .yml, or .json"
+                )
     except yaml.YAMLError as e:
-        raise ConfigError(f"Invalid YAML in {config_path}: {e}")
+        raise ConfigError(f"Invalid YAML in {config_path}: {e}") from e
     except json.JSONDecodeError as e:
-        raise ConfigError(f"Invalid JSON in {config_path}: {e}")
+        raise ConfigError(f"Invalid JSON in {config_path}: {e}") from e
 
     if not isinstance(data, dict):
-        raise ConfigError(f"Config file must contain a YAML/JSON mapping, got {type(data).__name__}")
+        raise ConfigError(
+            f"Config file must contain a YAML/JSON mapping, got {type(data).__name__}"
+        )
     return data
 
 
@@ -160,7 +180,9 @@ def validate_config(config: dict[str, Any], config_dir: str = "") -> None:
     has_patch = fix.get("patch") is not None
 
     if has_commit and has_patch:
-        raise ConfigError("fix.commit and fix.patch are mutually exclusive — specify one, not both")
+        raise ConfigError(
+            "fix.commit and fix.patch are mutually exclusive — specify one, not both"
+        )
     if not has_commit and not has_patch:
         raise ConfigError("fix.commit or fix.patch is required")
 
@@ -175,7 +197,9 @@ def validate_config(config: dict[str, Any], config_dir: str = "") -> None:
         if branches.get("source") is None:
             raise ConfigError("branches.source is required")
         if fix.get("upstream_ref") is not None:
-            log.warning("fix.upstream_ref is only used in patch mode — ignored in commit mode")
+            log.warning(
+                "fix.upstream_ref is only used in patch mode — ignored in commit mode"
+            )
 
     _require_mapping(config, "build")
 
@@ -207,22 +231,30 @@ def _legacy_profile(config: dict[str, Any], model: str) -> ModelProfile:
         log.warning("model_params must be a mapping, ignoring")
         params = None
     return build_legacy_profile(
-        model, api_base=str(api_base) if api_base else None,
-        api_key=_resolve_api_key(config) or _resolve_api_key(claude), params=params,
+        model,
+        api_base=str(api_base) if api_base else None,
+        api_key=_resolve_api_key(config) or _resolve_api_key(claude),
+        params=params,
     )
 
 
 def resolve_pipeline_profiles(
-    config: dict[str, Any], registry: ModelRegistry | None,
+    config: dict[str, Any],
+    registry: ModelRegistry | None,
 ) -> tuple[ModelProfile, ModelProfile]:
     """Resolve the pipeline and Phase 4b together, inheriting whole profiles."""
+
     def legacy(model_name: str) -> ModelProfile:
         return _legacy_profile(config, model_name)
 
     model = _pipeline_model_name(config)
     named = registry is not None and (model is None or model in registry.profiles)
     inline_fields = _inline_model_fields(config)
-    pipeline = registry.resolve(model, legacy_factory=legacy) if registry else legacy(model or "claude-sonnet-4-6")
+    pipeline = (
+        registry.resolve(model, legacy_factory=legacy)
+        if registry
+        else legacy(model or "claude-sonnet-4-6")
+    )
     if named and inline_fields:
         log.warning("Named profile ignores inline fields: %s", ", ".join(inline_fields))
     advanced = config.get("advanced", {})
@@ -236,7 +268,11 @@ def resolve_pipeline_profiles(
     elif override == pipeline.model:
         phase_4b = pipeline
     else:
-        phase_4b = registry.resolve(override, legacy_factory=legacy) if registry else legacy(override)
+        phase_4b = (
+            registry.resolve(override, legacy_factory=legacy)
+            if registry
+            else legacy(override)
+        )
         if inline_fields:
             log.warning(
                 "Different bare Phase 4b model inherits inline fields: %s; "
@@ -248,17 +284,25 @@ def resolve_pipeline_profiles(
 
 def _inline_model_fields(config: dict[str, Any]) -> list[str]:
     """Field names only: warnings must not disclose transport values."""
-    names = [key for key in ("api_base", "api_key", "api_key_file", "model_params") if key in config]
+    names = [
+        key
+        for key in ("api_base", "api_key", "api_key_file", "model_params")
+        if key in config
+    ]
     claude = config.get("claude", {})
     if isinstance(claude, dict):
-        names.extend(f"claude.{key}" for key in ("api_base", "api_key", "api_key_file") if key in claude)
+        names.extend(
+            f"claude.{key}"
+            for key in ("api_base", "api_key", "api_key_file")
+            if key in claude
+        )
     return names
 
 
 def parse_bug_fix_config(
     config: dict[str, Any],
     config_dir: str = "",
-    registry: "ModelRegistry | None" = None,
+    registry: ModelRegistry | None = None,
     *,
     profiles: tuple[ModelProfile, ModelProfile] | None = None,
 ) -> tuple[BugFixConfig, str, str]:
@@ -271,10 +315,7 @@ def parse_bug_fix_config(
     repo_path = os.path.join(workdir, repo_name)
 
     build_subdir = config["repository"].get("build_subdir", "")
-    if build_subdir:
-        build_dir = os.path.join(repo_path, build_subdir)
-    else:
-        build_dir = repo_path
+    build_dir = os.path.join(repo_path, build_subdir) if build_subdir else repo_path
 
     advanced = config.get("advanced", {})
     if not isinstance(advanced, dict):
@@ -318,8 +359,12 @@ def parse_bug_fix_config(
         auto_discover_tests=config["build"].get("auto_discover_tests", False),
         max_build_test_retries=advanced.get("max_build_test_retries", 3),
         max_resolution_retries=advanced.get("max_resolution_retries", 3),
-        forward_patch_id_lookback=advanced.get("forward_patch_id_lookback", "12 months"),
-        allowlist_rename_expansion_cap=advanced.get("allowlist_rename_expansion_cap", 3),
+        forward_patch_id_lookback=advanced.get(
+            "forward_patch_id_lookback", "12 months"
+        ),
+        allowlist_rename_expansion_cap=advanced.get(
+            "allowlist_rename_expansion_cap", 3
+        ),
         command_timeout=command_timeout,
         context_length=advanced.get("context_length"),
         mechanical_resolution=bool(advanced.get("mechanical_resolution", True)),
@@ -328,8 +373,8 @@ def parse_bug_fix_config(
         post_resolution_check=bool(advanced.get("post_resolution_check", True)),
         blind_review=bool(advanced.get("blind_review", True)),
         partial_success_skip_ratio=advanced_float(
-            advanced, "partial_success_skip_ratio", 0.5,
-            minimum=0.0, maximum=1.0),
+            advanced, "partial_success_skip_ratio", 0.5, minimum=0.0, maximum=1.0
+        ),
         phase_4b_model=phase_4b_profile.model,
         phase_4b_profile=phase_4b_profile,
         fix_patch=fix_patch,
@@ -342,7 +387,7 @@ def parse_bug_fix_config(
 def parse_claude_config(
     config: dict[str, Any],
     output_dir: str,
-    registry: "ModelRegistry | None" = None,
+    registry: ModelRegistry | None = None,
     *,
     profiles: tuple[ModelProfile, ModelProfile] | None = None,
 ) -> ClaudeConfig:
@@ -370,9 +415,16 @@ def parse_claude_config(
     # Deprecated: set module-level state in llm_client for callers that
     # haven't adopted profiles yet. Named selections never seed legacy globals.
     model_ref = _pipeline_model_name(config)
-    if registry is None or (model_ref is not None and model_ref not in registry.profiles):
+    if registry is None or (
+        model_ref is not None and model_ref not in registry.profiles
+    ):
         from common.llm_client import configure
-        configure(api_base=profile.api_base, api_key=profile.api_key, model_params=profile.params)
+
+        configure(
+            api_base=profile.api_base,
+            api_key=profile.api_key,
+            model_params=profile.params,
+        )
 
     return BugFixClaudeConfig(
         model=profile.model,
@@ -401,9 +453,14 @@ def load_pipeline_config(
     profiles = resolve_pipeline_profiles(config, registry)
 
     bug_fix_config, workdir, source_path = parse_bug_fix_config(
-        config, config_dir=config_dir, registry=registry, profiles=profiles,
+        config,
+        config_dir=config_dir,
+        registry=registry,
+        profiles=profiles,
     )
-    claude_config = parse_claude_config(config, output_dir, registry=registry, profiles=profiles)
+    claude_config = parse_claude_config(
+        config, output_dir, registry=registry, profiles=profiles
+    )
     claude_config.command_timeout = bug_fix_config.command_timeout
     claude_config.context_length = bug_fix_config.context_length
 
@@ -414,9 +471,11 @@ def load_pipeline_config(
 # Multi-target support
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TargetSpec:
     """Per-target overrides for multi-branch porting."""
+
     branch: str
     issue_id: str | None = None
     bug_description: str | None = None
@@ -467,14 +526,16 @@ def parse_targets(config: dict[str, Any]) -> list[TargetSpec]:
         elif isinstance(entry, dict):
             if "branch" not in entry:
                 raise ConfigError("each target mapping must have a 'branch' key")
-            specs.append(TargetSpec(
-                branch=str(entry["branch"]),
-                issue_id=entry.get("issue_id"),
-                bug_description=entry.get("bug_description"),
-                build_command=entry.get("build_command"),
-                test_command=entry.get("test_command"),
-                lint_command=entry.get("lint_command"),
-            ))
+            specs.append(
+                TargetSpec(
+                    branch=str(entry["branch"]),
+                    issue_id=entry.get("issue_id"),
+                    bug_description=entry.get("bug_description"),
+                    build_command=entry.get("build_command"),
+                    test_command=entry.get("test_command"),
+                    lint_command=entry.get("lint_command"),
+                )
+            )
         else:
             raise ConfigError(
                 f"each target must be a string or mapping, got {type(entry).__name__}"
@@ -526,9 +587,14 @@ def load_multi_target_config(
     profiles = resolve_pipeline_profiles(config, registry)
 
     bug_fix_config, workdir, source_path = parse_bug_fix_config(
-        config, config_dir=config_dir, registry=registry, profiles=profiles,
+        config,
+        config_dir=config_dir,
+        registry=registry,
+        profiles=profiles,
     )
-    claude_config = parse_claude_config(config, output_dir, registry=registry, profiles=profiles)
+    claude_config = parse_claude_config(
+        config, output_dir, registry=registry, profiles=profiles
+    )
     claude_config.command_timeout = bug_fix_config.command_timeout
     claude_config.context_length = bug_fix_config.context_length
 

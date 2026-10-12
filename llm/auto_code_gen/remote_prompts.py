@@ -37,12 +37,13 @@ import os
 from dataclasses import dataclass
 from typing import ClassVar
 
-from llm.auto_code_gen.code_gen_prompts import RUNTIME_DIR, DIAGNOSTIC_PROFILE_DIR
+from llm.auto_code_gen.code_gen_prompts import DIAGNOSTIC_PROFILE_DIR, RUNTIME_DIR
 
 REMOTE_VLLM_DIR = "/workspace/vllm"
 
 
 # ── RemoteApplyCodePrompt ─────────────────────────────────────────────────────
+
 
 @dataclass
 class RemoteApplyCodePrompt:
@@ -158,7 +159,7 @@ def gen_RemoteApplyCodePrompt(
         patch_file=patch_file,
         iteration=iteration,
         output_status_file=os.path.join(
-            RUNTIME_DIR, "V{}".format(iteration), "apply_status.txt"
+            RUNTIME_DIR, f"V{iteration}", "apply_status.txt"
         ),
         remote_namespace=remote_namespace,
         remote_pvc_name=remote_pvc_name,
@@ -166,6 +167,7 @@ def gen_RemoteApplyCodePrompt(
 
 
 # ── RemoteRunIterationPrompt ──────────────────────────────────────────────────
+
 
 @dataclass
 class RemoteRunIterationPrompt:
@@ -284,8 +286,9 @@ Step 5: Feature verification
         bench_quoted = shlex.quote(self.execution_command)
         subcommand = "run-iteration-parallel" if self.parallel else "run-iteration"
         model_pvc_flag = (
-            " \\\n  --model-pvc-name {}".format(self.remote_model_pvc_name)
-            if self.remote_model_pvc_name else ""
+            f" \\\n  --model-pvc-name {self.remote_model_pvc_name}"
+            if self.remote_model_pvc_name
+            else ""
         )
         run_lm_eval_flag = " \\\n  --run-lm-eval" if self.run_lm_eval else ""
 
@@ -313,15 +316,15 @@ Step 5: Feature verification
                 "- lm_eval_disabled_exit_code.txt"
             )
             lm_eval_output = (
-                "- {d}/lm_eval.txt\n"
-                "- {d}/lm_eval_combined.log\n"
-                "- {d}/lm_eval_enabled_stdout.log\n"
-                "- {d}/lm_eval_enabled_stderr.log\n"
-                "- {d}/lm_eval_enabled_exit_code.txt\n"
-                "- {d}/lm_eval_disabled_stdout.log\n"
-                "- {d}/lm_eval_disabled_stderr.log\n"
-                "- {d}/lm_eval_disabled_exit_code.txt"
-            ).format(d=self.runtime_logs_dir)
+                f"- {self.runtime_logs_dir}/lm_eval.txt\n"
+                f"- {self.runtime_logs_dir}/lm_eval_combined.log\n"
+                f"- {self.runtime_logs_dir}/lm_eval_enabled_stdout.log\n"
+                f"- {self.runtime_logs_dir}/lm_eval_enabled_stderr.log\n"
+                f"- {self.runtime_logs_dir}/lm_eval_enabled_exit_code.txt\n"
+                f"- {self.runtime_logs_dir}/lm_eval_disabled_stdout.log\n"
+                f"- {self.runtime_logs_dir}/lm_eval_disabled_stderr.log\n"
+                f"- {self.runtime_logs_dir}/lm_eval_disabled_exit_code.txt"
+            )
         else:
             lm_eval_verify = lm_eval_output = ""
 
@@ -334,8 +337,8 @@ Step 5: Feature verification
             feature_check = (
                 'Search for "is ENABLED". If found, feature is active. If NOT '
                 'found, print a WARNING and write "FEATURE_NOT_VERIFIED" to '
-                "{d}/run_status.txt with details."
-            ).format(d=self.runtime_logs_dir)
+                f"{self.runtime_logs_dir}/run_status.txt with details."
+            )
 
         return self.prompt_template.format(
             context=self.context,
@@ -406,6 +409,7 @@ def gen_RemoteRunIterationPrompt(
 
 
 # ── RemoteRunDiagnosticPrompt ─────────────────────────────────────────────────
+
 
 @dataclass
 class RemoteRunDiagnosticPrompt:
@@ -584,9 +588,11 @@ All files in <diagnostic_dir>/:
 
     def prompt(self) -> str:
         import shlex
+
         model_pvc_flag = (
-            " \\\n  --model-pvc-name {}".format(self.remote_model_pvc_name)
-            if self.remote_model_pvc_name else ""
+            f" \\\n  --model-pvc-name {self.remote_model_pvc_name}"
+            if self.remote_model_pvc_name
+            else ""
         )
         return self.prompt_template.format(
             context=self.context,

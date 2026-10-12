@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-
 
 # ── Config models ────────────────────────────────────────────────────────────
 
@@ -106,6 +105,7 @@ class StabilityResult:
 @dataclass
 class ProfileWindow:
     """Defines when/where to capture the nsys profile."""
+
     decode_start_sec: float = 0.0
     decode_end_sec: float = 0.0
     midpoint_sec: float = 0.0
@@ -129,8 +129,15 @@ class StepSummary:
 # ── Test naming helpers ──────────────────────────────────────────────────────
 
 
-def make_test_name(framework: str, model: str, num_gpus: int, concurrency: int,
-                   input_len: int, output_len: int, mode: str = "") -> str:
+def make_test_name(
+    framework: str,
+    model: str,
+    num_gpus: int,
+    concurrency: int,
+    input_len: int,
+    output_len: int,
+    mode: str = "",
+) -> str:
     model_slug = model.replace("/", "__")
     name = f"{framework}-{model_slug}-tp_{num_gpus}-isl_{input_len}-osl_{output_len}-b_{concurrency}"
     if mode:
@@ -138,8 +145,9 @@ def make_test_name(framework: str, model: str, num_gpus: int, concurrency: int,
     return name
 
 
-def make_test_id(model: str, num_gpus: int, input_len: int, output_len: int,
-                 mode: str = "") -> str:
+def make_test_id(
+    model: str, num_gpus: int, input_len: int, output_len: int, mode: str = ""
+) -> str:
     model_slug = model.replace("/", "__")
     tid = f"{model_slug}-tp_{num_gpus}-isl_{input_len}-osl_{output_len}"
     if mode:
@@ -147,10 +155,17 @@ def make_test_id(model: str, num_gpus: int, input_len: int, output_len: int,
     return tid
 
 
-def make_test_id_with_batch(model: str, num_gpus: int, concurrency: int,
-                            input_len: int, output_len: int,
-                            mode: str = "") -> str:
-    return make_test_id(model, num_gpus, input_len, output_len, mode) + f"-b_{concurrency}"
+def make_test_id_with_batch(
+    model: str,
+    num_gpus: int,
+    concurrency: int,
+    input_len: int,
+    output_len: int,
+    mode: str = "",
+) -> str:
+    return (
+        make_test_id(model, num_gpus, input_len, output_len, mode) + f"-b_{concurrency}"
+    )
 
 
 def save_json(data: dict, path: str | Path) -> None:

@@ -14,8 +14,8 @@ For this task think hard.
 IMPORTANT: All output files, helper scripts, generated code, and any other artifacts
 must be written to <output_dir> or its subdirectories. Do not create files anywhere else.
 
-<results_dir> = {results_dir} 
-<output_dir> = {output_dir} 
+<results_dir> = {results_dir}
+<output_dir> = {output_dir}
 <metadata_file> = run_metadata.txt
 <test_id>=[model]-tp_$[num_gpus]-isl_[input_len]-osl_[output_len]
 <test_id_with_batch>=<test_id>-b_[concurrency]
@@ -28,12 +28,12 @@ The structure of each sub-directory is as follows:
 - Each model tested has a directory, for example, HF nvidia/DeepSeek-R1-NVFP4 is represented as nvidia__DeepSeek-R1-NVFP4
 - Inside each model’s directory, there is a sequence of test directories, where each test directory represents a specific test with specific parameters
 - Each test directory name has the following format (that encodes test parameters): test-<full_test_id>
-- Inside each test directory there are the following files (that we call <test_files>): 
+- Inside each test directory there are the following files (that we call <test_files>):
 	- bench-<full_test_id>.json file that has the benchmark results of running the test on the framework
 	- run-log-<full_test_id>.txt file that has the run log of the execution
 	- [OPTIONAL] run-log-profile-<full_test_id>.txt file that has the profile run log of the execution
 	- [OPTIONAL] trace-<full_test_id>.nsys-rep file that has the NSYS profile results
-	- [OPTIONAL] trace-<full_test_id>.sqlite file that is the SQLite version of the nsys-rep file	
+	- [OPTIONAL] trace-<full_test_id>.sqlite file that is the SQLite version of the nsys-rep file
 - The contents of each bench-<full_test_id>.json are specific for each framework. We are interested in TPOT. If it is not presented directly, then compute it.
 - Each of the format dirnames/filenames may have also "-mode_[mode]" at the end which is optional
 

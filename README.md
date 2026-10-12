@@ -106,7 +106,7 @@ ai_auto_analyze/
 
 ## Prerequisites
 
-- Python 3.14+ (use [uv](https://docs.astral.sh/uv/) for version management)
+- Python 3.12+ (use [uv](https://docs.astral.sh/uv/) for version management)
 - Dependencies: `uv sync` (installs `claude-agent-sdk`, `litellm`, `colorama`, `pyyaml`)
 - An LLM endpoint — Claude via Vertex AI, a local Ollama instance, a
   self-hosted vLLM server, or an OpenAI API key
@@ -372,3 +372,69 @@ See **[auto_bug_fix/README.md](auto_bug_fix/README.md)** for the full setup and 
 # 2. Run
 python -m auto_bug_fix.run_bug_fix path/to/case.yaml
 ```
+
+## Development
+
+The CI gate runs **pre-commit** (black + ruff + hygiene hooks) and **pyrefly**
+(type check) on Python 3.12, then **pytest** on a **3.12 / 3.14 matrix**. All
+jobs must pass.
+
+### Environment setup (uv or pip, both first-class)
+
+uv is used by CI for reproducible environments, but it is optional for
+developers:
+
+```bash
+# uv path (recommended: locked, reproducible)
+uv sync --extra test --extra dev
+
+# plain pip path
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[test,dev]"
+```
+
+### Dependency lockfile
+
+`uv.lock` is committed intentionally: CI syncs with `--locked`, so every run
+tests the exact same resolved versions and fails loudly if the lock drifts from
+`pyproject.toml`. It only governs this repo's own environments — installing the
+project as a package (`pip install -e .`) resolves from `pyproject.toml` and
+never reads the lock. When adding or bumping dependencies, regenerate the lock
+(`uv add <pkg>` or `uv lock`) and commit it together with the `pyproject.toml`
+change. The file is marked `linguist-generated` in `.gitattributes`, so GitHub
+collapses it in diffs.
+
+### Formatting and lint
+
+Install the commit hooks once (black/ruff run hermetically — they need no
+project environment or uv, only git and pre-commit):
+
+```bash
+uv run pre-commit install        # or: pre-commit install (in an active env)
+```
+
+### Type checking
+
+pyrefly needs the project environment (it resolves third-party imports), so it
+is a manual-stage pre-commit hook rather than a commit-time hook:
+
+```bash
+uv run pyrefly check
+# or, via pre-commit:
+uv run pre-commit run pyrefly --hook-stage manual --all-files
+```
+
+### Tool versions
+
+- black/ruff: pinned revs in `.pre-commit-config.yaml` — the CI authority.
+  CI runs `pre-commit run --all-files`, so it always uses exactly these.
+- pyrefly: pinned by `uv.lock` — CI runs it from the locked environment.
+
+### Style notes
+
+- The repo targets **Python 3.12+** (RHEL 10 and Ubuntu 24.04 LTS ship 3.12 as
+  the system `python3`; RHEL 9 offers 3.12 via AppStream). Multi-exception
+  clauses use parentheses, `except (A, B):`.
+- Mass-reformat commits are listed in `.git-blame-ignore-revs` so `git blame`
+  (and GitHub's blame UI) keeps pointing at the commit that changed the logic.
+  Enable locally with `git config blame.ignoreRevsFile .git-blame-ignore-revs`.

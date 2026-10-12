@@ -14,8 +14,13 @@ from pathlib import Path
 from common.model_registry import ModelProfile
 
 from .triage import (
-    BranchCheckResult, FixStatus, check_ref,
-    get_remote_branches, get_tags, _run, _resolve_ref,
+    BranchCheckResult,
+    FixStatus,
+    _resolve_ref,
+    _run,
+    check_ref,
+    get_remote_branches,
+    get_tags,
 )
 
 log = logging.getLogger(__name__)
@@ -57,9 +62,12 @@ class ScanReport:
 
     @property
     def already_fixed(self) -> list[BranchCheckResult]:
-        return [r for r in self.results if r.status in (
-            FixStatus.EXACT_MATCH, FixStatus.EQUIVALENT, FixStatus.LIKELY_PRESENT
-        )]
+        return [
+            r
+            for r in self.results
+            if r.status
+            in (FixStatus.EXACT_MATCH, FixStatus.EQUIVALENT, FixStatus.LIKELY_PRESENT)
+        ]
 
     @property
     def not_affected(self) -> list[BranchCheckResult]:
@@ -82,7 +90,9 @@ def resolve_branches(config: ScanConfig) -> list[str]:
 
     if config.branch_pattern:
         log.info("Auto-discovering branches with pattern: %s", config.branch_pattern)
-        discovered = get_remote_branches(config.repo_path, pattern=config.branch_pattern)
+        discovered = get_remote_branches(
+            config.repo_path, pattern=config.branch_pattern
+        )
         log.info("Discovered %d branches: %s", len(discovered), discovered)
         return discovered
 
@@ -104,8 +114,6 @@ def resolve_tags(config: ScanConfig) -> list[str]:
     return []
 
 
-
-
 def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResult:
     """
     Use an LLM to resolve AMBIGUOUS cases.
@@ -116,11 +124,22 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
         from common.llm_client import completion as llm_completion
 
         ref = _resolve_ref(result.branch, result.ref_type)
-        ref_label = f"tag '{result.branch}'" if result.ref_type == "tag" else f"branch '{result.branch}'"
+        ref_label = (
+            f"tag '{result.branch}'"
+            if result.ref_type == "tag"
+            else f"branch '{result.branch}'"
+        )
         ref_type_upper = "TAG" if result.ref_type == "tag" else "BRANCH"
 
         _, fix_diff, _ = _run(
-            ["git", "show", "--unified=5", config.fix_commit, "--", *result.changed_files],
+            [
+                "git",
+                "show",
+                "--unified=5",
+                config.fix_commit,
+                "--",
+                *result.changed_files,
+            ],
             cwd=config.repo_path,
         )
         fix_diff = fix_diff[:8000]
@@ -168,7 +187,9 @@ def _llm_check(result: BranchCheckResult, config: ScanConfig) -> BranchCheckResu
             else:
                 section = full_file[:6000]
 
-            ref_content += f"\n\n--- {f} on {result.branch} (relevant sections) ---\n{section}"
+            ref_content += (
+                f"\n\n--- {f} on {result.branch} (relevant sections) ---\n{section}"
+            )
 
         prompt = f"""You are a code review expert. I need to determine if a bug fix has already been applied to a {ref_label}.
 
@@ -243,8 +264,11 @@ def run_scan(config: ScanConfig) -> ScanReport:
     for name, ref_type in refs_to_scan:
         log.info("Checking %s: %s", ref_type, name)
         result = check_ref(
-            config.repo_path, name, config.fix_commit,
-            vuln_commit=config.vuln_commit, ref_type=ref_type,
+            config.repo_path,
+            name,
+            config.fix_commit,
+            vuln_commit=config.vuln_commit,
+            ref_type=ref_type,
         )
 
         if result.status == FixStatus.AMBIGUOUS:

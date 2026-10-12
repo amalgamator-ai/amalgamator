@@ -24,23 +24,19 @@ _project_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")
 if _project_root not in _sys.path:
     _sys.path.insert(0, _project_root)
 
-import os
-import sys
-import time
 import argparse
 import asyncio
+import os
+import time
 
-from common.utils import setup_logging
 from common.claude_utils import PipelineStep
+from common.utils import setup_logging
 from llm.auto_code_gen.agents import agent_run
-
 from llm.auto_code_gen.code_gen_configs import CodeGenConfig
-from llm.auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase
-
 from llm.auto_code_gen.code_gen_prompts import (
     gen_RebasePRPrompt,
-    RUNTIME_FILE_PREFIX,
 )
+from llm.auto_code_gen.use_cases.llm_framework import LLMFrameworkUseCase
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,6 +55,7 @@ def parse_args() -> argparse.Namespace:
         "(created by pr_gen_step_7_get_latest_main.sh).",
     )
     from llm.auto_code_gen.agents import add_agent_argument
+
     add_agent_argument(parser)
     return parser.parse_args()
 
@@ -72,10 +69,10 @@ async def run_rebase(code_gen_config, claude_config, latest_main_branch):
     print("\n" + "=" * 80)
     print("REBASE PR")
     print("=" * 80)
-    print("  Target repo: {}".format(code_gen_config.source_code_dir))
-    print("  Patch branch: {}".format(branch_name))
-    print("  Latest main branch: {}".format(latest_main_branch))
-    print("  Output dir: {}".format(code_gen_config.output_dir))
+    print(f"  Target repo: {code_gen_config.source_code_dir}")
+    print(f"  Patch branch: {branch_name}")
+    print(f"  Latest main branch: {latest_main_branch}")
+    print(f"  Output dir: {code_gen_config.output_dir}")
     print("=" * 80 + "\n")
 
     prompt = gen_RebasePRPrompt(
@@ -114,16 +111,20 @@ if __name__ == "__main__":
     total_duration = time.time() - start_time
 
     import re
-    runtime_patches = sorted([
-        f for f in os.listdir(code_gen_config.output_dir)
-        if re.match(r'^code_gen_runtime_V\d+\.patch$', f)
-    ])
+
+    runtime_patches = sorted(
+        [
+            f
+            for f in os.listdir(code_gen_config.output_dir)
+            if re.match(r"^code_gen_runtime_V\d+\.patch$", f)
+        ]
+    )
     if runtime_patches:
         latest = runtime_patches[-1]
-        print("\nRebase patch saved as runtime iteration: {}".format(
-            os.path.join(code_gen_config.output_dir, latest)
-        ))
+        print(
+            f"\nRebase patch saved as runtime iteration: {os.path.join(code_gen_config.output_dir, latest)}"
+        )
     else:
         print("\nWARNING: No rebase patch was generated.")
 
-    print("Duration: {:.1f}s".format(total_duration))
+    print(f"Duration: {total_duration:.1f}s")

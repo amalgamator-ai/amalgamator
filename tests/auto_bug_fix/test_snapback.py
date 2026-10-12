@@ -1,4 +1,5 @@
 """Tests for auto_bug_fix.snapback — whitespace snap-back to source bytes."""
+
 from __future__ import annotations
 
 import subprocess
@@ -11,16 +12,20 @@ def test_normalize_ws_collapses_runs():
 
 
 def test_indent_drift_snaps_to_upstream_bytes():
-    upstream = "\n".join([
-        "int core_glock_get(struct core_sbd *sdp, u64 number,",
-        "\t\t   const struct core_glock_operations *glops,",
-        "\t\t   int create, struct core_glock **glp);",
-    ])
-    current = "\n".join([
-        "int core_glock_get(struct core_sbd *sdp, u64 number,",
-        "           const struct core_glock_operations *glops,",
-        "           int create, struct core_glock **glp);",
-    ])
+    upstream = "\n".join(
+        [
+            "int core_glock_get(struct core_sbd *sdp, u64 number,",
+            "\t\t   const struct core_glock_operations *glops,",
+            "\t\t   int create, struct core_glock **glp);",
+        ]
+    )
+    current = "\n".join(
+        [
+            "int core_glock_get(struct core_sbd *sdp, u64 number,",
+            "           const struct core_glock_operations *glops,",
+            "           int create, struct core_glock **glp);",
+        ]
+    )
     result, snapped = snap_back_text(current, [upstream])
     assert result == upstream
     assert snapped == 2  # each drifted line snaps to its unique source form
@@ -36,10 +41,12 @@ def test_byte_equal_source_line_is_never_touched():
 
 
 def test_ambiguous_byte_forms_are_skipped():
-    source = "\n".join([
-        "\tcall_something(a, b, c);",
-        "\t\tcall_something(a, b, c);",
-    ])
+    source = "\n".join(
+        [
+            "\tcall_something(a, b, c);",
+            "\t\tcall_something(a, b, c);",
+        ]
+    )
     current = "  call_something(a, b, c);"
     result, snapped = snap_back_text(current, [source])
     assert result == current
@@ -55,7 +62,9 @@ def test_short_keys_are_not_snapped():
 
 
 def test_preimage_is_fallback_source():
-    preimage = "\tstatic const struct file_operations core_fops = { .owner = THIS_MODULE };"
+    preimage = (
+        "\tstatic const struct file_operations core_fops = { .owner = THIS_MODULE };"
+    )
     current = "        static const struct file_operations core_fops = { .owner = THIS_MODULE };"
     result, snapped = snap_back_text(current, ["/* unrelated upstream */", preimage])
     assert result == preimage
@@ -120,7 +129,11 @@ def test_snap_back_files_uses_git_sources(tmp_path):
     _git(rp, "add", ".")
     _git(rp, "commit", "-m", "fix")
     fix_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=rp, capture_output=True, text=True, check=True,
+        ["git", "rev-parse", "HEAD"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     _git(rp, "checkout", "-q", "HEAD~1")
 
@@ -132,4 +145,7 @@ def test_snap_back_files_uses_git_sources(tmp_path):
     )
     counts = snap_back_files(rp, ["f.c"], "HEAD", fix_sha)
     assert counts == {"f.c": 1}
-    assert "\t\t   const struct core_glock_operations *glops);" in (repo / "f.c").read_text()
+    assert (
+        "\t\t   const struct core_glock_operations *glops);"
+        in (repo / "f.c").read_text()
+    )

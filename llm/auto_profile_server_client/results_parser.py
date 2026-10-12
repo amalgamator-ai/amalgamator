@@ -9,19 +9,18 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from dataclasses import asdict
 from pathlib import Path
 
-from llm.auto_profile_server_client.config import VALID_FRAMEWORKS
-from llm.auto_profile_server_client.models import (
-    BenchmarkResult, make_test_id, make_test_id_with_batch, save_json,
-)
 from llm.auto_profile_server_client.frameworks import get_adapter
+from llm.auto_profile_server_client.models import (
+    BenchmarkResult,
+    save_json,
+)
 
 log = logging.getLogger(__name__)
 
 
-def restructure_results(results_dir: str, output_dir: str) -> dict:
+def restructure_results(results_dir: str | Path, output_dir: str | Path) -> dict:
     """Reorganize per-framework results into test_results/<test_id_with_batch>/ dirs.
 
     Returns a mapping: test_id_with_batch -> {framework -> BenchmarkResult}.
@@ -56,13 +55,26 @@ def restructure_results(results_dir: str, output_dir: str) -> dict:
         if test_id_batch not in all_results:
             all_results[test_id_batch] = {}
 
-        adapter = get_adapter(fw)
-        result = BenchmarkResult(**{k: bench.get(k, 0) for k in [
-            "ttft_ms", "tpot_ms", "throughput_tok_per_sec",
-            "ttft_p50_ms", "ttft_p90_ms", "ttft_p99_ms",
-            "tpot_p50_ms", "tpot_p90_ms", "tpot_p99_ms",
-            "e2e_latency_ms", "num_prompts", "total_time_sec",
-        ]})
+        get_adapter(fw)
+        result = BenchmarkResult(
+            **{
+                k: bench.get(k, 0)
+                for k in [
+                    "ttft_ms",
+                    "tpot_ms",
+                    "throughput_tok_per_sec",
+                    "ttft_p50_ms",
+                    "ttft_p90_ms",
+                    "ttft_p99_ms",
+                    "tpot_p50_ms",
+                    "tpot_p90_ms",
+                    "tpot_p99_ms",
+                    "e2e_latency_ms",
+                    "num_prompts",
+                    "total_time_sec",
+                ]
+            }
+        )
         all_results[test_id_batch][fw] = result
 
         # Copy files into restructured directory
@@ -80,7 +92,7 @@ def restructure_results(results_dir: str, output_dir: str) -> dict:
 
 def generate_comparison_tables(
     all_results: dict[str, dict[str, BenchmarkResult]],
-    output_dir: str,
+    output_dir: str | Path,
 ) -> list[str]:
     """Generate cross-framework comparison tables.
 
@@ -137,7 +149,7 @@ def _format_comparison_table(
 
     # Header
     header = f"{'Batch':>8}"
-    for fw in frameworks:
+    for _fw in frameworks:
         header += f" | {'TTFT (ms)':>12} {'TPOT (ms)':>12} {'Tput (t/s)':>12}"
     lines.append(header)
 
@@ -180,7 +192,8 @@ def generate_analysis_configs(
         vllm_result = fw_results["vllm"]
         is_vllm_slower = any(
             fw_results[fw].tpot_ms < vllm_result.tpot_ms
-            for fw in fw_results if fw != "vllm"
+            for fw in fw_results
+            if fw != "vllm"
         )
         if not is_vllm_slower:
             continue
@@ -189,7 +202,7 @@ def generate_analysis_configs(
 
         # Generate single-trace configs
         single_configs = []
-        for fw, result in fw_results.items():
+        for fw, _result in fw_results.items():
             fw_dir = test_dir / fw
             trace_files = sorted(fw_dir.glob("trace-*.sqlite"))
             trace_file = str(trace_files[0]) if trace_files else ""

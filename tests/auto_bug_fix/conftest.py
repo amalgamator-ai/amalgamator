@@ -1,21 +1,34 @@
 import sys
 import types
+from typing import Any
 
 # Stub external dependencies before any project imports
-_cm = types.ModuleType("colorama")
-_cm.Fore = type("Fore", (), {k: "" for k in ["RED", "GREEN", "YELLOW", "CYAN", "MAGENTA", "RESET", "WHITE"]})()
-_cm.Style = type("Style", (), {"RESET_ALL": "", "BRIGHT": ""})()
+_cm: Any = types.ModuleType("colorama")
+_cm.Fore = type(
+    "Fore",
+    (),
+    {k: "" for k in ["RED", "GREEN", "YELLOW", "CYAN", "MAGENTA", "RESET", "WHITE"]},
+)
+_cm.Style = type("Style", (), {"RESET_ALL": "", "BRIGHT": ""})
 sys.modules["colorama"] = _cm
 
-_sdk = types.ModuleType("claude_agent_sdk")
+_sdk: Any = types.ModuleType("claude_agent_sdk")
 for _n in [
-    "ClaudeSDKClient", "ClaudeAgentOptions", "AssistantMessage", "TextBlock",
-    "ThinkingBlock", "ToolUseBlock", "ToolResultBlock", "ContentBlock",
-    "ResultMessage", "SystemMessage", "UserMessage",
+    "ClaudeSDKClient",
+    "ClaudeAgentOptions",
+    "AssistantMessage",
+    "TextBlock",
+    "ThinkingBlock",
+    "ToolUseBlock",
+    "ToolResultBlock",
+    "ContentBlock",
+    "ResultMessage",
+    "SystemMessage",
+    "UserMessage",
 ]:
     setattr(_sdk, _n, type(_n, (), {}))
 sys.modules["claude_agent_sdk"] = _sdk
-_sdk_types = types.ModuleType("claude_agent_sdk.types")
+_sdk_types: Any = types.ModuleType("claude_agent_sdk.types")
 _sdk_types.StreamEvent = type("StreamEvent", (), {})
 sys.modules["claude_agent_sdk.types"] = _sdk_types
 
@@ -68,7 +81,9 @@ def tmp_git_repo(tmp_path):
 
     subprocess.run(["git", "init", "-b", "main"], check=True, cwd=rp)
     subprocess.run(["git", "config", "user.name", "Test User"], check=True, cwd=rp)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], check=True, cwd=rp)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], check=True, cwd=rp
+    )
 
     # Create initial files
     lib_dir = repo_path / "lib"

@@ -17,16 +17,16 @@ log = logging.getLogger(__name__)
 # Prometheus metric name patterns per framework
 _METRIC_PATTERNS = {
     "generation_tokens": re.compile(
-        r'(?:vllm:generation_tokens_total|sglang:generation_tokens_total|trtllm_generation_tokens_total)\{[^}]*\}\s+([\d.eE+\-]+)'
+        r"(?:vllm:generation_tokens_total|sglang:generation_tokens_total|trtllm_generation_tokens_total)\{[^}]*\}\s+([\d.eE+\-]+)"
     ),
     "requests_running": re.compile(
-        r'(?:vllm:num_requests_running|sglang:num_running_reqs|trtllm_num_requests_running)\{[^}]*\}\s+([\d.eE+\-]+)'
+        r"(?:vllm:num_requests_running|sglang:num_running_reqs|trtllm_num_requests_running)\{[^}]*\}\s+([\d.eE+\-]+)"
     ),
     "kv_cache_usage": re.compile(
-        r'(?:vllm:gpu_cache_usage_perc|vllm:kv_cache_usage_perc|sglang:token_usage|trtllm_kv_cache_utilization)\{[^}]*\}\s+([\d.eE+\-]+)'
+        r"(?:vllm:gpu_cache_usage_perc|vllm:kv_cache_usage_perc|sglang:token_usage|trtllm_kv_cache_utilization)\{[^}]*\}\s+([\d.eE+\-]+)"
     ),
     "queue_size": re.compile(
-        r'(?:vllm:num_requests_waiting|sglang:num_queue_reqs)\{[^}]*\}\s+([\d.eE+\-]+)'
+        r"(?:vllm:num_requests_waiting|sglang:num_queue_reqs)\{[^}]*\}\s+([\d.eE+\-]+)"
     ),
 }
 
@@ -35,7 +35,9 @@ def _fetch_metrics(url: str) -> str | None:
     try:
         r = subprocess.run(
             ["curl", "-sf", "--max-time", "3", url],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if r.returncode == 0:
             return r.stdout
@@ -66,8 +68,12 @@ def _parse_metrics_text(text: str, prev_tokens_total: float) -> MetricsSample:
 class MetricsCollector:
     """Background thread that polls Prometheus metrics endpoint."""
 
-    def __init__(self, metrics_url: str, poll_interval_sec: float = 1.0,
-                 raw_log_path: str | None = None):
+    def __init__(
+        self,
+        metrics_url: str,
+        poll_interval_sec: float = 1.0,
+        raw_log_path: str | None = None,
+    ):
         self.metrics_url = metrics_url
         self.poll_interval_sec = poll_interval_sec
         self.raw_log_path = raw_log_path
@@ -83,11 +89,18 @@ class MetricsCollector:
         self._prev_tokens_total = 0.0
         if self.raw_log_path:
             Path(self.raw_log_path).parent.mkdir(parents=True, exist_ok=True)
-            self._raw_log_file = open(self.raw_log_path, "w")
+            self._raw_log_file = (
+                open(  # noqa: SIM115 (thread-lifetime; closed in stop())
+                    self.raw_log_path, "w"
+                )
+            )
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
-        log.info("Metrics collector started: %s (interval=%.1fs)",
-                 self.metrics_url, self.poll_interval_sec)
+        log.info(
+            "Metrics collector started: %s (interval=%.1fs)",
+            self.metrics_url,
+            self.poll_interval_sec,
+        )
 
     def stop(self) -> list[MetricsSample]:
         self._stop_event.set()
@@ -116,16 +129,23 @@ class MetricsCollector:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "timestamp", "generation_tokens_total", "requests_running",
-                "kv_cache_usage_pct", "queue_size",
-            ])
+            writer.writerow(
+                [
+                    "timestamp",
+                    "generation_tokens_total",
+                    "requests_running",
+                    "kv_cache_usage_pct",
+                    "queue_size",
+                ]
+            )
             for s in self.samples:
-                writer.writerow([
-                    f"{s.timestamp:.3f}",
-                    f"{s.generation_tokens_total:.1f}",
-                    f"{s.requests_running:.0f}",
-                    f"{s.kv_cache_usage_pct:.4f}",
-                    f"{s.queue_size:.0f}",
-                ])
+                writer.writerow(
+                    [
+                        f"{s.timestamp:.3f}",
+                        f"{s.generation_tokens_total:.1f}",
+                        f"{s.requests_running:.0f}",
+                        f"{s.kv_cache_usage_pct:.4f}",
+                        f"{s.queue_size:.0f}",
+                    ]
+                )
         log.info("Saved %d metrics samples to %s", len(self.samples), path)

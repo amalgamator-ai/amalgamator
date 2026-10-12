@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -28,8 +29,10 @@ DEFAULT_METRICS_POLL_INTERVAL_SEC = 1.0
 
 # NSYS profiling
 NSYS_DEFAULT_FLAGS = [
-    "-t", "cuda,nvtx",
-    "-c", "cudaProfilerApi",
+    "-t",
+    "cuda,nvtx",
+    "-c",
+    "cudaProfilerApi",
     "--capture-range-end=stop",
     "--cuda-graph-trace=node",
     "--trace-fork-before-exec=true",
@@ -40,8 +43,8 @@ PROFILING_BUFFER = 256
 # Framework-specific defaults
 FRAMEWORK_PORT_POOLS = {
     "vllm": list(range(8123, 8133)),
-    "sgl":  list(range(30123, 30133)),
-    "trt":  list(range(8534, 8544)),
+    "sgl": list(range(30123, 30133)),
+    "trt": list(range(8534, 8544)),
 }
 
 # Deprecated — use get_next_port() instead
@@ -60,19 +63,15 @@ def get_next_port(framework: str) -> int:
 
     index = {}
     if PORT_INDEX_FILE.is_file():
-        try:
+        with contextlib.suppress(json.JSONDecodeError, OSError):
             index = json.loads(PORT_INDEX_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
 
     idx = index.get(framework, 0) % len(pool)
     port = pool[idx]
 
     index[framework] = (idx + 1) % len(pool)
-    try:
+    with contextlib.suppress(OSError):
         PORT_INDEX_FILE.write_text(json.dumps(index))
-    except OSError:
-        pass
 
     _log.info("Port for %s: %d (index %d/%d)", framework, port, idx, len(pool))
     return port

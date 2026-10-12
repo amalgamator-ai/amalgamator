@@ -89,8 +89,12 @@ class VllmAdapter(FrameworkAdapter):
                 result.e2e_latency_ms = data.get("mean_e2el_ms", 0)
                 result.total_time_sec = data.get("duration", 0)
                 result.num_prompts = data.get("num_requests", 0)
-                log.info("Parsed vLLM results: TTFT=%.2fms TPOT=%.2fms throughput=%.1f tok/s",
-                         result.ttft_ms, result.tpot_ms, result.throughput_tok_per_sec)
+                log.info(
+                    "Parsed vLLM results: TTFT=%.2fms TPOT=%.2fms throughput=%.1f tok/s",
+                    result.ttft_ms,
+                    result.tpot_ms,
+                    result.throughput_tok_per_sec,
+                )
             except Exception:
                 log.warning("Failed to parse vLLM JSON: %s", json_path, exc_info=True)
 
@@ -119,8 +123,9 @@ class VllmAdapter(FrameworkAdapter):
     def operational_flags(self, concurrency: int) -> str:
         return f"--max-model-len 65536 --max-num-seqs {concurrency}"
 
-    def profiling_server_extra_flags(self, delay: int, active: int,
-                                     profiler_type: str = "nsys") -> str:
+    def profiling_server_extra_flags(
+        self, delay: int, active: int, profiler_type: str = "nsys"
+    ) -> str:
         backend = "cuda" if profiler_type == "nsys" else "torch"
         flags = (
             f"--profiler-config.profiler {backend}"

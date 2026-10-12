@@ -1,2 +1,4 @@
 *.nsys-rep filter=lfs diff=lfs merge=lfs -text
 *.json.gz filter=lfs diff=lfs merge=lfs -text
+# Generated files: collapsed by GitHub in diffs, excluded from language stats.
+uv.lock linguist-generated=true

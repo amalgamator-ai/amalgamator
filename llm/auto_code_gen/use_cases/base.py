@@ -19,15 +19,22 @@ class UseCase(ABC):
 
     @abstractmethod
     def gen_code_trace_steps(
-        self, context: str, config,
+        self,
+        context: str,
+        config,
     ) -> tuple[list[PipelineStep], list[str]]:
         """Returns (pipeline_steps, code_trace_file_names)."""
         ...
 
     @abstractmethod
     def gen_code_port_plan_iter_steps(
-        self, context: str, config, code_trace_files: list[str],
-        prev_output_file, prev_output_summary_file, iteration: int,
+        self,
+        context: str,
+        config,
+        code_trace_files: list[str],
+        prev_output_file,
+        prev_output_summary_file,
+        iteration: int,
     ) -> tuple[list[PipelineStep], object]:
         """One code-port-plan generate+review iteration.
 
@@ -45,28 +52,45 @@ class UseCase(ABC):
 
     @abstractmethod
     def gen_test_plan_iter_steps(
-        self, context: str, config, code_trace_files: list[str],
+        self,
+        context: str,
+        config,
+        code_trace_files: list[str],
         code_port_plan_file: str,
-        prev_output_file, prev_output_summary_file, iteration: int,
+        prev_output_file,
+        prev_output_summary_file,
+        iteration: int,
     ) -> tuple[list[PipelineStep], object]:
         """One test-plan generate+review iteration."""
         ...
 
     @abstractmethod
     def gen_code_gen_iter_steps(
-        self, context: str, config, code_trace_files: list[str],
-        code_port_plan_file: str, test_plan_file: str,
-        prev_output_patch_file, prev_output_summary_file, iteration: int,
+        self,
+        context: str,
+        config,
+        code_trace_files: list[str],
+        code_port_plan_file: str,
+        test_plan_file: str,
+        prev_output_patch_file,
+        prev_output_summary_file,
+        iteration: int,
     ) -> tuple[list[PipelineStep], object]:
         """One code-gen generate+review iteration."""
         ...
 
     @abstractmethod
     async def run_runtime_iterations(
-        self, context: str, config, claude_config: ClaudeConfig,
+        self,
+        context: str,
+        config,
+        claude_config: ClaudeConfig,
         code_trace_files: list[str],
-        code_port_plan_file: str, test_plan_file: str,
-        resume: bool = False, client=None,
+        code_port_plan_file: str,
+        test_plan_file: str,
+        resume: bool = False,
+        run_models=None,
+        client=None,
     ) -> tuple[list[dict], list[dict]]:
         """Phase 5: use-case-specific runtime iterations.
 
@@ -77,8 +101,12 @@ class UseCase(ABC):
         ...
 
     async def run_generate_pr_commands(
-        self, context: str, config, claude_config: ClaudeConfig,
-        descs_only: bool = False, client=None,
+        self,
+        context: str,
+        config,
+        claude_config: ClaudeConfig,
+        descs_only: bool = False,
+        client=None,
     ) -> tuple[list[dict], list[dict]]:
         """Phase 6: generate PR description files and command scripts.
 

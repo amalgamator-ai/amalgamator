@@ -90,8 +90,12 @@ class TrtAdapter(FrameworkAdapter):
                 result.e2e_latency_ms = data.get("mean_e2el_ms", 0)
                 result.total_time_sec = data.get("duration", 0)
                 result.num_prompts = data.get("num_requests", 0)
-                log.info("Parsed TRT results: TTFT=%.2fms TPOT=%.2fms throughput=%.1f tok/s",
-                         result.ttft_ms, result.tpot_ms, result.throughput_tok_per_sec)
+                log.info(
+                    "Parsed TRT results: TTFT=%.2fms TPOT=%.2fms throughput=%.1f tok/s",
+                    result.ttft_ms,
+                    result.tpot_ms,
+                    result.throughput_tok_per_sec,
+                )
             except Exception:
                 log.warning("Failed to parse TRT JSON: %s", json_path, exc_info=True)
 
@@ -107,7 +111,10 @@ class TrtAdapter(FrameworkAdapter):
                 (r"Mean TTFT.*?:\s*([\d.]+)\s*ms", "ttft_ms"),
                 (r"Mean TPOT.*?:\s*([\d.]+)\s*ms", "tpot_ms"),
                 (r"Output throughput.*?:\s*([\d.]+)", "throughput_tok_per_sec"),
-                (r"request_output_throughput_tok_per_s.*?:\s*([\d.]+)", "throughput_tok_per_sec"),
+                (
+                    r"request_output_throughput_tok_per_s.*?:\s*([\d.]+)",
+                    "throughput_tok_per_sec",
+                ),
             ]:
                 m = re.search(pattern, text, re.IGNORECASE)
                 if m and getattr(result, attr) == 0:

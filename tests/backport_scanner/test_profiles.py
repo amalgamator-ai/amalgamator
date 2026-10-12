@@ -1,4 +1,5 @@
 """Scanner profiles must survive completion calls and generated backport cases."""
+
 import shlex
 import sys
 from pathlib import Path
@@ -21,14 +22,28 @@ def write_registry(directory, *, model="openai/review", strict=True):
     key_file = directory / "model.key"
     key_file.write_text("  FAKE_PROFILE_KEY\n")
     path = directory / "models.yaml"
-    path.write_text(yaml.safe_dump({
-        "models": {"review": {
-            "provider": "litellm", "model": model, "api_base": "https://profile.invalid/v1",
-            "api_key_file": str(key_file),
-            "params": {"temperature": 0.2, "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
-        }},
-        "default": "review", "strict": strict,
-    }))
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "review": {
+                        "provider": "litellm",
+                        "model": model,
+                        "api_base": "https://profile.invalid/v1",
+                        "api_key_file": str(key_file),
+                        "params": {
+                            "temperature": 0.2,
+                            "extra_body": {
+                                "chat_template_kwargs": {"enable_thinking": False}
+                            },
+                        },
+                    }
+                },
+                "default": "review",
+                "strict": strict,
+            }
+        )
+    )
     return path
 
 
@@ -39,15 +54,23 @@ def write_scan(directory, *, model=None, discover_commands=False):
     llm = {"discover_commands": discover_commands}
     if model is not None:
         llm["model"] = model
-    path.write_text(yaml.safe_dump({
-        "repository": {"local_path": str(repo)}, "fix": {"commit": "abc123", "description": "Fix bug"},
-        "scan": {"branches": ["release"]}, "llm": llm,
-    }))
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "repository": {"local_path": str(repo)},
+                "fix": {"commit": "abc123", "description": "Fix bug"},
+                "scan": {"branches": ["release"]},
+                "llm": llm,
+            }
+        )
+    )
     return path
 
 
 def response(text):
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))], usage=None)
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=text))], usage=None
+    )
 
 
 def result(status):
@@ -55,7 +78,9 @@ def result(status):
 
 
 @pytest.mark.parametrize("selection", [None, "review"])
-def test_named_profile_reaches_both_scanner_completion_paths(tmp_path, monkeypatch, selection):
+def test_named_profile_reaches_both_scanner_completion_paths(
+    tmp_path, monkeypatch, selection
+):
     registry = write_registry(tmp_path)
     scan = write_scan(tmp_path, model=selection)
     monkeypatch.setattr(llm_client, "_api_base", "http://stale/v1")
@@ -67,14 +92,24 @@ def test_named_profile_reaches_both_scanner_completion_paths(tmp_path, monkeypat
     assert config.llm_model == "openai/review"
     assert llm_client.get_api_key() == "STALE_KEY"  # Loading did not seed globals.
 
-    request = Mock(side_effect=[response("NEEDS_FIX: fix is absent"), response("BUILD: make\nTEST: make test")])
+    request = Mock(
+        side_effect=[
+            response("NEEDS_FIX: fix is absent"),
+            response("BUILD: make\nTEST: make test"),
+        ]
+    )
     monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=request))
-    monkeypatch.setattr(scanner, "check_ref", Mock(return_value=result(FixStatus.AMBIGUOUS)))
+    monkeypatch.setattr(
+        scanner, "check_ref", Mock(return_value=result(FixStatus.AMBIGUOUS))
+    )
     monkeypatch.setattr(scanner, "_run", Mock(return_value=(0, "+fixed code\n", "")))
     assert len(scanner.run_scan(config).needs_fix) == 1
     (config.repo_path / "README.md").write_text("Build with make, test with make test.")
-    assert generate_config._discover_commands(config.repo_path, config.llm_model, profile=config.profile) == ("make", "make test")
+    assert generate_config._discover_commands(
+        config.repo_path, config.llm_model, profile=config.profile
+    ) == ("make", "make test")
     assert request.call_count == 2
+    assert config.profile is not None
     for call in request.call_args_list:
         sent = call.kwargs
         assert sent["model"] == config.profile.model
@@ -96,11 +131,14 @@ def test_home_registry_default_is_discovered(tmp_path):
     registry = write_registry(tmp_path / ".config" / "amalgamator")
     config = run_scanner.load_config(write_scan(tmp_path))
     assert config.model_ref == "review"
+    assert config.profile is not None
     assert config.profile.api_key == "FAKE_PROFILE_KEY"
     assert config.models_path == registry.resolve()
 
 
-def test_bare_model_preserves_legacy_transport_with_unrelated_registry(tmp_path, monkeypatch, caplog):
+def test_bare_model_preserves_legacy_transport_with_unrelated_registry(
+    tmp_path, monkeypatch, caplog
+):
     scan = write_scan(tmp_path, model="openai/bare")
     monkeypatch.setattr(llm_client, "_api_base", "http://legacy/v1")
     monkeypatch.setattr(llm_client, "_api_key", "LEGACY_KEY")
@@ -124,14 +162,32 @@ def test_without_registry_retains_scanner_default(tmp_path):
 
 
 @pytest.mark.parametrize("selection", [None, "review"])
-def test_generated_cases_round_trip_with_the_selected_registry(tmp_path, monkeypatch, capsys, selection):
+def test_generated_cases_round_trip_with_the_selected_registry(
+    tmp_path, monkeypatch, capsys, selection
+):
     registry = write_registry(tmp_path / "shared models")
-    config = run_scanner.load_config(write_scan(tmp_path, model=selection, discover_commands=True), models_path=registry)
-    monkeypatch.setattr(generate_config, "run_scan", Mock(return_value=ScanReport(
-        str(config.repo_path), config.fix_commit, config.fix_description, [result(FixStatus.NEEDS_FIX)],
-    )))
-    monkeypatch.setattr(generate_config, "git_show_files", Mock(return_value=["file.c"]))
-    monkeypatch.setattr(generate_config, "_get_default_branch", Mock(return_value="main"))
+    config = run_scanner.load_config(
+        write_scan(tmp_path, model=selection, discover_commands=True),
+        models_path=registry,
+    )
+    monkeypatch.setattr(
+        generate_config,
+        "run_scan",
+        Mock(
+            return_value=ScanReport(
+                str(config.repo_path),
+                config.fix_commit,
+                config.fix_description,
+                [result(FixStatus.NEEDS_FIX)],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        generate_config, "git_show_files", Mock(return_value=["file.c"])
+    )
+    monkeypatch.setattr(
+        generate_config, "_get_default_branch", Mock(return_value="main")
+    )
     (config.repo_path / "README.md").write_text("Build/test instructions")
     request = Mock(return_value=response("BUILD: make\nTEST: make test"))
     monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=request))
@@ -147,23 +203,42 @@ def test_generated_cases_round_trip_with_the_selected_registry(tmp_path, monkeyp
     assert data["build"] == {"command": "make", "test_command": "make test"}
     assert "FAKE_PROFILE_KEY" not in text and "profile.invalid" not in text
     assert "api_key" not in text and "params" not in data
-    command = next(line.removeprefix("# ") for line in text.splitlines() if line.startswith("# python "))
+    command = next(
+        line.removeprefix("# ")
+        for line in text.splitlines()
+        if line.startswith("# python ")
+    )
     assert command in capsys.readouterr().out
     args = shlex.split(command)
     assert args[:3] == ["python", "-m", "auto_bug_fix.run_bug_fix"]
     assert "--config" not in args
-    bug, agent, *_ = load_pipeline_config(args[3], models_path=args[args.index("--models") + 1])
+    bug, agent, *_ = load_pipeline_config(
+        args[3], models_path=args[args.index("--models") + 1]
+    )
     assert agent.profile == config.profile
     assert bug.phase_4b_profile is agent.profile
 
 
 def test_generated_legacy_case_uses_the_scanner_model(tmp_path, monkeypatch):
     config = run_scanner.load_config(write_scan(tmp_path, model="gpt-4o"))
-    monkeypatch.setattr(generate_config, "run_scan", Mock(return_value=ScanReport(
-        str(config.repo_path), config.fix_commit, "test", [result(FixStatus.NEEDS_FIX)],
-    )))
-    monkeypatch.setattr(generate_config, "git_show_files", Mock(return_value=["file.c"]))
-    monkeypatch.setattr(generate_config, "_get_default_branch", Mock(return_value="main"))
+    monkeypatch.setattr(
+        generate_config,
+        "run_scan",
+        Mock(
+            return_value=ScanReport(
+                str(config.repo_path),
+                config.fix_commit,
+                "test",
+                [result(FixStatus.NEEDS_FIX)],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        generate_config, "git_show_files", Mock(return_value=["file.c"])
+    )
+    monkeypatch.setattr(
+        generate_config, "_get_default_branch", Mock(return_value="main")
+    )
     output = tmp_path / "generated"
     generate_config.mode_generate(config, output)
     case = next(output.glob("*.yaml"))
@@ -171,8 +246,14 @@ def test_generated_legacy_case_uses_the_scanner_model(tmp_path, monkeypatch):
     assert "--models" not in case.read_text()
 
 
-def test_generation_requires_registry_provenance_for_programmatic_profile(tmp_path, monkeypatch):
-    config = ScanConfig(tmp_path, "abc", profile=ModelProfile("local", "litellm", "openai/local", api_key="KEY"))
+def test_generation_requires_registry_provenance_for_programmatic_profile(
+    tmp_path, monkeypatch
+):
+    config = ScanConfig(
+        tmp_path,
+        "abc",
+        profile=ModelProfile("local", "litellm", "openai/local", api_key="KEY"),
+    )
     scan = Mock()
     monkeypatch.setattr(generate_config, "run_scan", scan)
     with pytest.raises(RegistryError, match="requires models_path"):
@@ -184,6 +265,7 @@ def test_generation_requires_registry_provenance_for_programmatic_profile(tmp_pa
 def test_cli_forwards_models_path(entrypoint, monkeypatch):
     class StopAtLoader(Exception):
         pass
+
     loader = Mock(side_effect=StopAtLoader)
     monkeypatch.setattr(entrypoint, "load_config", loader)
     argv = ["--config", "scan.yaml", "--models", "shared.yaml"]

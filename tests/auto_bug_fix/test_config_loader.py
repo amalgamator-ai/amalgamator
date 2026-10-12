@@ -1,12 +1,21 @@
 """Tests for auto_bug_fix.config_loader — YAML/JSON config parsing."""
+
 import os
 import tempfile
+from typing import Any
+
 import pytest
+
 from auto_bug_fix.config_loader import (
-    load_config_file, validate_config, parse_bug_fix_config,
+    ConfigError,
+    _sanitize_ref,
+    expand_path,
+    load_config_file,
+    load_multi_target_config,
+    parse_bug_fix_config,
     parse_claude_config,
-    load_pipeline_config, ConfigError, expand_path,
-    TargetSpec, _sanitize_ref, parse_targets, load_multi_target_config,
+    parse_targets,
+    validate_config,
 )
 
 
@@ -124,7 +133,9 @@ def _fix_cfg(fix, branches=None):
         "issue_id": "CVE-2026-1234",
         "bug_description": "Test",
         "repository": {"source_path": "/tmp/test-repo", "workdir": "/tmp/workdir"},
-        "branches": {"source": "main", "target": "v1.0"} if branches is None else branches,
+        "branches": (
+            {"source": "main", "target": "v1.0"} if branches is None else branches
+        ),
         "fix": fix,
         "build": {},
     }
@@ -248,6 +259,7 @@ def test_parse_claude_config_top_level_model():
 
 # --- timeout_minutes -> command_timeout (seconds) ---
 
+
 def _timeout_config(advanced):
     return {
         "issue_id": "CVE-2024-0000",
@@ -287,6 +299,7 @@ def test_timeout_minutes_negative_means_no_limit():
 
 # --- _sanitize_ref ---
 
+
 def test_sanitize_ref_strips_origin():
     assert _sanitize_ref("origin/release-1.34") == "release-1.34"
 
@@ -305,7 +318,8 @@ def test_sanitize_ref_origin_and_slashes():
 
 # --- parse_targets ---
 
-def _base_config(**overrides):
+
+def _base_config(**overrides) -> dict[str, Any]:
     """Minimal valid config dict for parse_targets tests."""
     cfg = {
         "issue_id": "CVE-2024-1234",
@@ -409,6 +423,7 @@ def test_parse_targets_rejects_mapping_without_branch():
 
 # --- load_multi_target_config ---
 
+
 def test_load_multi_target_config_injects_synthetic_target():
     """Verify parse_bug_fix_config doesn't KeyError on targets-only YAML."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -431,7 +446,9 @@ build:
   test_command: make test
 """)
         f.flush()
-        targets, base_config, claude_config, workdir, source_path = load_multi_target_config(f.name)
+        targets, base_config, claude_config, workdir, source_path = (
+            load_multi_target_config(f.name)
+        )
 
     os.unlink(f.name)
     assert len(targets) == 2
@@ -472,6 +489,7 @@ build:
 
 # ---------- advanced_float: tolerant numeric parsing ----------
 
+
 def _cfg_with_advanced(advanced: dict) -> dict:
     return {
         "issue_id": "t-1",
@@ -486,28 +504,32 @@ def _cfg_with_advanced(advanced: dict) -> dict:
 
 def test_advanced_float_accepts_quoted_string():
     """YAML quoting must not silently disable a configured threshold."""
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"partial_success_skip_ratio": "0.7"}))
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"partial_success_skip_ratio": "0.7"})
+    )
     assert cfg.partial_success_skip_ratio == 0.7
 
 
 def test_advanced_float_accepts_number():
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"partial_success_skip_ratio": 0.8}))
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"partial_success_skip_ratio": 0.8})
+    )
     assert cfg.partial_success_skip_ratio == 0.8
 
 
 def test_advanced_float_null_falls_back_without_crashing(caplog):
     """A bare `partial_success_skip_ratio:` key yields None — must not raise."""
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"partial_success_skip_ratio": None}))
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"partial_success_skip_ratio": None})
+    )
     assert cfg.partial_success_skip_ratio == 0.5
     assert "not a number" in caplog.text
 
 
 def test_advanced_float_garbage_warns_and_defaults(caplog):
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"partial_success_skip_ratio": "high"}))
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"partial_success_skip_ratio": "high"})
+    )
     assert cfg.partial_success_skip_ratio == 0.5
     assert "not a number" in caplog.text
 
@@ -523,47 +545,57 @@ def test_advanced_float_absent_is_silent(caplog):
 # not fail loudly, it silently disables (or inverts) that gate, so it must be
 # rejected at load time.
 
-@pytest.mark.parametrize("bad", [-0.5, 2, 1.0001, float("nan"),
-                                 float("inf"), float("-inf")])
+
+@pytest.mark.parametrize(
+    "bad", [-0.5, 2, 1.0001, float("nan"), float("inf"), float("-inf")]
+)
 def test_skip_ratio_outside_unit_interval_falls_back(bad, caplog):
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"partial_success_skip_ratio": bad}))
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"partial_success_skip_ratio": bad})
+    )
     assert cfg.partial_success_skip_ratio == 0.5
 
 
 def test_skip_ratio_nan_does_not_silently_disable_the_gate():
     """float('nan') makes every `ratio >= threshold` comparison false."""
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"partial_success_skip_ratio": float("nan")}))
-    assert 1.0 >= cfg.partial_success_skip_ratio
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"partial_success_skip_ratio": float("nan")})
+    )
+    assert cfg.partial_success_skip_ratio <= 1.0
 
 
 def test_skip_ratio_above_one_cannot_suppress_a_total_drop():
     """A ratio of 2 would let a 100%-dropped port still report success."""
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"partial_success_skip_ratio": 2}))
-    assert 1.0 >= cfg.partial_success_skip_ratio
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"partial_success_skip_ratio": 2})
+    )
+    assert cfg.partial_success_skip_ratio <= 1.0
 
 
 @pytest.mark.parametrize("flag", [True, False])
 def test_skip_ratio_boolean_is_rejected(flag, caplog):
     """float(True) is 1.0 — a config saying `true` never meant that."""
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"partial_success_skip_ratio": flag}))
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"partial_success_skip_ratio": flag})
+    )
     assert cfg.partial_success_skip_ratio == 0.5
     assert "boolean" in caplog.text
 
 
-@pytest.mark.parametrize("good,expected", [(0, 0.0), (1, 1.0), ("0.75", 0.75), (0.25, 0.25)])
+@pytest.mark.parametrize(
+    "good,expected", [(0, 0.0), (1, 1.0), ("0.75", 0.75), (0.25, 0.25)]
+)
 def test_skip_ratio_accepts_the_whole_unit_interval(good, expected):
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"partial_success_skip_ratio": good}))
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"partial_success_skip_ratio": good})
+    )
     assert cfg.partial_success_skip_ratio == expected
 
 
 # --- phase_4b_model ---
 # Phase 4b defaults to the pipeline model. If you want a different model for
 # 4b, set it explicitly via advanced.phase_4b_model or a profile id.
+
 
 def test_phase_4b_model_defaults_to_pipeline_model():
     """When no phase_4b_model is set, 4b uses the pipeline model."""
@@ -580,14 +612,16 @@ def test_phase_4b_model_follows_pipeline_model():
 
 
 def test_phase_4b_model_override_is_honoured():
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"phase_4b_model": "claude-opus-5"}))
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"phase_4b_model": "claude-opus-5"})
+    )
     assert cfg.phase_4b_model == "claude-opus-5"
 
 
 def test_phase_4b_model_is_stripped():
-    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced(
-        {"phase_4b_model": "  claude-opus-5  "}))
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"phase_4b_model": "  claude-opus-5  "})
+    )
     assert cfg.phase_4b_model == "claude-opus-5"
 
 
@@ -601,6 +635,7 @@ def test_phase_4b_model_unusable_value_falls_back(bad, caplog):
 
 # --- patch mode in parse_bug_fix_config ---
 
+
 def test_parse_patch_mode_populates_fix_patch(tmp_path):
     patch = _write_patch(tmp_path)
     cfg, _, _ = parse_bug_fix_config(_fix_cfg({"patch": patch}))
@@ -612,7 +647,8 @@ def test_parse_patch_mode_populates_fix_patch(tmp_path):
 def test_parse_patch_mode_upstream_ref(tmp_path):
     patch = _write_patch(tmp_path)
     cfg, _, _ = parse_bug_fix_config(
-        _fix_cfg({"patch": patch, "upstream_ref": "deadbeef1234"}))
+        _fix_cfg({"patch": patch, "upstream_ref": "deadbeef1234"})
+    )
     assert cfg.fix_upstream_ref == "deadbeef1234"
 
 
@@ -621,7 +657,8 @@ def test_parse_patch_mode_relative_path_resolves_against_config_dir(tmp_path):
     config_dir.mkdir()
     patch = _write_patch(config_dir)
     cfg, _, _ = parse_bug_fix_config(
-        _fix_cfg({"patch": "fix.patch"}), config_dir=str(config_dir))
+        _fix_cfg({"patch": "fix.patch"}), config_dir=str(config_dir)
+    )
     assert cfg.fix_patch == patch
 
 

@@ -1,4 +1,5 @@
 """Lightweight pipeline analytics tracker — records timing, tokens, costs, and gate outcomes."""
+
 from __future__ import annotations
 
 import json
@@ -7,25 +8,24 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from common.model_registry import ModelProfile, public_config_snapshot
 
-
 MODEL_PRICING: dict[str, dict[str, float]] = {
-    "claude-opus-4-6":   {"input": 5.0,  "output": 25.0},
-    "claude-opus-4-7":   {"input": 5.0,  "output": 25.0},
-    "claude-opus-4-8":   {"input": 5.0,  "output": 25.0},
-    "claude-sonnet-4-6": {"input": 3.0,  "output": 15.0},
-    "claude-haiku-4-5":  {"input": 1.0,  "output": 5.0},
-    "gpt-4o":            {"input": 2.5,  "output": 10.0},
+    "claude-opus-4-6": {"input": 5.0, "output": 25.0},
+    "claude-opus-4-7": {"input": 5.0, "output": 25.0},
+    "claude-opus-4-8": {"input": 5.0, "output": 25.0},
+    "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+    "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
+    "gpt-4o": {"input": 2.5, "output": 10.0},
     # Standard short-context tier (<=272K input tokens). Long-context
     # requests (>272K) are billed at 2x input / 1.5x output by OpenAI —
     # not modeled here, so costs for very large prompts are a slight
     # underestimate. Verified 2026-08: https://developers.openai.com/api/docs/pricing
-    "gpt-5.6-luna":      {"input": 0.20, "output": 1.20},
-    "gpt-5.6-terra":     {"input": 2.0,  "output": 12.0},
-    "gpt-5.6-sol":       {"input": 4.0,  "output": 20.0},
+    "gpt-5.6-luna": {"input": 0.20, "output": 1.20},
+    "gpt-5.6-terra": {"input": 2.0, "output": 12.0},
+    "gpt-5.6-sol": {"input": 4.0, "output": 20.0},
 }
 
 _LOCAL_MODEL_PRICING: dict[str, float] = {"input": 0.0, "output": 0.0}
@@ -33,7 +33,9 @@ _LOCAL_MODEL_PRICING: dict[str, float] = {"input": 0.0, "output": 0.0}
 _FALLBACK_PRICING: dict[str, float] = {"input": 5.0, "output": 25.0}
 
 
-def compute_cost(model: str, input_tokens: int, output_tokens: int, profile=None) -> float:
+def compute_cost(
+    model: str, input_tokens: int, output_tokens: int, profile=None
+) -> float:
     """Compute USD cost from token counts using per-model pricing.
 
     Self-hosted models (Ollama, vLLM via api_base, etc.) are free.
@@ -46,12 +48,15 @@ def compute_cost(model: str, input_tokens: int, output_tokens: int, profile=None
     if is_self_hosted(model, profile=profile):
         pricing = _LOCAL_MODEL_PRICING
     else:
-        stripped = (model
-                    .removeprefix("vertex_ai/")
-                    .removeprefix("anthropic/")
-                    .removeprefix("openai/"))
+        stripped = (
+            model.removeprefix("vertex_ai/")
+            .removeprefix("anthropic/")
+            .removeprefix("openai/")
+        )
         pricing = MODEL_PRICING.get(stripped, _FALLBACK_PRICING)
-    return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+    return (
+        input_tokens * pricing["input"] + output_tokens * pricing["output"]
+    ) / 1_000_000
 
 
 @dataclass
@@ -101,7 +106,15 @@ class PipelineRun:
 
 
 class Tracker:
-    def __init__(self, issue_id: str, config_dict: dict, model: str = "claude-opus-4-6", output_dir: str = "runs", *, profile: ModelProfile | None = None):
+    def __init__(
+        self,
+        issue_id: str,
+        config_dict: dict,
+        model: str = "claude-opus-4-6",
+        output_dir: str = "runs",
+        *,
+        profile: ModelProfile | None = None,
+    ):
         """Initialize a new pipeline run tracker."""
         self._profile = profile  # Runtime-only; never part of PipelineRun.
         self._model = profile.model if profile else model
@@ -111,7 +124,7 @@ class Tracker:
             run_id=str(uuid.uuid4()),
             issue_id=issue_id,
             config=public_config_snapshot(config_dict),
-            start_time=datetime.now(timezone.utc).isoformat(),
+            start_time=datetime.now(UTC).isoformat(),
         )
 
     @contextmanager
@@ -162,9 +175,21 @@ class Tracker:
         effective_profile = profile
         if effective_profile is None and (model is None or model == self._model):
             effective_profile = self._profile
-        effective_model = effective_profile.model if effective_profile else (model or self._model)
-        cost = sdk_cost_usd if sdk_cost_usd is not None else round(
-            compute_cost(effective_model, input_tokens, output_tokens, profile=effective_profile), 6,
+        effective_model = (
+            effective_profile.model if effective_profile else (model or self._model)
+        )
+        cost = (
+            sdk_cost_usd
+            if sdk_cost_usd is not None
+            else round(
+                compute_cost(
+                    effective_model,
+                    input_tokens,
+                    output_tokens,
+                    profile=effective_profile,
+                ),
+                6,
+            )
         )
 
         record = QueryRecord(
@@ -219,7 +244,7 @@ class Tracker:
 
     def save(self) -> str:
         """Write the run record to a timestamped JSON file and return its path."""
-        self._run.end_time = datetime.now(timezone.utc).isoformat()
+        self._run.end_time = datetime.now(UTC).isoformat()
         if self._run.phases:
             self._run.total_duration_s = round(
                 sum(p.duration_s for p in self._run.phases), 3
@@ -227,7 +252,7 @@ class Tracker:
         self._compute_rollups()
 
         os.makedirs(self._output_dir, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         filename = f"{self._run.issue_id}_{ts}.json"
         path = os.path.join(self._output_dir, filename)
 
@@ -268,11 +293,13 @@ class Tracker:
                 gates = ", ".join(f"{k}={v}" for k, v in phase.gate_decisions.items())
                 lines.append(f"    Gates: {gates}")
 
-        lines.extend([
-            "",
-            f"  {'-' * 35} {'-' * 10} {'-' * 8} {'-' * 12} {'-' * 10}",
-            f"  {'TOTAL':<35} {run.total_duration_s:>9.1f}s {run.total_queries:>8} "
-            f"{run.total_input_tokens + run.total_output_tokens:>12,} ${run.total_cost_usd:>9.4f}",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                f"  {'-' * 35} {'-' * 10} {'-' * 8} {'-' * 12} {'-' * 10}",
+                f"  {'TOTAL':<35} {run.total_duration_s:>9.1f}s {run.total_queries:>8} "
+                f"{run.total_input_tokens + run.total_output_tokens:>12,} ${run.total_cost_usd:>9.4f}",
+                "",
+            ]
+        )
         return "\n".join(lines)
