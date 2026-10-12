@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from typing import cast
 
 import pytest
 
@@ -667,7 +668,9 @@ class TestValidateTriagePrerequisites:
                 "reason": "does not exist on target",
             },
         ]
-        corrections = validate_triage_prerequisites(rp, "target", prereqs)
+        corrections = validate_triage_prerequisites(
+            rp, "target", cast(list[dict], prereqs)
+        )
         assert any(c.symbol == "shared_helper" for c in corrections)
 
     def test_nonexistence_reason_gets_corrected(self, evidence_repo):

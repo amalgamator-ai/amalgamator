@@ -218,7 +218,16 @@ def resolve_agent_config(
         if backend == "claude_sdk"
         else {"model": model}
     )
-    config = AgentConfig(cwd=cwd, **{**defaults, **section, "backend": backend})
+    # Fields are runtime-validated against AgentConfig above (unknown -> error), so
+    # this dynamic merge cannot be verified statically.
+    config = AgentConfig(
+        cwd=cwd,
+        **{  # pyrefly: ignore [bad-argument-type]
+            **defaults,
+            **section,
+            "backend": backend,
+        },
+    )
     config.validate()
     if config.api_key_file:
         key_path = Path(os.path.expandvars(config.api_key_file)).expanduser()

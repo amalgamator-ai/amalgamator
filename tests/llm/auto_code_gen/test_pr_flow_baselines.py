@@ -204,7 +204,7 @@ def _repo(tmp_path, gated_extra="", other_extra=""):
     gated = repo / "vllm" / "gated.py"
     other = repo / "vllm" / "other.py"
     gated.parent.mkdir(parents=True, exist_ok=True)
-    gated.write_text("import os\nENABLED = os.getenv('%s')\n" % TOGGLE + gated_extra)
+    gated.write_text(f"import os\nENABLED = os.getenv('{TOGGLE}')\n" + gated_extra)
     other.write_text("VALUE = 1\n" + other_extra)
     return repo
 

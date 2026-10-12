@@ -14,7 +14,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from colorama import Fore, Style
 
@@ -165,7 +165,7 @@ def _step_output_files_complete(step: PipelineStep, cwd: str) -> bool:
 
 
 def print_claude_config(config: ClaudeConfig) -> None:
-    from common.llm_client import is_claude_model
+    from common.model_identity import is_claude_model
     from common.model_registry import public_config_snapshot
 
     class_name = config.__class__.__name__
@@ -316,13 +316,13 @@ def build_claude_options(config: ClaudeConfig):
     return ClaudeAgentOptions(
         system_prompt=config.system_prompt,
         allowed_tools=config.allowed_tools,
-        permission_mode=config.perm_mode,
+        permission_mode=cast(Any, config.perm_mode),
         cwd=config.cwd,
         env=env,
         model=config.model,
-        thinking=config.thinking or {"type": "adaptive"},
-        effort=config.effort,
-        **extra,
+        thinking=cast(Any, config.thinking or {"type": "adaptive"}),
+        effort=cast(Any, config.effort),
+        **extra,  # pyrefly: ignore [bad-argument-type] (dynamic SDK option passthrough)
     )
 
 
@@ -432,7 +432,9 @@ async def claude_run(
         result = await _run_steps(client, steps, start_index, cwd=claude_config.cwd)
         wall_duration = time.time() - wall_start
         for t in result:
-            t["wall_overhead"] = wall_duration - sum(s["duration"] for s in result)
+            t["wall_overhead"] = wall_duration - sum(
+                cast(float, s["duration"]) for s in result
+            )
         return result
 
     options = build_claude_options(claude_config)
@@ -444,7 +446,9 @@ async def claude_run(
         wall_duration = time.time() - wall_start
         for t in result:
             t["session_create_time"] = session_create_time
-            t["wall_overhead"] = wall_duration - sum(s["duration"] for s in result)
+            t["wall_overhead"] = wall_duration - sum(
+                cast(float, s["duration"]) for s in result
+            )
         return result
 
 
@@ -475,7 +479,11 @@ async def _run_steps(active_client, steps, start_index, cwd=None):
             continue
 
         start_time = time.time()
-        step_usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": None}
+        step_usage: dict[str, float | None] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": None,
+        }
         max_retries = 3
 
         for attempt in range(1, max_retries + 1):

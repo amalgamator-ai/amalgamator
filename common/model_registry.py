@@ -56,9 +56,7 @@ class ModelProfile:
     def is_self_hosted(self) -> bool:
         if is_ollama_model(self.model):
             return True
-        if self.model.startswith("openai/") and self.api_base:
-            return True
-        return False
+        return bool(self.model.startswith("openai/") and self.api_base)
 
 
 class RegistryError(Exception):

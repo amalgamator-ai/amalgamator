@@ -17,4 +17,3 @@ python -m llm.auto_code_gen.run_investigate_issue \
     --code-pr-review-evolution-file $PRS_DIR/code_gen_V3_PR_TOTAL_REVIEW_EVOLUTION_from_sglang_to_vllm.txt \
     --issue-desc-file $PRS_DIR/issue_1.txt \
     --output-file-prefix issue_1_research
-

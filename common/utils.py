@@ -29,7 +29,7 @@ def output_dir_from_run_config(run_config: str) -> str:
 def setup_logging(name: str) -> None:
     os.makedirs(LOGS_DIR, exist_ok=True)
     log_path = os.path.join(LOGS_DIR, f"run_{name}.log")
-    log_file = open(log_path, "w")
+    log_file = open(log_path, "w")  # noqa: SIM115 (app-lifetime tee target)
     sys.stdout = Tee(sys.stdout, log_file)
 
 
@@ -110,7 +110,7 @@ def safe_clean_dir(dir_path: str | Path) -> None:
 
     cwd_resolved = str(Path.cwd().resolve())
     project_resolved = str(Path(_PROJECT_ROOT).resolve())
-    if resolved == cwd_resolved or resolved == project_resolved:
+    if resolved in (cwd_resolved, project_resolved):
         raise ValueError(
             f"Refusing to clean directory that resolves to the current "
             f"working directory or project root.\n"
@@ -172,7 +172,7 @@ def clean_output_dir(
         always_keep_basenames.update(extra_keep)
 
     removed = []
-    for root, dirs, files in os.walk(output_dir, topdown=False):
+    for root, _dirs, files in os.walk(output_dir, topdown=False):
         root_path = Path(root)
 
         if "run_originals" in root_path.parts:

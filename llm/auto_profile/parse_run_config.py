@@ -243,7 +243,11 @@ def validate_profile(i, p, config_dir, errors):
         if field not in p:
             errors.append(f'"profiles[{i}].{field}" is required.')
         elif not isinstance(p[field], ftype):
-            errors.append(f'"profiles[{i}].{field}" must be of type {ftype.__name__}.')
+            if isinstance(ftype, tuple):
+                type_name = "/".join(t.__name__ for t in ftype if isinstance(t, type))
+            else:
+                type_name = getattr(ftype, "__name__", "?")
+            errors.append(f'"profiles[{i}].{field}" must be of type {type_name}.')
 
     if "model" in p and isinstance(p["model"], str) and len(p["model"]) == 0:
         errors.append(f'"profiles[{i}].model" must be a non-empty string.')
@@ -416,7 +420,7 @@ def parse_config(infra_config_path, run_config_path):
     def make_assoc(value_fn):
         entries = " ".join(
             f'["{shell_escape(p["model"])}"]="{shell_escape(value_fn(p, pf))}"'
-            for p, pf in zip(profiles, all_parsed_frameworks)
+            for p, pf in zip(profiles, all_parsed_frameworks, strict=False)
         )
         return entries
 
@@ -424,7 +428,7 @@ def parse_config(infra_config_path, run_config_path):
 
     for fw in VALID_FRAMEWORKS:
         var_name = f"{fw.upper()}_DOCKER_IMAGE"
-        image = docker_images.get(fw, "")
+        image = (docker_images or {}).get(fw, "")
         print(f'{var_name}="{shell_escape(image)}"')
 
     print(f"PROFILES=({profiles_arr})")

@@ -32,7 +32,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from colorama import Fore, Style
 
@@ -64,7 +64,7 @@ def _litellm_completion_with_streaming(stream: bool = True, **kwargs):
     try:
         response_stream = litellm.completion(stream=True, **kwargs)
         return litellm.stream_chunk_builder(
-            list(response_stream),
+            list(cast(Any, response_stream)),
             messages=kwargs.get("messages", []),
         )
     except Exception as e:
@@ -87,7 +87,19 @@ _CLAUDE_TO_LITELLM_TOOL = {
     "Bash": "bash",
 }
 
-ALL_TOOL_SCHEMAS = [
+
+class ToolFunction(TypedDict):
+    name: str
+    description: str
+    parameters: dict[str, object]
+
+
+class ToolSchema(TypedDict):
+    type: str
+    function: ToolFunction
+
+
+ALL_TOOL_SCHEMAS: list[ToolSchema] = [
     {
         "type": "function",
         "function": {
@@ -146,7 +158,7 @@ ALL_TOOL_SCHEMAS = [
 ]
 
 
-def _filter_tools(allowed_tools: list[str] | None) -> list[dict]:
+def _filter_tools(allowed_tools: list[str] | None) -> list[ToolSchema]:
     """Return tool schemas filtered by the config's allowed_tools list.
 
     Maps Claude SDK names (Read, Write, Bash) to LiteLLM names
@@ -584,10 +596,10 @@ class AgentRunner(ABC):
 class ClaudeAgentRunner(AgentRunner):
     """Thin wrapper around the existing ``claude_run()``."""
 
-    async def run(self, config, steps, resume=False):
+    async def run(self, config, steps: list, resume: bool = False) -> list[dict]:
         from common.claude_utils import claude_run as _claude_run
 
-        return await _claude_run(config, steps, resume=resume)
+        return cast(list, await _claude_run(config, steps, resume=resume))
 
 
 # ── LiteLLM agent runner (generic tool-use loop) ────────────────────────────
@@ -600,7 +612,7 @@ class LiteLLMAgentRunner(AgentRunner):
     calling: Qwen 2.5+, Llama 3.1+, Mistral, GPT-4o, Gemini, etc.
     """
 
-    async def run(self, config, steps, resume=False):
+    async def run(self, config, steps: list, resume: bool = False) -> list[dict]:
         from common.claude_utils import PipelineStep, print_claude_config
         from common.llm_client import _resolve_model
 
@@ -852,7 +864,7 @@ class LiteLLMAgentRunner(AgentRunner):
                         final = _litellm_completion_with_streaming(
                             model=model,
                             messages=messages,
-                            **final_kwargs,
+                            **final_kwargs,  # pyrefly: ignore [bad-argument-type] (dynamic LiteLLM option passthrough)
                         )
                         final_text = _strip_thinking(
                             final.choices[0].message.content or ""
@@ -953,7 +965,7 @@ async def agent_run(config, steps, resume=False):
     if profile:
         use_claude = profile.provider == "anthropic"
     else:
-        from common.llm_client import is_claude_model
+        from common.model_identity import is_claude_model
 
         use_claude = is_claude_model(config.model)
 

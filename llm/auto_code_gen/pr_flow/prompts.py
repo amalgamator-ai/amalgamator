@@ -6,6 +6,7 @@ command -- see the hard rules in the template.
 """
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 COMMENT_RESOLUTION_FILE = "comment_resolution.md"
 SUMMARY_DRAFT_FILE = "summary_draft_R0.txt"

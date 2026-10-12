@@ -46,6 +46,7 @@ import tempfile
 import textwrap
 import time
 import uuid
+from pathlib import Path
 
 # ── oc helpers ────────────────────────────────────────────────────────────────
 
@@ -232,9 +233,17 @@ def _upload_dir(namespace, pod_name, local_dir, remote_dir):
     r = _oc(
         "exec", "-n", namespace, pod_name, "--", "mkdir", "-p", remote_dir, check=False
     )
-    r = _oc("cp", local_dir + "/", f"{namespace}/{pod_name}:{remote_dir}/", check=False)
+    r = _oc(
+        "cp",
+        local_dir + "/",
+        f"{namespace}/{pod_name}:{remote_dir}/",
+        check=False,
+    )
     if r.returncode != 0:
-        print(f"WARNING: upload to pod failed: {r.stderr.strip()}", file=sys.stderr)
+        print(
+            f"WARNING: upload to pod failed: {r.stderr.strip()}",
+            file=sys.stderr,
+        )
         return False
     return True
 
@@ -533,7 +542,8 @@ def _run_job(
     print(manifest, file=sys.stderr)
 
     print(
-        f"[cluster_runner] submitting {job_name} namespace={namespace}", file=sys.stderr
+        f"[cluster_runner] submitting {job_name} namespace={namespace}",
+        file=sys.stderr,
     )
     _run_or_die("apply", "-f", "-", "-n", namespace, capture=False, input=manifest)
 
@@ -552,7 +562,10 @@ def _run_job(
         _oc("delete", "job", job_name, "-n", namespace, check=False)
         sys.exit(1)
 
-    print(f"[cluster_runner] pod {pod_name} started (phase={phase})", file=sys.stderr)
+    print(
+        f"[cluster_runner] pod {pod_name} started (phase={phase})",
+        file=sys.stderr,
+    )
 
     try:
         terminal = _poll_job_until_done(namespace, job_name, pod_name)
@@ -562,7 +575,10 @@ def _run_job(
     print(f"[cluster_runner] Job state: {terminal}", file=sys.stderr)
 
     # Always copy results so the agent can inspect logs even on failure.
-    print(f"[cluster_runner] copying results to {local_out_dir}...", file=sys.stderr)
+    print(
+        f"[cluster_runner] copying results to {local_out_dir}...",
+        file=sys.stderr,
+    )
     _copy_results(namespace, pvc_name, pvc_out_dir, local_out_dir)
 
     return pod_name
@@ -651,14 +667,17 @@ def cmd_run_iteration(args):
 
     status_file = os.path.join(args.out_dir, "run_status.txt")
     status = (
-        open(status_file).read().strip()
+        Path(status_file).read_text().strip()
         if os.path.isfile(status_file)
         else "NO_STATUS_FILE"
     )
     print(f"[cluster_runner] run_status={status}", file=sys.stderr)
 
     if status != "COMPLETED":
-        print(f"ERROR: iteration did not complete (status={status})", file=sys.stderr)
+        print(
+            f"ERROR: iteration did not complete (status={status})",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print(f"[cluster_runner] success — results in {args.out_dir}", file=sys.stderr)
@@ -773,7 +792,7 @@ def cmd_run_iteration_parallel(args):
 
     compile_status_file = os.path.join(args.out_dir, "run_status.txt")
     compile_status = (
-        open(compile_status_file).read().strip()
+        Path(compile_status_file).read_text().strip()
         if os.path.isfile(compile_status_file)
         else "NO_STATUS_FILE"
     )
@@ -838,7 +857,10 @@ def cmd_run_iteration_parallel(args):
             yaml_path = os.path.join(yaml_dir, f"run_{stage}.yaml")
             with open(yaml_path, "w") as f:
                 f.write(info["manifest"])
-            print(f"[cluster_runner] {stage} manifest → {yaml_path}", file=sys.stderr)
+            print(
+                f"[cluster_runner] {stage} manifest → {yaml_path}",
+                file=sys.stderr,
+            )
             print(info["manifest"], file=sys.stderr)
             _run_or_die(
                 "apply",
@@ -892,12 +914,18 @@ def cmd_run_iteration_parallel(args):
                     "error": error,
                 }
                 if error:
-                    print(f"[cluster_runner] [{stage}] ERROR: {error}", file=sys.stderr)
+                    print(
+                        f"[cluster_runner] [{stage}] ERROR: {error}",
+                        file=sys.stderr,
+                    )
 
         # ── copy results from PVC (sequentially to avoid overwrites) ──────────
         for stage in stages:
             if results[stage]["pod_name"]:
-                print(f"[cluster_runner] copying {stage} results...", file=sys.stderr)
+                print(
+                    f"[cluster_runner] copying {stage} results...",
+                    file=sys.stderr,
+                )
                 _copy_results(
                     args.namespace,
                     args.pvc_name,
@@ -1004,11 +1032,14 @@ def cmd_run_diagnostic(args):
 
     status_file = os.path.join(args.out_dir, "diagnostic_status.txt")
     status_p = (
-        open(status_file).read().strip()
+        Path(status_file).read_text().strip()
         if os.path.isfile(status_file)
         else "NO_STATUS_FILE"
     )
-    print(f"[cluster_runner] patched diagnostic_status={status_p}", file=sys.stderr)
+    print(
+        f"[cluster_runner] patched diagnostic_status={status_p}",
+        file=sys.stderr,
+    )
 
     if status_p != "NSYS_PATCHED_DONE":
         print(
@@ -1072,7 +1103,7 @@ def cmd_run_diagnostic(args):
         )
 
         status = (
-            open(status_file).read().strip()
+            Path(status_file).read_text().strip()
             if os.path.isfile(status_file)
             else "NO_STATUS_FILE"
         )
@@ -1080,12 +1111,14 @@ def cmd_run_diagnostic(args):
 
         if status != "NSYS_DONE":
             print(
-                f"ERROR: diagnostic did not complete (status={status})", file=sys.stderr
+                f"ERROR: diagnostic did not complete (status={status})",
+                file=sys.stderr,
             )
             sys.exit(1)
 
     print(
-        f"[cluster_runner] nsys done — SQLite traces in {args.out_dir}", file=sys.stderr
+        f"[cluster_runner] nsys done — SQLite traces in {args.out_dir}",
+        file=sys.stderr,
     )
     print("[cluster_runner] agent will now run Steps 2-5 locally.", file=sys.stderr)
 
@@ -1144,7 +1177,7 @@ def cmd_smoke_compile(args):
 
     status_file = os.path.join(args.out_dir, "smoke_status.txt")
     status = (
-        open(status_file).read().strip()
+        Path(status_file).read_text().strip()
         if os.path.isfile(status_file)
         else "NO_STATUS_FILE"
     )
@@ -1214,7 +1247,7 @@ def cmd_smoke_lm_eval(args):
 
     status_file = os.path.join(args.out_dir, "smoke_status.txt")
     status = (
-        open(status_file).read().strip()
+        Path(status_file).read_text().strip()
         if os.path.isfile(status_file)
         else "NO_STATUS_FILE"
     )
@@ -1228,7 +1261,10 @@ def cmd_smoke_lm_eval(args):
                 lines = f.readlines()
                 for line in lines[-40:]:
                     print(line, end="", file=sys.stderr)
-        print(f"ERROR: smoke-lm-eval test failed (status={status})", file=sys.stderr)
+        print(
+            f"ERROR: smoke-lm-eval test failed (status={status})",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print(
@@ -1277,7 +1313,10 @@ def cmd_reset_workspace(args):
     keep_cmake = args.keep_cmake
 
     try:
-        print(f"[reset-workspace] creating helper pod {helper}...", file=sys.stderr)
+        print(
+            f"[reset-workspace] creating helper pod {helper}...",
+            file=sys.stderr,
+        )
         _run_or_die(
             "run",
             helper,
@@ -1344,7 +1383,7 @@ def cmd_reset_workspace(args):
             print(f"WARNING: git clean failed (exit {rc})", file=sys.stderr)
 
         rc = _exec("git", "-C", vllm_dir, "log", "--oneline", "-1")
-        rc2 = _exec("git", "-C", vllm_dir, "status", "--short")
+        _exec("git", "-C", vllm_dir, "status", "--short")
 
         mode = "incremental" if keep_cmake else "full rebuild"
         print(
@@ -1489,7 +1528,10 @@ def main():
     )
     _add_common(ri)
     for flag, kw in _ITERATION_ARGS:
-        ri.add_argument(flag, **kw)
+        ri.add_argument(
+            flag,
+            **kw,  # pyrefly: ignore [bad-argument-type] (runtime-defined argparse options)
+        )
 
     rip = sub.add_parser(
         "run-iteration-parallel",
@@ -1497,7 +1539,10 @@ def main():
     )
     _add_common(rip)
     for flag, kw in _ITERATION_ARGS:
-        rip.add_argument(flag, **kw)
+        rip.add_argument(
+            flag,
+            **kw,  # pyrefly: ignore [bad-argument-type] (runtime-defined argparse options)
+        )
 
     # ── run-diagnostic ─────────────────────────────────────────────────────────
     rd = sub.add_parser(

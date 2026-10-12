@@ -151,6 +151,7 @@ def test_named_selection_does_not_seed_globals_or_merge_inline(
         )
     )
     configure.assert_not_called()
+    assert claude.profile is not None
     assert claude.profile.api_base is None
     assert claude.profile.api_key is None
     assert claude.profile.params == {}
@@ -180,7 +181,9 @@ def test_different_bare_phase_uses_only_yaml_inline_transport(
             },
         )
     )
+    assert claude.profile is not None
     assert claude.profile.api_key == "NAMED_KEY"
+    assert bug.phase_4b_profile is not None
     assert bug.phase_4b_profile.api_key == "INLINE_KEY"
     assert bug.phase_4b_profile.api_base == "http://inline/v1"
     assert "inherits inline fields" in caplog.text

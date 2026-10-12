@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 from collections import defaultdict
+from typing import cast
 
 REVIEW_SUMMARY_FILE = "review_summary.txt"
 NEW_COMMENTS_FILE = "NEW_COMMENTS.md"
@@ -193,7 +194,7 @@ def select_pending(data, cursor=None, our_logins=()):
                 ],
             }
         )
-    pending.sort(key=lambda item: item["comment_id"])
+    pending.sort(key=lambda item: cast(int, item["comment_id"]))
     return pending
 
 

@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def push_fixes(repo_dir: str, remote: str = "origin", branch: str = None):
+def push_fixes(repo_dir: str, remote: str = "origin", branch: str | None = None):
     repo_dir = os.path.abspath(repo_dir)
 
     if not os.path.isdir(repo_dir):

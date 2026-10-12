@@ -53,6 +53,7 @@ def _parse_framework_entry(raw: dict, idx: int) -> FrameworkEntry:
         f"profiles[{idx}].frameworks: invalid name {name!r}. "
         f"Must be one of {list(VALID_FRAMEWORKS)}",
     )
+    assert isinstance(name, str)
     profiler_type = raw.get("profiler_type", "nsys")
     _require(
         profiler_type in ("nsys", "torch"),
@@ -93,6 +94,7 @@ def _resolve_exec_mode(
         isinstance(input_len, int) and input_len > 0,
         f"profiles[{idx}].input_len must be a positive integer",
     )
+    assert isinstance(input_len, int)
 
     if "kv_cache_fill" in profile_raw:
         kv_cache_fill = profile_raw["kv_cache_fill"]
@@ -100,6 +102,8 @@ def _resolve_exec_mode(
             isinstance(kv_cache_fill, int) and kv_cache_fill > input_len,
             f"profiles[{idx}].kv_cache_fill must be > input_len",
         )
+        assert isinstance(input_len, int)
+        assert isinstance(kv_cache_fill, int)
         output_len = kv_cache_fill + PROFILING_BUFFER
         return "", input_len, output_len, kv_cache_fill
 
@@ -108,6 +112,8 @@ def _resolve_exec_mode(
         isinstance(output_len, int) and output_len > 0,
         f"profiles[{idx}].output_len must be a positive integer",
     )
+    assert isinstance(input_len, int)
+    assert isinstance(output_len, int)
     return "", input_len, output_len, 0
 
 
@@ -138,12 +144,14 @@ def _parse_profile(raw: dict, exec_modes: dict[str, ExecMode], idx: int) -> Prof
         isinstance(model, str) and len(model) > 0,
         f"profiles[{idx}].model must be a non-empty string",
     )
+    assert isinstance(model, str)
 
     num_gpus = raw.get("num_gpus")
     _require(
         isinstance(num_gpus, int) and num_gpus > 0,
         f"profiles[{idx}].num_gpus must be a positive integer",
     )
+    assert isinstance(num_gpus, int)
 
     mode_name, input_len, output_len, kv_cache_fill = _resolve_exec_mode(
         raw, exec_modes, idx

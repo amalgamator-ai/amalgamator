@@ -127,7 +127,7 @@ def render_thread_replies(replies_path):
         with open(replies_path) as f:
             payload = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"cannot read {replies_path}: {exc}")
+        raise SystemExit(f"cannot read {replies_path}: {exc}") from exc
     out = []
     for entry in payload.get("replies") or []:
         comment_id = entry.get("comment_id")

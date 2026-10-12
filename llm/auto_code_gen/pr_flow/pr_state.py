@@ -265,7 +265,7 @@ def update(path, **values):
             try:
                 value = json.loads(value)
             except json.JSONDecodeError as exc:
-                raise ValueError(f"field {key} must be JSON ({exc}): {value}")
+                raise ValueError(f"field {key} must be JSON ({exc}): {value}") from exc
             if not isinstance(value, (dict, list)):
                 raise ValueError(f"field {key} must be a JSON object or array")
         state[key] = value

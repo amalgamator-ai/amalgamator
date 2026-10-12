@@ -8,11 +8,22 @@ the network.
 
 import json
 import os
+import shutil
 import subprocess
 
 import pytest
 
 from llm.auto_code_gen.pr_flow import run_reviewer_suggest as rs
+
+# This E2E test drives the real CLI entry point, which shells out to the GitHub
+# CLI for reviewer data. Skip when it cannot run meaningfully (no gh binary, or
+# CI without a token), so the gate stays green everywhere gh is unavailable.
+# Mirrors the production token lookup, which accepts GH_TOKEN or GITHUB_TOKEN.
+needs_gh = pytest.mark.skipif(
+    not shutil.which("gh")
+    or not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")),
+    reason="requires the gh CLI with GH_TOKEN or GITHUB_TOKEN for live GitHub data",
+)
 
 
 def _run_git(cwd, *args):
@@ -244,6 +255,7 @@ class TestPatchFilesFromState:
         assert rs._patch_files_from_state(state) == [path]
 
 
+@needs_gh
 class TestEndToEndGenerate:
 
     def test_generate_writes_draft_and_json_and_stamps_state(

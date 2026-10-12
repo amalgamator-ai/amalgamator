@@ -141,6 +141,7 @@ def test_sdk_timing_distinguishes_unknown_and_reported_zero(
     monkeypatch.setattr(claude_utils, "ResultMessage", Result)
     monkeypatch.setattr(claude_utils, "print_Message", lambda msg: None)
     timings = asyncio.run(claude_utils.claude_run(claude_cfg, ["prompt"]))
+    assert timings is not None
     assert timings[0]["cost_usd"] == reported
 
 

@@ -121,7 +121,7 @@ def _run_via_docker(
     all_results = []
 
     # Update docker images
-    for fw_name, image in config.docker_images.items():
+    for _fw_name, image in config.docker_images.items():
         docker.ensure_image_updated(image)
 
     fw_order = []

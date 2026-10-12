@@ -52,7 +52,7 @@ def _fetch_json(path: str) -> dict:
 
 def _parse_args_list(args: list[str]) -> list[tuple[str, str | None]]:
     """Parse a flat list of args into (flag, value) pairs."""
-    pairs = []
+    pairs: list[tuple[str, str | None]] = []
     i = 0
     while i < len(args):
         token = args[i]

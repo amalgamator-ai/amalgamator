@@ -33,6 +33,7 @@ import json
 import os
 import re
 import subprocess
+from pathlib import Path
 
 REBASE_DIR = "rebase"
 CONFLICTS_FILE = "CONFLICTS.md"
@@ -175,8 +176,12 @@ def drift(state, repo_dir=None):
         "on_new_base": on_new_base,
         "pr_files": pr_files,
         "upstream_files": upstream_files,
-        "drift_files": sorted(set(pr_files) & set(upstream_files)),
-        "upstream_only_files": sorted(set(upstream_files) - set(pr_files)),
+        "drift_files": sorted(
+            set(str(f) for f in pr_files) & set(str(f) for f in upstream_files)
+        ),
+        "upstream_only_files": sorted(
+            set(str(f) for f in upstream_files) - set(str(f) for f in pr_files)
+        ),
     }
 
 
@@ -199,7 +204,11 @@ def plan(state, repo_dir=None):
     ahead = behind = ""
     if base and target_sha:
         counts = _git(
-            repo_dir, "rev-list", "--left-right", "--count", f"{base}...{target}"
+            repo_dir,
+            "rev-list",
+            "--left-right",
+            "--count",
+            f"{base}...{target}",
         ).split()
         if len(counts) == 2:
             behind = counts[1]  # what upstream gained since our base
@@ -396,7 +405,7 @@ def parse_resolution(path):
         return summary
 
     current = None
-    for line in open(path).read().splitlines():
+    for line in Path(path).read_text().splitlines():
         header = re.match(r"^##\s*File\s*:?\s*(\S+)?\s*$", line.strip())
         if header:
             current = {
@@ -419,12 +428,15 @@ def parse_resolution(path):
         if notes:
             current["notes"] = notes.group(1).strip()
 
+    status_counts: dict[str, int] = {}
     for entry in summary["entries"]:
-        summary[entry["status"]] += 1
+        status_counts[entry["status"]] = status_counts.get(entry["status"], 0) + 1
         summary["files"].append(entry["file"])
         if entry["status"] == "unresolved":
             summary["unresolved_files"].append(entry["file"])
     summary["total"] = len(summary["entries"])
+    summary["resolved"] = status_counts.get("resolved", 0)
+    summary["unresolved"] = status_counts.get("unresolved", 0)
     summary["pass"] = summary["total"] > 0 and summary["unresolved"] == 0
     if not summary["total"]:
         summary["reason"] = "no '## File:' blocks found"

@@ -111,7 +111,7 @@ def _patch_files(patch_path):
                 if m and m.group(1) != "/dev/null":
                     files.append(m.group(1))
     except OSError as exc:
-        raise CheckError(EXIT_STATE, f"cannot read patch {patch_path}: {exc}")
+        raise CheckError(EXIT_STATE, f"cannot read patch {patch_path}: {exc}") from exc
     return files
 
 
@@ -188,7 +188,8 @@ def check_branch_name(state, name, allow_prefixless=False):
             )
     if name == state.get("upstream_branch") or name == state.get("base_branch"):
         raise CheckError(
-            EXIT_BRANCH, f"'{name}' equals the base branch -- a PR would target itself"
+            EXIT_BRANCH,
+            f"'{name}' equals the base branch -- a PR would target itself",
         )
     if name == state.get("local_branch"):
         raise CheckError(
@@ -198,7 +199,8 @@ def check_branch_name(state, name, allow_prefixless=False):
     prefix = state.get("branch_prefix") or ""
     if prefix and not name.startswith(prefix) and not allow_prefixless:
         raise CheckError(
-            EXIT_BRANCH, f"'{name}' must start with '{prefix}' (state.branch_prefix)"
+            EXIT_BRANCH,
+            f"'{name}' must start with '{prefix}' (state.branch_prefix)",
         )
     return f"branch name OK: {name}"
 
@@ -230,7 +232,8 @@ def check_remotes(state):
     fork_url = remotes[fork_remote]
     if fork_url.startswith("file://") or fork_url.startswith("/"):
         raise CheckError(
-            EXIT_REMOTE, f"remote '{fork_remote}' resolves to a local path ({fork_url})"
+            EXIT_REMOTE,
+            f"remote '{fork_remote}' resolves to a local path ({fork_url})",
         )
     fork_repo = pr_state.parse_git_url(fork_url)
     if not fork_repo:
@@ -288,11 +291,13 @@ def check_descs(state, extra_patterns=()):
     title = lines[0].strip() if lines else ""
     if not title:
         raise CheckError(
-            EXIT_DESCS, f"commit title (first line of {COMMIT_DESC_FILE}) is empty"
+            EXIT_DESCS,
+            f"commit title (first line of {COMMIT_DESC_FILE}) is empty",
         )
     if len(title) > MAX_COMMIT_TITLE:
         raise CheckError(
-            EXIT_DESCS, f"commit title is {len(title)} chars (max {MAX_COMMIT_TITLE})"
+            EXIT_DESCS,
+            f"commit title is {len(title)} chars (max {MAX_COMMIT_TITLE})",
         )
     if len([line for line in lines[1:] if line.strip()]) < 2:
         raise CheckError(EXIT_DESCS, "commit message has no body beyond the title")
@@ -652,10 +657,10 @@ def check_pre_commit(state, files=()):
     cmd = ["pre-commit", "run", "--files"] + changed
     try:
         proc = subprocess.run(cmd, cwd=repo_dir, capture_output=True, text=True)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         raise CheckError(
             EXIT_LINT, "pre-commit is not installed (pip install pre-commit)"
-        )
+        ) from exc
 
     output = (proc.stdout or "") + (proc.stderr or "")
     print(output.rstrip())
@@ -667,11 +672,13 @@ def check_pre_commit(state, files=()):
             "check; if it only reports errors, fix the source "
             "and re-run.",
         )
-    fixed = [l for l in output.splitlines() if "reformatted" in l or "Fixed" in l]
+    fixed = [
+        line for line in output.splitlines() if "reformatted" in line or "Fixed" in line
+    ]
     summary = f"pre-commit OK on {len(changed)} file(s)"
     if fixed:
         summary += " -- hooks rewrote: {}".format(
-            ", ".join(sorted({l.strip() for l in fixed}))[:200]
+            ", ".join(sorted({line.strip() for line in fixed}))[:200]
         )
     return summary
 
@@ -681,8 +688,8 @@ def check_gh_auth():
         result = subprocess.run(
             ["gh", "auth", "status"], capture_output=True, text=True
         )
-    except FileNotFoundError:
-        raise CheckError(EXIT_AUTH, "gh CLI not installed")
+    except FileNotFoundError as exc:
+        raise CheckError(EXIT_AUTH, "gh CLI not installed") from exc
     if result.returncode != 0:
         raise CheckError(
             EXIT_AUTH,

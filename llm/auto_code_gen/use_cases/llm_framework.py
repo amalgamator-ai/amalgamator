@@ -1,7 +1,8 @@
 import os
 import re
+from typing import cast
 
-from common.claude_utils import PipelineStep
+from common.claude_utils import ClaudeConfig, PipelineStep
 from llm.auto_code_gen.agents import agent_run
 from llm.auto_code_gen.code_gen_prompts import (
     CODE_GEN_DIR,
@@ -515,16 +516,16 @@ class LLMFrameworkUseCase(UseCase):
 
     async def run_runtime_iterations(
         self,
-        context,
+        context: str,
         config,
-        claude_config,
-        code_trace_files,
-        code_port_plan_file,
-        test_plan_file,
-        resume=False,
+        claude_config: ClaudeConfig,
+        code_trace_files: list[str],
+        code_port_plan_file: str,
+        test_plan_file: str,
+        resume: bool = False,
         run_models=None,
         client=None,
-    ):
+    ) -> tuple[list[dict], list[dict]]:
         from llm.auto_code_gen.code_gen_prompts import (
             RUNTIME_EXPECTED_IMPROVEMENT_FILE,
             RUNTIME_RESULTS_MANIFEST,
@@ -708,8 +709,8 @@ class LLMFrameworkUseCase(UseCase):
                 phase_label=phase_label,
                 client=client,
             )
-            all_phase_results.extend(phase_results)
-            all_step_timings.extend(runtime_timings)
+            all_phase_results.extend(cast(list, phase_results))
+            all_step_timings.extend(cast(list, runtime_timings))
 
         # Collect all benchmark results into manifest
         if len(models_to_run) > 0:

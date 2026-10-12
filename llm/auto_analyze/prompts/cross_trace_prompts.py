@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from common.claude_utils import PipelineStep
 from common.iteration_utils import prev_iteration_section as _prev_iteration_section
@@ -740,7 +740,8 @@ def gen_improvement_plan_iter_steps(
             output_dir, f"{IMPROVEMENT_PREFIX}_review_V{iteration}.txt"
         ),
         output_summary_file=os.path.join(
-            output_dir, f"{IMPROVEMENT_PREFIX}_review_summary_V{iteration}.txt"
+            output_dir,
+            f"{IMPROVEMENT_PREFIX}_review_summary_V{iteration}.txt",
         ),
         iteration=iteration,
         knowledge_base_file=kb_file,
@@ -778,7 +779,7 @@ def gen_cross_trace_prompts(config: CrossTraceConfig, file_prefix=""):
     matching_file = _path(CROSS_MATCHING_FILE)
     compare_file = _path(CROSS_COMPARE_FILE)
 
-    prompt_objects = [
+    prompt_objects: list[Any] = [
         MatchMedianTransformerBlocksPrompt(
             config=config,
             output_file=matching_file,
@@ -813,8 +814,10 @@ def gen_cross_trace_prompts(config: CrossTraceConfig, file_prefix=""):
         output_files["cross_improvement"] = improvement_file
 
     total_steps = len(step_names)
-    prompts = []
-    for i, (step_name, prompt_obj) in enumerate(zip(step_names, prompt_objects), 1):
+    prompts: list[Any] = []
+    for i, (step_name, prompt_obj) in enumerate(
+        zip(step_names, prompt_objects, strict=False), 1
+    ):
         prompts.append(
             {"cmd": (f"print('\\n=== [Step {i}/{total_steps}] {step_name}... ===')")}
         )

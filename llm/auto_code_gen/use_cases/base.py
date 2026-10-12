@@ -89,6 +89,7 @@ class UseCase(ABC):
         code_port_plan_file: str,
         test_plan_file: str,
         resume: bool = False,
+        run_models=None,
         client=None,
     ) -> tuple[list[dict], list[dict]]:
         """Phase 5: use-case-specific runtime iterations.

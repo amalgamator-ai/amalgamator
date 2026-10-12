@@ -109,6 +109,7 @@ def test_named_profile_reaches_both_scanner_completion_paths(
         config.repo_path, config.llm_model, profile=config.profile
     ) == ("make", "make test")
     assert request.call_count == 2
+    assert config.profile is not None
     for call in request.call_args_list:
         sent = call.kwargs
         assert sent["model"] == config.profile.model
@@ -130,6 +131,7 @@ def test_home_registry_default_is_discovered(tmp_path):
     registry = write_registry(tmp_path / ".config" / "amalgamator")
     config = run_scanner.load_config(write_scan(tmp_path))
     assert config.model_ref == "review"
+    assert config.profile is not None
     assert config.profile.api_key == "FAKE_PROFILE_KEY"
     assert config.models_path == registry.resolve()
 

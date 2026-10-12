@@ -24,11 +24,11 @@ class StrategyAttempt:
 
 @dataclass
 class Dossier:
-    issue_id: str
-    source_branch: str
-    target_branch: str
-    fix_commit: str
-    bug_description: str
+    issue_id: str = ""
+    source_branch: str = ""
+    target_branch: str = ""
+    fix_commit: str = ""
+    bug_description: str = ""
     items: list[DossierItem] = field(default_factory=list)
     strategies: list[StrategyAttempt] = field(default_factory=list)
     cherry_pick_path: str = ""

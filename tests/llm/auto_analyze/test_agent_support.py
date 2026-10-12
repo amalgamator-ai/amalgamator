@@ -1,5 +1,6 @@
 import argparse
 import json
+from typing import Any
 
 from llm.agents import agent_run as shared_agent_run
 from llm.auto_analyze.agent_support import add_agent_arguments, make_agent_config
@@ -8,7 +9,7 @@ from llm.auto_analyze.configs.single_trace_config import SingleTraceConfig
 from llm.auto_code_gen.agents import agent_run as codegen_agent_run
 
 
-def _single_trace_data(tmp_path):
+def _single_trace_data(tmp_path) -> dict[str, Any]:
     return {
         "framework_name": "vllm",
         "model": "example/model",

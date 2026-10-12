@@ -17,9 +17,13 @@ import sys
 import time
 import uuid
 from datetime import UTC
+from pathlib import Path
+from typing import cast
 
 from common.claude_utils import PipelineStep, _all_steps_complete
-from common.iteration_utils import check_converged as _check_converged
+from common.iteration_utils import (
+    check_converged as _check_converged,
+)
 from common.utils import safe_clean_dir, setup_logging
 from llm.auto_code_gen.agents import agent_run
 from llm.auto_code_gen.code_gen_configs import load_config_and_use_case
@@ -260,7 +264,17 @@ def _sync_tree_to_pvc(config, source_dir):
         # stamp check. The pod never needs it (the version ships in
         # .ai_auto_analyze_scm_version), so drop the pointer from the PVC.
         subprocess.run(
-            ["oc", "exec", "-n", ns, helper, "--", "rm", "-f", f"{pvc_vllm}/.git"],
+            [
+                "oc",
+                "exec",
+                "-n",
+                ns,
+                helper,
+                "--",
+                "rm",
+                "-f",
+                f"{pvc_vllm}/.git",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -340,7 +354,11 @@ def _recompute_lm_eval_verdict(runtime_logs_dir, shared_baseline_dir):
         )
         if not results:
             return None, None
-        r = _json.load(open(results[-1])).get("results", {}).get("gsm8k", {})
+        r = (
+            _json.loads(Path(results[-1]).read_text())
+            .get("results", {})
+            .get("gsm8k", {})
+        )
         return r.get("exact_match,flexible-extract"), r.get("exact_match,strict-match")
 
     def _stderr(result_dir):
@@ -350,7 +368,11 @@ def _recompute_lm_eval_verdict(runtime_logs_dir, shared_baseline_dir):
         )
         for path in reversed(results):
             try:
-                r = _json.load(open(path)).get("results", {}).get("gsm8k", {})
+                r = (
+                    _json.loads(Path(path).read_text())
+                    .get("results", {})
+                    .get("gsm8k", {})
+                )
             except OSError, ValueError:
                 continue
             se = r.get("exact_match_stderr,flexible-extract")
@@ -363,8 +385,8 @@ def _recompute_lm_eval_verdict(runtime_logs_dir, shared_baseline_dir):
     if not os.path.isfile(en_exit_f) or not os.path.isfile(dis_exit_f):
         return
 
-    en_exit = int(open(en_exit_f).read().strip())
-    dis_exit = int(open(dis_exit_f).read().strip())
+    en_exit = int(Path(en_exit_f).read_text().strip())
+    dis_exit = int(Path(dis_exit_f).read_text().strip())
 
     flex_en, strict_en = _extract(os.path.join(runtime_logs_dir, "lm_eval_output"))
     # Delta noise: two independent single samples -> sqrt(se_on^2 + se_off^2).
@@ -376,8 +398,10 @@ def _recompute_lm_eval_verdict(runtime_logs_dir, shared_baseline_dir):
         if len(known) == 1:
             # One arm's stderr known: assume equal noise and scale by sqrt(2).
             delta_se = (2 * known[0] ** 2) ** 0.5
+        elif len(known) == 2:
+            delta_se = (known[0] ** 2 + known[1] ** 2) ** 0.5
         else:
-            delta_se = (se_en**2 + se_dis**2) ** 0.5
+            delta_se = None
     # The fixed -0.01 tolerance sits inside the sampling noise (with the
     # default 200-question slice, one question is 0.005 and the delta's own
     # stderr is ~0.024), failing identical code a third of the time. When
@@ -887,7 +911,7 @@ def _check_performance_meets_target(runtime_logs_dir, iteration, expected_pct):
         return (False, 0.0, threshold_pct)
 
     patched_tps, baseline_tps, key = _bench_throughput_pair(patched, baseline)
-    if patched_tps is None:
+    if patched_tps is None or baseline_tps is None:
         print(
             f"  Perf gate: no shared throughput metric in {os.path.basename(patched_file)} / {os.path.basename(baseline_file)}, failing closed"
         )
@@ -917,7 +941,7 @@ def _collect_previous_perf_results(results_dir, current_iteration):
             with open(baseline_file) as f:
                 baseline = json.load(f)
             patched_tps, baseline_tps, _ = _bench_throughput_pair(patched, baseline)
-            if patched_tps is not None:
+            if patched_tps is not None and baseline_tps is not None:
                 delta = (patched_tps - baseline_tps) / baseline_tps * 100
                 delta_str = f"{delta:+.2f}%"
         except OSError, json.JSONDecodeError:
@@ -1001,7 +1025,7 @@ def _generate_fallback_summary(output_dir, runtime_logs_dir, iteration):
     lm_eval_file = os.path.join(runtime_logs_dir, "lm_eval.txt")
     if os.path.isfile(lm_eval_file):
         lines.append("")
-        lines.append(f"Correctness (lm_eval): {open(lm_eval_file).read().strip()}")
+        lines.append(f"Correctness (lm_eval): {Path(lm_eval_file).read_text().strip()}")
 
     diag_report = os.path.join(
         runtime_logs_dir, "diagnostic_profile", "diagnostic_report.txt"
@@ -1034,10 +1058,7 @@ def _format_duration(seconds):
     mins, secs = divmod(int(seconds), 60)
     hrs, mins = divmod(mins, 60)
     raw = f"{seconds:.1f}s"
-    if hrs:
-        human = f"{hrs}h {mins}m {secs}s"
-    else:
-        human = f"{mins}m {secs}s"
+    human = f"{hrs}h {mins}m {secs}s" if hrs else f"{mins}m {secs}s"
     return raw, human
 
 
@@ -1102,9 +1123,7 @@ def _should_run_diagnostic(iteration, runtime_logs_dir, original_analysis_dir):
     report_file = os.path.join(diagnostic_dir, DIAGNOSTIC_REPORT_FILE)
     if os.path.isfile(report_file):
         return False
-    if not original_analysis_dir or not os.path.isdir(original_analysis_dir):
-        return False
-    return True
+    return not (not original_analysis_dir or not os.path.isdir(original_analysis_dir))
 
 
 NSYS_MAX_TRACE_ITERATIONS = 50
@@ -1286,9 +1305,9 @@ def _print_detailed_table(all_step_timings, total_duration, output_dir=None):
         }
     )
 
-    max_dur_len = max(len(r["dur_raw"]) for r in rows)
-    max_in_len = max(len(r["input"]) for r in rows)
-    max_out_len = max(len(r["output"]) for r in rows)
+    max_dur_len = max(len(str(r["dur_raw"])) for r in rows)
+    max(len(str(r["input"])) for r in rows)
+    max(len(str(r["output"])) for r in rows)
     w = 120
 
     lines = []
@@ -1380,7 +1399,7 @@ def _print_phase_summary(
             "Baseline Diff": ["baseline_diff"],
         }
         for phase_name, prefixes in _PHASE_STEP_PREFIXES.items():
-            if any(name.startswith(p) for p in prefixes):
+            if any(str(name).startswith(p) for p in prefixes):
                 phase_usage.setdefault(
                     phase_name, {"input": 0, "output": 0, "cost": 0.0}
                 )
@@ -1432,7 +1451,7 @@ def _print_phase_summary(
         }
     )
 
-    max_dur_len = max(len(r["dur_raw"]) for r in rows)
+    max_dur_len = max(len(str(r["dur_raw"])) for r in rows)
     w = 120
 
     lines = []
@@ -1575,7 +1594,12 @@ def _print_timeline_and_costs(
     )
     lines.append("")
 
-    if total_cost > 0 and total_duration > 0:
+    if (
+        total_cost is not None
+        and total_duration is not None
+        and total_cost > 0
+        and total_duration > 0
+    ):
         lines.append(
             f"  Cost per hour:        ${total_cost / (total_duration / 3600):.2f}/hr"
         )
@@ -1615,7 +1639,7 @@ async def run_pipeline(config, claude_config, use_case, resume=False, client=Non
             timings = await agent_run(
                 claude_config, baseline_steps, resume=resume, client=client
             )
-            all_step_timings.extend(timings)
+            all_step_timings.extend(cast(list, timings))
         phase_results.append(
             {
                 "name": "Baseline Test",
@@ -1635,7 +1659,7 @@ async def run_pipeline(config, claude_config, use_case, resume=False, client=Non
         timings = await agent_run(
             claude_config, code_trace_steps, resume=resume, client=client
         )
-        all_step_timings.extend(timings)
+        all_step_timings.extend(cast(list, timings))
     phase_results.append(
         {
             "name": "Code traces",
@@ -1661,7 +1685,7 @@ async def run_pipeline(config, claude_config, use_case, resume=False, client=Non
             timings = await agent_run(
                 claude_config, test_port_steps, resume=resume, client=client
             )
-            all_step_timings.extend(timings)
+            all_step_timings.extend(cast(list, timings))
         phase_results.append(
             {
                 "name": "Port Tests",
@@ -1687,7 +1711,7 @@ async def run_pipeline(config, claude_config, use_case, resume=False, client=Non
                 timings = await agent_run(
                     claude_config, test_val_steps, resume=resume, client=client
                 )
-                all_step_timings.extend(timings)
+                all_step_timings.extend(cast(list, timings))
             phase_results.append(
                 {
                     "name": "Test Validation",
@@ -1742,7 +1766,7 @@ async def run_pipeline(config, claude_config, use_case, resume=False, client=Non
         timings = await agent_run(
             claude_config, run_steps, resume=resume, client=client
         )
-        all_step_timings.extend(timings)
+        all_step_timings.extend(cast(list, timings))
 
         if skip_code_port_review:
             prev_output_file = run_steps[-1].output_files[0]
@@ -1819,7 +1843,7 @@ async def run_pipeline(config, claude_config, use_case, resume=False, client=Non
             timings = await agent_run(
                 claude_config, run_steps, resume=resume, client=client
             )
-            all_step_timings.extend(timings)
+            all_step_timings.extend(cast(list, timings))
 
             if skip_test_review:
                 prev_output_file = run_steps[-1].output_files[0]
@@ -1893,7 +1917,7 @@ async def run_pipeline(config, claude_config, use_case, resume=False, client=Non
         timings = await agent_run(
             claude_config, run_steps, resume=resume, client=client
         )
-        all_step_timings.extend(timings)
+        all_step_timings.extend(cast(list, timings))
 
         if skip_code_gen_review:
             prev_output_patch_file = run_steps[-1].output_files[0]
@@ -1947,7 +1971,7 @@ async def run_pipeline(config, claude_config, use_case, resume=False, client=Non
             timings = await agent_run(
                 claude_config, diff_steps, resume=resume, client=client
             )
-            all_step_timings.extend(timings)
+            all_step_timings.extend(cast(list, timings))
         phase_results.append(
             {
                 "name": "Baseline Diff",
@@ -2256,7 +2280,7 @@ async def run_runtime_iterations(
                 ],
                 client=client,
             )
-            all_step_timings.extend(timings)
+            all_step_timings.extend(cast(list, timings))
 
         if not _check_apply_succeeded(output_dir, iteration):
             print("  Apply FAILED, stopping.")
@@ -2336,8 +2360,10 @@ async def run_runtime_iterations(
                 ],
                 client=client,
             )
-            all_step_timings.extend(timings)
+            all_step_timings.extend(cast(list, timings))
 
+        perf_ok = False
+        actual_pct = 0.0
         if not _check_run_succeeded(runtime_logs_dir, iteration):
             print(f"  Bench FAILED (status={_read_status(runtime_logs_dir)})")
             # Still investigate to fix the error
@@ -2541,7 +2567,7 @@ async def run_runtime_iterations(
                 ],
                 client=client,
             )
-            all_step_timings.extend(timings)
+            all_step_timings.extend(cast(list, timings))
 
             # On success or last allowed revision, skip review
             if runtime_succeeded or revision >= max_revisions:
@@ -2569,7 +2595,7 @@ async def run_runtime_iterations(
                 ],
                 client=client,
             )
-            all_step_timings.extend(timings)
+            all_step_timings.extend(cast(list, timings))
 
             # Check verdict
             review_file = os.path.join(
@@ -2607,7 +2633,7 @@ async def run_runtime_iterations(
             summary_timings = await _run_cumulative_summary(
                 results_dir, iteration, claude_config, client=client
             )
-            all_step_timings.extend(summary_timings)
+            all_step_timings.extend(cast(list, summary_timings))
             break
 
         # Check for new patch
@@ -2640,7 +2666,7 @@ async def run_runtime_iterations(
         summary_timings = await _run_cumulative_summary(
             results_dir, iteration, claude_config, client=client
         )
-        all_step_timings.extend(summary_timings)
+        all_step_timings.extend(cast(list, summary_timings))
 
         print(f"  New patch: {new_patch} (accepted R{accepted_round})")
 
@@ -2738,7 +2764,7 @@ async def _run_nsys_step(
             ],
             client=client,
         )
-        all_step_timings.extend(timings)
+        all_step_timings.extend(cast(list, timings))
     else:
         # Local backend: single agent does everything
         diagnostic_prompt = _diagnostic_prompt_gen(config)(
@@ -2760,7 +2786,7 @@ async def _run_nsys_step(
             ],
             client=client,
         )
-        all_step_timings.extend(timings)
+        all_step_timings.extend(cast(list, timings))
 
 
 # The artifact that proves a shared baseline can still be compared against.
@@ -2911,8 +2937,8 @@ def _compute_perf_comparison(runtime_logs_dir, output_dir):
     import json as _json
 
     try:
-        p = _json.load(open(bench_on))
-        b = _json.load(open(shared_off))
+        p = _json.loads(Path(bench_on).read_text())
+        b = _json.loads(Path(shared_off).read_text())
         lines = ["Patched (feature ON) vs Baseline (feature OFF)\n"]
         for key in sorted(set(list(p) + list(b))):
             pv, bv = p.get(key, "N/A"), b.get(key, "N/A")

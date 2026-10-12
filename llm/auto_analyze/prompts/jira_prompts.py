@@ -9,7 +9,7 @@ JIRA_TASKS_FILE = "jira_tasks_output.txt"
 
 @dataclass
 class JiraTasksPrompt:
-    f"""Create JIRA tasks from analysis results.
+    """Create JIRA tasks from analysis results.
 
     Supports two modes:
       (A) Single-trace: creates tasks from {PERF_ANALYSIS_SINGLE_FILE} improvement proposals

@@ -96,6 +96,7 @@ def test_lm_eval_gate_uses_stderr_aware_delta_tolerance(tmp_path):
     _lm_eval_results_json(tmp_path / "lm_eval_output_disabled", 0.97, 0.0168)
     result = gates.evaluate_lm_eval(str(tmp_path))
     assert result["pass"] is True
+    assert result["delta_stderr"] is not None
     assert result["delta_stderr"] > 0.02
     assert result["delta_tolerance"] < -0.03
 
@@ -221,7 +222,9 @@ def test_verdict_round_trip(tmp_path):
     )
     path = gates.write_verdict(str(tmp_path / "V2" / gates.VERDICT_FILE), verdict)
     assert os.path.dirname(path).endswith("V2")
-    assert gates.read_verdict(path)["iteration"] == 2
+    verdict = gates.read_verdict(str(path))
+    assert verdict is not None
+    assert verdict["iteration"] == 2
     assert gates.read_verdict(None) is None
 
 

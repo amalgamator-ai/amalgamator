@@ -133,7 +133,13 @@ def history_candidates(repo_dir, changed_files, months=6):
     counts = {}
     for path in changed_files:
         log = _git(
-            repo_dir, "log", f"--since={since}", "--format=%ae", "--", path, check=False
+            repo_dir,
+            "log",
+            f"--since={since}",
+            "--format=%ae",
+            "--",
+            path,
+            check=False,
         )
         for email in log.splitlines():
             if email.strip():
@@ -175,7 +181,9 @@ def review_candidates(upstream_repo, changed_files, max_prs=10):
                 continue
             reviews = (
                 _gh_json(
-                    "api", f"repos/{upstream_repo}/pulls/{number}/reviews", check=False
+                    "api",
+                    f"repos/{upstream_repo}/pulls/{number}/reviews",
+                    check=False,
                 )
                 or []
             )

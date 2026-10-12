@@ -10,7 +10,7 @@ def parse_pr_url(url: str) -> tuple[str, str, int]:
     return m.group(1), m.group(2), int(m.group(3))
 
 
-def run_gh(args: list[str], cwd: str = None) -> subprocess.CompletedProcess:
+def run_gh(args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
     result = subprocess.run(
         ["gh"] + args,
         cwd=cwd,

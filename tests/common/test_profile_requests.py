@@ -31,6 +31,7 @@ def capture_request(monkeypatch, tmp_path):
 
     def capture(path, profile=None, *, model=None):
         model = profile.model if profile else model
+        assert isinstance(model, str)
         request.reset_mock()
         if path == "completion":
             llm_client.completion(model, [], profile=profile)

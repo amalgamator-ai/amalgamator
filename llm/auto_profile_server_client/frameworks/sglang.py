@@ -131,10 +131,7 @@ class SglangAdapter(FrameworkAdapter):
     ) -> list[str]:
         import json
 
-        if profiler_type == "nsys":
-            activities = ["CUDA_PROFILER"]
-        else:
-            activities = ["CPU", "GPU"]
+        activities = ["CUDA_PROFILER"] if profiler_type == "nsys" else ["CPU", "GPU"]
         body = json.dumps(
             {
                 "num_steps": active,

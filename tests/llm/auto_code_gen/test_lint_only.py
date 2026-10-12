@@ -287,9 +287,9 @@ def test_record_accepts_ci_wiring_addition(git_repo, tmp_path):
     )
     run("add", "mod.py", ".buildkite")
     run("commit", "-qm", "fix(lint): ruff + wire test")
-    head = run("rev-parse", "HEAD").strip()
+    run("rev-parse", "HEAD").strip()
 
-    iteration = lint_only.record_lint_only_iteration(
+    lint_only.record_lint_only_iteration(
         _Config(output_dir), "pre-commit fixes", ruff_bin=RUFF_BIN
     )
     verdict = json.loads(

@@ -1,3 +1,5 @@
+from typing import TypedDict
+
 """Pass/fail rules for a PR-review verification iteration.
 
 Three gates, all fail-closed:
@@ -90,7 +92,7 @@ def measure_throughput(iter_dir):
         return False, 0.0
 
     patched_tps, baseline_tps, _ = _bench_throughput_pair(patched, baseline)
-    if patched_tps is None:
+    if patched_tps is None or baseline_tps is None:
         return False, 0.0
     return True, (patched_tps - baseline_tps) / baseline_tps * 100
 
@@ -137,6 +139,22 @@ def evaluate_perf(
     }
 
 
+_LMResult = TypedDict(
+    "_LMResult",
+    {
+        "pass": bool,
+        "verdict": str,
+        "reason": str,
+        "flexible": float | None,
+        "strict": float | None,
+        "delta_flexible": float | None,
+        "delta_strict": float | None,
+        "delta_stderr": float | None,
+        "delta_tolerance": float,
+    },
+)
+
+
 def _lm_eval_stderr(iter_dir):
     """Combined standard error of (ON score - OFF score), or None.
 
@@ -167,9 +185,12 @@ def _lm_eval_stderr(iter_dir):
                         continue
                     task = (data.get("results") or {}).get("gsm8k") or {}
                     se = task.get("exact_match_stderr,flexible-extract")
-                    if isinstance(se, (int, float)) and se > 0:
-                        if best is None or se > best:
-                            best = float(se)
+                    if (
+                        isinstance(se, (int, float))
+                        and se > 0
+                        and (best is None or se > best)
+                    ):
+                        best = float(se)
         if best is not None:
             stderrs.append(best)
     if not stderrs:
@@ -183,13 +204,15 @@ def _lm_eval_stderr(iter_dir):
 
 def evaluate_lm_eval(iter_dir):
     """Read lm_eval.txt as rewritten by _recompute_lm_eval_verdict()."""
-    result = {
+    result: _LMResult = {
         "pass": False,
         "verdict": "MISSING",
         "flexible": None,
         "strict": None,
         "delta_flexible": None,
         "delta_strict": None,
+        "delta_stderr": None,
+        "delta_tolerance": 0.0,
         "reason": "",
     }
     path = os.path.join(iter_dir, "lm_eval.txt")
@@ -204,13 +227,12 @@ def evaluate_lm_eval(iter_dir):
     if m:
         result["flexible"] = float(m.group(1))
         result["strict"] = float(m.group(2))
-    for name, pattern in (
-        ("flexible", r"Delta flexible-extract:\s*([-+][0-9.]+)"),
-        ("strict", r"Delta strict-match:\s*([-+][0-9.]+)"),
-    ):
-        found = re.search(pattern, text)
-        if found:
-            result[f"delta_{name}"] = float(found.group(1))
+    flex_delta = re.search(r"Delta flexible-extract:\s*([-+][0-9.]+)", text)
+    if flex_delta:
+        result["delta_flexible"] = float(flex_delta.group(1))
+    strict_delta = re.search(r"Delta strict-match:\s*([-+][0-9.]+)", text)
+    if strict_delta:
+        result["delta_strict"] = float(strict_delta.group(1))
     verdict = re.search(r"Verdict:\s*(\w+)", text)
     if verdict:
         result["verdict"] = verdict.group(1).upper()
@@ -303,13 +325,17 @@ def parse_comment_resolution(path):
         if reply:
             current["reply"] = reply.group(1).strip()
 
+    status_counts: dict[str, int] = {}
     for entry in summary["entries"]:
-        summary[entry["status"]] = summary.get(entry["status"], 0) + 1
+        status_counts[entry["status"]] = status_counts.get(entry["status"], 0) + 1
         summary["comment_ids"].append(entry["comment_id"])
         if entry["status"] == "unresolved":
             summary["unresolved_ids"].append(entry["comment_id"])
 
     summary["total"] = len(summary["entries"])
+    summary["fixed"] = status_counts.get("fixed", 0)
+    summary["explained"] = status_counts.get("explained", 0)
+    summary["unresolved"] = status_counts.get("unresolved", 0)
     summary["pass"] = summary["total"] > 0 and summary["unresolved"] == 0
     if summary["total"] == 0:
         summary["reason"] = "no '## Comment <id>' blocks found"

@@ -3,6 +3,7 @@ import copy
 import json
 import subprocess
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
 import pytest
 
@@ -111,12 +112,14 @@ def test_fallback_summary_is_bounded_and_keeps_both_ends():
 
 def test_iteration_budget_reminders_force_artifact_synthesis():
     assert _iteration_budget_reminder(49, 100, ["trace.txt"]) is None
-    assert "begin writing trace.txt" in _iteration_budget_reminder(
-        50, 100, ["trace.txt"]
+    assert "begin writing trace.txt" in (
+        _iteration_budget_reminder(50, 100, ["trace.txt"]) or ""
     )
-    assert "Stop research now" in _iteration_budget_reminder(75, 100, ["trace.txt"])
-    assert "Finalize and verify trace.txt" in _iteration_budget_reminder(
-        90, 100, ["trace.txt"]
+    assert "Stop research now" in (
+        _iteration_budget_reminder(75, 100, ["trace.txt"]) or ""
+    )
+    assert "Finalize and verify trace.txt" in (
+        _iteration_budget_reminder(90, 100, ["trace.txt"]) or ""
     )
     assert _iteration_budget_reminder(50, None, ["trace.txt"]) is None
 
@@ -154,11 +157,11 @@ def test_code_generation_can_delay_the_write_only_boundary():
 
 
 def test_code_generation_progress_reminders_require_working_tree_edits():
-    assert "actual target source" in _code_generation_progress_reminder(
-        "code_gen_V1", 20, 60
+    assert "actual target source" in (
+        _code_generation_progress_reminder("code_gen_V1", 20, 60) or ""
     )
-    assert "Finish the working-tree" in _code_generation_progress_reminder(
-        "code_gen_review_V1", 40, 60
+    assert "Finish the working-tree" in (
+        _code_generation_progress_reminder("code_gen_review_V1", 40, 60) or ""
     )
     assert _code_generation_progress_reminder("test_plan_V1", 20, 60) is None
 
@@ -167,9 +170,9 @@ def test_source_checkpoint_allows_only_absolute_target_writes(tmp_path):
     target = tmp_path / "repo"
     target.mkdir()
     assert _source_write_error({"path": str(target / "module.py")}, target) is None
-    assert "absolute" in _source_write_error({"path": "module.py"}, target)
-    assert "temporary files" in _source_write_error(
-        {"path": str(tmp_path / "artifact.patch")}, target
+    assert "absolute" in (_source_write_error({"path": "module.py"}, target) or "")
+    assert "temporary files" in (
+        _source_write_error({"path": str(tmp_path / "artifact.patch")}, target) or ""
     )
 
 
@@ -185,8 +188,11 @@ def test_strict_finalization_cannot_overwrite_source(tmp_path):
         _final_artifact_write_error({"path": str(tmp_path / "V1.patch")}, tmp_path)
         is None
     )
-    assert "source-tree writes" in _final_artifact_write_error(
-        {"path": str(tmp_path.parent / "repo" / "module.py")}, tmp_path
+    assert "source-tree writes" in (
+        _final_artifact_write_error(
+            {"path": str(tmp_path.parent / "repo" / "module.py")}, tmp_path
+        )
+        or ""
     )
 
 
@@ -263,8 +269,8 @@ def test_code_patch_artifact_must_match_implemented_tree(tmp_path):
     prompt = f"<target_source_code_dir>{repo}</target_source_code_dir>"
     assert _code_patch_artifact_error("code_gen_V1", prompt, ["V1.patch"], out) is None
     source.write_text("old\n")
-    assert "does not match" in _code_patch_artifact_error(
-        "code_gen_V1", prompt, ["V1.patch"], out
+    assert "does not match" in (
+        _code_patch_artifact_error("code_gen_V1", prompt, ["V1.patch"], out) or ""
     )
 
 
@@ -287,7 +293,7 @@ def test_run_artifact_writes_are_limited_to_current_step_outputs(tmp_path):
     error = _artifact_write_error(
         {"path": "completed/trace.txt"}, tmp_path, ["current/result.txt"]
     )
-    assert "undeclared run artifact" in error
+    assert "undeclared run artifact" in (error or "")
     assert (
         _artifact_write_error(
             {"path": str(tmp_path.parent / "target.py")},
@@ -306,8 +312,11 @@ def test_later_artifact_chunks_cannot_truncate_same_file(tmp_path):
         )
         is None
     )
-    assert "append=true" in _artifact_overwrite_error(
-        {"path": "result.txt", "append": False}, tmp_path, {target}
+    assert "append=true" in (
+        _artifact_overwrite_error(
+            {"path": "result.txt", "append": False}, tmp_path, {target}
+        )
+        or ""
     )
     assert (
         _artifact_overwrite_error(
@@ -338,7 +347,7 @@ def test_heal_artifact_write_converts_or_dedupes(tmp_path):
         tmp_path,
         {target},
     )
-    assert healed is None and "duplicate" in note
+    assert healed is None and "duplicate" in (note or "")
     healed, note = _heal_artifact_write(
         {"path": "result.txt", "content": "section two\n", "append": True},
         tmp_path,
@@ -814,7 +823,7 @@ async def test_repeat_limit_keeps_pairs_complete(tmp_path):
         c["id"]
         for m in session.messages
         if m["role"] == "assistant"
-        for c in m.get("tool_calls") or []
+        for c in cast(list, m.get("tool_calls") or [])
     }
     answered = {m["tool_call_id"] for m in session.messages if m["role"] == "tool"}
     assert requested and answered == requested
@@ -822,7 +831,7 @@ async def test_repeat_limit_keeps_pairs_complete(tmp_path):
 
 def test_known_output_limit_checked(tmp_path):
     transport = FakeTransport()
-    transport.output_limit = lambda: 32
+    cast(Any, transport).output_limit = lambda: 32
     with pytest.raises(ValueError, match="output limit"):
         LiteLLMSession(cfg(tmp_path), transport)
 

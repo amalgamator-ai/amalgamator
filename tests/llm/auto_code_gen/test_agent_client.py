@@ -172,7 +172,7 @@ async def test_real_litellm_stream_assembly(tmp_path, unused_tcp_port):
             ),
             ({"content": "world", "reasoning": "reply briefly."}, "stop"),
         ]:
-            chunk = {
+            chunk: dict[str, object] = {
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",
                 "created": 1,
@@ -295,7 +295,7 @@ async def test_streaming_tool_argument_fragments(tmp_path, unused_tcp_port):
             {},
         ]
         for i, delta in enumerate(pieces):
-            chunk = {
+            chunk: dict[str, object] = {
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",
                 "created": 1,

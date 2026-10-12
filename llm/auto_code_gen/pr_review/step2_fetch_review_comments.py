@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 from collections import defaultdict
+from typing import Any
 
 from llm.auto_code_gen.pr_review import parse_pr_url, run_gh
 
@@ -49,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _fetch_json(api_path: str, paginate: bool = False) -> object:
+def _fetch_json(api_path: str, paginate: bool = False) -> Any:
     args = ["api"]
     if paginate:
         args.append("--paginate")

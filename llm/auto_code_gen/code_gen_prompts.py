@@ -403,8 +403,8 @@ def gen_ReviewTestPlanPrompt(
 class CodeGenPrompt:
     context: str
     code_trace_files: list[str]
-    code_port_plan_file: list[str]
-    test_plan_file: list[str]
+    code_port_plan_file: str
+    test_plan_file: str
     output_patch_file: str
     output_summary_file: str
     prev_output_patch_file: str | None
@@ -2958,7 +2958,7 @@ Rules for updating:
 
 
 def gen_RecordLearningsPrompt(
-    code_gen_output_dir: str, knowledge_base_file: str = None
+    code_gen_output_dir: str, knowledge_base_file: str | None = None
 ):
     import os
 
@@ -2973,6 +2973,7 @@ def gen_RecordLearningsPrompt(
     )
 
 
+@dataclass
 class InvestigateIssuePrompt:
     context: str
     code_trace_files: list[str]
@@ -3127,6 +3128,7 @@ def gen_InvestigateIssuePrompt(
     )
 
 
+@dataclass
 class ReviewInvestigatedIssuePrompt:
     context: str
     code_trace_files: list[str]
@@ -3273,6 +3275,7 @@ def gen_ReviewInvestigatedIssuePrompt(
     )
 
 
+@dataclass
 class FixIssuePrompt:
     claude_config: ClaudeConfig
     code_gen_config: CodeGenConfig

@@ -169,7 +169,7 @@ def _base_commit(config, state, repo_dir):
     if recorded:
         return recorded
     upstream = state.get("upstream_remote") or "upstream"
-    branch = state.get("upstream_branch") or "main"
+    state.get("upstream_branch") or "main"
     merge_base = _git(repo_dir, "merge-base", f"{upstream}/*", "HEAD").strip()
     if not merge_base:
         merge_base = _git(repo_dir, "rev-parse", "HEAD").strip()
@@ -438,7 +438,13 @@ async def run_round(config, claude_config, use_case, state, round_no, args):
             _gate_report(expected_pct, recorded_pct, gates.LM_EVAL_MIN_ABSOLUTE, state)
         )
         print(
-            f"\n[dry-run] planned iterations: {args.start_iteration or _find_latest_runtime_iteration(output_dir) + 1} (max {args.max_iterations})"
+            "\n[dry-run] planned iterations: {} (max {})".format(
+                (
+                    args.start_iteration
+                    or _find_latest_runtime_iteration(output_dir) + 1
+                ),
+                args.max_iterations,
+            )
         )
         print("[dry-run] nothing executed.")
         return EXIT_SUCCESS, []

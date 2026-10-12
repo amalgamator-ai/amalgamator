@@ -222,7 +222,7 @@ def analyze_metrics(
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"Metrics agent returned invalid JSON: {e}\nResponse: {response[:500]}"
-        )
+        ) from e
 
     # Validate required fields
     for key in (

@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 # Reuse existing detection functions from the pipeline — no reimplementation
@@ -27,7 +27,7 @@ from auto_bug_fix.patch_id import backward_patch_id_check, forward_patch_id_chec
 log = logging.getLogger(__name__)
 
 
-class FixStatus(str, Enum):
+class FixStatus(StrEnum):
     EXACT_MATCH = "exact_match"  # same commit SHA on branch
     EQUIVALENT = "equivalent_patch"  # same patch content, different SHA
     NOT_AFFECTED = "not_affected"  # branch predates the bug — no fix needed

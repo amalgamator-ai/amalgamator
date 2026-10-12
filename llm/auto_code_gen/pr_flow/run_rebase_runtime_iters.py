@@ -355,7 +355,11 @@ async def run_iterations(config, claude_config, use_case, state, args):
             "(re-measured) -> bench ON -> [NSYS if regressed] -> lm_eval"
         )
         print(
-            f"[dry-run] planned iterations: {args.start_iteration or (_find_latest_runtime_iteration(output_dir) + 1)} (max {args.max_iterations})"
+            "[dry-run] planned iterations: {} (max {})".format(
+                args.start_iteration
+                or (_find_latest_runtime_iteration(output_dir) + 1),
+                args.max_iterations,
+            )
         )
         print("[dry-run] nothing executed.")
         return EXIT_SUCCESS, []

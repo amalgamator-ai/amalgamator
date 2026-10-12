@@ -28,7 +28,7 @@ import os
 import re
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 # Compatibility exports for existing callers.
 from common.model_identity import is_ollama_model as _is_ollama_model
@@ -113,9 +113,7 @@ def is_self_hosted(model: str, profile: ModelProfile | None = None) -> bool:
         return profile.is_self_hosted()
     if _is_ollama_model(model):
         return True
-    if model.startswith("openai/") and get_api_base():
-        return True
-    return False
+    return bool(model.startswith("openai/") and get_api_base())
 
 
 def build_request_kwargs(
@@ -202,10 +200,13 @@ def completion(
         profile.id if profile else "legacy",
     )
 
-    response = litellm.completion(
-        model=effective_model,
-        messages=messages,
-        **merged,
+    response = cast(
+        Any,
+        litellm.completion(
+            model=effective_model,
+            messages=messages,
+            **merged,
+        ),
     )
 
     choice = response.choices[0]

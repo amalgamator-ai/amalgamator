@@ -439,7 +439,7 @@ def test_stage_default_follows_the_human_script(tmp_path):
     """R<n> created by the step script is the stage the resolver must fill in."""
     from llm.auto_code_gen.pr_flow import run_rebase_conflict_fix as fixer
 
-    root = rebase.rebase_dir(str(tmp_path))
+    rebase.rebase_dir(str(tmp_path))
     assert fixer.existing_stages(str(tmp_path)) == []
     assert fixer.default_stage(str(tmp_path)) == 1
 
@@ -587,12 +587,14 @@ def test_rebase_evidence_is_written_for_the_fix_step(upstream_and_pr, tmp_path):
     report, drift_patch = fixver._write_rebase_evidence(
         iter_dir, str(pr), state, stage_dir, drift
     )
-    report_text = open(report).read()
+    with open(report) as _rf:
+        report_text = _rf.read()
     assert "new base" in report_text and shas["target"][:12] in report_text
     assert "old base" in report_text
     assert "must stay identical to the new base" in report_text
     assert "service.py" in report_text  # upstream-owned, listed
-    drift_text = open(drift_patch).read()
+    with open(drift_patch) as _df:
+        drift_text = _df.read()
     assert "VALUE = 5" in drift_text and "service.py" not in drift_patch
 
 

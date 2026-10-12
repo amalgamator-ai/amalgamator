@@ -210,11 +210,11 @@ def ingest_patch(
 
     try:
         base_sha = git_rev_parse(source_path, base_ref)
-    except RuntimeError:
+    except RuntimeError as e:
         raise IngestError(
             f"Cannot resolve base ref '{base_ref}'. "
             f"Check that branches.source is correct and run 'git fetch' if needed."
-        )
+        ) from e
 
     slug = _slug(issue_id)
     ref_name = f"{_REF_PREFIX}/{slug}"
@@ -240,7 +240,7 @@ def ingest_patch(
     try:
         create_fresh_worktree(source_path, worktree_path, base_sha)
     except RuntimeError as e:
-        raise IngestError(f"Failed to create ingest worktree: {e}")
+        raise IngestError(f"Failed to create ingest worktree: {e}") from e
 
     try:
         abs_patch = os.path.abspath(patch_path)

@@ -225,6 +225,17 @@ class CodeGenConfig(PipelineConfig):
     plan_file: str = ""
     plan_step: int = 0
 
+    # Prompt-only fields used by FixIssuePrompt / investigate prompts.
+    precision: str = ""
+    faster_framework: str = ""
+    slower_framework: str = ""
+    faster_framework_test_dir: str = ""
+    slower_framework_test_dir: str = ""
+    faster_transformer_block_high_level_ops_file: str = ""
+    slower_transformer_block_high_level_ops_file: str = ""
+    faster_median_transformer_block_file: str = ""
+    slower_median_transformer_block_file: str = ""
+
     target_framework: str = ""
     source_framework: str = ""
     target_commit_id: str = ""
@@ -639,9 +650,9 @@ class CodeGenConfig(PipelineConfig):
 
         status = _run_git(["status", "--porcelain"], cwd, check=False)
         dirty = [
-            l
-            for l in status.stdout.strip().splitlines()
-            if l and not l.startswith("??")
+            line
+            for line in status.stdout.strip().splitlines()
+            if line and not line.startswith("??")
         ]
         if dirty:
             print(

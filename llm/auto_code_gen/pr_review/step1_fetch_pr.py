@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def fetch_pr(pr_url: str, repo_dir: str, branch_name: str = None):
+def fetch_pr(pr_url: str, repo_dir: str, branch_name: str | None = None):
     owner, repo, number = parse_pr_url(pr_url)
     if branch_name is None:
         branch_name = f"pr-{number}"

@@ -90,7 +90,9 @@ def try_resolve_file(repo_path: str, commit: str, path: str) -> str | None:
     ws_sensitive = _is_ws_sensitive(path)
     abs_path = os.path.join(repo_path, path)
 
-    patch_file = tempfile.NamedTemporaryFile(mode="wb", suffix=".patch", delete=False)
+    patch_file = tempfile.NamedTemporaryFile(  # noqa: SIM115 (delete-on-exit, unlinked in finally)
+        mode="wb", suffix=".patch", delete=False
+    )
     try:
         patch_file.write(patch_bytes)
         patch_file.close()

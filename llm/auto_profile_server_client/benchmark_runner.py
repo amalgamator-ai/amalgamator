@@ -10,6 +10,7 @@ Benchmark and profiling outputs go into separate subdirectories.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import subprocess
 import time
@@ -92,7 +93,10 @@ class BenchmarkRunner:
         Path(bench_dir).mkdir(parents=True, exist_ok=True)
 
         overall_start = time.time()
-        results = {"test_name": self.test_name, "framework": self.adapter.name}
+        results: dict[str, object] = {
+            "test_name": self.test_name,
+            "framework": self.adapter.name,
+        }
 
         # ── Benchmark phase ─────────────────────────────────────────────
         self._step = 0
@@ -630,10 +634,8 @@ class BenchmarkRunner:
         log.info(
             "[%s] Sending SIGINT to server for nsys trace finalization", self.test_name
         )
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.kill(server.process.pid, signal.SIGINT)
-        except ProcessLookupError:
-            pass
 
         nsys_rep = f"{out_dir}/trace.nsys-rep"
         log.info("[%s] Waiting for nsys trace at %s", self.test_name, nsys_rep)

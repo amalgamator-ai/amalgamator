@@ -176,10 +176,7 @@ def _format_duration(seconds):
     mins, secs = divmod(int(seconds), 60)
     hrs, mins = divmod(mins, 60)
     raw = f"{seconds:.1f}s"
-    if hrs:
-        human = f"{hrs}h {mins}m {secs}s"
-    else:
-        human = f"{mins}m {secs}s"
+    human = f"{hrs}h {mins}m {secs}s" if hrs else f"{mins}m {secs}s"
     return raw, human
 
 
@@ -195,9 +192,9 @@ def _print_phase_summary(
     phase_results, all_step_timings, total_duration, output_dir=None
 ):
     """Print a summary table of all phases with iteration counts and convergence status."""
-    total_input = sum(s.get("input_tokens", 0) for s in all_step_timings)
-    total_output = sum(s.get("output_tokens", 0) for s in all_step_timings)
-    total_cost = sum(s.get("cost_usd", 0.0) for s in all_step_timings)
+    sum(s.get("input_tokens", 0) for s in all_step_timings)
+    sum(s.get("output_tokens", 0) for s in all_step_timings)
+    sum(s.get("cost_usd", 0.0) for s in all_step_timings)
 
     rows = []
     for phase in phase_results:

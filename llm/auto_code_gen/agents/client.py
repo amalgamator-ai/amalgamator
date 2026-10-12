@@ -6,9 +6,11 @@ Configuration is per client; native Claude SDK behavior stays in its adapter.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import os
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 
 @dataclass
@@ -55,7 +57,7 @@ class LLMClient:
         self.config = copy.deepcopy(config)
         self.model = config.model
         self._info_loaded = False
-        self._info = {}
+        self._info: Any = {}
         if self.model.startswith("claude-") and os.environ.get(
             "CLAUDE_CODE_USE_VERTEX"
         ):
@@ -146,6 +148,7 @@ class LLMClient:
             request["tool_choice"] = tool_choice
         streaming = self.config.stream
         usage_incomplete = False
+        response = None
         for attempt in range(self.config.max_retries + 1):
             chunks = []
             try:
@@ -158,13 +161,15 @@ class LLMClient:
                     response = await litellm.acompletion(**request, stream=False)
                 if streaming:
                     try:
-                        async for chunk in response:
+                        async for chunk in cast(Any, response):
                             chunks.append(chunk)
                     finally:
                         close = getattr(response, "aclose", None)
                         if close:
                             await close()
-                    response = litellm.stream_chunk_builder(chunks, messages=messages)
+                    response = cast(
+                        Any, litellm.stream_chunk_builder(chunks, messages=messages)
+                    )
                     if not any(getattr(chunk, "usage", None) for chunk in chunks):
                         usage_incomplete = True
                 break
@@ -185,6 +190,7 @@ class LLMClient:
                 if chunks or not isinstance(exc, litellm.RateLimitError):
                     usage_incomplete = True
                 await asyncio.sleep(min(2**attempt, 8))
+        response = cast(Any, response)
         if not response or not response.choices:
             raise RuntimeError("Provider returned no choices")
         choice = response.choices[0]
@@ -194,12 +200,10 @@ class LLMClient:
         if self.config.billing == "self_hosted":
             cost = 0.0
         else:
-            try:
+            with contextlib.suppress(Exception):
                 cost = litellm.completion_cost(
                     completion_response=response, model=self.model
                 )
-            except Exception:
-                pass
         return Reply(
             text=msg.content or "",
             reasoning=_message_reasoning(msg),

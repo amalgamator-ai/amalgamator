@@ -133,9 +133,9 @@ def load_config_file(config_path: str) -> dict[str, Any]:
                     f"Unsupported config format: {suffix}. Use .yaml, .yml, or .json"
                 )
     except yaml.YAMLError as e:
-        raise ConfigError(f"Invalid YAML in {config_path}: {e}")
+        raise ConfigError(f"Invalid YAML in {config_path}: {e}") from e
     except json.JSONDecodeError as e:
-        raise ConfigError(f"Invalid JSON in {config_path}: {e}")
+        raise ConfigError(f"Invalid JSON in {config_path}: {e}") from e
 
     if not isinstance(data, dict):
         raise ConfigError(
@@ -315,10 +315,7 @@ def parse_bug_fix_config(
     repo_path = os.path.join(workdir, repo_name)
 
     build_subdir = config["repository"].get("build_subdir", "")
-    if build_subdir:
-        build_dir = os.path.join(repo_path, build_subdir)
-    else:
-        build_dir = repo_path
+    build_dir = os.path.join(repo_path, build_subdir) if build_subdir else repo_path
 
     advanced = config.get("advanced", {})
     if not isinstance(advanced, dict):

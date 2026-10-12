@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from common.claude_utils import PipelineStep
 from common.iteration_utils import prev_iteration_section as _prev_iteration_section
@@ -1103,7 +1103,7 @@ def gen_single_trace_prompts(config: SingleTraceConfig, file_prefix=""):
 
     params: SingleTraceParams = config
 
-    prompt_objects = [
+    prompt_objects: list[Any] = [
         TransformerBlockHighLevelPrompt(
             params=params,
             output_file=high_level_ops_file,
@@ -1159,8 +1159,10 @@ def gen_single_trace_prompts(config: SingleTraceConfig, file_prefix=""):
     )
 
     total_steps = len(step_names)
-    prompts = []
-    for i, (step_name, prompt_obj) in enumerate(zip(step_names, prompt_objects), 1):
+    prompts: list[Any] = []
+    for i, (step_name, prompt_obj) in enumerate(
+        zip(step_names, prompt_objects, strict=False), 1
+    ):
         prompts.append(
             {
                 "cmd": (

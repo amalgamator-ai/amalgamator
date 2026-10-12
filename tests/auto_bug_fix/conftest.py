@@ -1,17 +1,18 @@
 import sys
 import types
+from typing import Any
 
 # Stub external dependencies before any project imports
-_cm = types.ModuleType("colorama")
+_cm: Any = types.ModuleType("colorama")
 _cm.Fore = type(
     "Fore",
     (),
     {k: "" for k in ["RED", "GREEN", "YELLOW", "CYAN", "MAGENTA", "RESET", "WHITE"]},
-)()
-_cm.Style = type("Style", (), {"RESET_ALL": "", "BRIGHT": ""})()
+)
+_cm.Style = type("Style", (), {"RESET_ALL": "", "BRIGHT": ""})
 sys.modules["colorama"] = _cm
 
-_sdk = types.ModuleType("claude_agent_sdk")
+_sdk: Any = types.ModuleType("claude_agent_sdk")
 for _n in [
     "ClaudeSDKClient",
     "ClaudeAgentOptions",
@@ -27,7 +28,7 @@ for _n in [
 ]:
     setattr(_sdk, _n, type(_n, (), {}))
 sys.modules["claude_agent_sdk"] = _sdk
-_sdk_types = types.ModuleType("claude_agent_sdk.types")
+_sdk_types: Any = types.ModuleType("claude_agent_sdk.types")
 _sdk_types.StreamEvent = type("StreamEvent", (), {})
 sys.modules["claude_agent_sdk.types"] = _sdk_types
 

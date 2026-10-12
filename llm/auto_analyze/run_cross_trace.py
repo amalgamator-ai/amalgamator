@@ -61,8 +61,12 @@ import sys
 import time
 
 from common.claude_utils import _all_steps_complete
-from common.iteration_utils import check_converged as _check_converged
-from common.iteration_utils import resolve_output_file
+from common.iteration_utils import (
+    check_converged as _check_converged,
+)
+from common.iteration_utils import (
+    resolve_output_file,
+)
 from common.utils import safe_clean_dir, setup_logging
 from llm.agents import agent_run, agent_session
 from llm.auto_analyze.agent_support import (
@@ -218,7 +222,6 @@ async def run_pipeline(config, agent_config, resume=False):
     traces_context = (
         ""  # passed to gen_*_iter_steps but unused (prompts build it internally)
     )
-    phase_results = []
 
     async with agent_session(agent_config) as client:
         return await _run_pipeline_with_client(

@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def gen_prompts(args, code_gen_config, claude_config):
-    clear_target_dir_cmd = {
+    {
         "fn": lambda: clear_vllm_source_tree(code_gen_config.source_code_dir),
         "fn_name": f'clear_vllm_source_tree("{code_gen_config.source_code_dir}")',
     }

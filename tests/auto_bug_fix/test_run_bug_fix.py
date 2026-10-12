@@ -30,7 +30,9 @@ def test_pipeline_state_defaults():
     assert state.baseline == set()
     assert state.ported_test_files == []
     assert state.cherry_pick_path == ""
-    assert state.dossier is None
+    # dossier is always materialized (blank until run_pipeline populates it).
+    assert state.dossier is not None
+    assert state.dossier.items == [] and state.dossier.strategies == []
     assert state.triage_assessment == {}
     assert state.priority_files == []
 
@@ -951,7 +953,9 @@ def test_phase_4b_stale_success_file_is_ignored(tmp_path):
     with patch("auto_bug_fix.run_bug_fix._agent_run", new=_fake_claude_run):
         try:
             phase_4b_run_and_fix(config, claude_cfg, state, None)
-            assert False, "expected PipelineEscalation despite the stale success file"
+            raise AssertionError(
+                "expected PipelineEscalation despite the stale success file"
+            )
         except PipelineEscalation as exc:
             assert "without writing a result file" in str(exc)
 
@@ -964,7 +968,9 @@ def test_phase_4b_missing_result_file_escalates(tmp_path):
     with patch("auto_bug_fix.run_bug_fix._agent_run", new=_fake_claude_run):
         try:
             phase_4b_run_and_fix(config, claude_cfg, state, None)
-            assert False, "expected PipelineEscalation when no result file is written"
+            raise AssertionError(
+                "expected PipelineEscalation when no result file is written"
+            )
         except PipelineEscalation as exc:
             assert "without writing a result file" in str(exc)
 
@@ -1160,11 +1166,13 @@ def test_phase_4b_success_rejected_while_escalating_command_fails(tmp_path):
 
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
-        with pytest.raises(PipelineEscalation, match="extended verification still"):
-            phase_4b_run_and_fix(
-                config, claude_cfg, state, None, extra_verification=["exit 1"]
-            )
+    with (
+        patch("auto_bug_fix.run_bug_fix._agent_run", new=fake),
+        pytest.raises(PipelineEscalation, match="extended verification still"),
+    ):
+        phase_4b_run_and_fix(
+            config, claude_cfg, state, None, extra_verification=["exit 1"]
+        )
 
 
 def test_phase_4b_success_accepted_when_escalating_command_passes(tmp_path):
@@ -1236,9 +1244,11 @@ def test_phase_4b_success_rejected_when_build_still_fails(tmp_path):
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     config.build_command = "exit 1"
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
-        with pytest.raises(PipelineEscalation, match="build/test still fails"):
-            phase_4b_run_and_fix(config, claude_cfg, state, None)
+    with (
+        patch("auto_bug_fix.run_bug_fix._agent_run", new=fake),
+        pytest.raises(PipelineEscalation, match="build/test still fails"),
+    ):
+        phase_4b_run_and_fix(config, claude_cfg, state, None)
 
 
 def test_phase_4b_success_accepted_when_build_passes(tmp_path):
@@ -1568,9 +1578,11 @@ def test_phase_4b_verification_gate_rejects_a_failing_test_command(tmp_path):
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     config.test_command = "exit 1"
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
-        with pytest.raises(PipelineEscalation, match="build/test still fails"):
-            phase_4b_run_and_fix(config, claude_cfg, state, None)
+    with (
+        patch("auto_bug_fix.run_bug_fix._agent_run", new=fake),
+        pytest.raises(PipelineEscalation, match="build/test still fails"),
+    ):
+        phase_4b_run_and_fix(config, claude_cfg, state, None)
 
 
 def test_relatedness_needs_more_than_one_shared_line(tmp_path):
@@ -1631,9 +1643,11 @@ def test_phase_4b_artifact_does_not_claim_success_before_verification(tmp_path):
     tracker._output_dir = str(tmp_path / "out")
     os.makedirs(tracker._output_dir, exist_ok=True)
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
-    with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
-        with pytest.raises(PipelineEscalation):
-            phase_4b_run_and_fix(config, claude_cfg, state, tracker)
+    with (
+        patch("auto_bug_fix.run_bug_fix._agent_run", new=fake),
+        pytest.raises(PipelineEscalation),
+    ):
+        phase_4b_run_and_fix(config, claude_cfg, state, tracker)
     data = _json.loads((tmp_path / "out" / "phase_4b_input.json").read_text())
     assert data["outcome"] == "verification_failed"
     assert data["agent_reported"] == "success"

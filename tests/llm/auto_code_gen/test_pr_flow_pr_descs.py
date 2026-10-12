@@ -149,9 +149,11 @@ class TestUpdatePrDescs:
                 config, claude_config=None, use_case=self._use_case()
             )
         )
+        assert desc is not None and body is not None
         assert os.path.isfile(desc)
         assert os.path.isfile(body)
-        assert open(desc).readline().strip() == "perf: stub title"
+        with open(desc) as _desc:
+            assert _desc.readline().strip() == "perf: stub title"
 
     def test_updates_in_place(self, tmp_path, stub_agent):
         import asyncio

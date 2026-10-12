@@ -19,6 +19,8 @@ from unittest.mock import AsyncMock, patch
 # project is not installed or another installation is on the import path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import contextlib
+
 from claude_agent_sdk._internal.transport import subprocess_cli
 
 from common.claude_utils import ClaudeConfig, build_claude_options
@@ -48,11 +50,11 @@ async def check():
     with patch.dict(os.environ, ambient, clear=True):
         options = replace(build_claude_options(config), cli_path=sys.executable)
         spawn = AsyncMock(side_effect=CapturedSpawn)
-        with patch.object(subprocess_cli.anyio, "open_process", spawn):
-            try:
-                await subprocess_cli.SubprocessCLITransport("smoke", options).connect()
-            except CapturedSpawn:
-                pass
+        with (
+            patch.object(subprocess_cli.anyio, "open_process", spawn),
+            contextlib.suppress(CapturedSpawn),
+        ):
+            await subprocess_cli.SubprocessCLITransport("smoke", options).connect()
         spawn.assert_awaited_once()
         sent = spawn.call_args.kwargs["env"]
         assert sent["ANTHROPIC_API_KEY"] == "PROFILE_KEY"

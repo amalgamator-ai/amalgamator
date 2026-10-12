@@ -7,6 +7,7 @@ use this loop. Tools run with the user's process permissions, not in a sandbox.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import inspect
 import json
@@ -18,6 +19,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import TypedDict
 
 from .client import LLMClient
 from .config import TOOL_NAMES
@@ -31,7 +33,23 @@ class AgentError(RuntimeError):
         self.timings = timings or []
 
 
-def _schema(name, description, properties, required):
+class ToolFunction(TypedDict):
+    name: str
+    description: str
+    parameters: dict[str, object]
+
+
+class ToolSchema(TypedDict):
+    type: str
+    function: ToolFunction
+
+
+def _schema(
+    name: str,
+    description: str,
+    properties: dict[str, object],
+    required: list[str],
+) -> ToolSchema:
     return {
         "type": "function",
         "function": {
@@ -46,7 +64,7 @@ def _schema(name, description, properties, required):
     }
 
 
-SCHEMAS = [
+SCHEMAS: list[ToolSchema] = [
     _schema(
         "read_file",
         "Read a text file. offset is a zero-based line number; limit bounds lines.",
@@ -83,7 +101,7 @@ SCHEMAS = [
 ]
 
 
-def tool_schemas(allowed):
+def tool_schemas(allowed) -> list[ToolSchema]:
     names = {TOOL_NAMES.get(name, name) for name in allowed}
     known = {s["function"]["name"] for s in SCHEMAS}
     if names - known:
@@ -247,10 +265,8 @@ async def _bash(command, cwd, timeout, cap):
         try:
             await asyncio.wait_for(proc.wait(), timeout)
         except TimeoutError, asyncio.CancelledError:
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
             await proc.wait()
             raise
         size = output.tell()
@@ -536,12 +552,10 @@ def _format_human_event(event):
         for index, call in enumerate(event.get("tool_calls", []), 1):
             function = call.get("function", {})
             arguments = function.get("arguments", "")
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 arguments = (
                     json.loads(arguments) if isinstance(arguments, str) else arguments
                 )
-            except TypeError, ValueError:
-                pass
             lines.extend(
                 [
                     f"TOOL CALL {index}: {function.get('name', '')} (id={call.get('id', '')})",
@@ -873,6 +887,7 @@ class LiteLLMSession:
                 )
                 tool_mode = request_tool_mode
             allowed = {s["function"]["name"] for s in request_tools}
+            reply = None
             for context_attempt in range(3):
                 try:
                     reply = await self.transport.complete(
@@ -901,6 +916,7 @@ class LiteLLMSession:
                         "context_overflow", timing["name"], input_budget=self.budget
                     )
                     await self.compact(timing, force=True)
+            assert reply is not None
             add_usage(timing, reply)
             self._event(
                 "assistant",
@@ -1024,48 +1040,54 @@ class LiteLLMSession:
             self.messages.append(assistant)
             if reply.text:
                 print("Agent:", reply.text)
-            if not reply.tool_calls and _mentions_pseudo_tool_markup(reply.text):
-                if markup_reminders < 2:
-                    markup_reminders += 1
-                    retry_prompt = (
-                        "That message described a tool call as markup text, so "
-                        "nothing ran. Emit real tool calls through the provided "
-                        "tool functions instead: call bash, read_file or "
-                        "write_file directly, with arguments as a JSON object and "
-                        "no markup tags anywhere in the message."
-                    )
-                    self.messages.append({"role": "user", "content": retry_prompt})
-                    self._event(
-                        "user_prompt",
-                        timing["name"],
-                        purpose="pseudo_tool_markup_retry",
-                        prompt=retry_prompt,
-                    )
-                    continue
-            if not reply.tool_calls and self._missing_outputs(output_files):
-                if artifact_reminders < 2:
-                    missing = ", ".join(self._missing_outputs(output_files))
-                    self.messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "You have not created these required output files: "
-                                + missing
-                                + ". "
-                                "Do the file-writing work now with valid tool calls, verify each file is "
-                                "non-empty and complete, then finish. If a file is large, write it in "
-                                "multiple small complete calls."
-                            ),
-                        }
-                    )
-                    self._event(
-                        "user_prompt",
-                        timing["name"],
-                        purpose="artifact_reminder",
-                        prompt=self.messages[-1]["content"],
-                    )
-                    artifact_reminders += 1
-                    continue
+            if (
+                not reply.tool_calls
+                and _mentions_pseudo_tool_markup(reply.text)
+                and markup_reminders < 2
+            ):
+                markup_reminders += 1
+                retry_prompt = (
+                    "That message described a tool call as markup text, so "
+                    "nothing ran. Emit real tool calls through the provided "
+                    "tool functions instead: call bash, read_file or "
+                    "write_file directly, with arguments as a JSON object and "
+                    "no markup tags anywhere in the message."
+                )
+                self.messages.append({"role": "user", "content": retry_prompt})
+                self._event(
+                    "user_prompt",
+                    timing["name"],
+                    purpose="pseudo_tool_markup_retry",
+                    prompt=retry_prompt,
+                )
+                continue
+            if (
+                not reply.tool_calls
+                and self._missing_outputs(output_files)
+                and artifact_reminders < 2
+            ):
+                missing = ", ".join(self._missing_outputs(output_files))
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You have not created these required output files: "
+                            + missing
+                            + ". "
+                            "Do the file-writing work now with valid tool calls, verify each file is "
+                            "non-empty and complete, then finish. If a file is large, write it in "
+                            "multiple small complete calls."
+                        ),
+                    }
+                )
+                self._event(
+                    "user_prompt",
+                    timing["name"],
+                    purpose="artifact_reminder",
+                    prompt=self.messages[-1]["content"],
+                )
+                artifact_reminders += 1
+                continue
             if not reply.tool_calls:
                 return
             signature = json.dumps(
@@ -1151,6 +1173,7 @@ class LiteLLMSession:
                             else None
                         )
                         skip_write = False
+                        result: str = ""
                         if name == "write_file" and not write_error:
                             write_error = _artifact_overwrite_error(
                                 arguments, self.config.cwd, written_artifacts
@@ -1160,7 +1183,7 @@ class LiteLLMSession:
                                     arguments, self.config.cwd, written_artifacts
                                 )
                                 if healed is None:
-                                    result = heal_note
+                                    result = heal_note or ""
                                     skip_write = True
                                 else:
                                     arguments = healed
@@ -1184,8 +1207,12 @@ class LiteLLMSession:
                                 arguments, self.config.cwd
                             )
                         if not skip_write:
-                            result = write_error or await execute_tool(
-                                name, arguments, self.config, self.cap
+                            result = (
+                                write_error
+                                or await execute_tool(
+                                    name, arguments, self.config, self.cap
+                                )
+                                or ""
                             )
                         if name == "write_file" and not result.startswith("Error:"):
                             target = _path(arguments["path"], self.config.cwd).resolve()

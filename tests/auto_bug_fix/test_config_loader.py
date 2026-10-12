@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from typing import Any
 
 import pytest
 
@@ -318,7 +319,7 @@ def test_sanitize_ref_origin_and_slashes():
 # --- parse_targets ---
 
 
-def _base_config(**overrides):
+def _base_config(**overrides) -> dict[str, Any]:
     """Minimal valid config dict for parse_targets tests."""
     cfg = {
         "issue_id": "CVE-2024-1234",

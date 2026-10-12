@@ -19,7 +19,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TextIO, TypedDict, cast
 
 from auto_bug_fix.claude_utils import (
     BugFixClaudeConfig,
@@ -86,7 +86,10 @@ async def _run_llm(claude_config, prompts, tracker=None):
     if tracker and step_timings:
         cursor = batch_start
         for st in step_timings:
-            dur = st.get("duration", 0)
+            # A recorded duration of 0 is a valid measurement; only a missing
+            # entry falls back to the default.
+            raw_dur = st.get("duration")
+            dur = float(raw_dur) if raw_dur is not None else 0
             sdk_cost = st.get("cost_usd")
             record = tracker.record_query(
                 prompt_name=st.get("name", "query"),
@@ -289,13 +292,19 @@ def _validate_shell_command(cmd: str) -> bool:
 def _conflicted_files(status_lines: list[str]) -> list[str]:
     """Extract conflicted file paths from porcelain status output."""
     return [
-        l[3:] for l in status_lines if any(l.startswith(p) for p in _CONFLICT_PREFIXES)
+        line[3:]
+        for line in status_lines
+        if any(line.startswith(p) for p in _CONFLICT_PREFIXES)
     ]
 
 
 def _has_conflicts(status_lines: list[str]) -> list[str]:
     """Return status lines that represent merge conflicts."""
-    return [l for l in status_lines if any(l.startswith(p) for p in _CONFLICT_PREFIXES)]
+    return [
+        line
+        for line in status_lines
+        if any(line.startswith(p) for p in _CONFLICT_PREFIXES)
+    ]
 
 
 @dataclass
@@ -305,7 +314,7 @@ class PipelineState:
     baseline: set[str] = field(default_factory=set)
     ported_test_files: list[str] = field(default_factory=list)
     cherry_pick_path: str = ""
-    dossier: Dossier | None = None
+    dossier: Dossier = field(default_factory=Dossier)
     triage_assessment: dict = field(default_factory=dict)
     priority_files: list[str] = field(default_factory=list)
     baseline_build_exit: int = 0
@@ -1422,16 +1431,18 @@ def phase_4b_run_and_fix(
     phase_4b_log_path = (
         os.path.join(tracker._output_dir, "phase_4b_log.txt") if tracker else None
     )
+    _4b_log_file: TextIO | None = None
+    _prev_stdout = sys.stdout
     if phase_4b_log_path:
-
-        _4b_log_file = open(phase_4b_log_path, "w", encoding="utf-8")
-        _prev_stdout = sys.stdout
+        _4b_log_file = open(  # noqa: SIM115 (tee target, closed in finally)
+            phase_4b_log_path, "w", encoding="utf-8"
+        )
         sys.stdout = Tee(_prev_stdout, _4b_log_file)
 
     try:
         timings = asyncio.run(_agent_run(ext_claude_config, steps))
     finally:
-        if phase_4b_log_path:
+        if _4b_log_file is not None:
             sys.stdout = _prev_stdout
             _4b_log_file.close()
             log.info("Phase 4b log written to %s", phase_4b_log_path)
@@ -1441,7 +1452,10 @@ def phase_4b_run_and_fix(
     query_records = []
     if tracker and timings:
         for st in timings:
-            dur = st.get("duration", _4b_end - _4b_start)
+            # A recorded duration of 0 is a valid measurement; only a missing
+            # entry falls back to the whole-phase span.
+            raw_dur = st.get("duration")
+            dur = float(raw_dur) if raw_dur is not None else (_4b_end - _4b_start)
             sdk_cost = st.get("cost_usd")
             query_records.append(
                 tracker.record_query(
@@ -1461,10 +1475,10 @@ def phase_4b_run_and_fix(
         if timings:
             phase_4b_data["cost_usd"] = sum(record.cost_usd for record in query_records)
             phase_4b_data["input_tokens"] = sum(
-                st.get("input_tokens", 0) for st in timings
+                int(cast(Any, st.get("input_tokens", 0))) for st in timings
             )
             phase_4b_data["output_tokens"] = sum(
-                st.get("output_tokens", 0) for st in timings
+                int(cast(Any, st.get("output_tokens", 0))) for st in timings
             )
 
         # Failure first — must match the decision precedence below, so a
@@ -1514,7 +1528,7 @@ def phase_4b_run_and_fix(
             _finalize("verification_failed")
             raise PipelineEscalation(
                 f"Phase 4b: reported success while build/test still fails ({e})"
-            )
+            ) from None
 
         still_failing = _rerun_verification(config, extra_verification)
         if still_failing:
@@ -1564,13 +1578,18 @@ def cherry_pick_and_resolve(
 ) -> str:
     """Cherry-pick a single commit trying multiple strategies. Returns 'clean', 'resolved', or raises."""
 
-    strategies = [
+    class _CherryPickStrategy(TypedDict):
+        strategy: str | None
+        strategy_option: str | None
+        name: str
+
+    strategies: list[_CherryPickStrategy] = [
         {"strategy": None, "strategy_option": None, "name": "default"},
         {"strategy": None, "strategy_option": "patience", "name": "patience"},
         {"strategy": "ort", "strategy_option": None, "name": "ort"},
     ]
 
-    best_strategy = None
+    best_strategy: tuple[_CherryPickStrategy, int] | None = None
     for strat in strategies:
         result = git_cherry_pick(
             config.repo_path,
@@ -1597,8 +1616,8 @@ def cherry_pick_and_resolve(
             return "clean"
 
         if uu_files:
-            if best_strategy is None or len(uu_files) < best_strategy["count"]:
-                best_strategy = {"strat": strat, "count": len(uu_files)}
+            if best_strategy is None or len(uu_files) < best_strategy[1]:
+                best_strategy = (strat, len(uu_files))
             if state.dossier:
                 state.dossier.add_strategy(
                     strat["name"], f"conflict ({len(uu_files)} files)"
@@ -1622,10 +1641,10 @@ def cherry_pick_and_resolve(
     log.info(
         "%s: using strategy %s (%d conflicts, fewest)",
         label,
-        best_strategy["strat"]["name"],
-        best_strategy["count"],
+        best_strategy[0]["name"],
+        best_strategy[1],
     )
-    strat = best_strategy["strat"]
+    strat = best_strategy[0]
     git_cherry_pick(
         config.repo_path,
         commit,
@@ -2594,13 +2613,16 @@ def phase_4_5_semantic_equivalence(
         return "unmatched"
 
     equivalence = parse_equivalence(rd_output)
-    if equivalence != "unmatched" and creation_factor is not None:
-        if not _shares_content_with_fix(config, state):
-            log.warning(
-                "Phase 4.5: range-diff paired the commits, but the backport "
-                "changes none of the lines the fix changed — reporting unmatched"
-            )
-            return "unmatched"
+    if (
+        equivalence != "unmatched"
+        and creation_factor is not None
+        and not _shares_content_with_fix(config, state)
+    ):
+        log.warning(
+            "Phase 4.5: range-diff paired the commits, but the backport "
+            "changes none of the lines the fix changed — reporting unmatched"
+        )
+        return "unmatched"
     return equivalence
 
 
@@ -2611,13 +2633,9 @@ def run_pipeline(
 ) -> tuple[Dossier, Tracker]:
     """Orchestrate the full pipeline: triage, baseline, cherry-pick, resolve, verify, equivalence."""
     if config is None:
-        from auto_bug_fix.bug_fix_config import bug_fix_config as _default
-
-        config = _default
+        raise ConfigError("run_pipeline() requires a config")
     if claude_config is None:
-        from auto_bug_fix.bug_fix_config import claude_config as _default
-
-        claude_config = _default
+        raise ConfigError("run_pipeline() requires a claude_config")
 
     if not config.source_fix_commit:
         raise ConfigError(
@@ -2670,7 +2688,9 @@ def _run_pipeline_phases(
             config.repo_path, ["log", "-1", "--format=%B", config.source_fix_commit]
         )
         trailer_match = [
-            l for l in msg.stdout.splitlines() if l.startswith(f"{PATCH_TRAILER_KEY}:")
+            line
+            for line in msg.stdout.splitlines()
+            if line.startswith(f"{PATCH_TRAILER_KEY}:")
         ]
         ingest_lines = [
             f"Patch file: {config.fix_patch}",
@@ -2730,6 +2750,7 @@ def _run_pipeline_phases(
         tracker.record_gate(
             "recommendation", assessment.get("recommendation", "unknown")
         )
+        triage_dest: str | None = None
         if assessment:
             triage_dest = os.path.join(tracker._output_dir, "semantic_triage.json")
             with open(triage_dest, "w") as f:
@@ -2762,7 +2783,7 @@ def _run_pipeline_phases(
                     )
                 if corrections:
                     tracker.record_gate("triage_corrections", str(len(corrections)))
-                    if assessment:
+                    if assessment and triage_dest is not None:
                         with open(triage_dest, "w") as f:
                             json.dump(assessment, f, indent=2)
 
@@ -3375,7 +3396,7 @@ def run_targets(
         worktree_path = os.path.join(workdir, f"{target_config.issue_id}_{sanitized}")
 
         try:
-            target_log_file = open(
+            target_log_file = open(  # noqa: SIM115 (tee target, closed in finally)
                 os.path.join(target_run_dir, "run_log.txt"), "w", encoding="utf-8"
             )
         except OSError as e:
@@ -3580,7 +3601,9 @@ def main(argv=None) -> int:
     os.makedirs(parent_run_dir, exist_ok=True)
 
     log_path = os.path.join(parent_run_dir, "run_log.txt")
-    log_file = open(log_path, "w", encoding="utf-8")
+    log_file = open(  # noqa: SIM115 (tee target, closed at end of main)
+        log_path, "w", encoding="utf-8"
+    )
     original_stdout = sys.stdout
     sys.stdout = Tee(original_stdout, log_file)
 

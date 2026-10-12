@@ -525,7 +525,9 @@ def _fix_added_tokens(repo_path: str, fix_commit: str) -> set[str]:
     """Tokens introduced by the upstream fix commit's own added lines."""
     result = _run_git(repo_path, ["diff", f"{fix_commit}^1..{fix_commit}"])
     diff_text = result.stdout[:MAX_FIX_DIFF_BYTES]
-    added = [l for lines in added_lines_by_file(diff_text).values() for l in lines]
+    added = [
+        line for lines in added_lines_by_file(diff_text).values() for line in lines
+    ]
     tokens: set[str] = set()
     for line in added:
         tokens.update(TOKEN_RE.findall(line))
@@ -659,9 +661,9 @@ def mine_substitutions(
         removed: list[str] = []
         added: list[str] = []
 
-        def flush() -> None:
+        def flush(removed=removed, added=added) -> None:  # noqa: B023
             if removed and len(removed) == len(added):
-                for old_line, new_line in zip(removed, added):
+                for old_line, new_line in zip(removed, added, strict=False):
                     pair = _single_token_diff(old_line, new_line)
                     if pair:
                         pair_counts[pair] += 1
@@ -696,7 +698,7 @@ def _single_token_diff(old_line: str, new_line: str) -> tuple[str, str] | None:
     new_tokens = TOKEN_RE.findall(new_line)
     if len(old_tokens) != len(new_tokens) or not old_tokens:
         return None
-    diffs = [(a, b) for a, b in zip(old_tokens, new_tokens) if a != b]
+    diffs = [(a, b) for a, b in zip(old_tokens, new_tokens, strict=False) if a != b]
     if len(diffs) != 1:
         return None
     old, new = diffs[0]
@@ -939,12 +941,12 @@ def audit_line_provenance(
 
         pre = _git_blob(repo_path, base_head, f) or ""
         pre_lines = set(pre.split("\n"))
-        pre_norm = {normalize_ws(l) for l in pre_lines}
+        pre_norm = {normalize_ws(line) for line in pre_lines}
 
         cur = (current_texts or {}).get(f)
         guards = conditional_guards(cur) if cur else []
 
-        def dead_at(lineno: int) -> str | None:
+        def dead_at(lineno: int, guards=guards) -> str | None:  # noqa: B023
             if guards and 0 < lineno <= len(guards):
                 return dead_config_symbol(guards[lineno - 1], state_lookup)
             return None
@@ -988,7 +990,7 @@ def audit_line_provenance(
                 continue
             a_tokens = TOKEN_RE.findall(a)
             best, best_line = 0.0, ""
-            for text, tokens in zip(up_added, up_tokens):
+            for text, tokens in zip(up_added, up_tokens, strict=False):
                 if not tokens:
                     continue
                 ratio = difflib.SequenceMatcher(
@@ -1113,12 +1115,12 @@ def find_pure_rename_restorations(
             ):
                 continue
             a_tokens = TOKEN_RE.findall(a)
-            for fix_line, f_tokens in zip(up_added, up_tokens):
+            for fix_line, f_tokens in zip(up_added, up_tokens, strict=False):
                 if len(f_tokens) != len(a_tokens) or f_tokens == a_tokens:
                     continue
                 mapping: dict[str, str] = {}
                 consistent = True
-                for at, ft in zip(a_tokens, f_tokens):
+                for at, ft in zip(a_tokens, f_tokens, strict=False):
                     if at == ft:
                         continue
                     if mapping.setdefault(at, ft) != ft:
@@ -1200,7 +1202,7 @@ def scan_followup_fixes(
     )
     if not result.success:
         return []
-    return [l for l in result.stdout.splitlines() if l.strip()][:limit]
+    return [line for line in result.stdout.splitlines() if line.strip()][:limit]
 
 
 def run_file_checks(

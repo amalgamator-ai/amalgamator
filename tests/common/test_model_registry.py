@@ -44,7 +44,7 @@ class TestModelProfile:
     def test_frozen_dataclass(self):
         p = ModelProfile(id="a", provider="anthropic", model="claude-sonnet-4-6")
         with pytest.raises(AttributeError):
-            p.model = "other"
+            p.model = "other"  # pyrefly: ignore [read-only] (deliberately exercises the frozen error)
 
 
 # ── _infer_provider ─────────────────────────────────────────────────────────

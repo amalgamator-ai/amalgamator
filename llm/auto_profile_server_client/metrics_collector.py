@@ -89,7 +89,11 @@ class MetricsCollector:
         self._prev_tokens_total = 0.0
         if self.raw_log_path:
             Path(self.raw_log_path).parent.mkdir(parents=True, exist_ok=True)
-            self._raw_log_file = open(self.raw_log_path, "w")
+            self._raw_log_file = (
+                open(  # noqa: SIM115 (thread-lifetime; closed in stop())
+                    self.raw_log_path, "w"
+                )
+            )
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
         log.info(
