@@ -179,7 +179,7 @@ def _artifact_write_error(args, cwd, output_files):
         target = _path(args["path"], cwd).resolve()
         artifact_root = Path(cwd).resolve()
         target.relative_to(artifact_root)
-    except KeyError, OSError, ValueError:
+    except (KeyError, OSError, ValueError):
         return None
     allowed = {_path(name, cwd).resolve() for name in output_files}
     if target in allowed:
@@ -199,7 +199,7 @@ def _artifact_overwrite_error(args, cwd, written_artifacts):
     try:
         target = _path(args["path"], cwd).resolve()
         target.relative_to(Path(cwd).resolve())
-    except KeyError, OSError, ValueError:
+    except (KeyError, OSError, ValueError):
         return None
     if target not in written_artifacts:
         return None
@@ -227,7 +227,7 @@ def _heal_artifact_write(args, cwd, written_artifacts):
     try:
         target = _path(args["path"], cwd).resolve()
         target.relative_to(Path(cwd).resolve())
-    except KeyError, OSError, ValueError:
+    except (KeyError, OSError, ValueError):
         return args, None
     if target not in written_artifacts:
         return args, None
@@ -264,7 +264,7 @@ async def _bash(command, cwd, timeout, cap):
         )
         try:
             await asyncio.wait_for(proc.wait(), timeout)
-        except TimeoutError, asyncio.CancelledError:
+        except (TimeoutError, asyncio.CancelledError):
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
             await proc.wait()
@@ -413,7 +413,7 @@ def _source_write_error(args, target_source_dir):
         if not target.is_absolute():
             return "Error: source checkpoint requires an absolute target source path"
         target.resolve().relative_to(target_source_dir)
-    except KeyError, OSError, ValueError:
+    except (KeyError, OSError, ValueError):
         return (
             "Error: source checkpoint requires write_file inside "
             f"{target_source_dir}; artifacts and temporary files are not allowed yet"
@@ -426,7 +426,7 @@ def _final_artifact_write_error(args, cwd):
     try:
         target = _path(args["path"], cwd).resolve()
         target.relative_to(Path(cwd).resolve())
-    except KeyError, OSError, ValueError:
+    except (KeyError, OSError, ValueError):
         return (
             "Error: strict final-artifact mode may write only declared files "
             f"inside {Path(cwd).resolve()}; source-tree writes are no longer allowed"
@@ -1149,7 +1149,7 @@ class LiteLLMSession:
                             arguments = json.loads(arguments)
                         if not isinstance(arguments, dict):
                             raise ValueError("Tool arguments must be an object")
-                    except ValueError, TypeError:
+                    except (ValueError, TypeError):
                         # Some servers parse historical tool arguments in their chat
                         # template. Never resend malformed JSON or execute a repair.
                         # The original response remains in the event log.

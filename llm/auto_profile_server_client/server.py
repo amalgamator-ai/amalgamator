@@ -150,7 +150,7 @@ class ServerProcess:
         log.info("Stopping server process group (PID=%d)", pid)
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
-        except ProcessLookupError, PermissionError:
+        except (ProcessLookupError, PermissionError):
             self.process.terminate()
 
         try:
@@ -159,7 +159,7 @@ class ServerProcess:
             log.warning("Server did not exit after 30s, killing process group")
             try:
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except ProcessLookupError, PermissionError:
+            except (ProcessLookupError, PermissionError):
                 self.process.kill()
             self.process.wait(timeout=10)
 

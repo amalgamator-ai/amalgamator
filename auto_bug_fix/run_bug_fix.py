@@ -1975,7 +1975,7 @@ def _finalize_resolution(
                 try:
                     with open(abs_path, encoding="utf-8", newline="") as fh:
                         current = fh.read()
-                except UnicodeDecodeError, OSError:
+                except (UnicodeDecodeError, OSError):
                     continue
                 preimage = _git_blob(repo, base_head, f) or ""
                 new_text, hits = apply_substitutions(current, preimage, guarded)
@@ -2012,7 +2012,7 @@ def _finalize_resolution(
                 try:
                     with open(abs_path, encoding="utf-8", newline="") as fh:
                         lines = fh.read().split("\n")
-                except UnicodeDecodeError, OSError:
+                except (UnicodeDecodeError, OSError):
                     continue
                 changed = False
                 for lineno, old_line, fix_line in items:
@@ -2079,7 +2079,7 @@ def _finalize_resolution(
         try:
             with open(abs_path, encoding="utf-8", newline="") as fh:
                 current_texts[f] = fh.read()
-        except UnicodeDecodeError, OSError:
+        except (UnicodeDecodeError, OSError):
             continue
 
     try:
@@ -3307,7 +3307,7 @@ def _read_tracker_cost(target_run_dir: str, issue_id: str) -> tuple[float, str]:
         with open(tracker_path) as f:
             data = json.load(f)
         return data.get("total_cost_usd", 0.0), tracker_path
-    except json.JSONDecodeError, OSError:
+    except (json.JSONDecodeError, OSError):
         return 0.0, tracker_path
 
 

@@ -146,7 +146,7 @@ def _state_scrub_patterns(state):
         try:
             with open(config_path) as f:
                 cfg = json.load(f)
-        except OSError, json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             cfg = {}
         for key in ("remote_namespace", "remote_pvc_name", "remote_model_pvc_name"):
             value = cfg.get(key)

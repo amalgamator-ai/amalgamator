@@ -106,7 +106,7 @@ ai_auto_analyze/
 
 ## Prerequisites
 
-- Python 3.14+ (use [uv](https://docs.astral.sh/uv/) for version management)
+- Python 3.12+ (use [uv](https://docs.astral.sh/uv/) for version management)
 - Dependencies: `uv sync` (installs `claude-agent-sdk`, `litellm`, `colorama`, `pyyaml`)
 - An LLM endpoint — Claude via Vertex AI, a local Ollama instance, a
   self-hosted vLLM server, or an OpenAI API key
@@ -388,7 +388,7 @@ developers:
 uv sync --extra test --extra dev
 
 # plain pip path
-python3.14 -m venv .venv && source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[test,dev]"
 ```
 
@@ -420,9 +420,9 @@ uv run pre-commit run pyrefly --hook-stage manual --all-files
 
 ### Style notes
 
-- The repo targets **Python 3.14**. Parenthesis-less multi-exception `except A, B:`
-  (PEP 758) is the style black enforces for py314 targets; do not "fix" it back
-  to `except (A, B):` — black will revert it.
+- The repo targets **Python 3.12+** (RHEL 9/10 and Ubuntu 24.04 LTS ship 3.12
+  as the system `python3`). Multi-exception clauses use parentheses,
+  `except (A, B):`.
 - Mass-reformat commits are listed in `.git-blame-ignore-revs` so `git blame`
   (and GitHub's blame UI) keeps pointing at the commit that changed the logic.
   Enable locally with `git config blame.ignoreRevsFile .git-blame-ignore-revs`.

@@ -373,7 +373,7 @@ def _recompute_lm_eval_verdict(runtime_logs_dir, shared_baseline_dir):
                     .get("results", {})
                     .get("gsm8k", {})
                 )
-            except OSError, ValueError:
+            except (OSError, ValueError):
                 continue
             se = r.get("exact_match_stderr,flexible-extract")
             if isinstance(se, (int, float)) and se > 0:
@@ -843,7 +843,7 @@ def _read_expected_improvement_pct(output_dir):
         with open(filepath) as f:
             data = json.load(f)
         return data.get("expected_improvement_pct")
-    except OSError, json.JSONDecodeError, KeyError:
+    except (OSError, json.JSONDecodeError, KeyError):
         return None
 
 
@@ -944,7 +944,7 @@ def _collect_previous_perf_results(results_dir, current_iteration):
             if patched_tps is not None and baseline_tps is not None:
                 delta = (patched_tps - baseline_tps) / baseline_tps * 100
                 delta_str = f"{delta:+.2f}%"
-        except OSError, json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             pass
 
         gate_rejected = os.path.isfile(gate_file)
@@ -1188,7 +1188,7 @@ def _compute_delay_iterations(config, execution_command=None):
     if output_len is None:
         try:
             output_len = config.traces[config.target_trace_id].output_size_range[1]
-        except AttributeError, IndexError, TypeError:
+        except (AttributeError, IndexError, TypeError):
             output_len = 1024
     num_warmups = getattr(config, "num_warmups", 0)
     num_waves = getattr(config, "num_waves", 4)
@@ -1237,7 +1237,7 @@ def _resolve_original_analysis_dir(config):
         analysis_dir = os.path.join(cross_dir, f"analyze_{target_fw}")
         if os.path.isdir(analysis_dir):
             return analysis_dir
-    except AttributeError, TypeError:
+    except (AttributeError, TypeError):
         pass
     return None
 

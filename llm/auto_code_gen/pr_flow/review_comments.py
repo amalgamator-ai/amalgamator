@@ -39,7 +39,7 @@ def _load_json(path, default):
         with open(path) as f:
             text = f.read().strip()
         return json.loads(text) if text else default
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return default
 
 

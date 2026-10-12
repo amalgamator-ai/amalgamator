@@ -82,7 +82,7 @@ def _latest_passing_verdict(output_dir):
 
             with open(candidate) as f:
                 verdict = json.load(f)
-        except OSError, ValueError:
+        except (OSError, ValueError):
             continue
         if verdict.get("overall") == "PASS":
             number = int(name[1:])

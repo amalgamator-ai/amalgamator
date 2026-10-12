@@ -34,7 +34,7 @@ def _fetch_latest_stable_tag(repo: str) -> str | None:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
-    except HTTPError, URLError, json.JSONDecodeError:
+    except (HTTPError, URLError, json.JSONDecodeError):
         return None
 
     for tag in data.get("results", []):

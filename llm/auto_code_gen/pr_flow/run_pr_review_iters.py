@@ -842,7 +842,7 @@ def _resolve_round(state, output_dir):
     try:
         with open(pending) as f:
             return current if json.load(f).get("pending") else current + 1
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return current + 1
 
 

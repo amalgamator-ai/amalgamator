@@ -244,7 +244,7 @@ class CodeGenConfig(PipelineConfig):
     target_run_command: str = ""
 
     @classmethod
-    def from_json(cls, path: str) -> CodeGenConfig:
+    def from_json(cls, path: str) -> "CodeGenConfig":
         with open(path) as f:
             data = json.load(f)
 

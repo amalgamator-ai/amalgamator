@@ -136,7 +136,7 @@ def snap_back_files(
         try:
             with open(abs_path, encoding="utf-8", newline="") as fh:
                 current = fh.read()
-        except UnicodeDecodeError, OSError:
+        except (UnicodeDecodeError, OSError):
             continue
 
         sources = []

@@ -88,7 +88,7 @@ def measure_throughput(iter_dir):
             patched = json.load(f)
         with open(os.path.join(iter_dir, "baseline_bench_result.json")) as f:
             baseline = json.load(f)
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return False, 0.0
 
     patched_tps, baseline_tps, _ = _bench_throughput_pair(patched, baseline)
@@ -181,7 +181,7 @@ def _lm_eval_stderr(iter_dir):
                     try:
                         with open(os.path.join(root, name)) as f:
                             data = json.load(f)
-                    except OSError, ValueError:
+                    except (OSError, ValueError):
                         continue
                     task = (data.get("results") or {}).get("gsm8k") or {}
                     se = task.get("exact_match_stderr,flexible-extract")
@@ -409,7 +409,7 @@ def _read_measured_content(verdict_path):
     try:
         with open(path) as f:
             return json.load(f)
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return None
 
 
@@ -555,7 +555,7 @@ def read_verdict(path):
     try:
         with open(path) as f:
             return json.load(f)
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return None
 
 

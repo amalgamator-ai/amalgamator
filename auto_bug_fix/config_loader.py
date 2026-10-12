@@ -60,7 +60,7 @@ def advanced_float(
         return default
     try:
         value = float(raw)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         log.warning(
             "advanced.%s=%r is not a number — falling back to %s",
             key,

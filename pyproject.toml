@@ -3,7 +3,7 @@ name = "amalgamator"
 version = "0.1.0"
 description = "AI-driven bug-fix backporting and GPU performance analysis"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.40.0",
     "claude-agent-sdk>=0.2.87",
@@ -36,12 +36,12 @@ dev = [
 include = ["auto_bug_fix*", "backport_scanner*", "common*", "llm*"]
 
 [tool.black]
-target-version = ["py314"]
+target-version = ["py312"]
 line-length = 88
 extend-exclude = "/(\\.claude|runs|build|dist|__pycache__)/"
 
 [tool.ruff]
-target-version = "py314"
+target-version = "py312"
 line-length = 88
 extend-exclude = [".claude", "runs", "build", "dist"]
 
@@ -60,7 +60,7 @@ known-first-party = ["auto_bug_fix", "backport_scanner", "common", "llm"]
 # NOTE: pyrefly's config keys are project-includes/project-excludes (glob
 # patterns, relative to the project root). Plain include/exclude/strict are
 # silently ignored (pyrefly warns about extra keys on every run).
-python-version = "3.14"
+python-version = "3.12"
 project-includes = [
     "auto_bug_fix/**/*.py",
     "backport_scanner/**/*.py",
