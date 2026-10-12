@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Compare two benchmark runs to check performance stability."""
 
 from __future__ import annotations

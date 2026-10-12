@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Rebase stage: planning, conflict snapshots, resolution parsing, guardrails.
 
 Every test builds throwaway repositories under tmp_path -- nothing here touches

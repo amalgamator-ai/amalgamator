@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 
 from llm.auto_code_gen.claude_utils import ClaudeConfig, PipelineStep

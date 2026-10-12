@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Persistent tool sessions adapted from amalgamator c0b487d/de20339/3fc802e.
 
 The target owns orchestration and Claude behavior. Only generic codegen calls

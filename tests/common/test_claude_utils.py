@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the shared Claude Agent SDK glue and its per-package personas."""
 
 import asyncio

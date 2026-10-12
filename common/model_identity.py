@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Dependency-free model classification for legacy routing and inference."""
 
 _CLAUDE_PREFIXES = ("claude-", "anthropic/", "vertex_ai/claude-")

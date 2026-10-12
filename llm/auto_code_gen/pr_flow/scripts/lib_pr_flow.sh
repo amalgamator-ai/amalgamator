@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Shared helpers for the human-run PR flow scripts.
 #
 # Contract every step script follows:

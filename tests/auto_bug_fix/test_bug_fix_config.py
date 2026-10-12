@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+
 def test_config_has_all_required_fields(bug_cfg):
     expected_attrs = [
         "repo_path",

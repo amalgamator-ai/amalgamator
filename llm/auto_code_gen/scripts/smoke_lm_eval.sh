@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 set -euo pipefail
 
 # smoke_lm_eval.sh — smoke test for lm_eval in the pod-local venv.

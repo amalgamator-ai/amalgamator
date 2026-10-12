@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Deterministic adaptation evidence for resolved backports.
 
 Prompt instructions asking the LLM to "git grep every symbol" are followed

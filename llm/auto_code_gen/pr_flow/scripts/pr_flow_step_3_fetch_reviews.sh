@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Step 3 -- fetch every review artifact for the PR into the local inbox.
 #
 #   Network access : YES -- read-only 'gh api' calls (HTTPS + gh token) and,

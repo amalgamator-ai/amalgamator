@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Local guardrails for the human-run PR scripts.
 
 Every script calls exactly one of these before it asks for confirmation, so the

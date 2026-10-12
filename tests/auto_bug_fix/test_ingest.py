@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for auto_bug_fix.ingest — Phase -1 patch materialization."""
 
 import os

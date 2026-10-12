@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Suggest reviewers for a published PR -- detection and draft generation.
 
 Step 2b of the PR flow: find the best candidate reviewers for the PR's owned

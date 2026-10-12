@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for common.model_registry — profile loading, resolution, and legacy fallback."""
 
 from __future__ import annotations

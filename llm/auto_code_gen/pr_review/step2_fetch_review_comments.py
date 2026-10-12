@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Fetch PR review comments from GitHub and generate a summary file.
 
 Fetches all inline review comments, top-level reviews, and issue comments

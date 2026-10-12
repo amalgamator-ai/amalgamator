@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Model-agnostic agent runner with tool-use loop.
 
 Provides two concrete runners behind a common interface:

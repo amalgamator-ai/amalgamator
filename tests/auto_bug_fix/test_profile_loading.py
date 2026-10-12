@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Boundary tests for registry-backed and legacy pipeline configuration."""
 
 import sys

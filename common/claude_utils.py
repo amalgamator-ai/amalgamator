@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared Claude Agent SDK glue: the agent runner and its config/step types.
 
 This is the common ground every pipeline builds on. A package that wants its

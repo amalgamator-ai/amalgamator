@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Record a provably-cosmetic iteration without any cluster work.
 
 Formatting-only fixes (ruff format, ruff --fix, import ordering, lint

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Bug-fix specialization of the shared Claude Agent SDK glue.
 
 Everything mechanical — the agent runner, resume handling, message printing,

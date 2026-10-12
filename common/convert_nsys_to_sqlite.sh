@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 #
 # Convert an NSYS .nsys-rep trace file to SQLite format.
 #

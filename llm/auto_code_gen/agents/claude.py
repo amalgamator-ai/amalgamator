@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Adapter preserving the target's native Claude behavior."""
 
 from contextlib import asynccontextmanager

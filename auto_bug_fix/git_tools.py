@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Thin wrappers around git commands for the bug-fix porting pipeline."""
 
 from __future__ import annotations

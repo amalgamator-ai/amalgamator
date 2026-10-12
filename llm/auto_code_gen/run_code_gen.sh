@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 source "$(dirname "$0")/../auto_profile/utils.sh"
 

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 AUTO_PROFILE_DIR="llm/auto_profile"
 INFRA_CONFIG="${AUTO_PROFILE_DIR}/test_configs/infra_config.json"
 

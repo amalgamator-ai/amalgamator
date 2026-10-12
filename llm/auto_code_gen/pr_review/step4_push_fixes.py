@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Push fix commits to the remote PR branch.
 
 Pushes any new commits on the current branch to the remote. Uses SSH

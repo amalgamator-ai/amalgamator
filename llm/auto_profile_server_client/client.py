@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Client benchmark runner — executes the framework's bench command and captures output."""
 
 from __future__ import annotations

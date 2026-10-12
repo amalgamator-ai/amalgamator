@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Durable state for one PR: submission + review-fix loop.
 
 One JSON document per PR, at <output_dir>/pr_p3/pr_state.json, is the single

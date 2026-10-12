@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Step 1 -- commit the verified worktree as the PR commit (local git only).
 #
 #   Network access : NONE

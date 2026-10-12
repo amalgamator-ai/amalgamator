@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Rebase the patched branch onto the latest main branch.
 
 Creates a backup of the current branch, rebases onto the latest main,

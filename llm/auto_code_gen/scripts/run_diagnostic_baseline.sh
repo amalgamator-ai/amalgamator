@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 set -euo pipefail
 
 # run_diagnostic_baseline.sh — compile + nsys profile baseline (feature OFF) + SQLite export.

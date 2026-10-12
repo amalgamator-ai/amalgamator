@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Rebase a PR branch onto a new upstream base: planning, conflicts, resolution.
 
 A rebase is the one stage where history is rewritten, so it is split in three

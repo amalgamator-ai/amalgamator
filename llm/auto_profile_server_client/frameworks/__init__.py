@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 from llm.auto_profile_server_client.frameworks.sglang import SglangAdapter
 from llm.auto_profile_server_client.frameworks.trt import TrtAdapter
 from llm.auto_profile_server_client.frameworks.vllm import VllmAdapter

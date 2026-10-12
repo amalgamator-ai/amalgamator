@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 #
 # Step 2: Parse profiling results, generate summary tables, and generate
 #          per-test-case analysis configs (single-trace + cross-trace).

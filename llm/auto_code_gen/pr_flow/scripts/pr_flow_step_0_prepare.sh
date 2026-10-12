@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Step 0 -- create/refresh pr_state.json for this improvement's PR.
 #
 #   Network access : NONE

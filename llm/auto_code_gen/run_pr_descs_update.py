@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Manually (re)generate the PR title and description files.
 
 Thin entrypoint around llm.auto_code_gen.pr_flow.pr_descs.update_pr_descs, which is

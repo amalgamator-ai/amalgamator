@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """LiteLLM transport adapted from amalgamator c0b487d/de20339/3fc802e.
 
 Configuration is per client; native Claude SDK behavior stays in its adapter.

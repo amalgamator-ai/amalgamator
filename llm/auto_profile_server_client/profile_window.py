@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Analyze throughput metrics to find the pure-decode midpoint for profiling."""
 
 from __future__ import annotations

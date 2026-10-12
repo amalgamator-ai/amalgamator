@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Phase 0-5 orchestrator for the auto_bug_fix pipeline.
 
 Usage:

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Real SDK adapter canary; stop at process creation before any network I/O.
 
 This deliberately imports the private SubprocessCLITransport implementation to

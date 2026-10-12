@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared gen => review iteration infrastructure.
 
 Used by both auto_analyze and auto_code_gen pipelines.

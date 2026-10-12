@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 from llm.auto_code_gen.run_code_gen import _print_detailed_table, _print_phase_summary
 
 

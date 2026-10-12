@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # venv_compile.sh — pod-local venv setup + cmake incremental build.
 #
 # The venv is created under /tmp so each pod gets its own clean copy.

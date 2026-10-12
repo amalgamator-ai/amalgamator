@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Turn fetched GitHub review artifacts into bounded, actionable input for the AI.
 
 The human fetch script writes raw JSON (gh api output) into a round directory;

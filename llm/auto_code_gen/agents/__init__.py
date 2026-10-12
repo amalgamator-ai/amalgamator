@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Provider-neutral agent runtime shared by code generation and analysis."""
 
 from contextlib import asynccontextmanager

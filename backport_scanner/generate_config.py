@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 generate_config.py — bridge between backport scanner and auto_bug_fix YAML configs.
 
