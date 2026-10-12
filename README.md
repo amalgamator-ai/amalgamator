@@ -392,6 +392,17 @@ python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[test,dev]"
 ```
 
+### Dependency lockfile
+
+`uv.lock` is committed intentionally: CI syncs with `--locked`, so every run
+tests the exact same resolved versions and fails loudly if the lock drifts from
+`pyproject.toml`. It only governs this repo's own environments — installing the
+project as a package (`pip install -e .`) resolves from `pyproject.toml` and
+never reads the lock. When adding or bumping dependencies, regenerate the lock
+(`uv add <pkg>` or `uv lock`) and commit it together with the `pyproject.toml`
+change. The file is marked `linguist-generated` in `.gitattributes`, so GitHub
+collapses it in diffs.
+
 ### Formatting and lint
 
 Install the commit hooks once (black/ruff run hermetically — they need no
