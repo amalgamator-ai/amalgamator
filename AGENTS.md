@@ -24,6 +24,14 @@ uv run pyrefly check
 uv run pytest
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md#development-setup) for alternative setup
+and hook invocations. Keep these CI-aligned commands consistent with its guidance
+when the toolchain changes.
+
+- For live Claude SDK runs, configure `ANTHROPIC_API_KEY` or the SDK's supported
+  backend authentication. Backport/scanner profiles can supply `api_key` or
+  `api_key_file` through `models.yaml`; GPU `claude_sdk` agents use SDK/environment
+  authentication. Tests require no live credentials.
 - CI runs formatting, lint, and type checking on 3.12; pytest runs on 3.12 and
   3.14. To exercise the other interpreter, sync with `--python 3.14`, then test.
 - Black and Ruff versions come from the pinned pre-commit hooks. Ruff runs with
