@@ -33,6 +33,26 @@ Two use cases, four pipelines — GPU performance analysis spans profiling/analy
 | Bug-fix backporting | `auto_bug_fix` | Backports a fix commit to another branch and produces a reviewable commit, a patch file, and a dossier of what it did and why | [auto_bug_fix/README.md](auto_bug_fix/README.md) |
 | Backport scanner | `backport_scanner` | Finds which branches, tags, and releases are missing a fix, and generates backport configs for the pipeline above | [backport_scanner/README.md](backport_scanner/README.md) |
 
+## Supported platforms
+
+**Operating systems:** Linux and macOS — the full test suite runs on both (Linux in CI, macOS in development). Amalgamator itself is pure Python plus `git` and runs on an ordinary workstation; the GPU benchmarks it drives run on GPU machines. Windows is not tested and not supported.
+
+**Python:** 3.12 or newer. CI tests the floor (3.12) and a current release (3.14). Raising the floor is a breaking change and, while the project is pre-1.0, lands in a minor release — see the [release policy](CONTRIBUTING.md#releases-and-versioning).
+
+Per-pipeline requirements beyond that:
+
+| Pipeline | Extra requirements |
+|----------|--------------------|
+| GPU performance analysis | Claude; traces from vLLM, SGLang, or TensorRT-LLM in `.nsys-rep`, `.sqlite`, `.json`, or `.json.gz` form |
+| Code generation | The GitHub CLI (`gh`) for the PR flow; benchmark validation runs on GPU machines |
+| Bug-fix backporting | Any git repository whose build and test commands run from a shell, and any LLM endpoint from [Prerequisites](#prerequisites) |
+| Backport scanning | Only the git repository being scanned; generating a backport config from the scan results additionally uses an LLM |
+
+Notes:
+
+- Analyzing a `.nsys-rep` trace needs the `nsys` CLI (Nsight Systems) for conversion; the other trace formats do not.
+- `git` is required everywhere. `git-lfs` is only needed to commit trace files — `*.nsys-rep` and `*.json.gz` are LFS-tracked — not to clone the repository.
+
 ## Getting Started
 
 ### Prerequisites
