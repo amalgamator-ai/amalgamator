@@ -125,10 +125,11 @@ amalgamator/
 
 - [git](https://git-scm.com/) — backporting is git-first; `git cherry-pick` and mechanical re-apply are tried before any LLM involvement.
 - [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview) — the GPU analysis tools, and the default backporting agent runner.
+- [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python) — direct one-shot model calls, with optional Vertex support.
 - [LiteLLM](https://docs.litellm.ai/) — the generic tool-use loop backporting uses for OpenAI, Ollama, and other OpenAI-compatible endpoints.
+- [PyYAML](https://pyyaml.org/) — parsing of case, model, and scan configurations.
+- [colorama](https://github.com/tartley/colorama) — terminal output coloring.
 - Python 3.12+, managed via [uv](https://docs.astral.sh/uv/).
-
-### Related Projects
 
 ### Success Metrics
 
