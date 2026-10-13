@@ -94,6 +94,14 @@ Start the subject line with a type prefix, as in the existing history:
 
 Keep the subject short and write it in the imperative mood, for example `fix: handle BlockingIOError in Tee.write() for piped output`.
 
+## Releases and versioning
+
+Releases follow [Semantic Versioning 2.0.0](https://semver.org/). While the version is `0.y.z`, the CLI, configuration format, and Python APIs may change in a minor release — pin a specific tag if you need stability. There is no fixed release cadence; a release is cut when enough meaningful change has accumulated on `main`.
+
+- **Version source of truth:** `version` in `pyproject.toml`. The same version is recorded in `uv.lock`, so a version bump must regenerate the lock (`uv lock`) in the same change — CI's `uv sync --locked` step fails otherwise.
+- **Cutting a release:** open a pull request that bumps `version` and regenerates `uv.lock`. Once it merges, tag the merge commit `vX.Y.Z` and publish a GitHub Release from the tag summarizing what changed. Release notes live on GitHub; there is no separate changelog file.
+- **Support:** the latest release tag and `main`. The project does not maintain release branches of its own.
+
 ## Credentials and local files
 
 Never commit API keys, tokens, or other credentials. Keep local model registries and case files that contain secrets out of your commits.
