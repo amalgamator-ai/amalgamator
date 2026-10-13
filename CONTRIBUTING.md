@@ -94,6 +94,15 @@ Start the subject line with a type prefix, as in the existing history:
 
 Keep the subject short and write it in the imperative mood, for example `fix: handle BlockingIOError in Tee.write() for piped output`.
 
+### Sign your work (DCO)
+
+This project uses the [Developer Certificate of Origin](https://developercertificate.org/). Every commit needs a `Signed-off-by: Your Name <you@example.com>` line, certifying that you wrote the change or otherwise have the right to submit it. The easiest way is to sign off while committing:
+
+```bash
+git commit -s
+git commit --amend -s --no-edit   # add a forgotten sign-off to the last commit
+```
+
 ## Releases and versioning
 
 Releases follow [Semantic Versioning 2.0.0](https://semver.org/). While the version is `0.y.z`, the CLI, configuration format, and Python APIs may change in a minor release — pin a specific tag if you need stability. There is no fixed release cadence; a release is cut when enough meaningful change has accumulated on `main`.
