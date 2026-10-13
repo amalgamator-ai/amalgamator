@@ -164,6 +164,21 @@ uv run pytest tests/auto_bug_fix/test_sdk_profiles.py -k subprocess_transport_sm
   `test:`, or `chore:` commit subjects when a commit is requested; contribution
   and release details live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+### DCO sign-off
+
+- When asked to create commits, sign off every new commit with `git commit -s`
+  (`--signoff`). The `Signed-off-by: Full Name <email@example.com>` trailer
+  certifies the [Developer Certificate of Origin](https://developercertificate.org/).
+- Use the contributor's Git identity (`user.name` and `user.email`). Check the
+  effective identity with `git var GIT_AUTHOR_IDENT` and
+  `git var GIT_COMMITTER_IDENT`; for new commits, the sign-off name and email must
+  match the author. Ask if the identity is missing or inconsistent; never invent
+  a name/email or substitute an agent identity.
+- Verify the trailer with `git log -1 --format=full`. Preserve existing authorship
+  and sign-off trailers when amending or cherry-picking commits.
+- DCO sign-off (`-s`) is separate from GPG/SSH commit signing (`-S`);
+  a cryptographic signature does not replace the DCO trailer.
+
 ## Running pipelines and handling artifacts
 
 Use module help to inspect the actual CLI before assembling a run:
