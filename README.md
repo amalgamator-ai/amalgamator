@@ -136,7 +136,7 @@ The health signal for any single run is the same gate the pipeline itself enforc
 
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

@@ -98,6 +98,10 @@ Keep the subject short and write it in the imperative mood, for example `fix: ha
 
 Never commit API keys, tokens, or other credentials. Keep local model registries and case files that contain secrets out of your commits.
 
+## Code of conduct
+
+This project follows the [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold it — please report unacceptable behavior to the contact listed there.
+
 ## License
 
 This project is licensed under the Apache License 2.0 (see [LICENSE](LICENSE)). By contributing, you agree that your contributions are licensed under the same terms.
