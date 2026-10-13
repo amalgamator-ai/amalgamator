@@ -2,9 +2,13 @@
 
 Thanks for your interest in contributing. This guide covers how to set up a development environment and how to get a change merged.
 
+## Questions and issues
+
+Found a bug or have a question? Open an issue with what you ran, what you expected, and what happened.
+
 ## Development setup
 
-You need Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+You need Python 3.12+. [uv](https://docs.astral.sh/uv/) is recommended (CI uses it), but plain pip works.
 
 ```bash
 # Fork the repository on GitHub, then:
