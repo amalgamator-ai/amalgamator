@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Redo cross-trace analysis with accumulated code-gen learnings.
 
 Re-analyzes performance gaps using the original trace data PLUS learnings

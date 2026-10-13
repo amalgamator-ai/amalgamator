@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Run runtime iterations for a specific model configuration.
 
 Standalone entry point for runtime iterations after the code gen pipeline

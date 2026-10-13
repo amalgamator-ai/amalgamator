@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Step R1 -- move the PR branch onto a newer upstream base. Human-run, local git.
 #
 #   Network access : only with --fetch (git fetch over SSH, your passphrase)

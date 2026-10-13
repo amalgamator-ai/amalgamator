@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for auto_bug_fix.baseline — test failure parsing and regression detection."""
 
 from auto_bug_fix.baseline import (

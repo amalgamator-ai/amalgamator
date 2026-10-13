@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Fix PR review comments using Claude.
 
 Reads the review comments fetched by step2, uses Claude Agent SDK to

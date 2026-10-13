@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """LLM agent that analyzes raw Prometheus metrics to determine
 the pure-decode phase and profile capture window."""
 

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Resolve rebase conflicts in a paused worktree -- the AI half of a rebase.
 
 The human script starts the rebase and leaves the repository paused. This module

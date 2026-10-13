@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Autonomous build-test-fix loop prompt for Phase 4b.
 
 The last-resort escalation: a single long-running agent that iterates

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Deterministic whitespace snap-back for resolved backports.
 
 LLM conflict resolution can retype lines, drifting tabs-vs-spaces and

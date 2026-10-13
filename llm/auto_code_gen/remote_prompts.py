@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Remote runtime prompts: GPU phases delegated to OpenShift cluster Jobs.
 
 Selected by runtime_backend = "remote" in CodeGenConfig. The local backend

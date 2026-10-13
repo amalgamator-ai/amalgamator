@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Marker for the LLM use-case subtree.
 
 Everything GPU-inference-framework specific lives here: profiling

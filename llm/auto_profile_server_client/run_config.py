@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Load and validate JSON run configs for the server-client benchmark pipeline."""
 
 from __future__ import annotations

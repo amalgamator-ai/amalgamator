@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Model-agnostic LLM completion layer.
 
 Wraps LiteLLM to provide a single ``completion()`` call that works with any

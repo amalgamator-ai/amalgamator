@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 #
 # Step 3: Run the analysis pipeline for each test case — single-trace analysis
 #          for each framework, cross-trace comparison, PDF report, Chrome trace,

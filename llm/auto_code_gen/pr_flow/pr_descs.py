@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate / refresh the PR title and description files.
 
 commit_desc.txt (first line = PR title) and pr_desc.txt are the single source

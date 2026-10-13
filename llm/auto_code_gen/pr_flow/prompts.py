@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Prompts for the review-comment fix step of a PR-review runtime iteration.
 
 The agent edits files in the PR worktree; the runner records the resulting diff,

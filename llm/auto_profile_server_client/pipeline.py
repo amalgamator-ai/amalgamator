@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Top-level pipeline: orchestrate benchmarks across all profiles and concurrencies.
 
 Entry point for both CLI usage and LLM-driven execution.

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Test suite baseline capture and regression detection for the verify phase."""
 
 from __future__ import annotations

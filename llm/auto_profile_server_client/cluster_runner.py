@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Cluster execution for the server-client benchmark pipeline.
 
 Submits OpenShift Jobs that run the benchmark/profiling pipeline inside

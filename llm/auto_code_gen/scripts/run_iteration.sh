@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 set -euo pipefail
 
 # run_iteration.sh — compile + bench patched + bench baseline + perf comparison + lm_eval.

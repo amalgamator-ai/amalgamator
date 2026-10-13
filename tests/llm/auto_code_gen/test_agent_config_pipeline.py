@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Agent-config tests deferred from Phase 2.
 
 These require the CodeGenConfig agent section and the PR-command prompt

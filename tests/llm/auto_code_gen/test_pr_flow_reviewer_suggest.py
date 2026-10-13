@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Reviewer suggestion: ranking sources, draft rendering, and CLI plumbing.
 
 run_reviewer_suggest blends blame/history/review/CODEOWNERS signals into a

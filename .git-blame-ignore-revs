@@ -10,3 +10,7 @@
 # behavior changes: every manual fix and latent-bug fix from the same
 # effort lives in the immediately following, fully blameable commit.
 dcf1ba127bf7e0d8798e91c9de474ed8eaedf906
+# Mechanical source-header addition: Red Hat copyright + Apache-2.0
+# SPDX lines prepended to every .py and .sh file. Comments only —
+# no logic touched.
+4e9981c9a382da30dc4743dcd5f95b991d2c28bf

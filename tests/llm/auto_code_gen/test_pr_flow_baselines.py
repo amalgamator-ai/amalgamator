@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """The OFF arm must be measured, never assumed.
 
 These cover two ways a rebased tree used to be graded against numbers from the

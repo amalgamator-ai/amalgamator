@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate PR description files and command scripts from a successful pipeline run.
 
 Reads the pipeline output files (performance results, lm_eval scores,

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Lightweight pipeline analytics tracker — records timing, tokens, costs, and gate outcomes."""
 
 from __future__ import annotations

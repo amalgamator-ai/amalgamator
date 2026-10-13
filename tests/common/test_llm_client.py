@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Compatibility surface of common.llm_client.
 
 The module docstring documents ``is_claude_model()`` as part of its public

@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Step 2 -- push the PR branch to the fork and open the PR upstream.
 #
 #   Network access : YES -- git push over SSH (your passphrase, typed by you)

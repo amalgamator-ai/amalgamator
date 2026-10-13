@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Provider-neutral agent configuration helpers for ``auto_analyze``.
 
 The implementation is shared with ``auto_code_gen`` so analysis and code

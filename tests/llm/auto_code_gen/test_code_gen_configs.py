@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """CodeGenConfig loading, including fields derived from the cross-trace data."""
 
 import json

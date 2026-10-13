@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Prompt classes for the Phase 0-5 bug-fix porting pipeline."""
 
 from __future__ import annotations

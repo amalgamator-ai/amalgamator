@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Render and (on explicit --execute) post the human-visible PR text.
 
 Two kinds of text leave this machine during the review loop:

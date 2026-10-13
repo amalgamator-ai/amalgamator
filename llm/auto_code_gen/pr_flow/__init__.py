@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Human-gated PR submission and AI-assisted review-fix loop.
 
 Trust boundary: this package never talks to GitHub or to a git remote. Every

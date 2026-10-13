@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for auto_bug_fix.patch_id — patch-id computation and duplicate detection."""
 
 import re

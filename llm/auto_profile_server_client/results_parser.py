@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Programmatic parsing of benchmark results — replaces LLM-driven parse step.
 
 Restructures results into test_results/<test_id>/ directories,

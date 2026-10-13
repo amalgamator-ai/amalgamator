@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Public facade for provider-neutral agent execution in the LLM subtree.
 
 The implementation lives at ``llm.auto_code_gen.agents``; consumers inside

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Capture and normalize test-run output to create comparable failure signatures."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """git range-diff driver for Phase 4.5 semantic-equivalence checking."""
 
 from __future__ import annotations

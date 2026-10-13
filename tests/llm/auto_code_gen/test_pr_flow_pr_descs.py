@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """PR description refresh: success-proof discovery + post-PASS hook wiring.
 
 update_pr_descs / refresh_after_pass keep pr-generate/commit_desc.txt and

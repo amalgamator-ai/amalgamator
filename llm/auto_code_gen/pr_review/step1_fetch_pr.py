@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Fetch a GitHub PR to a local branch.
 
 Checks out the PR branch locally using gh CLI (preferred) or falls back

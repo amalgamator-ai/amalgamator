@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Fetch and resolve SGLang serving recipes from the SGLang cookbook on GitHub."""
 
 from __future__ import annotations

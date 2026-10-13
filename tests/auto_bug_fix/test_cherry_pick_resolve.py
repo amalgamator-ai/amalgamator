@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Integration tests for cherry_pick_and_resolve — mechanical + finalize paths."""
 
 from __future__ import annotations

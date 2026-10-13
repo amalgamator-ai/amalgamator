@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """YAML/JSON configuration loader with validation for bug fix porting pipeline."""
 
 from __future__ import annotations

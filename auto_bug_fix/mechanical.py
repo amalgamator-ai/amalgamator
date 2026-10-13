@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Git-native mechanical resolution of cherry-pick conflicts.
 
 Before handing conflicted files to the LLM, try to re-apply the upstream

@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 #
 # Full pipeline orchestrator: profile, parse, and analyze.
 # Runs all 3 steps sequentially. Each step can also be run individually.

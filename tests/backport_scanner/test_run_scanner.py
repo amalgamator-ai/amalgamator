@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for run_scanner.load_config() and generate_config modes."""
 
 from __future__ import annotations

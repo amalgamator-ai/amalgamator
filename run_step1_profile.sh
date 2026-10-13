@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 #
 # Step 1: Run benchmarks and profiling across frameworks (vllm, sgl, trt)
 #

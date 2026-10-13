@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Runtime iterations driven by upstream PR review comments.
 
 Same measurement discipline as the code-gen runtime loop, reordered so a review

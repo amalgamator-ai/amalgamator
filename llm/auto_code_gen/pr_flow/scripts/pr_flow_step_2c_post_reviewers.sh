@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Step 2c -- post the reviewer-suggestion comment drafted by step 2b.
 #
 #   Network access : YES -- read-only 'gh api' to check idempotency, then ONE

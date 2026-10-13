@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Pass/fail rules for a PR-review verification iteration.
 
 Three gates, all fail-closed:

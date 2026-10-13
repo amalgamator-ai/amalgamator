@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Prometheus /metrics endpoint poller — background thread that samples server metrics."""
 
 from __future__ import annotations

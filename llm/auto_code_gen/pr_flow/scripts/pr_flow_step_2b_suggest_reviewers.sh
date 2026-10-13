@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Step 2b -- suggest reviewers: generate the draft comment for the PR.
 #
 #   Network access : YES -- read-only 'gh api' searches (HTTPS + gh token).

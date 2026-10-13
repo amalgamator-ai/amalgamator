@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Fix + verify runtime iterations after a rebase -- repair, then re-prove.
 
 A rebase that no longer conflicts textually can still be broken: upstream renames
