@@ -4,9 +4,7 @@
 
 We're extremely grateful for security researchers and users that report vulnerabilities to the amalgamator Open Source Community. All reports are thoroughly investigated by a set of community volunteers.
 
-**Preferred method:** Report any security issues using the [New Draft Security advisory]() ***complete once new org defined*** button on the Security page in this repo.
-
-**Alternate method:** mail the private [***complete once new org defined***](***complete once new org defined***) list with the security details and the details expected for [all amalgamator bug reports](.github/ISSUE_TEMPLATE/bug.yml).
+**Preferred method:** Report any security issues using the [New Draft Security advisory](https://github.com/amalgamator-ai/amalgamator/security/advisories) button on the Security page in this repo.
 
 ### When Should I Report a Vulnerability?
 
