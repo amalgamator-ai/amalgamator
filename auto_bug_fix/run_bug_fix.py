@@ -2604,7 +2604,11 @@ def phase_4_5_semantic_equivalence(
         # supplies the unmatched signal that forcing destroys.
         creation_factor = 999 if backport_range else None
         if backport_range is None:
-            target_base = git_merge_base(repo, config.target_branch, "HEAD")
+            # Range from the frozen baseline, not the branch name — the
+            # agent may have moved the branch (see run_pipeline).
+            target_base = git_merge_base(
+                repo, config.frozen_target_sha or config.target_branch, "HEAD"
+            )
             backport_range = f"{target_base}..HEAD"
         rd_output = run_range_diff(
             repo,
@@ -2629,6 +2633,82 @@ def phase_4_5_semantic_equivalence(
     return equivalence
 
 
+def _emit_candidate_patch_on_failure(config: BugFixConfig, tracker: Tracker) -> None:
+    """Best-effort candidate.patch export when the pipeline aborts.
+
+    The benchmark verifier judges the exported patch on its own build+test
+    gates, not the pipeline's internal verdict — and on escalation the agent
+    may have produced a good backport that only Phase 4's re-verify rejected
+    (observed on expat c8s, four identical runs: green tree, escalation, no
+    patch, reward 0). Emit whatever exists between the frozen baseline and
+    HEAD so the verifier can score the work on its merits. Never raises.
+    """
+    try:
+        if not os.path.isdir(config.repo_path):
+            return
+        patch_base = config.frozen_target_sha or config.target_branch
+        patch_bytes = git_format_patch_bytes(config.repo_path, base_ref=patch_base)
+        if not patch_bytes.strip():
+            return
+        os.makedirs(tracker._output_dir, exist_ok=True)
+        patch_path = os.path.join(tracker._output_dir, PATCH_FILE)
+        with open(patch_path, "wb") as f:
+            f.write(patch_bytes)
+        log.info(
+            "Failure path: candidate patch written to %s (%d bytes)",
+            patch_path,
+            len(patch_bytes),
+        )
+    except Exception as e:
+        log.warning("Failure-path patch export failed: %s", e)
+
+
+def _restore_target_baseline(
+    source_path: str, worktree_path: str, branch: str, frozen_sha: str
+) -> None:
+    """Point the target branch back at the frozen baseline if the agent moved it.
+
+    The task verifier builds its own worktree from the branch NAME; if the
+    agent left its commits on the target branch, a pristine-baseline apply
+    of candidate.patch would fail. The agent's work stays preserved in
+    candidate.patch (and on the amalgamator/ branch for successful runs).
+    Never raises.
+    """
+    try:
+        if not frozen_sha:
+            return
+        current = git_rev_parse(source_path, branch)
+        if current == frozen_sha:
+            return
+        log.warning(
+            "Target branch %s moved during the run (%s -> %s); restoring "
+            "the frozen baseline so the verifier applies candidate.patch "
+            "to a pristine tree",
+            branch,
+            frozen_sha[:12],
+            current[:12],
+        )
+        # git branch -f refuses to move a branch that is checked out
+        # (attached) in a worktree — detach that HEAD first; the commits
+        # stay reachable from the worktree until cleanup, and live on in
+        # candidate.patch regardless.
+        subprocess.run(
+            ["git", "checkout", "--detach"],
+            cwd=worktree_path,
+            capture_output=True,
+        )
+        result = subprocess.run(
+            ["git", "branch", "-f", branch, frozen_sha],
+            cwd=source_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            log.warning("git branch -f failed: %s", (result.stderr or "").strip())
+    except Exception as e:
+        log.warning("Target baseline restore failed: %s", e)
+
+
 def run_pipeline(
     config: BugFixConfig | None = None,
     claude_config: ClaudeConfig | None = None,
@@ -2645,6 +2725,28 @@ def run_pipeline(
             "source_fix_commit is empty. In patch mode, run ingest_patch() "
             "before calling run_pipeline."
         )
+
+    # Freeze the target baseline before any agent phase runs. Phase 0.5
+    # drives an LLM with shell access inside this worktree, and it may
+    # attach HEAD to the shared target branch ref and commit there
+    # (observed 2026-10-15: the django run whose format-patch
+    # "target..HEAD" then exported an empty range). Everything that later
+    # computes "what did the agent produce" must range from this SHA, not
+    # from the movable branch name.
+    if not config.frozen_target_sha:
+        try:
+            config.frozen_target_sha = git_rev_parse(
+                config.repo_path, config.target_branch
+            )
+        except Exception:
+            try:
+                config.frozen_target_sha = git_rev_parse(config.repo_path, "HEAD")
+            except Exception:
+                log.warning(
+                    "Could not freeze the target baseline in %s; patch "
+                    "export falls back to the branch name",
+                    config.repo_path,
+                )
 
     from common.model_registry import public_config_snapshot
 
@@ -2669,9 +2771,11 @@ def run_pipeline(
         return _run_pipeline_phases(config, claude_config, state, tracker)
     except (PipelineStop, PipelineEscalation) as e:
         tracker.set_outcome(type(e).__name__.lower())
+        _emit_candidate_patch_on_failure(config, tracker)
         raise
     except Exception:
         tracker.set_outcome("error")
+        _emit_candidate_patch_on_failure(config, tracker)
         raise
     finally:
         run_path = tracker.save()
@@ -3251,9 +3355,23 @@ def _run_pipeline_phases(
     )
 
     log.info("Phase 5 — Dossier ready for human review")
-    patch_bytes = git_format_patch_bytes(
-        config.repo_path, base_ref=config.target_branch
-    )
+    if config.frozen_target_sha:
+        state.dossier.add(
+            "Frozen baseline",
+            f"{config.target_branch} @ {config.frozen_target_sha}",
+            "recorded at pipeline start, before Phase 0.5 agent shell access",
+        )
+    # Export against the frozen baseline, not the branch name: if the agent
+    # moved the target branch mid-run, "target..HEAD" is an empty range and
+    # a perfect backport would ship as a 0-byte patch (observed 2026-10-15).
+    patch_base = config.frozen_target_sha or config.target_branch
+    patch_bytes = git_format_patch_bytes(config.repo_path, base_ref=patch_base)
+    if not patch_bytes.strip():
+        raise PipelineEscalation(
+            "Phase 5: candidate patch is empty — no commits between the "
+            f"frozen baseline ({patch_base}) and HEAD; refusing to report "
+            "success without a deliverable"
+        )
     # Written as bytes: the patch has to apply, and a repo carrying non-UTF-8
     # source would otherwise be handed a patch full of replacement characters.
     # The dossier copy is for humans, so a lossy decode is fine there.
@@ -3554,6 +3672,12 @@ def run_targets(
             sys.stdout = saved_stdout
             target_log_file.close()
             if worktree_created:
+                _restore_target_baseline(
+                    source_path,
+                    worktree_path,
+                    spec.branch,
+                    target_config.frozen_target_sha,
+                )
                 cleanup_worktree(source_path, worktree_path)
 
     _write_summary(results, parent_run_dir, warnings=run_warnings)

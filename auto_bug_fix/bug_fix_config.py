@@ -78,4 +78,12 @@ class BugFixConfig:
     # Patch-file ingest (Phase -1). Mutually exclusive with source_fix_commit
     # at config time; source_fix_commit is filled in after ingest.
     fix_patch: str = ""
+
+    # Frozen baseline: SHA of target_branch recorded at pipeline start,
+    # BEFORE any agent phase can move the shared branch ref (the Phase 0.5
+    # agent has shell access in the worktree and may attach HEAD to the
+    # branch and commit there — observed 2026-10-15). Phase 5's patch export
+    # and the failure-path export range from this SHA, not the movable
+    # branch name. Filled in by run_pipeline; empty = not yet frozen.
+    frozen_target_sha: str = ""
     fix_upstream_ref: str = ""
