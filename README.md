@@ -1,3 +1,4 @@
+![Amalgamator](art/main-amalgamator-logo.png)
 # Amalgamator
 
 Comparing and optimizing GPU inference frameworks, and keeping fixes in sync across branches and releases, are both repetitive, evidence-heavy tasks that are tedious to do by hand and easy to get wrong at scale. Amalgamator automates the mechanical parts with an LLM agent, while checking every step against deterministic evidence — git history, build output, test results — so it fails closed to a human instead of guessing. It covers two kinds of engineering work:
