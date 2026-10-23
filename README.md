@@ -85,7 +85,7 @@ Full prerequisites and install options: [docs/getting-started.md](docs/getting-s
 Install from source:
 
 ```bash
-git clone https://github.com/redhat-et/amalgamator.git
+git clone https://github.com/amalgamator-ai/amalgamator.git
 cd amalgamator
 uv sync
 ```

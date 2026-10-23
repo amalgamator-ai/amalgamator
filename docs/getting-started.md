@@ -27,7 +27,7 @@ Optional, depending on workflow:
 ## Install
 
 ```bash
-git clone https://github.com/redhat-et/amalgamator.git
+git clone https://github.com/amalgamator-ai/amalgamator.git
 cd amalgamator
 uv sync
 ```
