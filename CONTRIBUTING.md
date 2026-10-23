@@ -23,7 +23,9 @@ python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[test,dev]"
 ```
 
-See the [README](README.md) for an overview of the pipelines and where each one lives.
+See the [README](README.md) for an overview of the pipelines and where each one
+lives, and [docs/](docs/README.md) for user-facing getting-started and workflow
+guides. Update those guides when user-visible commands or workflows change.
 
 ## Running the tests
 

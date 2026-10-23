@@ -55,6 +55,21 @@ Notes:
 - Analyzing a `.nsys-rep` trace needs the `nsys` CLI (Nsight Systems) for conversion; the other trace formats do not.
 - `git` is required everywhere. `git-lfs` is only needed to commit trace files — `*.nsys-rep` and `*.json.gz` are LFS-tracked — not to clone the repository.
 
+## Documentation
+
+User guides (install, workflows, CLI map, FAQ) live under **[docs/](docs/README.md)**:
+
+| Guide | Link |
+|-------|------|
+| Getting started | [docs/getting-started.md](docs/getting-started.md) |
+| Concepts | [docs/concepts.md](docs/concepts.md) |
+| Authentication and models | [docs/authentication.md](docs/authentication.md) |
+| GPU workflows | [docs/gpu/overview.md](docs/gpu/overview.md) |
+| Backport workflows | [docs/backporting/overview.md](docs/backporting/overview.md) |
+| CLI reference | [docs/reference/cli.md](docs/reference/cli.md) |
+
+Package READMEs remain the field-level source of truth; `docs/` is the user-oriented map.
+
 ## Getting Started
 
 ### Prerequisites
@@ -62,6 +77,8 @@ Notes:
 - Python 3.12+ (use [uv](https://docs.astral.sh/uv/) for version management)
 - An LLM endpoint — Claude via Anthropic or Vertex AI, a local Ollama instance, a self-hosted vLLM server, or an OpenAI API key. The backporting pipeline works with any of these; the GPU analysis tools need Claude.
 - For GPU analysis: framework source code and GPU trace files
+
+Full prerequisites and install options: [docs/getting-started.md](docs/getting-started.md).
 
 ### Install
 
@@ -128,6 +145,7 @@ Each query records its effective model and profile ID. A provider-reported cost,
 
 ```
 amalgamator/
+├── docs/                  # User documentation (start at docs/README.md)
 ├── llm/                   # GPU performance analysis, profiling, and code-gen pipelines (see llm/README.md)
 ├── auto_bug_fix/          # Git-first bug-fix backport pipeline
 ├── backport_scanner/      # Find branches/tags missing a fix; generate backport cases
