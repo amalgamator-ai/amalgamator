@@ -11,3 +11,4 @@ llm/auto_profile_server_client/results/
 
 # Local Claude Code worktrees (never committed)
 /.claude/worktrees/
+.vscode/

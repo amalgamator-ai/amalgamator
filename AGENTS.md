@@ -8,6 +8,10 @@ Amalgamator automates GPU performance analysis and optimization porting, plus
 git-first bug-fix backporting and discovery of releases missing a fix. Pipeline
 results are supported by artifacts, deterministic checks, and human review.
 
+User-facing guides (getting started, workflows, CLI map, FAQ) live in
+[docs/](docs/README.md). Keep those guides aligned when commands or user-visible
+workflows change; this file remains the engineering-contract guide for agents.
+
 ## Setup and verification
 
 Run commands from the repository root. Python **3.12+** is required; use syntax
