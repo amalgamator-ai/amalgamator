@@ -1,0 +1,57 @@
+{
+    "profiles": [
+        {
+            "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "num_gpus": 4,
+            "exec_mode": "pure_decode",
+            "frameworks": [
+                {
+                    "name": "vllm",
+                    "enable_trace": true,
+                    "profiler_type": "torch",
+                    "server_args": {
+                        "extra_flags": "--tokenizer-mode deepseek_v41 --gpu-memory-utilization 0.9 --moe-backend aiter --no-swa-bounded-replay --engram-config '{\"cpu_offload\":true}' --attention-config '{\"indexer_kv_dtype\":\"mxfp4\",\"indexer_sparse_logits\":true}' --block-size 128 --speculative-config '{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"probabilistic\",\"rejection_sample_method\":\"block\",\"enable_adaptive_verification\":false}'",
+                        "extra_env": {
+                            "VLLM_ENGINE_READY_TIMEOUT_S": "3600",
+                            "VLLM_ROCM_USE_AITER": "1",
+                            "VLLM_ROCM_USE_AITER_MOE": "1",
+                            "AITER_TRITON_LOG_LEVEL": "ERROR",
+                            "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
+                            "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA": "1",
+                            "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
+                            "VLLM_USE_RUST_FRONTEND": "1"
+                        }
+                    },
+                    "client_args": {"extra_flags": ""}
+                },
+                {
+                    "name": "sgl",
+                    "enable_trace": true,
+                    "profiler_type": "torch",
+                    "server_args": {
+                        "extra_flags": "--ep-size 1 --mem-fraction-static 0.85 --fp8-gemm-backend aiter --enforce-shared-experts-fusion --cuda-graph-max-bs-decode 128 --enable-decoder-swa-bounded-replay --cuda-graph-backend-prefill disabled --speculative-algorithm DSPARK --speculative-dspark-block-size 5",
+                        "extra_env": {
+                            "AITER_BF16_FP8_MOE_BOUND": "0",
+                            "SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE": "1",
+                            "SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT": "per_rank",
+                            "SGLANG_USE_ROCM700A": "0",
+                            "TORCH_BLAS_PREFER_HIPBLASLT": "1"
+                        }
+                    },
+                    "client_args": {"extra_flags": ""}
+                }
+            ]
+        }
+    ],
+    "concurrencies": [1],
+    "num_prompts_multiplier": 16,
+    "stability_threshold_pct": 5.0,
+    "max_stability_retries": 3,
+    "metrics_poll_interval_sec": 1.0,
+    "docker_images": {
+        "vllm": "vllm/vllm-openai-rocm:nightly-rocm100",
+        "sgl": "lmsysorg/sglang-rocm:v0.5.21-rocm10-mi35x-20261009"
+    },
+    "exec_modes": {"pure_decode": {"input_len": 16, "output_len": 2048}},
+    "output_dir": "llm/auto_profile_server_client/results/deepseek_v41_flash_mi355x_tp4_spec_b1_prof"
+}

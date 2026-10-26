@@ -58,6 +58,7 @@ class RunConfig:
     stability_threshold_pct: float = 5.0
     max_stability_retries: int = 3
     metrics_poll_interval_sec: float = 1.0
+    num_prompts_multiplier: int = 4
     output_dir: str = ""
 
 

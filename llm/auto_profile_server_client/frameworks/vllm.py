@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
 from pathlib import Path
 
 from llm.auto_profile_server_client.frameworks.base import FrameworkAdapter
@@ -121,15 +122,27 @@ class VllmAdapter(FrameworkAdapter):
 
     def profiling_server_extra_flags(self, delay: int, active: int,
                                      profiler_type: str = "nsys") -> str:
-        backend = "cuda" if profiler_type == "nsys" else "torch"
-        flags = (
-            f"--profiler-config.profiler {backend}"
-            f" --profiler-config.delay_iterations {delay}"
-            f" --profiler-config.max_iterations {active}"
-        )
-        if profiler_type == "torch":
-            flags += " --profiler-config.torch_profiler_dir /tmp/vllm_traces"
-        return flags
+        # vLLM registers --profiler-config as a single flag taking one JSON
+        # string (see vllm/config/profiler.py: ProfilerConfig). delay/max
+        # iterations are counted from the /start_profile request.
+        if profiler_type == "nsys":
+            # 'cuda' backend = cudaProfilerStart/Stop hooks for nsys to capture
+            config = {
+                "profiler": "cuda",
+                "delay_iterations": delay,
+                "max_iterations": active,
+            }
+        else:
+            config = {
+                "profiler": "torch",
+                "torch_profiler_dir": "/tmp/vllm_traces",
+                "delay_iterations": delay,
+                "max_iterations": active,
+                # The frontend (AsyncLLM) CPU profiler ignores delay/limit and
+                # would capture the whole window at high overhead.
+                "ignore_frontend": True,
+            }
+        return f"--profiler-config {shlex.quote(json.dumps(config))}"
 
     def metrics_url(self, port: int) -> str:
         return f"http://localhost:{port}/metrics"

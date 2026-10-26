@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -18,6 +19,15 @@ from llm.auto_profile_server_client.config import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _gpu_vendor() -> str:
+    """Detect the host GPU vendor from its management CLI."""
+    if shutil.which("nvidia-smi"):
+        return "nvidia"
+    if shutil.which("rocm-smi"):
+        return "amd"
+    return "unknown"
 
 
 @dataclass
@@ -76,12 +86,33 @@ class DockerRunner:
         args = [
             "docker", "run",
             "--rm",
-            "--runtime", "nvidia",
             "--ulimit", "memlock=-1",
             "--ulimit", "stack=67108864",
             "--ipc=host",
             "--shm-size", DOCKER_SHM_SIZE,
-            "--gpus=all",
+        ]
+
+        if _gpu_vendor() == "amd":
+            # ROCm: expose the compute/render devices and loosen ptrace/seccomp
+            # so profilers inside the container can attach (matches the docker
+            # invocations in the vLLM/SGLang ROCm docs).
+            args += [
+                "--device", "/dev/kfd",
+                "--device", "/dev/dri",
+                "--group-add", "video",
+                "--cap-add", "SYS_PTRACE",
+                "--security-opt", "seccomp=unconfined",
+                # ROCR's auto-probe picks the legacy IPC mode inside
+                # containers, which exhausts KFD event slots and fails RCCL
+                # init with "hipIpcGetMemHandle: invalid argument". Forcing
+                # the dmabuf IPC path fixes multi-GPU comms. Listed before
+                # the framework extra_env so a config can still override it.
+                "--env", "HSA_ENABLE_IPC_MODE_LEGACY=0",
+            ]
+        else:
+            args += ["--runtime", "nvidia", "--gpus=all"]
+
+        args += [
             "-v", f"{self.base_dir}:{DOCKER_BASE_DIR}",
             "-v", f"{self.hf_hub_cache}:{DOCKER_HF_HUB_CACHE}",
             "--env", f"HF_HUB_CACHE={DOCKER_HF_HUB_CACHE}",
@@ -226,31 +257,60 @@ class DockerRunner:
             log.warning("Failed to check for updates: %s", image, exc_info=True)
 
 
-def wait_for_gpu_memory_release(max_wait: int = 120, threshold_mib: int = 2000) -> bool:
-    """Wait until GPU memory usage drops below threshold."""
-    interval = 5
-    elapsed = 0
-    log.info("Waiting for GPU memory release (threshold=%d MiB, timeout=%ds)",
-             threshold_mib, max_wait)
-
-    while elapsed < max_wait:
-        try:
+def _query_gpu_memory_used_mib(vendor: str) -> int | None:
+    """Max per-GPU memory in use (MiB), or None if it cannot be read."""
+    try:
+        if vendor == "amd":
+            r = subprocess.run(
+                ["rocm-smi", "--showmeminfo", "vram", "--json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode != 0:
+                return None
+            data = json.loads(r.stdout)
+            return max(
+                int(gpu["VRAM Total Used Memory (B)"])
+                for gpu in data.values()
+            ) // (1024 * 1024)
+        if vendor == "nvidia":
             r = subprocess.run(
                 ["nvidia-smi", "--query-gpu=memory.used",
                  "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=10,
             )
-            if r.returncode == 0:
-                max_used = max(
-                    int(line.strip()) for line in r.stdout.strip().split("\n") if line.strip()
-                )
-                if max_used <= threshold_mib:
-                    log.info("GPU memory released (max used: %d MiB, elapsed: %ds)",
-                             max_used, elapsed)
-                    return True
-                log.info("  GPU memory in use: %d MiB (%d/%ds)", max_used, elapsed, max_wait)
-        except Exception:
-            pass
+            if r.returncode != 0:
+                return None
+            return max(
+                int(line.strip())
+                for line in r.stdout.strip().split("\n") if line.strip()
+            )
+    except Exception:
+        pass
+    return None
+
+
+def wait_for_gpu_memory_release(max_wait: int = 120, threshold_mib: int = 2000) -> bool:
+    """Wait until GPU memory usage drops below threshold."""
+    vendor = _gpu_vendor()
+    if vendor == "unknown":
+        log.warning("No GPU management CLI found (nvidia-smi/rocm-smi); "
+                    "skipping GPU memory wait")
+        return False
+
+    interval = 5
+    elapsed = 0
+    log.info("Waiting for GPU memory release (vendor=%s, threshold=%d MiB, timeout=%ds)",
+             vendor, threshold_mib, max_wait)
+
+    while elapsed < max_wait:
+        used_mib = _query_gpu_memory_used_mib(vendor)
+        if used_mib is not None:
+            if used_mib <= threshold_mib:
+                log.info("GPU memory released (max used: %d MiB, elapsed: %ds)",
+                         used_mib, elapsed)
+                return True
+            log.info("  GPU memory in use: %d MiB (%d/%ds)",
+                     used_mib, elapsed, max_wait)
 
         time.sleep(interval)
         elapsed += interval

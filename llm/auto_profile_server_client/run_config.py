@@ -180,6 +180,9 @@ def load_config(config_path: str | Path) -> RunConfig:
     stability_threshold = raw.get("stability_threshold_pct", DEFAULT_STABILITY_THRESHOLD_PCT)
     max_retries = raw.get("max_stability_retries", DEFAULT_MAX_STABILITY_RETRIES)
     metrics_interval = raw.get("metrics_poll_interval_sec", DEFAULT_METRICS_POLL_INTERVAL_SEC)
+    num_prompts_multiplier = raw.get("num_prompts_multiplier", 4)
+    _require(isinstance(num_prompts_multiplier, int) and num_prompts_multiplier > 0,
+             '"num_prompts_multiplier" must be a positive integer')
     output_dir = raw.get("output_dir", "")
 
     config = RunConfig(
@@ -190,6 +193,7 @@ def load_config(config_path: str | Path) -> RunConfig:
         stability_threshold_pct=stability_threshold,
         max_stability_retries=max_retries,
         metrics_poll_interval_sec=metrics_interval,
+        num_prompts_multiplier=num_prompts_multiplier,
         output_dir=output_dir,
     )
 

@@ -170,6 +170,15 @@ class CodeGenConfig(PipelineConfig):
     improvement_id: int = 0
     num_runtime_iterations: int = 10
     gpu_wait_timeout_minutes: int = 30
+    # Pin every GPU-allocating runtime step (bench servers, lm_eval engines)
+    # to this comma-separated CUDA device list instead of letting the agent
+    # discover "any K free GPUs". Needed on shared machines where the
+    # nvidia-smi/rocm-smi pid listing misreports occupancy (containerized
+    # servers of other users are invisible to KFD, and KFD indices can
+    # diverge from CUDA enumeration) — agents must never wander onto GPUs
+    # reserved for other users. Empty (default) keeps dynamic discovery.
+    # Example: "0,1,2,3".
+    gpu_ids: str = ""
     # "local"  — use local GPUs via nvidia-smi (default, unchanged behavior).
     # "remote" — delegate all GPU phases to OpenShift cluster Jobs via cluster_runner.py.
     runtime_backend: str = "local"
@@ -203,10 +212,41 @@ class CodeGenConfig(PipelineConfig):
     # Applied by rewriting --num-prompts (vllm bench serve) / --num-samples
     # (bench latency) in target_run_command; 0 (default) keeps the trace value.
     runtime_bench_num_prompts: int = 0
+    # Run directly in source_code_dir instead of a run-named git worktree.
+    # The default worktree isolates concurrent runs, but a venv installed
+    # editable against source_code_dir imports from that exact tree — patching
+    # a sibling worktree would leave that venv serving the unpatched code.
+    use_source_worktree: bool = True
+    # Skip the NSYS kernel-level diagnostic phase in runtime iterations
+    # (hosts without nsys, or server-style bench commands the diagnostic
+    # cannot wrap, set this and let the investigate agent work from the
+    # benchmark logs instead).
+    skip_runtime_diagnostics: bool = False
+    # Benchmark client command for server-style execution commands. When the
+    # target run command starts a long-running inference server (e.g.
+    # `vllm serve`), the runtime bench agent drives it with this client and
+    # saves the client's result JSON as bench_result.json. Empty for batch
+    # benchmark commands that run to completion on their own.
+    benchmark_client_command: str = ""
     max_investigation_revisions: int = 2
     use_smaller_model_for_runtime: bool = False
     disable_new_feature_for_runtime: bool = False
     additional_benchmark_configs: list[dict] = field(default_factory=list)
+    # Run a parallel research iteration (PRI) alongside each runtime
+    # iteration: while the bench/lm_eval/investigation window runs, research
+    # agents (one per persona) read the whole campaign history and propose
+    # further optimizations; their adjudicated proposals feed the next
+    # iteration's investigation. See llm/auto_code_gen/parallel_research_iteration.py.
+    enable_parallel_research_iteration: bool = True
+    # Number of research agents per PRI (distinct personas; see the persona
+    # pool in parallel_research_iteration.py — count above the pool size is
+    # capped by it).
+    parallel_research_iteration_agent_count: int = 4
+    # Keep running runtime iterations after a formally SUCCESSFUL iteration
+    # (perf + lm_eval both pass). Default False preserves the legacy
+    # "stop at first success" semantics; phase-2 maximize campaigns set it
+    # True to keep discovering improvements until iteration exhaustion.
+    runtime_continue_after_success: bool = False
 
     # --- Auto-inferred fields ---
     model: str = ""
@@ -278,6 +318,16 @@ class CodeGenConfig(PipelineConfig):
         if not isinstance(gpu_wait_timeout_minutes, (int, float)) or gpu_wait_timeout_minutes <= 0:
             errors.append('"gpu_wait_timeout_minutes" must be a positive number.')
 
+        gpu_ids = str(data.get("gpu_ids", "") or "").strip()
+        if gpu_ids:
+            import re as _re_gpu
+            if not _re_gpu.fullmatch(r"\d+(,\d+)*", gpu_ids.replace(" ", "")):
+                errors.append(
+                    '"gpu_ids" must be a comma-separated list of GPU indices, '
+                    'e.g. "0,1,2,3" (or empty for dynamic discovery).')
+            else:
+                gpu_ids = gpu_ids.replace(" ", "")
+
         runtime_bench_num_prompts = data.get("runtime_bench_num_prompts", 0)
         if not isinstance(runtime_bench_num_prompts, int) or runtime_bench_num_prompts < 0:
             errors.append('"runtime_bench_num_prompts" must be a non-negative integer (0 = keep the trace value).')
@@ -298,9 +348,39 @@ class CodeGenConfig(PipelineConfig):
         if not isinstance(disable_new_feature_for_runtime, bool):
             errors.append('"disable_new_feature_for_runtime" must be a boolean.')
 
+        use_source_worktree = data.get("use_source_worktree", True)
+        if not isinstance(use_source_worktree, bool):
+            errors.append('"use_source_worktree" must be a boolean.')
+
+        skip_runtime_diagnostics = data.get("skip_runtime_diagnostics", False)
+        if not isinstance(skip_runtime_diagnostics, bool):
+            errors.append('"skip_runtime_diagnostics" must be a boolean.')
+
+        benchmark_client_command = data.get("benchmark_client_command", "")
+        if not isinstance(benchmark_client_command, str):
+            errors.append('"benchmark_client_command" must be a string.')
+
         additional_benchmark_configs = data.get("additional_benchmark_configs", [])
         if not isinstance(additional_benchmark_configs, list):
             errors.append('"additional_benchmark_configs" must be a list.')
+
+        enable_parallel_research_iteration = data.get(
+            "enable_parallel_research_iteration", True)
+        if not isinstance(enable_parallel_research_iteration, bool):
+            errors.append('"enable_parallel_research_iteration" must be a boolean.')
+
+        parallel_research_iteration_agent_count = data.get(
+            "parallel_research_iteration_agent_count", 4)
+        if (not isinstance(parallel_research_iteration_agent_count, int)
+                or parallel_research_iteration_agent_count < 1):
+            errors.append(
+                '"parallel_research_iteration_agent_count" must be a positive '
+                'integer.')
+
+        runtime_continue_after_success = data.get(
+            "runtime_continue_after_success", False)
+        if not isinstance(runtime_continue_after_success, bool):
+            errors.append('"runtime_continue_after_success" must be a boolean.')
 
         thinking_mode = data.get("thinking-mode", "deep")
         if thinking_mode not in ("normal", "deep"):
@@ -368,6 +448,7 @@ class CodeGenConfig(PipelineConfig):
             num_code_gen_iterations=num_code_gen_iterations,
             num_runtime_iterations=num_runtime_iterations,
             gpu_wait_timeout_minutes=int(gpu_wait_timeout_minutes),
+            gpu_ids=gpu_ids,
             runtime_bench_num_prompts=runtime_bench_num_prompts,
             runtime_backend=runtime_backend,
             remote_namespace=remote_namespace,
@@ -383,7 +464,13 @@ class CodeGenConfig(PipelineConfig):
             max_investigation_revisions=max_investigation_revisions,
             use_smaller_model_for_runtime=use_smaller_model_for_runtime,
             disable_new_feature_for_runtime=disable_new_feature_for_runtime,
+            use_source_worktree=use_source_worktree,
+            skip_runtime_diagnostics=skip_runtime_diagnostics,
+            benchmark_client_command=benchmark_client_command,
             additional_benchmark_configs=additional_benchmark_configs,
+            enable_parallel_research_iteration=enable_parallel_research_iteration,
+            parallel_research_iteration_agent_count=parallel_research_iteration_agent_count,
+            runtime_continue_after_success=runtime_continue_after_success,
             plan_step=improvement_id,
             disallowed_modules=disallowed_modules,
             thinking_mode=thinking_mode,
@@ -444,12 +531,15 @@ class CodeGenConfig(PipelineConfig):
         self.framework_names = [t.framework_name for t in traces_ordered]
 
         # Source codes: use source_code_dir for target, run_params for source.
-        # The target gets its own run-named worktree first: the agent edits the
-        # tree in place, so concurrent runs need separate working trees.
+        # The target gets its own run-named worktree first (the agent edits the
+        # tree in place, so concurrent runs need separate working trees) unless
+        # the config opts out — e.g. when a venv installed editable against
+        # source_code_dir must import the patched code from that exact tree.
         run_name = os.path.basename(os.path.normpath(self.output_dir)) or "run"
-        self.source_code_dir = _ensure_worktree(
-            self.source_code_dir, "vllm_worktree_" + run_name,
-        )
+        if self.use_source_worktree:
+            self.source_code_dir = _ensure_worktree(
+                self.source_code_dir, "vllm_worktree_" + run_name,
+            )
         source_codes = []
         for idx, trace in ordered:
             if idx == target_idx:

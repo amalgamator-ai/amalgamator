@@ -241,6 +241,10 @@ def print_AssistantMessage(msg: AssistantMessage):
 
 
 def print_SystemMessage(msg: SystemMessage):
+    if msg.subtype == "thinking_tokens":
+        # per-token heartbeat; printing every one flooded multi-GB logs
+        # (filled the disk and crashed the pipeline on ENOSPC)
+        return
     print("System: subtype = {} data = {}".format(msg.subtype, msg.data))
 
 
