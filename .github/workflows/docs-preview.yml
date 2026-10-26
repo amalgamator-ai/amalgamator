@@ -1,4 +1,8 @@
-# Copy to amalgamator-ai/amalgamator as .github/workflows/docs-netlify-preview.yml
+# Cross-repo Netlify docs preview for amalgamator PRs that touch docs/.
+# Calls the reusable workflow in amalgamator-ai/amalgamator-ai.github.io.
+#
+# The reusable workflow must treat this as a remote website build using the
+# inputs below (caller event_name stays pull_request on workflow_call).
 
 name: Docs Preview
 
@@ -15,7 +19,9 @@ permissions:
 jobs:
   preview:
     if: github.event.pull_request.head.repo.full_name == github.repository
-    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/netlify-preview.yml@main
+    # Pin to the remote-call detection fix until it lands on website main;
+    # switch back to @main after amalgamator-ai.github.io merges that fix.
+    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/netlify-preview.yml@fix/netlify-preview-remote-call
     with:
       caller_repo: ${{ github.repository }}
       caller_pr: ${{ github.event.pull_request.number }}
@@ -24,7 +30,6 @@ jobs:
     secrets:
       NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
       NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-      # Caller's token can read private amalgamator; website GITHUB_TOKEN cannot.
+      # Caller's job token can read amalgamator; website GITHUB_TOKEN cannot
+      # when this job runs on the website for a native website PR.
       AMALGAMATOR_REPO_TOKEN: ${{ github.token }}
-
-      
