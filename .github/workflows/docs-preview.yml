@@ -3,11 +3,15 @@
 #
 # The reusable workflow must treat this as a remote website build using the
 # inputs below (caller event_name stays pull_request on workflow_call).
+#
+# Re-runs on every push to the PR head (synchronize), not only when the PR
+# is opened.
 
 name: Docs Preview
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
     paths:
       - "docs/**"
       - ".github/workflows/docs-preview.yml"
@@ -19,9 +23,7 @@ permissions:
 jobs:
   preview:
     if: github.event.pull_request.head.repo.full_name == github.repository
-    # Pin to the remote-call detection fix until it lands on website main;
-    # switch back to @main after amalgamator-ai.github.io merges that fix.
-    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/netlify-preview.yml
+    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/netlify-preview.yml@main
     with:
       caller_repo: ${{ github.repository }}
       caller_pr: ${{ github.event.pull_request.number }}
