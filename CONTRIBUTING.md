@@ -113,6 +113,12 @@ The CI check requires the sign-off to match the commit author. Use
 `git rebase --signoff <base>` to add the trailer to a branch with several
 commits.
 
+## AI-assisted contributions
+
+AI assistance is allowed. If you use it, disclose it in the pull request and
+make sure a human has reviewed the result. You are responsible for the change,
+including its tests and documentation.
+
 ## Releases and versioning
 
 Releases follow [Semantic Versioning 2.0.0](https://semver.org/). While the version is `0.y.z`, the CLI, configuration format, and Python APIs may change in a minor release — pin a specific tag if you need stability. There is no fixed release cadence; a release is cut when enough meaningful change has accumulated on `main`.
