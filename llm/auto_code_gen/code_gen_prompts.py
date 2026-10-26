@@ -746,6 +746,7 @@ Step 3: Incremental Compilation
     1. `cd <target_source_code_dir> && python tools/generate_cmake_presets.py --force-overwrite`
     2. `cd <target_source_code_dir> && cmake --preset release`
     3. `cd <target_source_code_dir> && cmake --build --preset release --target install` (use all available CPUs for speed)
+- CRITICAL — FOREGROUND ONLY: run every compilation command in the FOREGROUND and wait for it to exit before doing anything else. NEVER start the build in the background, NEVER end your turn while a process you started is still running, and NEVER assume you will "be notified" when a background task finishes — this task runs as a SINGLE query: after your final message nothing wakes you up, and any step not completed (especially Step 4) counts as FAILURE even if the build itself succeeds. If the build is slow, keep polling it with foreground commands (e.g. an `until` loop or repeated short `sleep N && tail`) WITHIN your turn until it exits.
 - If compilation fails:
     - Analyze the compilation errors carefully.
     - Fix the code issues directly in <target_source_code_dir>.
@@ -755,6 +756,7 @@ Step 3: Incremental Compilation
 
 Step 4: Write Success Status
 - Write "SUCCESS" to <output_dir>/{output_status_file}
+- This MUST be your final action. The pipeline considers this task failed unless this file exists with "SUCCESS" — a completed build without this file is a FAILED task.
 </instructions>
 
 <output>
@@ -794,6 +796,8 @@ class RunAndLogPrompt:
     gpu_wait_timeout_minutes: int
     smaller_model_file: Optional[str]
     disable_new_feature: bool
+    benchmark_client_command: Optional[str] = None
+    gpu_ids: str = ""
     prompt_template: ClassVar[str] = """
 
 {context}
@@ -809,6 +813,7 @@ class RunAndLogPrompt:
 {gpu_wait_timeout_minutes}
 </gpu_wait_timeout_minutes>
 {smaller_model_section}
+{benchmark_client_section}
 </definitions>
 
 <instructions>
@@ -820,18 +825,17 @@ Follow these steps precisely:
 Step 1: Wait for GPUs to Become Available
 - Determine the number of GPUs needed (K):
 {gpu_count_instructions}
-- Run `nvidia-smi` and analyze the output for ALL GPUs on the machine.
-- Find K GPUs that are free — i.e. not running other significant workloads (training jobs, other inference servers, large GPU processes). Small monitoring processes (a few MB of VRAM) are acceptable. The free GPUs do NOT need to be consecutive — any K free GPUs will work.
-- If fewer than K GPUs are free:
+{gpu_selection_instructions}
+- If the GPUs you will use are not all free:
     - Print a status message listing the busy GPUs and their conflicting processes (PID, process name, GPU memory usage), and how many free GPUs were found vs. needed.
     - Sleep for 60 seconds, then re-check by running `nvidia-smi` again.
-    - Keep polling in this loop until K GPUs are free.
+    - Keep polling in this loop until the GPUs are free.
     - Track elapsed wait time. If the total wait exceeds <gpu_wait_timeout_minutes> minutes:
         - Print "ERROR: Not enough free GPUs after <gpu_wait_timeout_minutes> minutes, giving up."
         - Write "GPUS_TIMEOUT" to {runtime_logs_dir}/run_status.txt
         - STOP immediately. Do NOT proceed.
     - Each poll iteration, print the current wait time and remaining timeout so progress is visible.
-- Once K free GPUs are found, record their GPU IDs (e.g. 2,5,6). These will be used for CUDA_VISIBLE_DEVICES in Step 3.
+{gpu_record_instructions}
 
 Step 2: Create Output Directory
 - Ensure {runtime_logs_dir} exists: `mkdir -p {runtime_logs_dir}`
@@ -839,23 +843,14 @@ Step 2: Create Output Directory
 Step 3: Run the Execution Command
 - The original execution command is: <execution_command>
 - Before running, make these adjustments:
-    - Set CUDA_VISIBLE_DEVICES to the specific free GPU IDs discovered in Step 1 (e.g. CUDA_VISIBLE_DEVICES=2,5,6). Replace any existing CUDA_VISIBLE_DEVICES in the command.
+{cuda_devices_instruction}
 {command_model_adjustments}
 {feature_toggle_env_var}
     - If the command contains Docker-internal paths (paths starting with `/app/`), replace them with the corresponding local paths.
     - If the command has `--output-json <path>`, update the path to: {runtime_logs_dir}/bench_result.json
     - Ensure all other paths in the command are valid local paths.
 - Write the final adjusted command (the exact command you are about to run, including all env var prefixes) to {runtime_logs_dir}/run_command.txt
-- Run the adjusted command and capture ALL output:
-    - Use a script or shell construct to capture stdout and stderr separately AND as a combined stream:
-      ```
-      <adjusted_command> > {runtime_logs_dir}/run_stdout.log 2> {runtime_logs_dir}/run_stderr.log ; echo $? > {runtime_logs_dir}/run_exit_code.txt
-      ```
-    - Then create the combined log:
-      ```
-      cat {runtime_logs_dir}/run_stdout.log {runtime_logs_dir}/run_stderr.log > {runtime_logs_dir}/run_combined.log
-      ```
-    - Alternatively, use `tee` and process substitution to capture everything in real time.
+{execution_instructions}
 
 Step 4: Write Run Status
 - Read the exit code from {runtime_logs_dir}/run_exit_code.txt
@@ -906,6 +901,203 @@ Step 4: Write Run Status
                 "(or the count of GPUs in CUDA_VISIBLE_DEVICES)."
             )
             command_model_adjustments = ""
+
+        if self.gpu_ids:
+            gpu_selection_instructions = (
+                "- PINNED GPU POLICY: every GPU-allocating command in this task (server, "
+                "benchmark client, any probes) MUST use exactly these GPU IDs: {ids} "
+                "(CUDA_VISIBLE_DEVICES={ids}). They are the ONLY GPUs you may use — never "
+                "substitute other GPUs, even if they appear free or the pinned ones look busy."
+            ).format(ids=self.gpu_ids)
+            gpu_selection_instructions += (
+                "\n- Check that the pinned GPUs are actually free: run `nvidia-smi` (or "
+                "`rocm-smi --showuse --showmemuse -u` on an AMD ROCm host) and read the "
+                "per-GPU memory-use numbers. CAUTION: process listings (the nvidia-smi "
+                "process table, `rocm-smi --showpids`) can MISS other users' containerized "
+                "servers and mislabel GPU indices — judge occupancy by per-GPU memory use, "
+                "not by the process list."
+            )
+            gpu_record_instructions = (
+                "- The pinned GPU IDs ({ids}) are the ones used for CUDA_VISIBLE_DEVICES "
+                "in Step 3."
+            ).format(ids=self.gpu_ids)
+            cuda_devices_instruction = (
+                "    - Keep CUDA_VISIBLE_DEVICES set to the pinned GPU IDs ({ids}). The "
+                "execution command already carries the correct value — verify it and do NOT "
+                "replace it with discovered IDs or any other GPUs."
+            ).format(ids=self.gpu_ids)
+        else:
+            gpu_selection_instructions = (
+                "- Run `nvidia-smi` and analyze the output for ALL GPUs on the machine. If `nvidia-smi` is not available (AMD ROCm host), use `rocm-smi --showuse --showmemuse -u` instead.\n"
+                "- Find K GPUs that are free — i.e. not running other significant workloads (training jobs, other inference servers, large GPU processes). Small monitoring processes (a few MB of VRAM) are acceptable. The free GPUs do NOT need to be consecutive — any K free GPUs will work."
+            )
+            gpu_record_instructions = (
+                "- Once K free GPUs are found, record their GPU IDs (e.g. 2,5,6). These will be used for CUDA_VISIBLE_DEVICES in Step 3."
+            )
+            cuda_devices_instruction = (
+                "    - Set CUDA_VISIBLE_DEVICES to the specific free GPU IDs discovered in Step 1 (e.g. CUDA_VISIBLE_DEVICES=2,5,6). Replace any existing CUDA_VISIBLE_DEVICES in the command."
+            )
+
+        if self.benchmark_client_command:
+            benchmark_client_section = (
+                "<benchmark_client_command>\n"
+                "{}\n"
+                "</benchmark_client_command>".format(self.benchmark_client_command)
+            )
+            execution_instructions = (
+                "The execution command starts a LONG-RUNNING INFERENCE SERVER — it does NOT exit by "
+                "itself. Drive it with the benchmark client command from <benchmark_client_command>:\n"
+                "CRITICAL — SINGLE-QUERY RULE: this task runs as ONE query; nothing wakes you up "
+                "after your final message. Keep every poll and the benchmark client INSIDE your "
+                "turn using FOREGROUND commands (e.g. `until curl -s -f URL/health; do sleep 30; "
+                "done`, or repeated short polls). NEVER end your turn while the server is starting, "
+                "the client is running, or any result file is unwritten, and NEVER rely on "
+                "background-task notifications — they arrive too late. The nohup'd SERVER runs in "
+                "the background by design; YOUR session must stay active until step (e) completes.\n"
+                "a) Start the adjusted server command in the background, capturing its output:\n"
+                "    nohup bash -c '<adjusted server command>' > {runtime_logs_dir}/run_stdout.log "
+                "2> {runtime_logs_dir}/run_stderr.log &\n"
+                "    echo $! > {runtime_logs_dir}/server_pid.txt\n"
+                "b) Wait for the server to become ready: extract the port from the adjusted server "
+                "command (--port argument; default 8000), then poll "
+                "`curl -s -f http://127.0.0.1:PORT/health` every 30 seconds until it succeeds "
+                "(exit code 0). Model loading can take 15-30 minutes or more — keep polling for up "
+                "to {startup_minutes} minutes total. While waiting, periodically check "
+                "{runtime_logs_dir}/run_stdout.log and run_stderr.log for fatal errors; if the "
+                "server process dies, write its exit code to {runtime_logs_dir}/run_exit_code.txt "
+                "and continue with Step 4 (the run FAILED).\n"
+                "c) Once the server is ready, run the benchmark client from "
+                "<benchmark_client_command> with the same environment adjustments as the server "
+                "(CUDA_VISIBLE_DEVICES, local paths, same --port). Redirect its saved result so the "
+                "result JSON lands at {runtime_logs_dir}/bench_result.json — e.g. for "
+                "`vllm bench serve`, set --save-result --result-dir {runtime_logs_dir} "
+                "--result-filename bench_result.json (for a --output-json style client, point that "
+                "flag at the same file). Capture the client's stdout/stderr to "
+                "{runtime_logs_dir}/client_stdout.log and {runtime_logs_dir}/client_stderr.log, and "
+                "write the client's exit code to {runtime_logs_dir}/run_exit_code.txt.\n"
+                "d) Concatenate the server and client logs into {runtime_logs_dir}/run_combined.log "
+                "(server log first, then client log).\n"
+                "e) Stop the server YOU started: kill $(cat {runtime_logs_dir}/server_pid.txt), and "
+                "wait for the GPUs to be released. NEVER kill processes you did not start — other "
+                "users' servers may run on this machine.\n"
+                "The exit code of the BENCHMARK CLIENT (not the server) is the run's exit code for "
+                "Step 4."
+            ).format(
+                runtime_logs_dir=self.runtime_logs_dir,
+                startup_minutes=self.gpu_wait_timeout_minutes,
+            )
+            server_baseline_instructions = (
+                "\n- SERVER-MODE BASELINE: the baseline is not a foreground re-run. Repeat the Step 3 "
+                "server workflow for the baseline — start the adjusted server command WITH the "
+                "disable env var in its prefix, in the background (server output to "
+                "{runtime_logs_dir}/baseline_stdout.log and {runtime_logs_dir}/baseline_stderr.log, "
+                "PID to {runtime_logs_dir}/baseline_server_pid.txt), wait for /health readiness "
+                "(same polling and timeout as Step 3b), then re-run the SAME benchmark client with "
+                "its result JSON saved to {runtime_logs_dir}/baseline_bench_result.json (client "
+                "output to {runtime_logs_dir}/baseline_client_stdout.log and "
+                "{runtime_logs_dir}/baseline_client_stderr.log, client exit code to "
+                "{runtime_logs_dir}/baseline_exit_code.txt), then stop the baseline server you "
+                "started. The baseline client's exit code is the baseline run's exit code."
+            ).format(runtime_logs_dir=self.runtime_logs_dir)
+        else:
+            benchmark_client_section = ""
+            execution_instructions = (
+                "- CRITICAL — run the adjusted command in the FOREGROUND and wait for it to exit. "
+                "This task runs as ONE query: never background the command, never end your turn "
+                "before run_exit_code.txt is written, and never rely on background-task "
+                "notifications.\n"
+                "- Run the adjusted command and capture ALL output:\n"
+                "    - Use a script or shell construct to capture stdout and stderr separately AND "
+                "as a combined stream:\n"
+                "      ```\n"
+                "      <adjusted_command> > {runtime_logs_dir}/run_stdout.log "
+                "2> {runtime_logs_dir}/run_stderr.log ; echo $? > "
+                "{runtime_logs_dir}/run_exit_code.txt\n"
+                "      ```\n"
+                "    - Then create the combined log:\n"
+                "      ```\n"
+                "      cat {runtime_logs_dir}/run_stdout.log {runtime_logs_dir}/run_stderr.log > "
+                "{runtime_logs_dir}/run_combined.log\n"
+                "      ```\n"
+                "    - Alternatively, use `tee` and process substitution to capture everything in "
+                "real time."
+            ).format(runtime_logs_dir=self.runtime_logs_dir)
+            server_baseline_instructions = ""
+
+        # Measurement stabilization for speculative-decode serving: a single
+        # default-temperature run per arm is not a valid A/B (observed +/-14.5%
+        # acceptance-length RNG between restarts of identical code). Appended to
+        # the patched-arm bench prompt's Step 6 so both arms of the comparison
+        # measure stabilized means, with a greedy temp=0 companion A/B.
+        stabilization_instructions = (
+            "\n\nStep 6a: MEASUREMENT STABILIZATION PROTOCOL (MANDATORY when the benchmark "
+            "samples at temperature > 0)\n"
+            "- Check the benchmark command: if it does NOT set --temperature 0, the "
+            "measurement carries sampling/acceptance RNG (on this stack, speculative-decode "
+            "acceptance length varies by up to +/-14.5% between restarts of IDENTICAL code). "
+            "A single-run-per-arm A/B at temperature > 0 is NOT evidence of anything.\n"
+            "- Stabilized temp>0 measurement: run EACH arm N=3 times, where one run is one "
+            "full benchmark execution (server-mode: server start + client run + server stop; "
+            "foreground-mode: one command execution). The Step 3 run counts as run 1 of 3 for "
+            "the patched arm. Save per-run results as bench_result_run1.json, "
+            "bench_result_run2.json, bench_result_run3.json (patched arm) and "
+            "baseline_bench_result_run1.json through run3.json (baseline arm) in "
+            "{runtime_logs_dir}, then write the per-run MEAN of every metric (output "
+            "throughput, TTFT, TPOT, ITL, spec-decode acceptance length) into "
+            "{runtime_logs_dir}/bench_result.json and {runtime_logs_dir}/baseline_bench_result.json "
+            "- the perf gate reads those two files and must see stabilized means, not a "
+            "lucky single draw.\n"
+            "- Deterministic companion: ALSO run one greedy A/B pair (--temperature 0 added "
+            "to the client command, 1 run per arm, fresh server per arm) saved under "
+            "{runtime_logs_dir}/validation_t0/. Temp=0 removes sampling RNG entirely and is "
+            "the ground truth for step-time and acceptance effects.\n"
+            "- perf_comparison.txt must show: all per-run numbers for both arms, the temp>0 "
+            "mean comparison with per-run spread, and the temp=0 comparison side by side.\n"
+            "- SUCCESS requires the feature to beat baseline beyond the perf gate threshold "
+            "on BOTH the stabilized temp>0 mean comparison AND the temp=0 comparison. A win "
+            "at temp>0 that does not reproduce at temp=0 (or vice versa) is sampling luck, "
+            "not a win: document the iteration as FAILED and let the investigation step fix "
+            "the cause. Do not stop at the first favorable draw."
+        ).format(runtime_logs_dir=self.runtime_logs_dir)
+
+        # Prefill-benefit isolation sweep: the campaign workload (short ISL,
+        # long OSL) buries prefill/TTFT effects under decode time. Appended
+        # after Step 6a so every runtime iteration also measures the prefill
+        # benefit across input lengths. Informational (not a gate); the gate
+        # remains Step 6a's dual temp>0-means + temp=0 rule.
+        prefill_sweep_instructions = (
+            "\n\nStep 6b: PREFILL-SWEEP A/B (MANDATORY when the feature changes prefill "
+            "or TTFT behavior; runs IN ADDITION to Step 6a - it does not replace any "
+            "benchmark and is not a pass/fail gate)\n"
+            "- Purpose: isolate the prefill benefit. Same benchmark client as the "
+            "official bench, but short decode (output length 128) and input length "
+            "swept over 16, 128, 1024, 2048, so TTFT carries a large share of each "
+            "request and the prefill win is directly visible per input size.\n"
+            "- Server-mode: start ONE fresh server per arm (ON arm = the Step 3 "
+            "command; OFF arm = same command + the Step 6 disable env var). Against "
+            "each server, for EACH input length ISL in 16, 128, 1024, 2048 run the "
+            "bench client TWICE with --temperature 0, --random-input-len <ISL>, "
+            "--random-output-len 128 (every other client flag identical to the "
+            "official bench): the FIRST run is a discarded warmup (first-request "
+            "kernel-shape resolution would otherwise distort mean TTFT), the SECOND "
+            "run is the measurement. Stop the server after its 4 points and verify "
+            "port/GPU release before the next arm.\n"
+            "- Foreground-mode: same sweep as warmup+measured command pairs, one "
+            "pair per ISL, restarting the runtime between arms if the command "
+            "embeds a server lifecycle.\n"
+            "- Save measured results as {runtime_logs_dir}/prefill_sweep/"
+            "on_isl{{16,128,1024,2048}}_bench_result.json and "
+            "off_isl{{16,128,1024,2048}}_bench_result.json.\n"
+            "- Write {runtime_logs_dir}/prefill_sweep/prefill_sweep_summary.txt: "
+            "per-ISL table of mean TTFT (ON vs OFF, delta %), mean request duration, "
+            "output throughput; the TTFT share of request time per ISL; and a clear "
+            "statement of how the prefill benefit scales with input length.\n"
+            "- Append the per-ISL TTFT comparison table to perf_comparison.txt as a "
+            "section titled 'prefill sweep'.\n"
+            "- The sweep documents the prefill benefit; the iteration gate remains "
+            "Step 6a's dual rule. A failed or skipped sweep makes the iteration "
+            "INCOMPLETE - retry it the same way a failed bench run is retried."
+        ).format(runtime_logs_dir=self.runtime_logs_dir)
 
         if self.disable_new_feature:
             feature_toggle_env_var = (
@@ -959,7 +1151,7 @@ Step 4: Write Run Status
                 "    - Delta and percentage change for each metric (TTFT, TPOT, throughput)\n"
                 "    - Analysis: whether the patch provides the expected performance improvement\n"
                 "    - Clear statement of whether the patched version is faster or slower than baseline, and by how much"
-            )
+            ).format(runtime_logs_dir=self.runtime_logs_dir) + server_baseline_instructions + stabilization_instructions + prefill_sweep_instructions
 
         if self.disable_new_feature:
             baseline_output_files = ""
@@ -980,8 +1172,13 @@ Step 4: Write Run Status
             iteration=self.iteration,
             gpu_wait_timeout_minutes=self.gpu_wait_timeout_minutes,
             smaller_model_section=smaller_section,
+            benchmark_client_section=benchmark_client_section,
+            execution_instructions=execution_instructions,
             smaller_model_instructions=smaller_instructions,
             gpu_count_instructions=gpu_count_instructions,
+            gpu_selection_instructions=gpu_selection_instructions,
+            gpu_record_instructions=gpu_record_instructions,
+            cuda_devices_instruction=cuda_devices_instruction,
             command_model_adjustments=command_model_adjustments,
             feature_toggle_env_var=feature_toggle_env_var,
             feature_verification_step=feature_verification_step,
@@ -997,6 +1194,8 @@ def gen_RunAndLogPrompt(
     gpu_wait_timeout_minutes: int = 30,
     smaller_model_file: Optional[str] = None,
     disable_new_feature: bool = False,
+    benchmark_client_command: Optional[str] = None,
+    gpu_ids: str = "",
 ):
     return RunAndLogPrompt(
         context=context,
@@ -1006,6 +1205,8 @@ def gen_RunAndLogPrompt(
         gpu_wait_timeout_minutes=gpu_wait_timeout_minutes,
         smaller_model_file=smaller_model_file,
         disable_new_feature=disable_new_feature,
+        benchmark_client_command=benchmark_client_command,
+        gpu_ids=gpu_ids,
     )
 
 
@@ -1021,6 +1222,7 @@ class RunLMEvalPrompt:
     gpu_wait_timeout_minutes: int
     smaller_model_file: Optional[str]
     output_file: str
+    gpu_ids: str = ""
     prompt_template: ClassVar[str] = """
 
 {context}
@@ -1046,9 +1248,8 @@ Follow these steps precisely:
 Step 1: Wait for GPUs to Become Available
 - Determine the number of GPUs needed (K):
 {gpu_count_instructions}
-- Run `nvidia-smi` and analyze the output for ALL GPUs on the machine.
-- Find K GPUs that are free — i.e. not running other significant workloads. Small monitoring processes are acceptable. The free GPUs do NOT need to be consecutive.
-- If fewer than K GPUs are free:
+{gpu_selection_instructions}
+- If the GPUs you will use are not all free:
     - Print a status message listing the busy GPUs and their conflicting processes.
     - Sleep for 60 seconds, then re-check.
     - Track elapsed wait time. If the total wait exceeds <gpu_wait_timeout_minutes> minutes:
@@ -1056,30 +1257,33 @@ Step 1: Wait for GPUs to Become Available
         - Write "GPUS_TIMEOUT" to {runtime_logs_dir}/{output_file}
         - STOP immediately. Do NOT proceed.
     - Each poll iteration, print the current wait time and remaining timeout.
-- Once K free GPUs are found, record their GPU IDs (e.g. 2,5,6).
+{gpu_record_instructions}
 
 Step 2: Determine Model and Parameters
 - Determine the model to use:
 {model_selection_instructions}
 - Determine tensor_parallel_size = K (number of GPUs).
 - Determine max_model_len: use the --max-model-len value from <execution_command>. If this value is very large and may cause OOM for lm_eval, reduce it to a reasonable value (e.g., 16384 or 32768) that fits in available VRAM while being sufficient for gsm8k 5-shot evaluation.
+- Mirror engine-relevant settings from <execution_command> into the lm_eval vllm model_args where the backend supports them — e.g. tokenizer_mode if the serve command uses a non-default --tokenizer-mode, dtype, or quantization settings. The offline lm_eval engine must load the model the same way the server does, or tokenization/load errors will look like correctness failures.
+- If the model does not fit in K GPUs' VRAM with these settings (the serve command may rely on CPU offload to fit), add the matching offload option to model_args (e.g. enable_cpu_offload=true) or reduce max_model_len further.
 
 Step 3: Run lm_eval with Feature ENABLED
 - Read the latest code gen or runtime summary file in <output_dir> to find the environment variable name that disables the new feature.
 - Ensure this env var is NOT set (or unset it) so the new feature is active.
 - Construct and run the lm_eval command:
     ```
-    CUDA_VISIBLE_DEVICES=<free_gpu_ids> lm_eval --model vllm --model_args pretrained=<model>,max_model_len=<len>,tensor_parallel_size=<K> --trust_remote_code --tasks gsm8k --num_fewshot 5 --batch_size auto
+    CUDA_VISIBLE_DEVICES={lm_eval_gpu_ids} lm_eval --model vllm --model_args pretrained=<model>,max_model_len=<len>,tensor_parallel_size=<K> --trust_remote_code --tasks gsm8k --num_fewshot 5 --batch_size auto
     ```
 - Capture all output to {runtime_logs_dir}/lm_eval_enabled_stdout.log and stderr to {runtime_logs_dir}/lm_eval_enabled_stderr.log
 - Record exit code to {runtime_logs_dir}/lm_eval_enabled_exit_code.txt
 - Extract the exact_match scores (flexible-extract and strict-match) from the output.
+- If lm_eval prints the results table but the process does not exit within a few minutes (engine teardown can hang after the eval finishes), kill the lm_eval process tree YOU started — the scores are already captured in the log — write the recorded exit status, and treat the run as completed.
 
 Step 4: Run lm_eval with Feature DISABLED
 - Set the disable env var to "1" in the command prefix to disable the new feature.
 - Run the same lm_eval command with the disable env var:
     ```
-    <DISABLE_ENV_VAR>=1 CUDA_VISIBLE_DEVICES=<free_gpu_ids> lm_eval --model vllm --model_args pretrained=<model>,max_model_len=<len>,tensor_parallel_size=<K> --trust_remote_code --tasks gsm8k --num_fewshot 5 --batch_size auto
+    <DISABLE_ENV_VAR>=1 CUDA_VISIBLE_DEVICES={lm_eval_gpu_ids} lm_eval --model vllm --model_args pretrained=<model>,max_model_len=<len>,tensor_parallel_size=<K> --trust_remote_code --tasks gsm8k --num_fewshot 5 --batch_size auto
     ```
 - Capture output to {runtime_logs_dir}/lm_eval_disabled_stdout.log and stderr to {runtime_logs_dir}/lm_eval_disabled_stderr.log
 - Record exit code to {runtime_logs_dir}/lm_eval_disabled_exit_code.txt
@@ -1138,6 +1342,36 @@ Step 5: Compare and Report
                 "    - Use <model> (the model from the context)."
             )
 
+        if self.gpu_ids:
+            gpu_selection_instructions = (
+                "- PINNED GPU POLICY: both lm_eval runs in this task (feature ENABLED "
+                "and DISABLED) MUST use exactly these GPU IDs: {ids} "
+                "(CUDA_VISIBLE_DEVICES={ids}). They are the ONLY GPUs you may use — never "
+                "substitute other GPUs, even if they appear free or the pinned ones look busy."
+            ).format(ids=self.gpu_ids)
+            gpu_selection_instructions += (
+                "\n- Check that the pinned GPUs are actually free: run `nvidia-smi` (or "
+                "`rocm-smi --showuse --showmemuse -u` on an AMD ROCm host) and read the "
+                "per-GPU memory-use numbers. CAUTION: process listings (the nvidia-smi "
+                "process table, `rocm-smi --showpids`) can MISS other users' containerized "
+                "servers and mislabel GPU indices — judge occupancy by per-GPU memory use, "
+                "not by the process list."
+            )
+            gpu_record_instructions = (
+                "- The pinned GPU IDs ({ids}) are the ones used for CUDA_VISIBLE_DEVICES "
+                "in Steps 3 and 4, and K is the count of pinned GPUs."
+            ).format(ids=self.gpu_ids)
+            lm_eval_gpu_ids = self.gpu_ids
+        else:
+            gpu_selection_instructions = (
+                "- Run `nvidia-smi` and analyze the output for ALL GPUs on the machine. If `nvidia-smi` is not available (AMD ROCm host), use `rocm-smi --showuse --showmemuse -u` instead.\n"
+                "- Find K GPUs that are free — i.e. not running other significant workloads. Small monitoring processes are acceptable. The free GPUs do NOT need to be consecutive."
+            )
+            gpu_record_instructions = (
+                "- Once K free GPUs are found, record their GPU IDs (e.g. 2,5,6)."
+            )
+            lm_eval_gpu_ids = "<free_gpu_ids>"
+
         return self.prompt_template.format(
             context=self.context,
             execution_command=self.execution_command,
@@ -1146,6 +1380,9 @@ Step 5: Compare and Report
             gpu_wait_timeout_minutes=self.gpu_wait_timeout_minutes,
             smaller_model_section=smaller_section,
             gpu_count_instructions=gpu_count_instructions,
+            gpu_selection_instructions=gpu_selection_instructions,
+            gpu_record_instructions=gpu_record_instructions,
+            lm_eval_gpu_ids=lm_eval_gpu_ids,
             model_selection_instructions=model_selection_instructions,
             output_file=self.output_file,
         )
@@ -1158,6 +1395,7 @@ def gen_RunLMEvalPrompt(
     iteration: int,
     gpu_wait_timeout_minutes: int = 30,
     smaller_model_file: Optional[str] = None,
+    gpu_ids: str = "",
 ):
     return RunLMEvalPrompt(
         context=context,
@@ -1166,6 +1404,7 @@ def gen_RunLMEvalPrompt(
         iteration=iteration,
         gpu_wait_timeout_minutes=gpu_wait_timeout_minutes,
         smaller_model_file=smaller_model_file,
+        gpu_ids=gpu_ids,
         output_file="lm_eval.txt",
     )
 
@@ -1190,11 +1429,15 @@ class InvestigateRuntimeOutputAndFixCodePrompt:
     success_result_file: str
     results_output_dir: Optional[str]
     review_feedback: Optional[str] = None
+    research_proposals_file: Optional[str] = None
+    continue_after_success: bool = False
     prompt_template: ClassVar[str] = """
 
 {context}
 
 {prev_iteration_section}
+
+{research_proposals_section}
 
 {review_feedback_section}
 
@@ -1266,7 +1509,7 @@ STEP 4: DETERMINE RESULT
 STEP 5A: IF SUCCEEDED
 - Write success report to {results_output_dir}/{success_result_file}:
   patch name, perf delta, lm_eval scores, execution context.
-- Write summary (same format as 5B). STOP — do NOT generate a new patch.
+- Write summary (same format as 5B).{step5a_directive}
 
 STEP 5B: IF FAILED
 1. Fix: implement the highest-scored direction from Step 3.
@@ -1327,13 +1570,65 @@ On FAILURE:
         else:
             review_section = ""
 
+        if self.research_proposals_file:
+            research_section = (
+                "<research_proposals>\n"
+                "PARALLEL RESEARCH ITERATION (PRI) OUTPUT — read this as part of STEP 1,\n"
+                "right after the previous-iteration summaries (item C). While the previous\n"
+                "runtime iteration's bench ran, a swarm of research agents analyzed the\n"
+                "campaign history and produced a ranked set of optimization proposals, then\n"
+                "adjudicated them against that iteration's results. Each proposal has a\n"
+                "mechanism, expected effect, evidence, risks, a CHEAP validation plan and a\n"
+                "proposed disable env var. Read it FIRST when choosing directions in STEP 3:\n"
+                "{}\n"
+                "Treat these as strong pre-researched candidates, not decisions: run the\n"
+                "cheap validation plan before committing to one; do NOT re-implement\n"
+                "something the previous iteration already promoted.\n"
+                "</research_proposals>".format(self.research_proposals_file)
+            )
+        else:
+            research_section = ""
+
+        if self.continue_after_success:
+            step5a_directive = (
+                "\n"
+                "  TOP-UP MODE IS ACTIVE (runtime_continue_after_success=true): the success\n"
+                "  record does NOT end this iteration, and success_result.txt is a record,\n"
+                "  not a stop trigger. In THIS SAME investigation, generate the NEXT\n"
+                "  top-up patch before finishing:\n"
+                "    1. Read the binding OWNER DIRECTIVES in\n"
+                "       <iteration_history_summary_file> (the STEP 5A OVERRIDE / top-up\n"
+                "       directive and the NO-DEFERRAL ADDENDUM) and the PRI research\n"
+                "       proposals if provided; the previous iteration's decision table\n"
+                "       names the mandated next primary.\n"
+                "    2. Run that primary's cheap validation plan; if it dies at its own\n"
+                "       gates, take the next surviving ranked candidate.\n"
+                "    3. Implement it per Step 5B rules (fix in <target_source_code_dir>\n"
+                "       ONLY, run patch-introduced tests until they pass, preserve the\n"
+                "       env-var kill switch + startup log messages).\n"
+                "    4. Generate the standalone cumulative patch (git diff from the clean\n"
+                "       base commit, MUST be different from <prev_patch_file>) and save it\n"
+                "       to EXACTLY the pre-determined draft path given in the <output>\n"
+                "       section's FAILURE entry — in top-up mode that file is expected on\n"
+                "       SUCCESS as well. Cover BOTH the success record and the new top-up\n"
+                "       primary in the summary.\n"
+                "  Do NOT defer the top-up to a later iteration and do NOT end with the\n"
+                "  patch unchanged — deferral is barred by the owner addendum. The only\n"
+                "  authorized way to finish without a new patch is a documented\n"
+                "  kill-record exhaustion of the entire ranked candidate list."
+            )
+        else:
+            step5a_directive = " STOP — do NOT generate a new patch."
+
         return self.prompt_template.format(
             context=self.context,
             prev_iteration_section=_prev_iteration_section(
                 self.prev_patch_file if self.prev_summary_file else None,
                 self.prev_summary_file,
             ),
+            research_proposals_section=research_section,
             review_feedback_section=review_section,
+            step5a_directive=step5a_directive,
             code_trace_files=self.code_trace_files,
             code_port_plan_file=self.code_port_plan_file,
             test_plan_file=self.test_plan_file,
@@ -1365,6 +1660,8 @@ def gen_InvestigateRuntimeOutputAndFixCodePrompt(
     output_patch_file: Optional[str] = None,
     output_summary_file: Optional[str] = None,
     review_feedback: Optional[str] = None,
+    research_proposals_file: Optional[str] = None,
+    continue_after_success: bool = False,
 ):
     assert len(code_trace_files) == 2
 
@@ -1390,6 +1687,8 @@ def gen_InvestigateRuntimeOutputAndFixCodePrompt(
         success_result_file=RUNTIME_SUCCESS_FILE,
         results_output_dir=results_output_dir,
         review_feedback=review_feedback,
+        research_proposals_file=research_proposals_file,
+        continue_after_success=continue_after_success,
     )
 
 
@@ -1439,7 +1738,9 @@ Evaluate each dimension and write your verdict to <output_dir>/{output_review_fi
    Does the scoring in the summary make sense given the NSYS evidence?
    Are the probability ratings justified?
 
-Write the final verdict on the FIRST LINE of the review file:
+Write the final verdict on the FIRST LINE of the review file — the file
+must START with the verdict line, no title, heading, or blank line before
+it (an automated parser reads it to route the pipeline):
   VERDICT: APPROVED
   VERDICT: NEEDS_REVISION
 

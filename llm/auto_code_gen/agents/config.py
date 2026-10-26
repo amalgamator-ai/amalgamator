@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 import os
 from dataclasses import dataclass, field, fields
@@ -20,6 +21,7 @@ MODE_PARAMS = {
                "effort": "medium", "max_thinking_tokens": 65536},
 }
 TOOL_NAMES = {"Read": "read_file", "Write": "write_file", "Bash": "bash"}
+log = logging.getLogger(__name__)
 RESERVED_PARAMS = {"model", "messages", "tools", "tool_choice", "api_base", "api_key",
                    "stream", "stream_options", "timeout", "num_retries", "max_retries"}
 
@@ -85,8 +87,21 @@ class AgentConfig:
         if self.billing not in {"provider", "self_hosted"}:
             raise ValueError("agent.billing must be provider or self_hosted")
         if self.backend == "claude_sdk":
+            if self.model.startswith(("vertex_ai/", "bedrock/", "azure_ai/")):
+                raise ValueError(
+                    "claude_sdk requires a direct model name; provider-qualified "
+                    "Claude routes need backend litellm"
+                )
             if not self.model.startswith("claude-"):
-                raise ValueError("claude_sdk requires a bare claude-* model name")
+                # Non-Claude names are served by Anthropic-compatible
+                # endpoints the SDK resolves through its environment
+                # (e.g. ANTHROPIC_BASE_URL); the default endpoint would
+                # reject them, so say so instead of failing silently.
+                log.warning(
+                    "claude_sdk model '%s' is not a claude-* name; it must "
+                    "be served by an Anthropic-compatible endpoint "
+                    "configured in the SDK environment", self.model,
+                )
             if (self.api_base or self.api_key or self.api_key_file or self.model_params
                     or self.summary_model_params or self.write_model_params):
                 raise ValueError("Claude SDK uses its existing environment authentication; agent transport settings require litellm")

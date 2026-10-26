@@ -9,13 +9,15 @@ import argparse
 import json
 import logging
 import os
+import shlex
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 
-from llm.auto_profile_server_client.config import FRAMEWORK_PORTS
+from llm.auto_profile_server_client.config import DOCKER_BASE_DIR, FRAMEWORK_PORTS
 from llm.auto_profile_server_client.run_config import load_config
-from llm.auto_profile_server_client.models import RunConfig, StepSummary, save_json
+from llm.auto_profile_server_client.models import RunConfig, StepSummary, make_test_name, save_json
 from llm.auto_profile_server_client.docker_runner import DockerRunner, wait_for_gpu_memory_release
 from llm.auto_profile_server_client.benchmark_runner import BenchmarkRunner
 from llm.auto_profile_server_client.summary import SummaryWriter
@@ -80,14 +82,21 @@ def _run_direct(config: RunConfig, output_dir: str, summary: SummaryWriter) -> l
             adapter = get_adapter(fw_entry.name)
 
             for concurrency in config.concurrencies:
+                # One subtree per test: multiple concurrencies share the
+                # step-numbered filenames, so a shared dir would overwrite.
+                test_name = make_test_name(
+                    adapter.name, profile.model, profile.num_gpus, concurrency,
+                    profile.input_len, profile.output_len,
+                )
                 runner = BenchmarkRunner(
                     adapter=adapter,
                     profile=profile,
                     fw_entry=fw_entry,
                     concurrency=concurrency,
-                    output_dir=output_dir,
+                    output_dir=f"{output_dir}/{test_name}",
                     stability_threshold_pct=config.stability_threshold_pct,
                     max_stability_retries=config.max_stability_retries,
+                    num_prompts_multiplier=config.num_prompts_multiplier,
                     summary_writer=summary,
                 )
                 try:
@@ -102,6 +111,48 @@ def _run_direct(config: RunConfig, output_dir: str, summary: SummaryWriter) -> l
                     ))
 
     return all_results
+
+
+def _serialize_config(config: RunConfig) -> dict:
+    """Serialize a RunConfig back into run-config JSON for the inner container."""
+    profiles = []
+    for p in config.profiles:
+        raw = {
+            "model": p.model,
+            "num_gpus": p.num_gpus,
+            "input_len": p.input_len,
+            "output_len": p.output_len,
+        }
+        if p.kv_cache_fill > 0:
+            raw["kv_cache_fill"] = p.kv_cache_fill
+        if p.exec_mode_name:
+            raw["exec_mode"] = p.exec_mode_name
+        raw["frameworks"] = [
+            {
+                "name": fw.name,
+                "enable_trace": fw.enable_trace,
+                "profiler_type": fw.profiler_type,
+                "server_args": {
+                    "extra_flags": fw.server_args.extra_flags,
+                    "extra_env": fw.server_args.extra_env,
+                    "prepare_cmds": fw.server_args.prepare_cmds,
+                },
+                "client_args": {"extra_flags": fw.client_args.extra_flags},
+            }
+            for fw in p.frameworks
+        ]
+        profiles.append(raw)
+    return {
+        "profiles": profiles,
+        "concurrencies": config.concurrencies,
+        "docker_images": config.docker_images,
+        "exec_modes": {name: asdict(em) for name, em in config.exec_modes.items()},
+        "stability_threshold_pct": config.stability_threshold_pct,
+        "max_stability_retries": config.max_stability_retries,
+        "metrics_poll_interval_sec": config.metrics_poll_interval_sec,
+        "num_prompts_multiplier": config.num_prompts_multiplier,
+        "output_dir": config.output_dir,
+    }
 
 
 def _run_via_docker(config: RunConfig, output_dir: str, summary: SummaryWriter) -> list[dict]:
@@ -125,13 +176,23 @@ def _run_via_docker(config: RunConfig, output_dir: str, summary: SummaryWriter) 
         image = config.docker_images[fw_entry.name]
         container_name = f"{fw_entry.name}_auto_profile_{os.environ.get('USER', 'user')}"
 
-        # Build the inner command that runs inside docker
-        inner_config_path = f"/tmp/run_config_{fw_entry.name}.json"
+        # Write the run config where the container can see it: base_dir is
+        # mounted at DOCKER_BASE_DIR, so the inner pipeline loads the same
+        # values the outer one did.
+        inner_config_name = f".server_client_inner_{fw_entry.name}.json"
+        with open(Path(docker.base_dir) / inner_config_name, "w") as f:
+            json.dump(_serialize_config(config), f, indent=4)
+        inner_config_path = f"{DOCKER_BASE_DIR}/{inner_config_name}"
+
+        # Each framework gets its own subtree of the host-visible output dir
+        inner_output_dir = f"{output_dir}/{fw_entry.name}"
+
         inner_cmd = (
-            f"python -m llm.auto_profile_server_client.pipeline "
-            f"--config {inner_config_path} "
+            f"python3 -m llm.auto_profile_server_client.pipeline "
+            f"--config {shlex.quote(inner_config_path)} "
             f"--framework {fw_entry.name} "
-            f"--model {profile.model}"
+            f"--model {shlex.quote(profile.model)} "
+            f"--output-dir {shlex.quote(inner_output_dir)}"
         )
 
         # Prepare commands

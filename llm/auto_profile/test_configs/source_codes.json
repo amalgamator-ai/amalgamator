@@ -1,5 +1,5 @@
 {
-  "vllm": "/path/to/vllm",
-  "sgl": "/path/to/sglang",
+  "vllm": "/home/amatveev/code/vllm",
+  "sgl": "/home/amatveev/code/sglang",
   "trt": "/path/to/TensorRT-LLM"
 }

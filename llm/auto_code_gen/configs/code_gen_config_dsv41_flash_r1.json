@@ -1,0 +1,30 @@
+{
+    "cross_trace_config": "/home/amatveev/code/amalgamator/llm/auto_analyze/results/results_analyze_deepseek_v41_flash_mi355x_tp4_spec_b1_prof/test_results/deepseek-ai__DeepSeek-V4.1-Flash-tp_4-isl_16-osl_2048-b_1/cross_trace_config.json",
+    "improvement_id": 1,
+    "source_code_dir": "/home/amatveev/code/vllm",
+    "output_dir": "/home/amatveev/code/amalgamator/llm/auto_code_gen/results/dsv41_flash_r1_fused_shared_experts",
+    "use_source_worktree": false,
+    "skip_runtime_diagnostics": true,
+    "benchmark_client_command": "vllm bench serve --model deepseek-ai/DeepSeek-V4.1-Flash --port 8123 --backend openai --dataset-name random --random-input-len 16 --random-output-len 2048 --num-prompts 16 --max-concurrency 1 --ignore-eos --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 90,95,99 --save-result --result-dir /tmp/vllm_bench_results --result-filename bench_result.json",
+    "num_code_port_plan_iterations": 4,
+    "num_test_plan_iterations": 3,
+    "num_code_gen_iterations": 3,
+    "num_runtime_iterations": 40,
+    "runtime_continue_after_success": true,
+    "max_investigation_revisions": 2,
+    "gpu_wait_timeout_minutes": 60,
+    "gpu_ids": "0,1,2,3",
+    "disallowed_modules": [
+        "sglang",
+        "sgl_kernel",
+        "sgl*"
+    ],
+    "use_smaller_model_for_runtime": false,
+    "disable_new_feature_for_runtime": false,
+    "additional_benchmark_configs": [],
+    "code_port_plan_skip_review": false,
+    "test_plan_skip_review": false,
+    "code_gen_skip_review": false,
+    "generate_pr_commands": false,
+    "thinking-mode": "deep"
+}

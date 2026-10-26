@@ -46,6 +46,7 @@ class BenchmarkRunner:
         stability_threshold_pct: float,
         max_stability_retries: int,
         summary_writer: SummaryWriter,
+        num_prompts_multiplier: int = 0,
     ):
         self.adapter = adapter
         self.profile = profile
@@ -62,7 +63,8 @@ class BenchmarkRunner:
             profile.input_len, profile.output_len,
         )
         self.port = get_next_port(adapter.name)
-        self.num_prompts = concurrency * DEFAULT_NUM_PROMPTS_MULTIPLIER
+        self.num_prompts = concurrency * (
+            num_prompts_multiplier or DEFAULT_NUM_PROMPTS_MULTIPLIER)
         self._step = 0
 
     def _next_step(self, label: str) -> str:
@@ -206,6 +208,12 @@ class BenchmarkRunner:
 
     # ── Time-based profiling helpers ─────────────────────────────────────
 
+    def _speculative_decoding_enabled(self) -> bool:
+        """True if the server was configured with speculative decoding."""
+        flags = self.fw_entry.server_args.extra_flags
+        return ("--speculative-config" in flags
+                or "--speculative-algorithm" in flags)
+
     def _run_client(self, out_dir: str, step_prefix: str) -> None:
         """Run client benchmark and wait for completion. No metrics polling."""
         import shlex
@@ -225,7 +233,7 @@ class BenchmarkRunner:
                    f" > /dev/null; exit ${{PIPESTATUS[0]}}")
 
         log.info("[%s] Running client (%s)", self.test_name, step_prefix)
-        result = subprocess.run(["bash", "-c", log_cmd], timeout=600)
+        result = subprocess.run(["bash", "-c", log_cmd], timeout=3600)
         log.info("[%s] Client finished (%s, exit=%d)",
                  self.test_name, step_prefix, result.returncode)
 
@@ -297,8 +305,10 @@ class BenchmarkRunner:
             "profiler_type": profiler_type,
         }
 
-        # Wait for client to finish
-        timeout = fire_delay_sec + 120
+        # Wait for client to finish. The fire happens around the workload
+        # midpoint, so the client needs roughly another fire_delay of work;
+        # allow 2x plus a fixed margin for slow tail requests.
+        timeout = max(fire_delay_sec * 2, 600) + 300
         remaining = timeout - elapsed
         deadline = time.time() + remaining
         while time.time() < deadline:
@@ -333,6 +343,17 @@ class BenchmarkRunner:
         use_time_based = self.adapter.uses_metrics_based_profiling()
         profiler_type = self.fw_entry.profiler_type
 
+        # Speculative decoding breaks iteration-count profiling: each engine
+        # step commits multiple draft tokens (dspark ~4-6), so a delay
+        # computed as (output_len + 1) per prompt overshoots the total number
+        # of steps and the profiler never fires. Fall back to the wall-clock
+        # path and arm with delay=0 so the timed POST starts capture directly.
+        if self._speculative_decoding_enabled():
+            use_time_based = True
+            delay = 0
+            log.info("[%s] Speculative decoding detected — forcing time-based "
+                     "profiling with delay_iterations=0", self.test_name)
+
         log.info("[%s] Profiling: profiler=%s, active_iterations=%d, method=%s, "
                  "benchmark_throughput=%.1f tok/s",
                  self.test_name, profiler_type, active,
@@ -349,7 +370,8 @@ class BenchmarkRunner:
                 self._profiling_time_based_path(out_dir, benchmark_throughput,
                                                 active, profiler_type)
             else:
-                self._profiling_iteration_path(out_dir, delay, active, profiler_type)
+                self._profiling_iteration_path(out_dir, delay, active, profiler_type,
+                                               benchmark_throughput)
 
             # Stop profiler (cleanup — may fail if auto-stopped)
             step_stop = self._next_step("profile_stop")
@@ -463,7 +485,8 @@ class BenchmarkRunner:
             log.warning("[%s] Live capture: fire delay not reached", self.test_name)
 
     def _profiling_iteration_path(self, out_dir: str, delay: int, active: int,
-                                   profiler_type: str = "nsys") -> None:
+                                   profiler_type: str = "nsys",
+                                   benchmark_throughput: float = 0) -> None:
         """Iteration-based profiling (vLLM): arm profiler → run client → wait."""
         import shlex
 
@@ -497,7 +520,13 @@ class BenchmarkRunner:
                    f" > /dev/null; exit ${{PIPESTATUS[0]}}")
         client_proc = subprocess.Popen(["bash", "-c", log_cmd])
 
-        estimated_sec = (delay + active) * 0.01 + 30
+        # Estimate capture duration. The old 10ms/step heuristic is far too
+        # tight for large models at low concurrency; prefer the measured
+        # throughput from the benchmark phase (tok/s ≈ steps/s at bs=1).
+        if benchmark_throughput > 0:
+            estimated_sec = (delay + active) / benchmark_throughput * 2 + 300
+        else:
+            estimated_sec = (delay + active) * 0.01 + 30
         log.info("[%s] Waiting up to %.0fs for capture to complete",
                  self.test_name, estimated_sec)
 

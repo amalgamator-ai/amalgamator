@@ -86,7 +86,7 @@ tests/              Test suite (pytest)
 ## Configuration
 
 - **Performance analysis:** JSON configs in `llm/auto_profile/test_configs/` and `llm/auto_analyze/configs/` (one example chain: the `deepseek_r1_nvfp4` campaign flows profile → single/cross-trace analysis → codegen)
-- **Code generation:** JSON configs in `llm/auto_code_gen/configs/` (`use_case: llm_framework`; agent backends via `agent` section, see `agent_vllm_example.json`)
+- **Code generation:** JSON configs in `llm/auto_code_gen/configs/` (`use_case: llm_framework`; agent backends via `agent` section, see `agent_vllm_example.json`; each runtime iteration also runs a parallel research iteration — research agents that pre-research the next iteration's proposals during the bench window — controlled by `enable_parallel_research_iteration` (default true) and `parallel_research_iteration_agent_count` (default 4), see `llm/auto_code_gen/parallel_research_iteration.py`)
 - **Bug fix:** YAML configs in `auto_bug_fix/configs/`
 
 ## Dependencies
@@ -99,6 +99,17 @@ tests/              Test suite (pytest)
 ## Environment
 
 Set `ANTHROPIC_API_KEY` in your environment.
+
+## GPU Access on the MI355X Box (gpulease)
+
+All GPU work on the shared 8×MI355X machine goes through `gpulease` (installed at `~/.local/bin/gpulease`, watcher via `systemctl --user status gpulease-watch`). Invariant: **every GPU run reserves its GPUs before it starts and releases them at the end.** Never set `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES`/`CUDA_VISIBLE_DEVICES` by hand, and never target GPUs that `gpulease status` reports as leased/foreign.
+
+- **Long chains / detached docker servers** (the r10 harness): `eval "$(gpulease checkout --gpu 0,1,2,3 --ttl <minutes>)"`, launch with the exported env, `gpulease release $GPULEASE_LEASE_ID` when done. Harness drivers call `lease_ensure` from `/data/amatveev/rocm10/scripts/r10_lease.sh`, which does this and installs an EXIT trap; serving primitives assert the lease per boot (`lease_assert`). New drivers MUST source `r10_lease.sh` and call `lease_ensure` — see the patched drivers (r10_hetero_tune3.sh, r10_tune_ab2.sh, r10tp_sweep.sh, r10_*_verify.sh) for the pattern.
+- **Foreground jobs** (tests, repros, host-venv python): `gpulease run -n <N> -- <command>` — blocks until free, releases on exit. `--wait 0` fails fast.
+- **TP8 (cards 4-7 are other users')**: always one-shot, `--wait 0` — abort if any card is busy; never queue/camp on their cards. Foreign booking (their root-owned containers show as `foreign`, >2 GiB = busy) is the cross-user protection.
+- **`--gpu` is exact** (waits for those GPUs); **`--prefer` silently falls back to any free GPU — never use it for TP-pinned work** (it could grab cards 4-7).
+- TTL backstop: size `--ttl` to the run and `renew` at phase boundaries; an expired lease makes the next `lease_assert` fail fast (visible abort, not a silent unleased run).
+- Standalone operation: scripts run without a lease behave exactly as before; the adoption watcher books their GPUs automatically.
 
 ## Running Tests
 

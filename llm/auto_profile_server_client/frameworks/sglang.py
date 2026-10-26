@@ -62,6 +62,7 @@ class SglangAdapter(FrameworkAdapter):
             f"--dataset-name random "
             f"--random-input-len {input_len} "
             f"--random-output-len {output_len} "
+            f"--random-range-ratio 1.0 "
             f"--num-prompts {num_prompts} "
             f"--max-concurrency {concurrency} "
             f"--warmup-requests 0 "

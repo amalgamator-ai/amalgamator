@@ -66,7 +66,10 @@ against the file declaring them. Missing/empty selected key files fail at
 startup. The runner does not print configuration credentials. For an endpoint
 without authentication, supply a dummy key if its client requires one.
 
-For Claude, use `backend: claude_sdk` and a bare `claude-*` model name. The
+For Claude, use `backend: claude_sdk` and a bare `claude-*` model name. A
+non-Claude name is also accepted when an Anthropic-compatible endpoint in the
+SDK environment (e.g. `ANTHROPIC_BASE_URL`) serves it; a warning is logged
+because the default endpoint would reject it. The
 adapter retains the existing SDK environment authentication and profiling
 persona; transport parameters are rejected rather than ignored. To route a
 provider-qualified Claude model through LiteLLM, select `backend: litellm`

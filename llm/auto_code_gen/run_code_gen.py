@@ -23,6 +23,10 @@ from common.claude_utils import PipelineStep, _all_steps_complete
 from llm.auto_code_gen.agents import agent_run
 
 from llm.auto_code_gen.code_gen_configs import load_config_and_use_case
+from llm.auto_code_gen.parallel_research_iteration import (
+    launch_parallel_research_iteration as _launch_pri,
+    pri_proposals_file as _pri_proposals_file,
+)
 
 from common.iteration_utils import CONVERGENCE_MARKER, check_converged as _check_converged
 
@@ -429,6 +433,8 @@ def _apply_prompt_gen(config):
                 remote_model_pvc_name=config.remote_model_pvc_name,
             )
         return _remote
+    # local: the apply+compile step is CPU-only (git apply + cmake build),
+    # so it takes no gpu_ids — GPU pinning lives in the bench/lm_eval prompts.
     return gen_ApplyCodeAndCompilePrompt
 
 
@@ -458,7 +464,23 @@ def _run_prompt_gen(config):
                 gpu_wait_timeout_minutes=gpu_wait_timeout_minutes,
             )
         return _remote
-    return gen_RunAndLogPrompt
+
+    def _local(context, execution_command, runtime_logs_dir, iteration,
+               gpu_wait_timeout_minutes=60, smaller_model_file=None,
+               disable_new_feature=False):
+        return gen_RunAndLogPrompt(
+            context=context,
+            execution_command=execution_command,
+            runtime_logs_dir=runtime_logs_dir,
+            iteration=iteration,
+            gpu_wait_timeout_minutes=gpu_wait_timeout_minutes,
+            smaller_model_file=smaller_model_file,
+            disable_new_feature=disable_new_feature,
+            benchmark_client_command=getattr(
+                config, "benchmark_client_command", "") or None,
+            gpu_ids=getattr(config, "gpu_ids", "") or "",
+        )
+    return _local
 
 
 def _lm_eval_prompt_gen(config):
@@ -487,7 +509,18 @@ def _lm_eval_prompt_gen(config):
                 gpu_wait_timeout_minutes=gpu_wait_timeout_minutes,
             )
         return _remote
-    return gen_RunLMEvalPrompt
+    def _local(context, execution_command, runtime_logs_dir, iteration,
+               gpu_wait_timeout_minutes=60, smaller_model_file=None):
+        return gen_RunLMEvalPrompt(
+            context=context,
+            execution_command=execution_command,
+            runtime_logs_dir=runtime_logs_dir,
+            iteration=iteration,
+            gpu_wait_timeout_minutes=gpu_wait_timeout_minutes,
+            smaller_model_file=smaller_model_file,
+            gpu_ids=getattr(config, "gpu_ids", "") or "",
+        )
+    return _local
 
 
 def _diagnostic_prompt_gen(config):
@@ -1744,7 +1777,8 @@ async def run_runtime_iterations(
                  "max_iterations": max_runtime_iterations,
                  "converged": False, "duration": time.time() - phase_start}], []
 
-    if resume and _check_runtime_success(output_dir, latest_patch):
+    if (resume and _check_runtime_success(output_dir, latest_patch)
+            and not config.runtime_continue_after_success):
         print("Resume: runtime iterations already succeeded")
         return [{"name": phase_label, "iterations": 0,
                  "max_iterations": max_runtime_iterations,
@@ -1809,6 +1843,16 @@ async def run_runtime_iterations(
         prev_patch_abs = os.path.join(output_dir, prev_patch_file) if not os.path.isabs(prev_patch_file) else prev_patch_file
         if not os.path.isfile(iter_patch_path) and os.path.isfile(prev_patch_abs):
             shutil.copy2(prev_patch_abs, iter_patch_path)
+        # Snapshot the patch content this iteration STARTS from: the accepted-
+        # draft promotion below overwrites patch.patch in place, so a later
+        # "patch unchanged" check against a prev_patch_file that resolves to
+        # this same path would compare the file against itself and always
+        # stop. Comparing against the snapshot keeps the intended semantics
+        # (stop only when the investigation produced no change).
+        applied_patch_snapshot = None
+        if os.path.isfile(iter_patch_path):
+            with open(iter_patch_path) as pf:
+                applied_patch_snapshot = pf.read()
 
         print("\n--- Runtime Iteration {} / {} ---".format(iteration, max_runtime_iterations))
 
@@ -1837,6 +1881,12 @@ async def run_runtime_iterations(
         if not _check_apply_succeeded(output_dir, iteration):
             print("  Apply FAILED, stopping.")
             break
+
+        # ── Parallel research iteration (PRI): research agents use the
+        # bench/lm_eval/investigation window to pre-research the NEXT
+        # iteration's optimization proposals. Detached, self-gating,
+        # read-only — see parallel_research_iteration.py.
+        _launch_pri(config, iteration)
 
         # ── STEP 2: Compile + Bench ON (Pod 1), then Bench OFF (Pod 2) ────
         has_bench_off = _has_shared_baseline(output_dir, "bench_off")
@@ -1994,6 +2044,30 @@ async def run_runtime_iterations(
                         print("  lm_eval: FAIL")
                     else:
                         print("  lm_eval: PASS")
+            elif not disable_new_feature:
+                # Local backend: one agent run executes lm_eval with the
+                # feature ENABLED and DISABLED and writes the lm_eval.txt
+                # verdict, mirroring the remote pods' per-arm isolation.
+                print("  lm_eval ON+OFF (local)...")
+                lm_eval_prompt = _lm_eval_prompt_gen(config)(
+                    context=context, execution_command=execution_command,
+                    runtime_logs_dir=runtime_logs_dir, iteration=iteration,
+                    gpu_wait_timeout_minutes=config.gpu_wait_timeout_minutes,
+                    smaller_model_file=smaller_model_file)
+                timings = await agent_run(claude_config, [
+                    PipelineStep(name="lm_eval_V{}".format(iteration),
+                                 prompt=lm_eval_prompt.prompt()),
+                ], client=client)
+                all_step_timings.extend(timings)
+
+                lm_eval_result_file = os.path.join(runtime_logs_dir, "lm_eval.txt")
+                if os.path.isfile(lm_eval_result_file):
+                    with open(lm_eval_result_file) as f:
+                        lm_content = f.read().strip()
+                    if "FAIL" in lm_content:
+                        print("  lm_eval: FAIL")
+                    else:
+                        print("  lm_eval: PASS")
 
             # ── STEP 5: NSYS ON (+OFF if needed) ────────────────────────────
             print("  Running NSYS diagnostic (improvement path)...")
@@ -2050,6 +2124,10 @@ async def run_runtime_iterations(
                 output_patch_file=draft_patch,
                 output_summary_file=draft_summary,
                 review_feedback=review_feedback_text,
+                research_proposals_file=(
+                    _pri_proposals_file(output_dir, iteration - 1)
+                    if iteration > 1 else None),
+                continue_after_success=config.runtime_continue_after_success,
             )
             timings = await agent_run(claude_config, [
                 PipelineStep(name="investigate_V{}_R{}".format(iteration, revision),
@@ -2085,8 +2163,16 @@ async def run_runtime_iterations(
                 output_dir, iter_dir_rel, "review_R{}.txt".format(revision))
             if os.path.isfile(review_file):
                 with open(review_file) as rf:
-                    first_line = rf.readline().strip()
-                if "APPROVED" in first_line:
+                    review_head = [rf.readline().strip() for _ in range(60)]
+                # The review prompt asks for "VERDICT: ..." on the first
+                # line, but review agents sometimes open with a title line
+                # first; find the actual verdict line instead of trusting
+                # line 1 alone (a titled APPROVED review was misread as
+                # NEEDS_REVISION, burning the whole revision budget).
+                verdict_line = next(
+                    (l for l in review_head if l.upper().startswith("VERDICT:")),
+                    review_head[0])
+                if "APPROVED" in verdict_line and "NEEDS_REVISION" not in verdict_line:
                     print("  Review R{}: APPROVED".format(revision))
                     accepted_round = revision
                     break
@@ -2109,13 +2195,26 @@ async def run_runtime_iterations(
             if os.path.isfile(src):
                 shutil.copy2(src, dst)
 
-        # If succeeded, stop
+        # If succeeded: write the cumulative summary, then stop — unless the
+        # campaign runs in maximize mode (runtime_continue_after_success),
+        # where a successful iteration still promotes its patch and the loop
+        # keeps going until iteration exhaustion.
         if runtime_succeeded:
             # Write cumulative summary
             summary_timings = await _run_cumulative_summary(
                 results_dir, iteration, claude_config, client=client)
             all_step_timings.extend(summary_timings)
-            break
+            new_patch = os.path.join(RUNTIME_DIR, "V{}".format(iteration), "patch.patch")
+            new_patch_path = os.path.join(output_dir, new_patch)
+            new_summary = os.path.join(RUNTIME_DIR, "V{}".format(iteration), "summary.txt")
+            new_summary_path = os.path.join(output_dir, new_summary)
+            if os.path.isfile(new_patch_path):
+                prev_patch_file = new_patch
+            if os.path.isfile(new_summary_path):
+                prev_summary_file = new_summary
+            if not config.runtime_continue_after_success:
+                break
+            continue
 
         # Check for new patch
         new_patch = os.path.join(RUNTIME_DIR, "V{}".format(iteration), "patch.patch")
@@ -2130,15 +2229,22 @@ async def run_runtime_iterations(
             print("  No new patch generated, stopping.")
             break
 
-        # Check patch unchanged
-        if os.path.isfile(os.path.join(output_dir, prev_patch_file)):
-            with open(new_patch_path) as f:
-                new_content = f.read()
-            with open(os.path.join(output_dir, prev_patch_file)) as f:
-                prev_content = f.read()
-            if new_content == prev_content:
-                print("  Patch unchanged, stopping.")
-                break
+        # Check patch unchanged — against the content this iteration started
+        # from (see applied_patch_snapshot above). Falls back to the previous
+        # patch file only when no snapshot was captured.
+        with open(new_patch_path) as f:
+            new_content = f.read()
+        if applied_patch_snapshot is not None:
+            unchanged = (new_content == applied_patch_snapshot)
+        else:
+            prev_patch_cmp = prev_patch_file if os.path.isabs(prev_patch_file) else os.path.join(output_dir, prev_patch_file)
+            unchanged = False
+            if os.path.isfile(prev_patch_cmp):
+                with open(prev_patch_cmp) as f:
+                    unchanged = (new_content == f.read())
+        if unchanged:
+            print("  Patch unchanged, stopping.")
+            break
 
         prev_patch_file = new_patch
         prev_summary_file = new_summary
@@ -2169,6 +2275,11 @@ async def _run_nsys_step(config, output_dir, runtime_logs_dir, execution_command
 
     if os.path.isfile(report_file):
         print("  NSYS diagnostic already exists, skipping.")
+        return
+
+    if getattr(config, "skip_runtime_diagnostics", False):
+        print("  SKIP NSYS: diagnostics disabled by config "
+              "(skip_runtime_diagnostics)")
         return
 
     original_analysis_dir = _resolve_original_analysis_dir(config)
