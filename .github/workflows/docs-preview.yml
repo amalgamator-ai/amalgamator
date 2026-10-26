@@ -21,7 +21,7 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     # Pin to the remote-call detection fix until it lands on website main;
     # switch back to @main after amalgamator-ai.github.io merges that fix.
-    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/netlify-preview.yml@fix/netlify-preview-remote-call
+    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/netlify-preview.yml
     with:
       caller_repo: ${{ github.repository }}
       caller_pr: ${{ github.event.pull_request.number }}
