@@ -1,0 +1,64 @@
+# Titles and weights for the product docs sidebar on amalgamator.ai.
+# Paths are relative to this docs/ directory (without .md).
+# Section entries use overview.md (or README / _index.md) as the section landing page.
+#
+# When you add a guide, update this file in the same PR — the website loads it
+# from the amalgamator docs checkout (no website PR required).
+
+pages:
+  - path: getting-started
+    title: Getting started
+    weight: 10
+  - path: concepts
+    title: Concepts
+    weight: 20
+  - path: authentication
+    title: Authentication and models
+    weight: 30
+
+  - path: gpu
+    title: GPU performance analysis
+    weight: 40
+    section: true
+  - path: gpu/profiling
+    title: Profiling
+    weight: 20
+  - path: gpu/analysis
+    title: Trace analysis
+    weight: 30
+  - path: gpu/codegen
+    title: Code generation and PRs
+    weight: 40
+
+  - path: backporting
+    title: Bug-fix backporting
+    weight: 50
+    section: true
+  - path: backporting/scanning
+    title: Scanner
+    weight: 20
+  - path: backporting/backporting
+    title: Backport pipeline
+    weight: 30
+
+  - path: reference
+    title: Reference
+    weight: 60
+    section: true
+  - path: reference/cli
+    title: CLI entry points
+    weight: 10
+  - path: reference/artifacts
+    title: Artifacts and outputs
+    weight: 20
+  - path: reference/faq
+    title: FAQ and troubleshooting
+    weight: 30
+
+  - path: testing
+    title: Testing
+    weight: 70
+    section: true
+  - path: testing/testing
+    title: Testing notes
+    weight: 10

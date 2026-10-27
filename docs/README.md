@@ -4,6 +4,11 @@ User guides for installing Amalgamator and running its pipelines. For design
 contracts aimed at coding agents and contributors changing the code, see
 [AGENTS.md](../AGENTS.md) and [CONTRIBUTING.md](../CONTRIBUTING.md).
 
+The published docs site ([amalgamator.ai](https://amalgamator.ai/docs/)) pulls
+this tree. Sidebar titles and order live in [`docs_nav.yaml`](docs_nav.yaml) —
+update that file in the same PR when you add or rename a guide (no website PR
+needed for product docs).
+
 ## Start here
 
 | Doc | When to read it |
@@ -38,6 +43,12 @@ contracts aimed at coding agents and contributors changing the code, see
 | [CLI entry points](reference/cli.md) | Module commands and orchestrator scripts |
 | [Artifacts and outputs](reference/artifacts.md) | Where runs write results |
 | [FAQ and troubleshooting](reference/faq.md) | Common failures and how to recover |
+
+## Testing
+
+| Doc | Description |
+|-----|-------------|
+| [Testing notes](testing/testing.md) | Docs/site preview smoke checks |
 
 ## Package deep dives
 
