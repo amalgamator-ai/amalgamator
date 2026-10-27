@@ -66,6 +66,7 @@ project-includes = [
     "backport_scanner/**/*.py",
     "common/**/*.py",
     "llm/**/*.py",
+    "scripts/**/*.py",
     "tests/**/*.py",
 ]
 project-excludes = [".claude/**", "runs/**", "build/**", "dist/**"]
