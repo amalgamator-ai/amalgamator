@@ -14,7 +14,6 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - "docs/**"
-      - ".github/workflows/docs-preview.yml"
 
 permissions:
   contents: read
@@ -23,12 +22,13 @@ permissions:
 jobs:
   preview:
     if: github.event.pull_request.head.repo.full_name == github.repository
-    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/netlify-preview.yml@main
+    # Pin until feat/docs-nav-from-product lands on website main (nav from docs/).
+    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/netlify-preview.yml@feat/docs-nav-from-product
     with:
       caller_repo: ${{ github.repository }}
       caller_pr: ${{ github.event.pull_request.number }}
       docs_ref: ${{ github.event.pull_request.head.sha }}
-      website_ref: main
+      website_ref: feat/docs-nav-from-product
     secrets:
       NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
       NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
