@@ -18,10 +18,14 @@ import subprocess
 
 import pytest
 
+from auto_bug_fix import run_bug_fix as rbf
+from auto_bug_fix.git_tools import git_status_porcelain
 from auto_bug_fix.run_bug_fix import (
     PipelineEscalation,
     StageResult,
     _branch_checkout_holders,
+    _conflicted_files,
+    _force_resolve_for_phase_4b,
     _commit_recovery_edits,
     _commit_worktree_edits,
     _discard_verification_dirt,
@@ -1011,3 +1015,68 @@ def test_phase_4a_prompt_diff_survives_the_per_attempt_commit(tmp_path):
     # Attempt 1 has nothing applied yet; attempt 2 must see attempt 1's commit.
     assert len(seen) >= 2, seen
     assert "/* try */" in seen[1], seen[1]
+
+
+# ---------- The force-resolve boundary: commit, then escalate ----------
+
+
+def _conflicted_repo(tmp_path):
+    """Leave the repo mid-merge with a real ``UU`` entry for src.c."""
+    _git_4b(tmp_path, "checkout", "-b", "side")
+    (tmp_path / "src.c").write_text("int a = 99;\n")
+    _git_4b(tmp_path, "commit", "-am", "side edit")
+    _git_4b(tmp_path, "checkout", "main")
+    (tmp_path / "src.c").write_text("int a = 2;\n")
+    _git_4b(tmp_path, "commit", "-am", "main edit")
+    subprocess.run(["git", "merge", "side"], cwd=tmp_path, capture_output=True)
+    assert _conflicted_files(git_status_porcelain(str(tmp_path)))
+
+
+def test_force_resolve_escalates_when_staging_failed(tmp_path, monkeypatch):
+    """The force-resolve boundary used to drop ``StageResult.ok`` on the floor:
+    a failed ``git add`` produced an incomplete commit, Phase 4b ran on it, and
+    nothing ever reported that the fix might be missing."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _conflicted_repo(tmp_path)
+
+    def _staged_but_failing(cfg, st=None):
+        subprocess.run(["git", "add", "-A"], cwd=cfg.repo_path, capture_output=True)
+        return StageResult(None, set(), ok=False)
+
+    monkeypatch.setattr(rbf, "_stage_agent_work", _staged_but_failing)
+
+    with pytest.raises(PipelineEscalation, match="force-resolve"):
+        _force_resolve_for_phase_4b(config, state)
+
+
+def test_force_resolve_commits_before_it_escalates(tmp_path, monkeypatch):
+    """Ordering is the whole point: Phase 4b and the failure-path export both
+    read commits, and ``_emit_candidate_patch_on_failure`` never commits. An
+    escalation raised ahead of ``git_commit`` would throw away the conflicts
+    this boundary just force-resolved."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _conflicted_repo(tmp_path)
+    head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    def _staged_but_failing(cfg, st=None):
+        subprocess.run(["git", "add", "-A"], cwd=cfg.repo_path, capture_output=True)
+        return StageResult(None, set(), ok=False)
+
+    monkeypatch.setattr(rbf, "_stage_agent_work", _staged_but_failing)
+
+    with pytest.raises(PipelineEscalation):
+        _force_resolve_for_phase_4b(config, state)
+
+    assert _git_4b(tmp_path, "rev-parse", "HEAD") != head_before
+    assert "int a = 99;" in _git_4b(tmp_path, "show", "HEAD:src.c")
+
+
+def test_force_resolve_is_silent_when_staging_succeeded(tmp_path):
+    """The normal path still commits the force-resolved tree and says nothing."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _conflicted_repo(tmp_path)
+    head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    _force_resolve_for_phase_4b(config, state)
+
+    assert _git_4b(tmp_path, "rev-parse", "HEAD") != head_before

@@ -1361,23 +1361,36 @@ def _stage_agent_work(
     return StageResult(fence, generated, ok)
 
 
+def _require_complete_stage(staged: StageResult, phase_label: str) -> None:
+    """Escalate when a commit boundary could not stage the whole worktree.
+
+    Leaving recognized build output unstaged is normal; failing to *stage*
+    is not. An incomplete stage means the commit — and therefore
+    ``candidate.patch`` and the preserved branch — may omit the work the
+    phase produced, so no boundary may discard ``StageResult.ok``.
+    """
+    if staged.ok:
+        return
+    raise PipelineEscalation(
+        f"{phase_label}: could not stage the worktree for its commit "
+        "boundary — the commit, candidate patch and preserved branch "
+        "may omit this phase's work"
+    )
+
+
 def _stage_or_escalate(
     config: BugFixConfig, state: PipelineState | None, phase_label: str
 ) -> StageResult:
-    """``_stage_agent_work`` for a boundary the pipeline can still succeed at.
+    """``_stage_agent_work`` for a boundary that stages before it commits.
 
-    Leaving recognized build output unstaged is normal; failing to *stage*
-    is not. At a success-path boundary an incomplete stage means the commit
-    — and therefore ``candidate.patch`` and the preserved branch — may omit
-    the work this phase produced, so it escalates instead of logging.
+    Where the commit has to happen *first* — the failure-path export never
+    commits (``_emit_candidate_patch_on_failure``), so raising ahead of
+    ``git_commit`` would drop the very work the boundary just rescued —
+    stage with ``_stage_agent_work`` and call ``_require_complete_stage``
+    after the commit instead.
     """
     staged = _stage_agent_work(config, state)
-    if not staged.ok:
-        raise PipelineEscalation(
-            f"{phase_label}: could not stage the worktree for its commit "
-            "boundary — the commit, candidate patch and preserved branch "
-            "may omit this phase's work"
-        )
+    _require_complete_stage(staged, phase_label)
     return staged
 
 
@@ -4390,6 +4403,98 @@ def run_pipeline(
         print(tracker.summary())
 
 
+def _force_resolve_for_phase_4b(config: BugFixConfig, state: PipelineState) -> None:
+    """Land whatever the failed cherry-pick resolution produced, for Phase 4b.
+
+    Extracted from the Phase 2+3a recovery handler so the boundary is
+    reachable from tests: it is the one commit boundary that must commit
+    *before* it escalates. Phase 4b and the failure-path export both read
+    commits only, and ``_emit_candidate_patch_on_failure`` never commits,
+    so raising on an incomplete stage before ``git_commit`` would discard
+    the conflicts this function just force-resolved.
+
+    Raises PipelineEscalation when a staging step failed: the commit
+    stands and carries what it could, but the run must not continue as
+    though the boundary had been complete.
+    """
+    status = git_status_porcelain(config.repo_path)
+    remaining_conflicts = _conflicted_files(status)
+    if remaining_conflicts:
+        log.info(
+            "Force-resolving %d remaining conflicts with --theirs before Phase 4b",
+            len(remaining_conflicts),
+        )
+        for f in remaining_conflicts:
+            subprocess.run(
+                ["git", "checkout", "--theirs", "--", f],
+                cwd=config.repo_path,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "add", "--", f], cwd=config.repo_path, capture_output=True
+            )
+        staged = _stage_agent_work(config, state)
+        git_commit(
+            config.repo_path,
+            f"Port {config.issue_id} (partial — force-resolved for Phase 4b)\n\n"
+            f"[ {len(remaining_conflicts)} conflicts force-resolved with --theirs ]",
+            trailers=_COAUTHOR_TRAILERS,
+        )
+        # Commit first, escalate after: this boundary feeds Phase 4b and
+        # the failure-path export, neither of which commits anything.
+        _require_complete_stage(
+            staged, "Phase 2+3a force-resolve (remaining conflicts)"
+        )
+    else:
+        cherry_pick_in_progress = (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", "CHERRY_PICK_HEAD"],
+                cwd=config.repo_path,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+        if cherry_pick_in_progress:
+            subprocess.run(
+                ["git", "cherry-pick", "--abort"],
+                cwd=config.repo_path,
+                capture_output=True,
+            )
+        # Reset to the frozen baseline, not the (movable) branch name.
+        git_reset_hard(
+            config.repo_path, config.frozen_target_sha or config.target_branch
+        )
+        git_cherry_pick(config.repo_path, config.source_fix_commit)
+        status = git_status_porcelain(config.repo_path)
+        force_conflicts = _conflicted_files(status)
+        if force_conflicts:
+            log.info(
+                "Re-applied cherry-pick, force-resolving %d conflicts with --theirs",
+                len(force_conflicts),
+            )
+            for f in force_conflicts:
+                subprocess.run(
+                    ["git", "checkout", "--theirs", "--", f],
+                    cwd=config.repo_path,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "add", "--", f],
+                    cwd=config.repo_path,
+                    capture_output=True,
+                )
+        staged = _stage_agent_work(config, state)
+        git_commit(
+            config.repo_path,
+            f"Port {config.issue_id} (force-resolved for Phase 4b)\n\n"
+            f"[ All conflicts force-resolved with --theirs ]",
+            trailers=_COAUTHOR_TRAILERS,
+        )
+        _require_complete_stage(
+            staged, "Phase 2+3a force-resolve (re-applied cherry-pick)"
+        )
+
+
 def _run_pipeline_phases(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -4680,74 +4785,7 @@ def _run_pipeline_phases(
             "Cherry-pick resolution failed", f"{type(e).__name__}: {e}", "Phase 2+3a"
         )
 
-        status = git_status_porcelain(config.repo_path)
-        remaining_conflicts = _conflicted_files(status)
-        if remaining_conflicts:
-            log.info(
-                "Force-resolving %d remaining conflicts with --theirs before Phase 4b",
-                len(remaining_conflicts),
-            )
-            for f in remaining_conflicts:
-                subprocess.run(
-                    ["git", "checkout", "--theirs", "--", f],
-                    cwd=config.repo_path,
-                    capture_output=True,
-                )
-                subprocess.run(
-                    ["git", "add", "--", f], cwd=config.repo_path, capture_output=True
-                )
-            _stage_agent_work(config, state)
-            git_commit(
-                config.repo_path,
-                f"Port {config.issue_id} (partial — force-resolved for Phase 4b)\n\n"
-                f"[ {len(remaining_conflicts)} conflicts force-resolved with --theirs ]",
-                trailers=_COAUTHOR_TRAILERS,
-            )
-        else:
-            cherry_pick_in_progress = (
-                subprocess.run(
-                    ["git", "rev-parse", "--verify", "CHERRY_PICK_HEAD"],
-                    cwd=config.repo_path,
-                    capture_output=True,
-                ).returncode
-                == 0
-            )
-            if cherry_pick_in_progress:
-                subprocess.run(
-                    ["git", "cherry-pick", "--abort"],
-                    cwd=config.repo_path,
-                    capture_output=True,
-                )
-            # Reset to the frozen baseline, not the (movable) branch name.
-            git_reset_hard(
-                config.repo_path, config.frozen_target_sha or config.target_branch
-            )
-            git_cherry_pick(config.repo_path, config.source_fix_commit)
-            status = git_status_porcelain(config.repo_path)
-            force_conflicts = _conflicted_files(status)
-            if force_conflicts:
-                log.info(
-                    "Re-applied cherry-pick, force-resolving %d conflicts with --theirs",
-                    len(force_conflicts),
-                )
-                for f in force_conflicts:
-                    subprocess.run(
-                        ["git", "checkout", "--theirs", "--", f],
-                        cwd=config.repo_path,
-                        capture_output=True,
-                    )
-                    subprocess.run(
-                        ["git", "add", "--", f],
-                        cwd=config.repo_path,
-                        capture_output=True,
-                    )
-            _stage_agent_work(config, state)
-            git_commit(
-                config.repo_path,
-                f"Port {config.issue_id} (force-resolved for Phase 4b)\n\n"
-                f"[ All conflicts force-resolved with --theirs ]",
-                trailers=_COAUTHOR_TRAILERS,
-            )
+        _force_resolve_for_phase_4b(config, state)
 
         with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
             phase_4b_run_and_fix(config, claude_config, state, tracker)
