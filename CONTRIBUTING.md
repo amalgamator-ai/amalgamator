@@ -23,7 +23,9 @@ python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[test,dev]"
 ```
 
-See the [README](README.md) for an overview of the pipelines and where each one lives.
+See the [README](README.md) for an overview of the pipelines and where each one
+lives, and [docs/](docs/README.md) for user-facing getting-started and workflow
+guides. Update those guides when user-visible commands or workflows change.
 
 ## Running the tests
 
@@ -94,6 +96,10 @@ Start the subject line with a type prefix, as in the existing history:
 
 Keep the subject short and write it in the imperative mood, for example `fix: handle BlockingIOError in Tee.write() for piped output`.
 
+Pull request titles use the same type prefix. CI checks the PR title on every
+edit and checks DCO sign-off on every non-merge commit; bot-authored PRs are
+exempt from both. The checks are named `PR title` and `DCO sign-off`.
+
 ### Sign your work (DCO)
 
 This project uses the [Developer Certificate of Origin](https://developercertificate.org/). Every commit needs a `Signed-off-by: Your Name <you@example.com>` line, certifying that you wrote the change or otherwise have the right to submit it. The easiest way is to sign off while committing:
@@ -102,6 +108,16 @@ This project uses the [Developer Certificate of Origin](https://developercertifi
 git commit -s
 git commit --amend -s --no-edit   # add a forgotten sign-off to the last commit
 ```
+
+The CI check requires the sign-off to match the commit author. Use
+`git rebase --signoff <base>` to add the trailer to a branch with several
+commits.
+
+## AI-assisted contributions
+
+AI assistance is allowed. If you use it, disclose it in the pull request and
+make sure a human has reviewed the result. You are responsible for the change,
+including its tests and documentation.
 
 ## Releases and versioning
 

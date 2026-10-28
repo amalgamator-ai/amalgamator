@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `edited` deliberately stays out of this workflow: a title or body edit
+    # must not cancel and rerun the test matrix. The PR title is checked by
+    # pr-title.yml instead.
+    types: [opened, synchronize, reopened]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,10 +17,47 @@ permissions:
   contents: read
 
 jobs:
+  # Gate the expensive jobs on commit metadata. The checkout is deliberately
+  # the *base* branch, so the check runs trusted code; the PR head is fetched
+  # as a ref only. On pushes to main this job is a no-op so the jobs below
+  # still run (a skipped job would skip every dependent job too).
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the trusted baseline
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+
+      - name: Fetch the pull request commits
+        if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.number }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr-head"
+
+      - name: Verify DCO sign-off
+        if: github.event_name == 'pull_request'
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check_pr_metadata.py dco \
+            --base-ref HEAD \
+            --head-ref refs/remotes/origin/pr-head \
+            --author "$PR_AUTHOR"
+
   # Format/lint/type-check run once, on the minimum supported Python; the
   # pytest matrix below covers the supported range.
   lint-type:
     name: Format / Lint / Type (Python 3.12)
+    needs: dco
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -57,6 +98,7 @@ jobs:
 
   test:
     name: Test (Python ${{ matrix.python-version }})
+    needs: dco
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

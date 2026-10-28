@@ -8,6 +8,8 @@ auto_bug_fix/configs/*.yaml
 .venv/
 .DS_Store
 llm/auto_profile_server_client/results/
+.vscode/
 
 # Local Claude Code worktrees (never committed)
 /.claude/worktrees/
+.vscode/
