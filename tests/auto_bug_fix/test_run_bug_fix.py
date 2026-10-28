@@ -38,6 +38,7 @@ def test_pipeline_state_defaults():
     assert state.dossier.items == [] and state.dossier.strategies == []
     assert state.triage_assessment == {}
     assert state.priority_files == []
+    assert state.skipped_prerequisites == []
 
 
 def test_pipeline_stop_exception():
@@ -988,6 +989,7 @@ def test_completeness_bugfix_commits_never_downgrade(tmp_path):
     config, _, state = _phase_4b_fixtures(tmp_path)
     state.triage_assessment = {"commit_type": "bugfix", "files_to_skip": ["src.c"]}
     state.failed_prerequisites = ["some_symbol"]
+    state.skipped_prerequisites = ["skipped_symbol"]
     outcome, detail = _backport_completeness(config, state)
     assert outcome == "success"
     assert detail == ""
@@ -1012,6 +1014,19 @@ def test_completeness_failed_prereq_downgrades_feature_port(tmp_path):
     outcome, detail = _backport_completeness(config, state)
     assert outcome == "partial_success"
     assert "missing_infra_symbol" in detail
+
+
+def test_completeness_skipped_prereq_downgrades_feature_port(tmp_path):
+    from auto_bug_fix.run_bug_fix import _backport_completeness
+
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.source_fix_commit = _git_4b(tmp_path, "rev-parse", "HEAD")
+    state.triage_assessment = {"commit_type": "api-change"}
+    state.skipped_prerequisites = ["overflow_symbol"]
+    outcome, detail = _backport_completeness(config, state)
+    assert outcome == "partial_success"
+    assert "depth cap" in detail
+    assert "overflow_symbol" in detail
 
 
 def _completeness_repo(tmp_path):
