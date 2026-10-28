@@ -375,9 +375,6 @@ def phase_0_triage(
     )
     state.allowed_modules = resolved
 
-    if config.allowed_modules is not None:
-        state.allowed_modules = config.allowed_modules
-
     fwd = forward_patch_id_check(repo, fix, target, config.forward_patch_id_lookback)
     if fwd:
         raise PipelineStop(f"Fix already present on target as {fwd}")
@@ -404,6 +401,11 @@ def phase_0_triage(
             log.info(
                 "Ancestry/patch-id checks failed but seed files exist on target — proceeding with caution"
             )
+
+    # The operator-supplied allowlist is authoritative. Apply it after the
+    # ancestry block so the no_seed_files fallback cannot clobber it.
+    if config.allowed_modules is not None:
+        state.allowed_modules = config.allowed_modules
 
     return {"forward_patch_id": "not_found", "ancestry": ancestry_status}
 

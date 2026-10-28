@@ -134,6 +134,27 @@ def test_phase_0_reports_no_seed_files_and_keeps_seed_as_allowlist(tmp_path):
     assert state.allowed_modules == ["new_module.c"]
 
 
+def test_phase_0_explicit_allowed_modules_wins_on_no_seed_files(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    _git(repo, "branch", "target")
+    (repo / "brand_new.c").write_text("int brand_new_symbol;\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "fix: add brand new file")
+    fix_sha = _sha(repo)
+
+    state = PipelineState()
+    gates = phase_0_triage(
+        _config(repo, fix_sha, allowed_modules=["custom/"]),
+        _claude_config(repo),
+        state,
+    )
+
+    assert gates == {"forward_patch_id": "not_found", "ancestry": "no_seed_files"}
+    # The operator override is authoritative even when the fix's files are
+    # absent from the target and the seed fallback would otherwise win.
+    assert state.allowed_modules == ["custom/"]
+
+
 def test_phase_0_respects_explicit_allowed_modules(tmp_git_repo):
     repo = tmp_git_repo.repo_path
     state = PipelineState()
