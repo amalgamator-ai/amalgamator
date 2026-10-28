@@ -1435,6 +1435,37 @@ def test_semantic_triage_strips_build_output_from_an_agent_commit(
     assert (tmp_path / "gen.o").exists(), "kept on disk for the build that expects it"
 
 
+def test_red_triage_strips_build_output_from_an_agent_commit(tmp_path, monkeypatch):
+    """Phase 1.5's triage session is a full agent with a shell. Its own
+    commit was outside every boundary, and by then Phase 1 has run, so the
+    paths a build was seen to write are known and can be taken back out."""
+    from auto_bug_fix.bug_fix_prompts import RED_TRIAGE_FILE
+
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    state.generated_output = {"gen.o"}
+    state.red_passed_output = "PASSED tests/test_x.py"
+
+    async def session(cfg, steps, tracker=None):
+        (tmp_path / "gen.o").write_text("compile output\n")
+        (tmp_path / RED_TRIAGE_FILE).write_text('{"verdict": "vulnerable"}\n')
+        _git_4b(tmp_path, "add", "-A")
+        _git_4b(tmp_path, "commit", "-m", "agent commit")
+        return []
+
+    monkeypatch.setattr(rbf, "claude_run", session)
+
+    result = rbf.phase_1_5_red_triage(config, claude_cfg, state, None)
+
+    assert result["verdict"] == "vulnerable"
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "gen.o" not in tree
+    # Pipeline artifacts never enter a pipeline commit either, but the file
+    # has to survive on disk for the function to read its verdict.
+    assert RED_TRIAGE_FILE not in tree
+    assert (tmp_path / "gen.o").exists(), "kept on disk for the build that expects it"
+    assert (tmp_path / RED_TRIAGE_FILE).exists()
+
+
 def test_phase_4a_survives_and_strips_a_self_committing_agent(tmp_path):
     """A recovery agent that commits for itself looks exactly like one that did
     nothing — a clean worktree — so the run aborted with CANNOT_FIX while the

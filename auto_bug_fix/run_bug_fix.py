@@ -944,7 +944,22 @@ def phase_1_5_red_triage(
 
     claude_config_triage = _phase_config(claude_config, config)
 
+    # The triage session is a full agent with a shell and can commit for
+    # itself, like Phase 0.5's. Unlike that one, Phase 1's baseline build
+    # has already run, so paths a build was seen to create are known and a
+    # commit it leaves behind is stripped of them.
+    head = _run_git(config.repo_path, ["rev-parse", "HEAD"])
+    triage_head = head.stdout.strip() if head.success else ""
     asyncio.run(claude_run(claude_config_triage, [prompt.prompt()], tracker=tracker))
+    if triage_head:
+        _strip_committed_build_output(
+            config, state, triage_head, "Phase 1.5 (RED triage)"
+        )
+    else:
+        log.warning(
+            "Phase 1.5 (RED triage): could not read HEAD before the session "
+            "— a commit it made is not checked for build output"
+        )
 
     triage_candidates = [
         os.path.join(config.repo_path, RED_TRIAGE_FILE),
