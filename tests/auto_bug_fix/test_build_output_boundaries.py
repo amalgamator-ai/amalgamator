@@ -24,13 +24,14 @@ from auto_bug_fix.run_bug_fix import (
     PipelineEscalation,
     StageResult,
     _branch_checkout_holders,
-    _conflicted_files,
-    _force_resolve_for_phase_4b,
     _commit_recovery_edits,
     _commit_worktree_edits,
+    _conflicted_files,
     _discard_verification_dirt,
     _empty_dirs,
+    _fence_build_dir,
     _finish_verification,
+    _force_resolve_for_phase_4b,
     _non_artifact_dirt,
     _porcelain_line_paths,
     _prune_emptied_dirs,
@@ -1237,3 +1238,128 @@ def test_force_resolve_is_silent_when_staging_succeeded(tmp_path):
     _force_resolve_for_phase_4b(config, state)
 
     assert _git_4b(tmp_path, "rev-parse", "HEAD") != head_before
+
+
+# ---------- Agent-created commits: the guard runs after them too ----------
+
+
+def _learn_gen_o(config, state, content="verification build output\n"):
+    """Run one orchestrator verification that writes gen.o, and discard it."""
+    baseline = _worktree_snapshot(config)
+    with open(os.path.join(config.repo_path, "gen.o"), "w") as f:
+        f.write(content)
+    assert _discard_verification_dirt(config, baseline, state) is True
+    return state
+
+
+def test_agent_committed_build_output_is_untracked_again(tmp_path):
+    """An agent that runs `git add -A && git commit` sweeps its own build
+    output into the tree. The staging guard never saw that commit, and from
+    then on HEAD tracks the output — which is exactly the signal both guards
+    read as "this is source". The guard therefore runs after the agent too."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _learn_gen_o(config, state)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    # The agent commits its fix *and* its build output, as agents do.
+    (tmp_path / "gen.o").write_text("verification build output\n")
+    (tmp_path / "src.c").write_text("int a = 2; /* the fix */\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "agent commit")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "gen.o" not in tree
+    assert "src.c" in tree
+    assert (tmp_path / "gen.o").exists(), "kept on disk — later builds expect it"
+    # The deliverable ranges over base..HEAD, and the path was added inside
+    # that range, so it is gone from the patch entirely.
+    net = _git_4b(tmp_path, "diff", "--name-only", base, "HEAD").splitlines()
+    assert net == ["src.c"]
+
+
+def test_agent_commit_no_longer_disables_the_build_dir_fence(tmp_path):
+    """The sting in the original failure: _fence_build_dir asks whether HEAD
+    tracks anything under the build directory, so one agent commit switched
+    the fence off for the whole run."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "rpm-build")
+    (tmp_path / "rpm-build").mkdir()
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "rpm-build" / "artifact.o").write_text("output\n")
+    state.generated_output = {"rpm-build/artifact.o"}
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "agent commit with build output")
+    assert _fence_build_dir(config) is None, "fence disabled by the agent commit"
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    assert _fence_build_dir(config) == "rpm-build"
+
+
+def test_agent_committed_ignored_output_is_untracked_again(tmp_path):
+    """A force-added artifact is still recognizable: `git check-ignore
+    --no-index` answers from the ignore rules, not from the index."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / ".gitignore").write_text("*.o\n")
+    _git_4b(tmp_path, "add", ".gitignore")
+    _git_4b(tmp_path, "commit", "-m", "ignore object files")
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "stray.o").write_text("output\n")
+    _git_4b(tmp_path, "add", "-f", "stray.o")
+    _git_4b(tmp_path, "commit", "-m", "agent force-added build output")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    assert (
+        "stray.o"
+        not in _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    )
+
+
+def test_agent_committed_source_is_never_untracked(tmp_path):
+    """Accounting runs the same way here as at a staging boundary: anything
+    the pipeline cannot show is build output stays in the commit. A noisier
+    patch is recoverable, removing the fix from the tree is not."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "new_helper.c").write_text("int n = 1;\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "agent commit")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    assert _git_4b(tmp_path, "rev-parse", "HEAD") != base
+    assert (
+        "new_helper.c"
+        in _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    )
+
+
+def test_agent_committed_source_at_a_learned_path_is_never_untracked(tmp_path):
+    """The name-collision case again, on the commit side: the agent authored
+    the fix at a path some verification once generated."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _learn_gen_o(config, state)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "gen.o").write_text("int ported_fix = 1;\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "agent commit")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    assert (
+        "gen.o"
+        in _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    )
+
+
+def test_strip_committed_build_output_is_a_no_op_without_an_agent_commit(tmp_path):
+    """HEAD never moved: nothing to inspect, and no empty commit created."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    assert _git_4b(tmp_path, "rev-parse", "HEAD") == base

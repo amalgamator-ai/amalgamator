@@ -1363,6 +1363,194 @@ def _recognized_build_output(
     return recognized
 
 
+def _blobs_in_ref(
+    config: BugFixConfig, ref: str, paths: list[str]
+) -> dict[str, str] | None:
+    """Blob hash of each of *paths* as committed at *ref* (batched, literal).
+
+    Paths absent from the tree are simply missing from the result. Returns
+    None when ``git ls-tree`` failed, so callers can fail closed.
+    """
+    ordered = sorted(set(paths))
+    blobs: dict[str, str] = {}
+    for start in range(0, len(ordered), _PATHSPEC_BATCH):
+        batch = ordered[start : start + _PATHSPEC_BATCH]
+        ls = _run_git(
+            config.repo_path,
+            ["ls-tree", "-z", ref, "--", *(_literal_pathspec(x) for x in batch)],
+        )
+        if not ls.success:
+            log.warning(
+                "git ls-tree %s failed (exit %d): %s",
+                ref,
+                ls.exit_code,
+                ls.stderr.strip(),
+            )
+            return None
+        for entry in ls.stdout.split("\0"):
+            meta, _, path = entry.partition("\t")
+            fields = meta.split()
+            if path and len(fields) >= 3 and fields[1] == "blob":
+                blobs[path] = fields[2]
+    return blobs
+
+
+def _ignored_paths(config: BugFixConfig, paths: list[str]) -> set[str]:
+    """Which of *paths* git is configured to ignore (best effort, batched).
+
+    ``git check-ignore`` answers from the ignore rules alone — ``--no-index``
+    keeps it answering for paths that are already tracked — so it still
+    recognizes a build artifact an agent force-added to a commit. Paths go
+    in on stdin: ``-z`` is only accepted with ``--stdin``, and NUL framing
+    is what keeps a filename containing a newline from being read as two.
+    A failed call yields nothing: "cannot prove it is ignored" must never
+    read as "proved it is ignored".
+    """
+    ordered = sorted(set(paths))
+    ignored: set[str] = set()
+    for start in range(0, len(ordered), _PATHSPEC_BATCH):
+        batch = ordered[start : start + _PATHSPEC_BATCH]
+        result = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--stdin", "-z"],
+            cwd=config.repo_path,
+            input="\0".join(batch),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        # Exit 1 simply means "none of these are ignored"; 128 is an error.
+        if result.returncode not in (0, 1):
+            log.warning(
+                "git check-ignore failed (exit %d): %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
+            continue
+        ignored.update(x for x in result.stdout.split("\0") if x)
+    return ignored
+
+
+def _strip_committed_build_output(
+    config: BugFixConfig,
+    state: PipelineState | None,
+    base_ref: str,
+    phase_label: str,
+) -> bool:
+    """Take build output back out of commits an agent made for itself.
+
+    Every *pipeline* commit boundary goes through ``_stage_agent_work``, but
+    an agent is free to run ``git commit`` on its own — the Phase 3a
+    resolution agent is explicitly instructed to, and the Phase 0.5 agents
+    may. A ``git add -A`` in that session sweeps the session's own build
+    output into the commit, and from that moment HEAD tracks it. Both guards
+    then switch themselves off by design: ``_fence_build_dir`` reads HEAD,
+    finds the build directory tracked and stops fencing it, while
+    ``_stage_agent_work`` keeps anything HEAD tracks, because at a learned
+    path "HEAD tracks it" is the signal that it is source. One agent commit
+    was therefore enough to disable the whole mechanism and put the output
+    in ``candidate.patch`` — the failure this module exists to prevent.
+
+    So the guard runs after the agent as well. Paths *added* between
+    *base_ref* and HEAD that the pipeline can account for as build output —
+    content a verification was seen to write there, or a path git ignores —
+    are removed from the tree with ``git rm --cached`` and one follow-up
+    commit. The files stay on disk, because the agent and the verifications
+    after it run builds that expect them, and they go back to being
+    untracked, which re-arms the fence. They were added *inside* the range,
+    so the net ``base_ref..HEAD`` diff no longer mentions them at all and
+    the deliverable is clean.
+
+    Accounting is the same everywhere in this module, and deliberately
+    conservative: output nothing recorded as build output stays committed.
+    A noisier patch is recoverable; removing a fix from the tree is not.
+
+    Returns False when a step failed. Never raises.
+    """
+    try:
+        head = git_rev_parse(config.repo_path, "HEAD")
+        if head == base_ref:
+            return True
+        added = _run_git(
+            config.repo_path,
+            ["diff", "--name-only", "--diff-filter=A", "-z", base_ref, head],
+        )
+        if not added.success:
+            log.warning(
+                "%s: could not list files added since %s (exit %d): %s — "
+                "build output an agent committed may reach the patch",
+                phase_label,
+                base_ref[:12],
+                added.exit_code,
+                added.stderr.strip(),
+            )
+            return False
+        paths = [x for x in added.stdout.split("\0") if x]
+        if not paths:
+            return True
+        learned = state.generated_output if state is not None else set()
+        digests = state.generated_digests if state is not None else {}
+        candidates = sorted(set(paths) & learned)
+        committed = _blobs_in_ref(config, head, candidates) if candidates else {}
+        if committed is None:
+            return False
+        # A learned path with recorded content must still hold content a
+        # build was seen to write; one learned inside a fenced build
+        # directory has none recorded, and the path rule stands there.
+        output = {
+            path
+            for path in candidates
+            if not digests.get(path) or committed.get(path) in digests[path]
+        }
+        output |= _ignored_paths(config, paths)
+        if not output:
+            return True
+        log.warning(
+            "%s: %d path(s) of build output were committed by the agent — "
+            "removing them from the tree so they stay out of the candidate "
+            "patch (e.g. %s)",
+            phase_label,
+            len(output),
+            ", ".join(sorted(output)[:5]),
+        )
+        if not _run_git_pathspec_batches(
+            config, ["rm", "--cached", "-q", "--"], sorted(output)
+        ):
+            log.warning(
+                "%s: could not untrack agent-committed build output — the "
+                "build-directory fence stays disabled for the rest of the run",
+                phase_label,
+            )
+            return False
+        git_commit(
+            config.repo_path,
+            f"chore: untrack build output committed during {phase_label}\n\n"
+            f"[ {len(output)} generated path(s) kept on disk, out of the tree ]",
+        )
+        if git_rev_parse(config.repo_path, "HEAD") == head:
+            log.warning(
+                "%s: the untracking commit did not land — build output is "
+                "still tracked",
+                phase_label,
+            )
+            return False
+        if state is not None:
+            state.generated_output |= output
+            # Keep the content key too, so the paths that just went back to
+            # being untracked are still judged on content at the next
+            # boundary rather than on their name alone.
+            for path in output:
+                blob = committed.get(path)
+                if blob:
+                    state.generated_digests.setdefault(path, set()).add(blob)
+        return True
+    except Exception as e:
+        log.warning(
+            "%s: untracking agent-committed build output failed: %s", phase_label, e
+        )
+        return False
+
+
 def _restage_unaccounted_fenced(
     config: BugFixConfig,
     fence: str,
@@ -2566,6 +2754,11 @@ def _finalize_resolution(
             )
             return "resolved"
 
+    # The resolution agent commits for itself, so the staging guard never ran
+    # over what it committed. Take build output back out before anything
+    # downstream reads the range as "the fix".
+    _strip_committed_build_output(config, state, base_head, f"Phase 3a ({label})")
+
     changed_files = git_diff_name_only_range(repo, base_head, "HEAD")
 
     findings = []
@@ -2927,6 +3120,10 @@ def _finalize_resolution(
                             "adaptations that were incorrect.",
                             "Phase 3a.2",
                         )
+
+    # The Phase 3a.1 and 3a.2 agents commit for themselves too, after the
+    # strip above — run the guard once more over everything they added.
+    _strip_committed_build_output(config, state, base_head, f"Phase 3a ({label})")
 
     return "resolved"
 
@@ -4825,8 +5022,14 @@ def _run_pipeline_phases(
         test_files_in_commit = identify_test_files(state.seed)
         if test_files_in_commit:
             with tracker.phase("Phase 0.5c — Test port"):
+                head_before_test_port = git_rev_parse(config.repo_path, "HEAD")
                 ported_tests = phase_0_5c_test_port(
                     config, claude_config, state, tracker
+                )
+                # The test-port agent may commit for itself; the boundary
+                # below only covers what it left in the worktree.
+                _strip_committed_build_output(
+                    config, state, head_before_test_port, "Phase 0.5c"
                 )
                 state.dossier.add(
                     "Test port",
