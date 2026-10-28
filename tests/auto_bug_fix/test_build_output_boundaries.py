@@ -1466,6 +1466,32 @@ def test_red_triage_strips_build_output_from_an_agent_commit(tmp_path, monkeypat
     assert (tmp_path / RED_TRIAGE_FILE).exists()
 
 
+def test_a_session_that_commits_and_then_raises_is_still_stripped(
+    tmp_path, monkeypatch
+):
+    """The failure-path export formats frozen..HEAD, so a commit left behind
+    by a session that then errors would ship its build output exactly when
+    the run gives up on the phase. The strip has to run in ``finally``."""
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    state.generated_output = {"gen.o"}
+    state.red_passed_output = "PASSED tests/test_x.py"
+
+    async def session(cfg, steps, tracker=None):
+        (tmp_path / "gen.o").write_text("compile output\n")
+        _git_4b(tmp_path, "add", "-A")
+        _git_4b(tmp_path, "commit", "-m", "agent commit")
+        raise RuntimeError("session crashed")
+
+    monkeypatch.setattr(rbf, "claude_run", session)
+
+    with pytest.raises(RuntimeError, match="session crashed"):
+        rbf.phase_1_5_red_triage(config, claude_cfg, state, None)
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "gen.o" not in tree
+    assert (tmp_path / "gen.o").exists(), "kept on disk for the build that expects it"
+
+
 def test_phase_4a_survives_and_strips_a_self_committing_agent(tmp_path):
     """A recovery agent that commits for itself looks exactly like one that did
     nothing — a clean worktree — so the run aborted with CANNOT_FIX while the

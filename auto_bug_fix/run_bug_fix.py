@@ -693,19 +693,9 @@ def phase_0_5_semantic_triage(
     # is learned yet — Phase 1's baseline build has not run — so the strip can
     # only recognize what git already ignores here, which is exactly a
     # force-added artifact from the session's own `git add -A -f` sweep.
-    head = _run_git(config.repo_path, ["rev-parse", "HEAD"])
-    triage_head = head.stdout.strip() if head.success else ""
-    asyncio.run(claude_run(claude_config_triage, [prompt.prompt()], tracker=tracker))
-    if triage_head:
-        _strip_committed_build_output(
-            config, state, triage_head, "Phase 0.5 (semantic triage)"
-        )
-    else:
-        # No HEAD to measure against: nothing can be said about what the
-        # session committed, and the phases below fail on their own terms.
-        log.warning(
-            "Phase 0.5 (semantic triage): could not read HEAD before the "
-            "session — a commit it made is not checked for build output"
+    with _agent_commit_guard(config, state, "Phase 0.5 (semantic triage)"):
+        asyncio.run(
+            claude_run(claude_config_triage, [prompt.prompt()], tracker=tracker)
         )
 
     triage_candidates = [
@@ -948,17 +938,9 @@ def phase_1_5_red_triage(
     # itself, like Phase 0.5's. Unlike that one, Phase 1's baseline build
     # has already run, so paths a build was seen to create are known and a
     # commit it leaves behind is stripped of them.
-    head = _run_git(config.repo_path, ["rev-parse", "HEAD"])
-    triage_head = head.stdout.strip() if head.success else ""
-    asyncio.run(claude_run(claude_config_triage, [prompt.prompt()], tracker=tracker))
-    if triage_head:
-        _strip_committed_build_output(
-            config, state, triage_head, "Phase 1.5 (RED triage)"
-        )
-    else:
-        log.warning(
-            "Phase 1.5 (RED triage): could not read HEAD before the session "
-            "— a commit it made is not checked for build output"
+    with _agent_commit_guard(config, state, "Phase 1.5 (RED triage)"):
+        asyncio.run(
+            claude_run(claude_config_triage, [prompt.prompt()], tracker=tracker)
         )
 
     triage_candidates = [
@@ -1652,6 +1634,42 @@ def _strip_committed_build_output(
         return False
 
 
+@contextlib.contextmanager
+def _agent_commit_guard(
+    config: BugFixConfig,
+    state: PipelineState | None,
+    phase_label: str,
+    base_ref: str | None = None,
+) -> Iterator[None]:
+    """Strip build output an agent session committed, even when it raises.
+
+    The strip has to run in ``finally``, not after the await: a session can
+    commit and then error, and the failure-path export formats
+    ``frozen_target_sha..HEAD`` — so the commit it left behind would ship
+    its build output precisely when the run gives up on the phase.
+
+    *base_ref* is HEAD read before the session where the caller needs it
+    for something else too; otherwise it is read here. An unreadable HEAD
+    means nothing can be said about what the session committed, which the
+    guard reports rather than passing silently.
+    """
+    base = base_ref
+    if base is None:
+        head = _run_git(config.repo_path, ["rev-parse", "HEAD"])
+        base = head.stdout.strip() if head.success else ""
+    try:
+        yield
+    finally:
+        if base:
+            _strip_committed_build_output(config, state, base, phase_label)
+        else:
+            log.warning(
+                "%s: could not read HEAD before the session — a commit it "
+                "made is not checked for build output",
+                phase_label,
+            )
+
+
 def _restage_unaccounted_fenced(
     config: BugFixConfig,
     fence: str,
@@ -2141,7 +2159,18 @@ def phase_4a_build_recovery(
             config.max_build_test_retries,
         )
         head_before_agent = git_rev_parse(config.repo_path, "HEAD")
-        asyncio.run(claude_run(claude_config_4a, [prompt.prompt()], tracker=tracker))
+        # The agent can commit for itself, and a `git add -A` there sweeps
+        # its own build output into the tree — which also switches the fence
+        # off for everything that follows. The guard takes it back out before
+        # the boundary below and before the baseline is re-taken, so the
+        # files stay on disk as untracked dirt rather than being recorded as
+        # pre-existing work the next discard must spare.
+        with _agent_commit_guard(
+            config, state, f"Phase 4a attempt {attempt}", head_before_agent
+        ):
+            asyncio.run(
+                claude_run(claude_config_4a, [prompt.prompt()], tracker=tracker)
+            )
 
         post_fix_files = set(git_diff_name_only(config.repo_path))
         if (
@@ -2154,16 +2183,6 @@ def phase_4a_build_recovery(
             raise PipelineEscalation(
                 "Phase 4a: agent made no changes — likely CANNOT_FIX"
             )
-
-        # The agent can commit for itself, and a `git add -A` there sweeps
-        # its own build output into the tree — which also switches the fence
-        # off for everything that follows. Take it back out before the
-        # boundary below and before the baseline is re-taken, so the files
-        # stay on disk as untracked dirt rather than being recorded as
-        # pre-existing work the next discard must spare.
-        _strip_committed_build_output(
-            config, state, head_before_agent, f"Phase 4a attempt {attempt}"
-        )
 
         # Strict pre-verification boundary: the agent's edits are committed
         # now, before the next build/test attempt runs. This is what keeps
@@ -2362,17 +2381,17 @@ def phase_4b_run_and_fix(
         sys.stdout = Tee(_prev_stdout, _4b_log_file)
 
     head_before_agent = git_rev_parse(config.repo_path, "HEAD")
-    try:
-        timings = asyncio.run(_agent_run(ext_claude_config, steps))
-    finally:
-        if _4b_log_file is not None:
-            sys.stdout = _prev_stdout
-            _4b_log_file.close()
-            log.info("Phase 4b log written to %s", phase_4b_log_path)
-
     # The session is a full agent with a shell and can commit for itself.
-    # Guard that range before any exit path commits, verifies or exports it.
-    _strip_committed_build_output(config, state, head_before_agent, "Phase 4b")
+    # Guard that range in `finally`, before any exit path commits, verifies
+    # or exports it — including the one where the session itself fails.
+    with _agent_commit_guard(config, state, "Phase 4b", head_before_agent):
+        try:
+            timings = asyncio.run(_agent_run(ext_claude_config, steps))
+        finally:
+            if _4b_log_file is not None:
+                sys.stdout = _prev_stdout
+                _4b_log_file.close()
+                log.info("Phase 4b log written to %s", phase_4b_log_path)
 
     _4b_end = time.time()
 
@@ -2773,11 +2792,14 @@ def cherry_pick_and_resolve(
                     baseline_ref=base_head,
                     followup_fixes=followup_note,
                 )
-                asyncio.run(
-                    claude_run(
-                        claude_config_resolve, [prompt.prompt()], tracker=tracker
+                with _agent_commit_guard(
+                    config, state, f"Phase 3a ({label})", base_head
+                ):
+                    asyncio.run(
+                        claude_run(
+                            claude_config_resolve, [prompt.prompt()], tracker=tracker
+                        )
                     )
-                )
         else:
             prompt = NarrowResolutionAgentPrompt(
                 fix_diff=fix_diff,
@@ -2800,9 +2822,12 @@ def cherry_pick_and_resolve(
                 config.max_resolution_retries,
                 len(uu_files),
             )
-            asyncio.run(
-                claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker)
-            )
+            with _agent_commit_guard(config, state, f"Phase 3a ({label})", base_head):
+                asyncio.run(
+                    claude_run(
+                        claude_config_resolve, [prompt.prompt()], tracker=tracker
+                    )
+                )
 
         remaining = git_status_porcelain(config.repo_path)
         still_conflicted = _has_conflicts(remaining)
@@ -5165,14 +5190,14 @@ def _run_pipeline_phases(
         if test_files_in_commit:
             with tracker.phase("Phase 0.5c — Test port"):
                 head_before_test_port = git_rev_parse(config.repo_path, "HEAD")
-                ported_tests = phase_0_5c_test_port(
-                    config, claude_config, state, tracker
-                )
                 # The test-port agent may commit for itself; the boundary
                 # below only covers what it left in the worktree.
-                _strip_committed_build_output(
-                    config, state, head_before_test_port, "Phase 0.5c"
-                )
+                with _agent_commit_guard(
+                    config, state, "Phase 0.5c", head_before_test_port
+                ):
+                    ported_tests = phase_0_5c_test_port(
+                        config, claude_config, state, tracker
+                    )
                 state.dossier.add(
                     "Test port",
                     "\n".join(ported_tests) if ported_tests else "no tests ported",
