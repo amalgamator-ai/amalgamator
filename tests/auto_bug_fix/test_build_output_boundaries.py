@@ -390,6 +390,21 @@ def test_discard_restores_a_file_that_was_already_dirty_at_the_baseline(tmp_path
     assert state.generated_output == {"gen.o"}
 
 
+def test_discard_restores_a_baseline_dirty_file_the_verification_reset(tmp_path):
+    """A verification can reset a baseline-dirty file to HEAD content. It is
+    then no longer "modified", so intersecting the two snapshots missed it and
+    the baseline content was silently lost."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "src.c").write_text("int a = 99; /* local work */\n")
+    baseline = _worktree_snapshot(config)
+
+    # The verification restores the file to its HEAD content.
+    _git_4b(tmp_path, "checkout", "--", "src.c")
+
+    assert _discard_verification_dirt(config, baseline, state) is True
+    assert (tmp_path / "src.c").read_text() == "int a = 99; /* local work */\n"
+
+
 def test_discard_reports_failure_when_a_dirty_baseline_was_not_captured(
     tmp_path, monkeypatch
 ):

@@ -4282,7 +4282,13 @@ def _discard_verification_dirt(
         # *content*, not skipped: a verification that touches one of them
         # must not be able to smuggle its change into a later commit just
         # because the path was dirty before it started.
-        protected = sorted(current.modified & baseline.modified)
+        #
+        # Every baseline-dirty path, not just the ones still modified: a
+        # verification that resets one to HEAD content leaves it unmodified,
+        # so intersecting with ``current.modified`` would miss it entirely —
+        # it is in neither ``to_restore`` (current - baseline) nor that
+        # intersection — and the baseline content would be lost.
+        protected = sorted(baseline.modified)
         if protected:
             if baseline.dirty_ref is None:
                 log.warning(
