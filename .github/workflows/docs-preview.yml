@@ -1,11 +1,9 @@
-# Cross-repo Netlify docs preview for amalgamator PRs that touch docs/.
+# Netlify docs preview for amalgamator PRs that touch product docs or
+# community policy files the website publishes.
+#
 # Calls the reusable workflow in amalgamator-ai/amalgamator-ai.github.io.
-#
-# The reusable workflow must treat this as a remote website build using the
-# inputs below (caller event_name stays pull_request on workflow_call).
-#
-# Re-runs on every push to the PR head (synchronize), not only when the PR
-# is opened.
+# workflow_call keeps the caller's event_name (pull_request); the website
+# workflow detects remote builds via the inputs below.
 
 name: Docs Preview
 
@@ -14,6 +12,9 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - "docs/**"
+      - "SECURITY.md"
+      - "CONTRIBUTING.md"
+      - "CODE_OF_CONDUCT.md"
 
 permissions:
   contents: read
@@ -22,16 +23,12 @@ permissions:
 jobs:
   preview:
     if: github.event.pull_request.head.repo.full_name == github.repository
-    # Pin until feat/docs-nav-from-product lands on website main (nav from docs/).
-    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/netlify-preview.yml@feat/docs-nav-from-product
+    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/netlify-preview.yml@main
     with:
       caller_repo: ${{ github.repository }}
       caller_pr: ${{ github.event.pull_request.number }}
       docs_ref: ${{ github.event.pull_request.head.sha }}
-      website_ref: feat/docs-nav-from-product
+      website_ref: main
     secrets:
       NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
       NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-      # Caller's job token can read amalgamator; website GITHUB_TOKEN cannot
-      # when this job runs on the website for a native website PR.
-      AMALGAMATOR_REPO_TOKEN: ${{ github.token }}
