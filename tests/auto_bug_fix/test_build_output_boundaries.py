@@ -50,17 +50,88 @@ def _staged(tmp_path):
 
 
 def test_stage_agent_work_fences_an_untracked_build_dir(tmp_path):
-    """Build output in a directory git knows nothing about stays unstaged."""
+    """Build output in a directory git knows nothing about stays unstaged, once
+    the orchestrator's own verification has been seen to create it — which is
+    the state every agent boundary runs in, Phase 1 having built first."""
     config, _, state = _phase_4b_fixtures(tmp_path)
     config.build_dir = str(tmp_path / "rpm-build")
     (tmp_path / "rpm-build").mkdir()
     (tmp_path / "rpm-build" / "artifact.rpm").write_text("build output\n")
+    state.generated_output = {"rpm-build/artifact.rpm"}
     (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
 
     result = _stage_agent_work(config, state)
 
     assert result.fenced_build_dir == "rpm-build"
     assert _staged(tmp_path).splitlines() == ["src.c"]
+
+
+def test_stage_agent_work_fences_a_gitignored_build_dir_wholesale(tmp_path):
+    """A gitignored build tree needs no learning at all: `git status` never
+    reports it, so the subtree exclusion keeps its full effect and the
+    thousand-file sweep an agent's `git add -A` would cause is impossible."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / ".gitignore").write_text("rpm-build/\n")
+    _git_4b(tmp_path, "add", ".gitignore")
+    _git_4b(tmp_path, "commit", "-m", "ignore the build tree")
+    config.build_dir = str(tmp_path / "rpm-build")
+    (tmp_path / "rpm-build").mkdir()
+    for n in range(5):
+        (tmp_path / "rpm-build" / f"artifact{n}.o").write_text("output\n")
+    (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
+
+    result = _stage_agent_work(config, state)
+
+    assert result.fenced_build_dir == "rpm-build"
+    assert result.restaged == frozenset()
+    assert _staged(tmp_path).splitlines() == ["src.c"]
+
+
+def test_stage_agent_work_keeps_new_source_in_an_empty_build_subdir(tmp_path):
+    """`build_subdir` means "where the commands run", and the checked-in example
+    uses `src`. An *empty* one satisfies the fence's "nothing tracked at HEAD"
+    proxy exactly like a build tree does, so fencing it on that proxy alone
+    silently dropped the fix ported there. Content the pipeline cannot account
+    for as build output is staged instead."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "src")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "new_helper.c").write_text("int n = 1; /* the fix */\n")
+
+    result = _stage_agent_work(config, state)
+
+    assert result.fenced_build_dir == "src"
+    assert result.restaged == frozenset({"src/new_helper.c"})
+    assert "src/new_helper.c" in _staged(tmp_path).splitlines()
+
+
+def test_stage_agent_work_separates_learned_output_from_new_source(tmp_path):
+    """The two live side by side in the same fenced directory: the learned
+    artifact stays out, the unaccounted source goes in."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "build")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "artifact.o").write_text("output\n")
+    (tmp_path / "build" / "ported_fix.c").write_text("int n = 1;\n")
+    state.generated_output = {"build/artifact.o"}
+
+    result = _stage_agent_work(config, state)
+
+    assert result.restaged == frozenset({"build/ported_fix.c"})
+    assert _staged(tmp_path).splitlines() == ["build/ported_fix.c"]
+
+
+def test_stage_agent_work_fails_closed_when_the_fence_cannot_be_checked(tmp_path):
+    """An unreadable status cannot show the fence is dropping build output and
+    nothing else, so the boundary reports an incomplete stage."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "rpm-build")
+    (tmp_path / "rpm-build").mkdir()
+    (tmp_path / "rpm-build" / "artifact.o").write_text("output\n")
+
+    result = rbf._restage_unaccounted_fenced(config, "rpm-build", None, set())
+
+    assert result == (frozenset(), False)
 
 
 def test_stage_agent_work_clears_a_build_dir_the_agent_staged_in(tmp_path):
@@ -74,6 +145,7 @@ def test_stage_agent_work_clears_a_build_dir_the_agent_staged_in(tmp_path):
     (tmp_path / "rpm-build" / "artifact.rpm").write_text("build output\n")
     _git_4b(tmp_path, "add", "rpm-build/artifact.rpm")
     (tmp_path / "rpm-build" / "unrelated.o").write_text("more output\n")
+    state.generated_output = {"rpm-build/artifact.rpm", "rpm-build/unrelated.o"}
     (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
 
     result = _stage_agent_work(config, state)
@@ -188,6 +260,7 @@ def test_stage_agent_work_in_a_linked_worktree_leaves_the_source_repo(tmp_path):
     config.build_dir = str(wt / "build")
     (wt / "build").mkdir()
     (wt / "build" / "artifact.o").write_text("output\n")
+    state.generated_output = {"build/artifact.o"}
     (wt / "src.c").write_text("int a = 2; /* fix */\n")
 
     result = _stage_agent_work(config, state)
@@ -829,6 +902,7 @@ def test_phase_3b_regeneration_commit_uses_the_staging_guard(tmp_path):
     config.build_dir = str(tmp_path / "rpm-build")
     (tmp_path / "rpm-build").mkdir()
     (tmp_path / "rpm-build" / "artifact.o").write_text("output\n")
+    state.generated_output = {"rpm-build/artifact.o"}
 
     phase_3b_regeneration(config, state, ["echo regenerated > src.c"])
 

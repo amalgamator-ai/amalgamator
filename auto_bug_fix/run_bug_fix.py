@@ -1127,11 +1127,16 @@ class StageResult(NamedTuple):
     ``ok`` reports whether every staging step succeeded. Leaving build output
     unstaged is expected; failing to *stage* is not, and a caller that can
     still succeed must not treat the two alike (see ``_stage_or_escalate``).
+
+    ``restaged`` names paths that fell inside ``fenced_build_dir`` but which
+    the pipeline could not account for as build output, so they were staged
+    again rather than dropped (see ``_restage_unaccounted_fenced``).
     """
 
     fenced_build_dir: str | None
     generated: set[str]
     ok: bool = True
+    restaged: frozenset[str] = frozenset()
 
 
 def _is_under(path: str, rel: str) -> bool:
@@ -1153,8 +1158,14 @@ def _fence_build_dir(config: BugFixConfig) -> str | None:
     about the directory: no file tracked at HEAD. The index is deliberately
     not consulted — an agent that stages a build artifact itself must not
     switch the fence off, or the next ``git add -A`` would sweep the entire
-    build tree into the fix. Everything else is handled per path by
-    ``state.generated_output``.
+    build tree into the fix.
+
+    "No file tracked at HEAD" is still only a proxy: a brand-new *source*
+    directory used as ``build_subdir`` looks exactly the same. The subtree
+    exclusion is therefore not the last word — ``_restage_unaccounted_fenced``
+    puts back everything under it that the pipeline cannot positively
+    account for as build output. Everything outside it is handled per path
+    by ``state.generated_output``.
     """
     rel = _build_dir_relpath(config)
     if rel is None or rel == ".git" or rel.startswith(".git/"):
@@ -1254,6 +1265,66 @@ def _run_git_pathspec_batches(
     return ok
 
 
+def _restage_unaccounted_fenced(
+    config: BugFixConfig,
+    fence: str,
+    dirty: tuple[set[str], set[str]] | None,
+    learned: set[str],
+) -> tuple[frozenset[str], bool]:
+    """Put back the fenced paths the pipeline cannot call build output.
+
+    ``_fence_build_dir`` excludes a whole subtree on the strength of one
+    proxy: nothing under it is tracked at HEAD. A *new source* directory
+    used as ``build_subdir`` satisfies that proxy exactly — the checked-in
+    example uses ``build_subdir: src`` — so the exclusion on its own would
+    silently drop a fix ported there, which is the one outcome this module
+    exists to prevent.
+
+    The fence therefore withholds only what the pipeline can account for:
+    paths a verification was seen to create (``state.generated_output``),
+    and paths git ignores. Ignored files never reach here at all — ``git
+    status`` does not report them — so a gitignored build tree keeps the
+    full subtree exclusion, which is what real build directories look like.
+    Everything else under the fence is staged again and named in the log,
+    the same trade the fence itself documents: committing build output is
+    recoverable, silently dropping a fix is not.
+
+    Returns the re-staged paths and whether every step succeeded.
+    """
+    if dirty is None:
+        # Fail closed: an unreadable status cannot show that the fence is
+        # dropping build output and nothing else.
+        log.warning(
+            "Could not read the worktree before staging — the fenced build "
+            "directory %s may be hiding agent work from this commit",
+            fence,
+        )
+        return frozenset(), False
+    # Both sets: a file the agent authored *and staged* under the fence is
+    # reported as a staged addition, not as untracked.
+    unaccounted = {
+        path for path in dirty[0] | dirty[1] if _is_under(path, fence)
+    } - learned
+    if not unaccounted:
+        return frozenset(), True
+    log.warning(
+        "Commit boundary: %d path(s) under the fenced build directory %s are "
+        "not known build output — staging them rather than dropping work "
+        "(e.g. %s)",
+        len(unaccounted),
+        fence,
+        ", ".join(sorted(unaccounted)[:5]),
+    )
+    if not _run_git_pathspec_batches(config, ["add", "--"], sorted(unaccounted)):
+        log.warning(
+            "Could not stage unaccounted paths under the fenced build "
+            "directory %s — this commit may omit agent work",
+            fence,
+        )
+        return frozenset(), False
+    return frozenset(unaccounted), True
+
+
 def _stage_agent_work(
     config: BugFixConfig, state: PipelineState | None = None
 ) -> StageResult:
@@ -1286,12 +1357,11 @@ def _stage_agent_work(
     """
     fence = _fence_build_dir(config)
     ok = True
+    learned = state.generated_output if state is not None else set()
     # Read the dirty set *before* staging: after `git add` the same files are
     # reported as staged additions, not as untracked, so the intersection
     # with the learned generated-output set would be empty.
-    dirty = (
-        _dirty_paths(config) if state is not None and state.generated_output else None
-    )
+    dirty = _dirty_paths(config) if fence is not None or learned else None
     args = ["git", "add", "-A", "--", "."]
     if fence is not None:
         args.append(f":(exclude,literal){fence}")
@@ -1303,15 +1373,19 @@ def _stage_agent_work(
             staged.returncode,
             staged.stderr.decode("utf-8", "replace").strip(),
         )
-    if fence is not None and not _run_git_pathspec_batches(
-        config, ["reset", "-q", "HEAD", "--"], [fence]
-    ):
-        ok = False
-        log.warning(
-            "Could not unstage the fenced build directory %s — staged build "
-            "output may reach this commit",
-            fence,
-        )
+    restaged: frozenset[str] = frozenset()
+    if fence is not None:
+        if not _run_git_pathspec_batches(
+            config, ["reset", "-q", "HEAD", "--"], [fence]
+        ):
+            ok = False
+            log.warning(
+                "Could not unstage the fenced build directory %s — staged "
+                "build output may reach this commit",
+                fence,
+            )
+        restaged, fence_ok = _restage_unaccounted_fenced(config, fence, dirty, learned)
+        ok = ok and fence_ok
     generated: set[str] = set()
     if state is not None and state.generated_output:
         if dirty is None:
@@ -1358,7 +1432,7 @@ def _stage_agent_work(
                     len(generated),
                     ", ".join(sorted(generated)[:3]),
                 )
-    return StageResult(fence, generated, ok)
+    return StageResult(fence, generated, ok, restaged)
 
 
 def _require_complete_stage(staged: StageResult, phase_label: str) -> None:
@@ -1412,6 +1486,7 @@ def _non_artifact_dirt(
     """
     fence = staged.fenced_build_dir if staged is not None else None
     generated = staged.generated if staged is not None else set()
+    restaged = staged.restaged if staged is not None else frozenset()
     status = git_status_porcelain_all(config.repo_path)
     if not status.success:
         log.warning(
@@ -1434,7 +1509,10 @@ def _non_artifact_dirt(
             # once created, it is dropped here and nowhere else.
             skipped_generated.append(path)
             continue
-        if fence is not None and _is_under(path, fence):
+        if fence is not None and _is_under(path, fence) and path not in restaged:
+            # Re-staged fenced paths are *not* excused: the fence was told to
+            # keep them, so one still dirty afterwards is work that did not
+            # make it into the commit.
             continue
         dirt.append(line)
     if skipped_generated:
