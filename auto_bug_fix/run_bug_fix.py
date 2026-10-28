@@ -5113,6 +5113,27 @@ def _force_resolve_for_phase_4b(config: BugFixConfig, state: PipelineState) -> N
         )
 
 
+def _pre_cherry_pick_cleanup(config: BugFixConfig, state: PipelineState) -> None:
+    """Commit what a pre-cherry-pick step left staged, then reset to HEAD.
+
+    The reset is ``--hard``, so an unreadable status here is not benign: it
+    would be taken for "nothing to commit" and the work just staged would be
+    discarded. Fail closed instead — an unreadable status is not a clean
+    tree, the same rule every other call site in this module follows.
+    """
+    _stage_or_escalate(config, state, "Pre-cherry-pick cleanup")
+    status = git_status_porcelain_all(config.repo_path)
+    if not status.success:
+        raise PipelineEscalation(
+            "Pre-cherry-pick cleanup: could not read the worktree "
+            f"(exit {status.exit_code}): {status.stderr.strip()} — the reset "
+            "would discard the work this boundary just staged"
+        )
+    if status.stdout.strip():
+        git_commit(config.repo_path, f"Pre-cherry-pick cleanup for {config.issue_id}")
+    git_reset_hard(config.repo_path, "HEAD")
+
+
 def _run_pipeline_phases(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -5356,13 +5377,7 @@ def _run_pipeline_phases(
                         "RED triage inconclusive — escalating to Phase 4b"
                     )
 
-        _stage_or_escalate(config, state, "Pre-cherry-pick cleanup")
-        status = git_status_porcelain(config.repo_path)
-        if status:
-            git_commit(
-                config.repo_path, f"Pre-cherry-pick cleanup for {config.issue_id}"
-            )
-        git_reset_hard(config.repo_path, "HEAD")
+        _pre_cherry_pick_cleanup(config, state)
 
         with tracker.phase("Phase 2+3a — Cherry-pick and resolve"):
             files_to_skip = state.triage_assessment.get("files_to_skip", [])

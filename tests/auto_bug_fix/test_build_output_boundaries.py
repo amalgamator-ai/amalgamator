@@ -1052,6 +1052,44 @@ def test_commit_worktree_edits_on_an_abort_path_uses_the_staging_guard(tmp_path)
     assert "gen.o" not in tree
 
 
+def test_pre_cherry_pick_cleanup_fails_closed_when_status_is_unreadable(
+    tmp_path, monkeypatch
+):
+    """A failed status used to read as "nothing to commit", and the
+    `git reset --hard` that follows then discarded the work the boundary had
+    just staged."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "src.c").write_text("int a = 2; /* staged work */\n")
+    resets = []
+
+    class _Failed:
+        success = False
+        exit_code = 128
+        stdout = ""
+        stderr = "fatal: index file corrupt"
+
+    monkeypatch.setattr(rbf, "git_status_porcelain_all", lambda *a, **k: _Failed())
+    monkeypatch.setattr(rbf, "git_reset_hard", lambda *a, **k: resets.append(a))
+
+    with pytest.raises(PipelineEscalation, match="Pre-cherry-pick cleanup"):
+        rbf._pre_cherry_pick_cleanup(config, state)
+
+    assert resets == [], "the reset must not run on an unreadable status"
+    assert "staged work" in (tmp_path / "src.c").read_text()
+
+
+def test_pre_cherry_pick_cleanup_commits_staged_work_and_resets(tmp_path):
+    """The happy path still commits the work first, then resets the tree."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "src.c").write_text("int a = 2; /* staged work */\n")
+
+    rbf._pre_cherry_pick_cleanup(config, state)
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "src.c" in tree
+    assert "staged work" in _git_4b(tmp_path, "show", "HEAD:src.c")
+
+
 def test_cleanup_of_an_unrelated_verification_still_reports_clean(tmp_path):
     """Sanity check on the success return: a discard with nothing to do is
     not a failure."""
