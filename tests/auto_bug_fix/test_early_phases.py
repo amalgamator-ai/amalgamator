@@ -12,6 +12,7 @@ for the two agent phases.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -507,7 +508,7 @@ def test_prerequisite_chain_records_failure_and_continues(tmp_path, monkeypatch)
     assert "Prerequisite 2: beta" in labels
 
 
-def test_prerequisite_chain_caps_depth(tmp_path, monkeypatch):
+def test_prerequisite_chain_caps_depth_and_records_skips(tmp_path, monkeypatch, caplog):
     calls: list[str] = []
 
     def fake_cherry_pick(config, claude_config, state, tracker, **kwargs):
@@ -515,18 +516,33 @@ def test_prerequisite_chain_caps_depth(tmp_path, monkeypatch):
         return "clean"
 
     monkeypatch.setattr(run_bug_fix, "cherry_pick_and_resolve", fake_cherry_pick)
-    total = MAX_PREREQUISITE_DEPTH + 1
+    total = MAX_PREREQUISITE_DEPTH + 2
     state = PipelineState()
     state.triage_assessment = {
         "prerequisites": [_prereq(f"symbol-{i}", f"{i:040d}") for i in range(total)]
     }
 
-    ported = port_prerequisite_chain(
-        _config(tmp_path, "fix-sha"),
-        _claude_config(tmp_path),
-        state,
-        tracker=None,
-    )
+    with caplog.at_level(logging.WARNING):
+        ported = port_prerequisite_chain(
+            _config(tmp_path, "fix-sha"),
+            _claude_config(tmp_path),
+            state,
+            tracker=None,
+        )
 
     assert len(calls) == MAX_PREREQUISITE_DEPTH
     assert len(ported) == MAX_PREREQUISITE_DEPTH
+    # Overflow must be visible to the completeness gate, not silently dropped.
+    assert state.skipped_prerequisites == [
+        f"symbol-{MAX_PREREQUISITE_DEPTH}",
+        f"symbol-{MAX_PREREQUISITE_DEPTH + 1}",
+    ]
+    skipped_items = [
+        item
+        for item in state.dossier.items
+        if item.label == "Prerequisites skipped (depth cap)"
+    ]
+    assert len(skipped_items) == 1
+    assert "symbol-5" in skipped_items[0].content
+    assert "symbol-6" in skipped_items[0].content
+    assert any("depth cap" in record.message for record in caplog.records)

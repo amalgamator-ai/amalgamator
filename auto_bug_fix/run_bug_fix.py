@@ -328,6 +328,7 @@ class PipelineState:
     followup_fixes: list[str] = field(default_factory=list)
     followup_fixes_commit: str = ""
     failed_prerequisites: list[str] = field(default_factory=list)
+    skipped_prerequisites: list[str] = field(default_factory=list)
     squashed_backport_range: str = ""
 
 
@@ -2321,6 +2322,27 @@ def port_prerequisite_chain(
     log.info(
         "Phase 0.5 identified %d portable prerequisites to port first", len(portable)
     )
+
+    overflow = portable[MAX_PREREQUISITE_DEPTH:]
+    if overflow:
+        skipped = [p.get("symbol", "unknown") for p in overflow]
+        state.skipped_prerequisites.extend(skipped)
+        log.warning(
+            "Phase 0.5: %d portable prerequisites exceed the depth cap (%d); "
+            "skipping: %s",
+            len(overflow),
+            MAX_PREREQUISITE_DEPTH,
+            ", ".join(skipped),
+        )
+        state.dossier.add(
+            "Prerequisites skipped (depth cap)",
+            "\n".join(
+                f"{p.get('symbol', 'unknown')}: {p.get('introduced_by', '')}"
+                for p in overflow
+            ),
+            f"Phase 0.5 prerequisite chain (cap {MAX_PREREQUISITE_DEPTH})",
+        )
+
     ported = []
 
     for i, prereq in enumerate(portable[:MAX_PREREQUISITE_DEPTH]):
@@ -2439,6 +2461,12 @@ def _backport_completeness(
             reasons.append(
                 "prerequisites failed to port: "
                 + ", ".join(str(s) for s in state.failed_prerequisites)
+            )
+
+        if state.skipped_prerequisites:
+            reasons.append(
+                "prerequisites skipped by the depth cap: "
+                + ", ".join(str(s) for s in state.skipped_prerequisites)
             )
 
         # state.seed is the fix's file set with merge-commit (-m1) handling;
