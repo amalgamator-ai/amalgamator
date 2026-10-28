@@ -14,6 +14,7 @@ verifications create, and never trust ``.git/info/exclude``.
 """
 
 import os
+import pathlib
 import subprocess
 
 import pytest
@@ -1491,3 +1492,47 @@ def test_phase_4b_strips_a_self_committing_agent(tmp_path):
     assert "gen.o" not in tree
     assert "int a = 4;" in _git_4b(tmp_path, "show", "HEAD:src.c")
     assert (tmp_path / "gen.o").exists(), "kept on disk for the build that expects it"
+
+
+def _learn_rewritten_tracked_file(config, state, content="/* build stamped this */\n"):
+    """Run one verification that rewrites the tracked src.c, then discard it."""
+    baseline = _worktree_snapshot(config)
+    pathlib.Path(config.repo_path, "src.c").write_text(content)
+    assert _discard_verification_dirt(config, baseline, state) is True
+    return state
+
+
+def test_agent_commit_overwriting_a_tracked_file_is_reverted(tmp_path):
+    """A build that rewrites a tracked file leaves a modification, not an
+    addition, so the addition pass never saw it and the build's version went
+    into the patch."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _learn_rewritten_tracked_file(config, state)
+    assert state.generated_digests.get("src.c"), "the build's content was recorded"
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    pathlib.Path(tmp_path, "src.c").write_text("/* build stamped this */\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "agent commit")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    assert _git_4b(tmp_path, "show", "HEAD:src.c") == "int a = 1;"
+    # Net effect: the build's version is gone from the range entirely.
+    assert "build stamped" not in _git_4b(tmp_path, "diff", base, "HEAD")
+
+
+def test_agent_edit_to_a_learned_tracked_file_is_kept(tmp_path):
+    """The path rule is not evidence for a modification: the agent's own edit
+    to a file the build also regenerates must survive the strip."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _learn_rewritten_tracked_file(config, state)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    pathlib.Path(tmp_path, "src.c").write_text("int a = 7; /* the fix */\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "agent commit")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    assert _git_4b(tmp_path, "show", "HEAD:src.c") == "int a = 7; /* the fix */"

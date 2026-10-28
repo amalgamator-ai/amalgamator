@@ -1328,7 +1328,7 @@ def _hash_worktree_paths(config: BugFixConfig, paths: list[str]) -> dict[str, st
 def _record_generated_digests(
     config: BugFixConfig, state: PipelineState, paths: set[str]
 ) -> None:
-    """Remember what the build just wrote at each newly created path."""
+    """Remember what the build just wrote at each path it touched."""
     for path, digest in _hash_worktree_paths(config, sorted(paths)).items():
         state.generated_digests.setdefault(path, set()).add(digest)
 
@@ -1478,6 +1478,13 @@ def _strip_committed_build_output(
     so the net ``base_ref..HEAD`` diff no longer mentions them at all and
     the deliverable is clean.
 
+    A build can also overwrite a *tracked* file (a generated header, a
+    stamped version file). That commit is a modification, not an addition,
+    and is restored to its ``base_ref`` content — but only when it still
+    holds content this run saw a build write there, because the path alone
+    would also match the agent's own edit to a file the build happens to
+    regenerate.
+
     Accounting is the same everywhere in this module, and deliberately
     conservative: output nothing recorded as build output stays committed.
     A noisier patch is recoverable; removing a fix from the tree is not.
@@ -1503,10 +1510,24 @@ def _strip_committed_build_output(
             )
             return False
         paths = [x for x in added.stdout.split("\0") if x]
-        if not paths:
-            return True
+        modified = _run_git(
+            config.repo_path,
+            ["diff", "--name-only", "--diff-filter=M", "-z", base_ref, head],
+        )
+        if not modified.success:
+            log.warning(
+                "%s: could not list files modified since %s (exit %d): %s — "
+                "build output an agent committed may reach the patch",
+                phase_label,
+                base_ref[:12],
+                modified.exit_code,
+                modified.stderr.strip(),
+            )
+            return False
+        modified_paths = [x for x in modified.stdout.split("\0") if x]
         learned = state.generated_output if state is not None else set()
         digests = state.generated_digests if state is not None else {}
+
         candidates = sorted(set(paths) & learned)
         committed = _blobs_in_ref(config, head, candidates) if candidates else {}
         if committed is None:
@@ -1514,35 +1535,83 @@ def _strip_committed_build_output(
         # A learned path with recorded content must still hold content a
         # build was seen to write; one learned inside a fenced build
         # directory has none recorded, and the path rule stands there.
-        output = {
+        removed = {
             path
             for path in candidates
             if not digests.get(path) or committed.get(path) in digests[path]
         }
-        output |= _ignored_paths(config, paths)
-        if not output:
-            return True
-        log.warning(
-            "%s: %d path(s) of build output were committed by the agent — "
-            "removing them from the tree so they stay out of the candidate "
-            "patch (e.g. %s)",
-            phase_label,
-            len(output),
-            ", ".join(sorted(output)[:5]),
+        removed |= _ignored_paths(config, paths)
+
+        # A build that rewrites a *tracked* file (a generated header, a
+        # stamped version file) leaves a modification, not an addition, so
+        # the addition pass above never sees it. The path rule alone is not
+        # evidence here: restoring a file the agent edited as part of the
+        # fix would delete the fix. A modification is only reverted when it
+        # still holds content this run watched a build write there.
+        modified_candidates = sorted(set(modified_paths) & learned)
+        modified_committed = (
+            _blobs_in_ref(config, head, modified_candidates)
+            if modified_candidates
+            else {}
         )
-        if not _run_git_pathspec_batches(
-            config, ["rm", "--cached", "-q", "--"], sorted(output)
-        ):
-            log.warning(
-                "%s: could not untrack agent-committed build output — the "
-                "build-directory fence stays disabled for the rest of the run",
-                phase_label,
-            )
+        if modified_committed is None:
             return False
+        restored = {
+            path
+            for path in modified_candidates
+            if digests.get(path) and modified_committed.get(path) in digests[path]
+        }
+
+        if not removed and not restored:
+            return True
+        if removed:
+            log.warning(
+                "%s: %d path(s) of build output were committed by the agent — "
+                "removing them from the tree so they stay out of the candidate "
+                "patch (e.g. %s)",
+                phase_label,
+                len(removed),
+                ", ".join(sorted(removed)[:5]),
+            )
+            if not _run_git_pathspec_batches(
+                config, ["rm", "--cached", "-q", "--"], sorted(removed)
+            ):
+                log.warning(
+                    "%s: could not untrack agent-committed build output — the "
+                    "build-directory fence stays disabled for the rest of the run",
+                    phase_label,
+                )
+                return False
+        if restored:
+            log.warning(
+                "%s: %d tracked file(s) hold build output the agent committed — "
+                "restoring their pre-session content (e.g. %s)",
+                phase_label,
+                len(restored),
+                ", ".join(sorted(restored)[:5]),
+            )
+            if not _run_git_pathspec_batches(
+                config, ["checkout", base_ref, "--"], sorted(restored)
+            ):
+                log.warning(
+                    "%s: could not restore tracked files overwritten by build "
+                    "output — the build's version stays in the patch",
+                    phase_label,
+                )
+                return False
+        summary = []
+        if removed:
+            summary.append(
+                f"{len(removed)} generated path(s) kept on disk, out of the tree"
+            )
+        if restored:
+            summary.append(
+                f"{len(restored)} tracked file(s) restored to their pre-session content"
+            )
         git_commit(
             config.repo_path,
             f"chore: untrack build output committed during {phase_label}\n\n"
-            f"[ {len(output)} generated path(s) kept on disk, out of the tree ]",
+            f"[ {'; '.join(summary)} ]",
         )
         if git_rev_parse(config.repo_path, "HEAD") == head:
             log.warning(
@@ -1552,11 +1621,11 @@ def _strip_committed_build_output(
             )
             return False
         if state is not None:
-            state.generated_output |= output
+            state.generated_output |= removed | restored
             # Keep the content key too, so the paths that just went back to
             # being untracked are still judged on content at the next
             # boundary rather than on their name alone.
-            for path in output:
+            for path in removed:
                 blob = committed.get(path)
                 if blob:
                     state.generated_digests.setdefault(path, set()).add(blob)
@@ -4122,6 +4191,13 @@ def _discard_verification_dirt(
                 f" (+{len(vanished) - len(shown)} more)" if len(vanished) > 5 else "",
             )
         to_restore = sorted(current.modified - baseline.modified)
+        if state is not None and to_restore:
+            # A build that rewrites a *tracked* file leaves a modification,
+            # not a new path. Record what it wrote while the content is still
+            # on disk, so a later commit carrying the build's version can be
+            # told apart from the agent's own edit (which will not match).
+            state.generated_output |= set(to_restore)
+            _record_generated_digests(config, state, set(to_restore))
         if to_restore and not _restore_tracked_files(
             config, to_restore, baseline.untracked
         ):
