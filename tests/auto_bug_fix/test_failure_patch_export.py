@@ -1,10 +1,19 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Failure-path deliverables: candidate.patch and dossier.md on abort.
 
 Regression tests for the frozen-baseline failure path: when the pipeline
-escalates or errors, the agent's committed *and uncommitted* work must still
-reach candidate.patch, dossier.md must still be written, the frozen baseline
-(not the movable branch name) must define every range, and a PipelineStop
-after the Phase 0.5c test port must not submit a test-only patch.
+escalates or errors, the agent's *committed* work must still reach
+candidate.patch, dossier.md must still be written, the frozen baseline (not
+the movable branch name) must define every range, and a PipelineStop after
+the Phase 0.5c test port must not submit a test-only patch.
+
+The export is deliberately commit-based. An earlier revision snapshotted the
+working tree at abort time; on the motivating expat case that tree is what
+``centpkg prep`` left behind, so the snapshot committed build corruption into
+the deliverable. The phases now commit at their own pre-verification and
+abort boundaries instead, and these tests pin that the export adds nothing.
 """
 
 import os
@@ -79,14 +88,9 @@ def _commit(repo, msg, files):
 
 
 class TestEmitCandidatePatchOnFailure:
-    def test_committed_and_uncommitted_work_both_reach_the_patch(
-        self, target_worktree, tmp_path
-    ):
+    def test_committed_work_reaches_the_patch(self, target_worktree, tmp_path):
         repo, worktree, frozen = target_worktree
         _commit(worktree, "port the fix", {"lib/url.c": "void f() { fixed }"})
-        # Phase 4b raises on re-verify failure *before* committing its edits.
-        with open(os.path.join(worktree, "lib/url.c"), "a") as f:
-            f.write("\nvoid recovered() { 4b edit }\n")
 
         tracker = _tracker(tmp_path)
         _emit_candidate_patch_on_failure(_config(worktree, frozen), tracker)
@@ -96,7 +100,60 @@ class TestEmitCandidatePatchOnFailure:
         with open(patch) as f:
             content = f.read()
         assert "fixed" in content
-        assert "recovered" in content  # the uncommitted 4b edit, snapshotted
+
+    def test_export_never_commits_verification_dirt(self, target_worktree, tmp_path):
+        """The export is commit-based and must add nothing of its own.
+
+        On the expat path the uncommitted tree at abort time is what
+        ``centpkg prep`` left: a re-patched tracked file and an unpacked
+        source tree. An export that snapshotted the worktree would ship that
+        corruption to the verifier.
+        """
+        repo, worktree, frozen = target_worktree
+        _commit(worktree, "port the fix", {"lib/url.c": "void f() { fixed }"})
+        # Verification side effects, tracked and untracked.
+        with open(os.path.join(worktree, "lib/url.c"), "a") as f:
+            f.write("\n/* re-patched by centpkg prep */\n")
+        os.makedirs(os.path.join(worktree, "curl-8.9.1"), exist_ok=True)
+        with open(os.path.join(worktree, "curl-8.9.1", "unpacked.c"), "w") as f:
+            f.write("unpacked source tree\n")
+
+        head_before = _git(worktree, "rev-parse", "HEAD").stdout.strip()
+        tracker = _tracker(tmp_path)
+        _emit_candidate_patch_on_failure(_config(worktree, frozen), tracker)
+
+        # Nothing was committed by the export itself.
+        assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == head_before
+        with open(os.path.join(tracker._output_dir, "candidate.patch")) as f:
+            content = f.read()
+        assert "fixed" in content
+        assert "centpkg prep" not in content
+        assert "unpacked" not in content
+
+    def test_exported_patch_applies_to_the_frozen_baseline(
+        self, target_worktree, tmp_path
+    ):
+        """A patch that cannot be applied is not a deliverable."""
+        repo, worktree, frozen = target_worktree
+        _commit(worktree, "port the fix", {"lib/url.c": "void f() { fixed }"})
+        _commit(worktree, "add a helper", {"lib/helper.c": "void h() {}"})
+        # Verification dirt that must not make it into the applied result.
+        with open(os.path.join(worktree, "lib/url.c"), "a") as f:
+            f.write("\n/* dirt */\n")
+
+        tracker = _tracker(tmp_path)
+        _emit_candidate_patch_on_failure(_config(worktree, frozen), tracker)
+        patch = os.path.join(tracker._output_dir, "candidate.patch")
+
+        pristine = tmp_path / "pristine"
+        _git(repo, "worktree", "add", "--detach", str(pristine), frozen)
+        am = _git(pristine, "am", patch, check=False)
+        assert am.returncode == 0, am.stdout + am.stderr
+        with open(pristine / "lib" / "url.c") as f:
+            applied = f.read()
+        assert "fixed" in applied
+        assert "dirt" not in applied
+        assert (pristine / "lib" / "helper.c").exists()
 
     def test_no_work_means_no_patch(self, target_worktree, tmp_path):
         repo, worktree, frozen = target_worktree
@@ -281,13 +338,14 @@ class TestRunPipelineFailureWiring:
             rbf.run_pipeline(_config(worktree, frozen), claude_cfg, output_dir=str(out))
         return out
 
-    def test_escalation_emits_patch_with_uncommitted_work_and_dossier(
+    def test_escalation_emits_committed_work_but_not_verify_dirt(
         self, target_worktree, tmp_path, monkeypatch, claude_cfg
     ):
         def prepare(worktree):
             _commit(worktree, "port the fix", {"lib/url.c": "void f() { fixed }"})
+            # What the orchestrator's re-verify leaves behind when it fails.
             with open(os.path.join(worktree, "lib/url.c"), "a") as f:
-                f.write("\nvoid recovered() { 4b edit }\n")
+                f.write("\n/* re-patched by centpkg prep */\n")
 
         out = self._abort(
             target_worktree,
@@ -301,7 +359,7 @@ class TestRunPipelineFailureWiring:
         assert patch.exists()
         content = patch.read_text()
         assert "fixed" in content
-        assert "recovered" in content
+        assert "centpkg prep" not in content
         assert "gate output" in (out / "dossier.md").read_text()
 
     def test_pipeline_stop_with_test_only_work_emits_no_patch(
@@ -332,3 +390,198 @@ class TestRunPipelineFailureWiring:
             target_worktree, tmp_path, monkeypatch, claude_cfg, RuntimeError, prepare
         )
         assert (out / "candidate.patch").exists()
+
+
+class TestRestoreTargetBaselineSafety:
+    """The restore repoints a *shared* ref, so every guard must fail closed."""
+
+    def _move_branch(self, repo, branch, worktree):
+        _commit(worktree, "agent commit on the target branch", {"x.c": "moved"})
+        return _git(worktree, "rev-parse", "HEAD").stdout.strip()
+
+    def test_moved_tip_is_preserved_before_the_branch_is_reset(self, target_worktree):
+        """Restoring must never be the only copy of the agent's commits."""
+        repo, worktree, frozen = target_worktree
+        moved = self._move_branch(repo, "target", worktree)
+
+        assert _restore_target_baseline(repo, worktree, "target", frozen) is None
+
+        assert _git(repo, "rev-parse", "target").stdout.strip() == frozen
+        preserved = _git(repo, "rev-parse", "amalgamator-failed/target").stdout.strip()
+        assert preserved == moved
+
+    def test_branch_held_by_another_worktree_is_left_alone(
+        self, target_worktree, tmp_path
+    ):
+        """The ref is shared state; repointing it corrupts the other checkout."""
+        repo, worktree, frozen = target_worktree
+        moved = self._move_branch(repo, "target", worktree)
+        # A second worktree that also holds the branch. git refuses two
+        # checkouts of one branch, so hand the pipeline a *different*
+        # worktree path and let `target` stay held by `worktree`.
+        other = tmp_path / "decoy"
+        _git(repo, "worktree", "add", "--detach", str(other), frozen)
+
+        reason = _restore_target_baseline(repo, str(other), "target", frozen)
+
+        assert reason is not None and "another worktree" in reason
+        assert _git(repo, "rev-parse", "target").stdout.strip() == moved
+
+    def test_unreadable_worktree_list_fails_closed(self, target_worktree, monkeypatch):
+        """'Cannot tell' must never be read as 'no holders'."""
+        import auto_bug_fix.run_bug_fix as rbf
+
+        repo, worktree, frozen = target_worktree
+        moved = self._move_branch(repo, "target", worktree)
+        monkeypatch.setattr(rbf, "_branch_checkout_holders", lambda *a, **k: None)
+
+        reason = _restore_target_baseline(repo, worktree, "target", frozen)
+
+        assert reason is not None and "worktree list failed" in reason
+        assert _git(repo, "rev-parse", "target").stdout.strip() == moved
+
+    def test_concurrent_move_loses_the_cas_and_is_left_alone(
+        self, target_worktree, monkeypatch
+    ):
+        """A branch that moved again after we read it must not be clobbered."""
+        import auto_bug_fix.run_bug_fix as rbf
+
+        repo, worktree, frozen = target_worktree
+        self._move_branch(repo, "target", worktree)
+        real_rev_parse = rbf.git_rev_parse
+
+        def stale(path, ref):
+            # Report a tip that is not the branch's real value, so the
+            # compare-and-swap old-value check must fail.
+            if ref == "target":
+                return "0" * 40
+            return real_rev_parse(path, ref)
+
+        monkeypatch.setattr(rbf, "git_rev_parse", stale)
+        reason = _restore_target_baseline(repo, worktree, "target", frozen)
+
+        assert reason is not None and "CAS" in reason
+        assert _git(repo, "rev-parse", "target").stdout.strip() != frozen
+
+    def test_no_frozen_baseline_is_reported_not_silently_skipped(self, target_worktree):
+        repo, worktree, frozen = target_worktree
+        reason = _restore_target_baseline(repo, worktree, "target", "")
+        assert reason is not None and "no frozen baseline" in reason
+
+
+class TestIsTestPath:
+    """The heuristic can suppress a deliverable, so false positives cost real fixes."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/test/java/com/x/FooTest.java",
+            "src/test/java/com/x/FooTests.java",
+            "tests/test_url.c",
+            "lib/url_test.go",
+            "lib/url_test.c",
+            "spec/url_spec.rb",
+            "testdata/corpus.bin",
+            "web/url.test.js",
+        ],
+    )
+    def test_recognised_as_test(self, path):
+        from auto_bug_fix.run_bug_fix import _is_test_path
+
+        assert _is_test_path(path) is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # A lowercased `endswith("test.java")` misclassified these.
+            "src/main/java/com/x/Contest.java",
+            "src/main/java/com/x/Latest.java",
+            "lib/url.c",
+            "src/protest.go",
+            "docs/testing.md",
+        ],
+    )
+    def test_not_a_test(self, path):
+        from auto_bug_fix.run_bug_fix import _is_test_path
+
+        assert _is_test_path(path) is False
+
+
+class TestCommitBoundaries:
+    """Agent work is committed before verification can dirty the tree."""
+
+    def test_phase_4b_commits_before_reverification(self, tmp_path, monkeypatch):
+        """The pre-verification commit is what carries 4b's work to the patch.
+
+        Committing after re-verification (as this code used to) loses the
+        work on exactly the path this PR exists for: re-verify fails, the
+        phase raises, and format-patch sees no commit.
+        """
+        from unittest.mock import patch as mock_patch
+
+        from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+        from tests.auto_bug_fix.test_run_bug_fix import (
+            _git_4b,
+            _phase_4b_fixtures,
+        )
+
+        config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+        head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+        async def session(cfg, steps):
+            (tmp_path / "src.c").write_text("int a = 2; /* 4b fix */\n")
+            (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\n")
+            return []
+
+        def failing_verify(cfg, st):
+            raise PipelineEscalation("re-verify failed (centpkg prep)")
+
+        with (
+            mock_patch("auto_bug_fix.run_bug_fix._agent_run", new=session),
+            mock_patch("auto_bug_fix.run_bug_fix.phase_4_verify", new=failing_verify),
+            pytest.raises(PipelineEscalation),
+        ):
+            phase_4b_run_and_fix(config, claude_cfg, state, None)
+
+        assert _git_4b(tmp_path, "rev-parse", "HEAD") != head_before
+        assert "4b fix" in _git_4b(tmp_path, "show", "HEAD")
+
+    def test_phase_4b_agent_failure_commits_its_work(self, tmp_path):
+        """An agent that reports failure may still have produced a real fix."""
+        from unittest.mock import patch as mock_patch
+
+        from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
+        from tests.auto_bug_fix.test_run_bug_fix import (
+            _git_4b,
+            _phase_4b_fixtures,
+        )
+
+        config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+        head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+        async def session(cfg, steps):
+            (tmp_path / "src.c").write_text("int a = 2; /* partial fix */\n")
+            (tmp_path / "run_and_fix_failure.txt").write_text("FAILED\n")
+            return []
+
+        with (
+            mock_patch("auto_bug_fix.run_bug_fix._agent_run", new=session),
+            pytest.raises(PipelineEscalation),
+        ):
+            phase_4b_run_and_fix(config, claude_cfg, state, None)
+
+        assert _git_4b(tmp_path, "rev-parse", "HEAD") != head_before
+        shown = _git_4b(tmp_path, "show", "HEAD")
+        assert "partial fix" in shown
+        # The marker file is pipeline bookkeeping, not part of the fix.
+        assert "run_and_fix_failure" not in shown
+
+
+class TestEmptyDeliverable:
+    def test_commits_with_no_net_diff_escalate(self, target_worktree):
+        """format-patch renders a message-only commit as headers with no diff."""
+        repo, worktree, frozen = target_worktree
+        _git(worktree, "commit", "--allow-empty", "-m", "message-only fixup")
+
+        with pytest.raises(PipelineEscalation, match="candidate patch is empty"):
+            _export_candidate_patch_bytes(_config(worktree, frozen))
