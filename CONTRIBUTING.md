@@ -133,14 +133,32 @@ Never commit API keys, tokens, or other credentials. Keep local model registries
 
 ### Docs site CI (maintainers)
 
-Pull requests that touch `docs/**`, `SECURITY.md`, `CONTRIBUTING.md`, or `CODE_OF_CONDUCT.md` run **Docs Preview** (Netlify) via the website’s reusable workflow. Merges of those paths to `main` run **Docs Publish**, which calls the website’s `pages.yml` reusable workflow to rebuild production.
+Pull requests that touch `docs/**`, `SECURITY.md`, `CONTRIBUTING.md`, or `CODE_OF_CONDUCT.md` run **Docs Preview** (Netlify) via the website’s reusable workflow. Merges of those paths to `main` run **Docs Publish**, which sends `repository_dispatch` to `amalgamator-ai/amalgamator-ai.github.io` so **Publish Pages** runs *on the website repo* (GitHub Pages cannot be deployed via a cross-repo `workflow_call`).
 
-Required Actions secrets on this repo (preview only):
+Required Actions secrets on this repo:
 
 | Secret | Used by | Purpose |
 |--------|---------|---------|
 | `NETLIFY_AUTH_TOKEN` | Docs Preview | Netlify CLI deploy |
 | `NETLIFY_SITE_ID` | Docs Preview | Netlify site |
+| `WEBSITE_DISPATCH_TOKEN` | Docs Publish | PAT that can dispatch on the website repo |
+
+#### Creating `WEBSITE_DISPATCH_TOKEN`
+
+1. GitHub → **Settings** → **Developer settings** → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**.
+2. **Resource owner:** `amalgamator-ai` (the org).
+3. **Repository access:** Only select **`amalgamator-ai.github.io`** (not amalgamator).
+4. **Permissions → Repository permissions:**
+   - **Contents:** Read and write (required for the [repository dispatch API](https://docs.github.com/en/rest/repos/repos#create-a-repository-dispatch-event))
+   - Everything else: leave at No access / default
+5. Set an expiry you’re willing to rotate; generate and copy the token once.
+6. On **amalgamator**: **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+   - Name: `WEBSITE_DISPATCH_TOKEN`
+   - Value: the token
+
+Prefer a machine/bot account or a shared maintainer token over a personal one that leaves with someone. A classic PAT with `public_repo` (or `repo` if the website were private) also works, but fine-grained is tighter.
+
+Land the website `pages.yml` change (listen for `docs-publish`) before relying on Docs Publish from amalgamator.
 
 ## Code of conduct
 
