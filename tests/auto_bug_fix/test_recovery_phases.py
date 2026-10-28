@@ -369,7 +369,11 @@ def test_extra_verification_section_names_the_escalating_commands():
 
 
 def _run_extended_verification_pipeline(
-    tmp_path: Path, monkeypatch, *, recovery_fixes: bool
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    recovery_fixes: bool,
+    recovery_raises: bool = False,
 ):
     """Drive only the Phase 4.1 branch of _run_pipeline_phases.
 
@@ -390,7 +394,8 @@ def _run_extended_verification_pipeline(
     def fake_semantic_triage(config, claude_config, state, tracker):
         assessment = {
             "commit_type": "bugfix",
-            "verification_commands": ["test -f fixed.txt"],
+            # One check fails; the other passes and must not be escalated.
+            "verification_commands": ["test -f fixed.txt", "true"],
         }
         state.triage_assessment = assessment
         return assessment
@@ -409,6 +414,8 @@ def _run_extended_verification_pipeline(
 
     def fake_4a(config, claude_config, state, tracker, fix_diff):
         calls["4a"] += 1
+        if recovery_raises:
+            raise PipelineEscalation("4a failed before the post-recovery sweep")
         if recovery_fixes:
             (Path(config.build_dir) / "fixed.txt").write_text("fixed\n")
 
@@ -475,3 +482,20 @@ def test_extended_verification_still_failing_escalates_to_phase_4b(
     labels = [item.label for item in dossier.items]
     assert "Extended verification failed: test -f fixed.txt" in labels
     assert "Extended verification still failing after Phase 4a" in labels
+
+
+def test_extended_verification_recovery_raises_forwards_only_failed_commands(
+    tmp_path, monkeypatch
+):
+    _, _, calls, dossier, _ = _run_extended_verification_pipeline(
+        tmp_path, monkeypatch, recovery_fixes=False, recovery_raises=True
+    )
+
+    assert calls["4a"] == 1
+    # "true" passed the first sweep; only the command that actually failed may
+    # be forwarded. The fallback must use ext_failures, not every non-baseline
+    # verification command.
+    assert calls["4b"] == [["test -f fixed.txt"]]
+
+    labels = [item.label for item in dossier.items]
+    assert "Extended verification failed: test -f fixed.txt" in labels

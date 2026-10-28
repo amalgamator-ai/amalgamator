@@ -3203,9 +3203,10 @@ def _run_pipeline_phases(
                 # Hand 4b the commands that got us here. Its own success
                 # criteria cover only build and test, so without these it can
                 # report success while the failing command is untouched.
-                escalated_cmds = still_failing or [
-                    c for c in verification_cmds if c not in baseline_failures
-                ]
+                # If 4a raised before the post-recovery sweep, fall back to the
+                # first-sweep failures — not every non-baseline command, which
+                # would also name checks that passed.
+                escalated_cmds = still_failing or [f["cmd"] for f in ext_failures]
                 with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
                     phase_4b_run_and_fix(
                         config,
