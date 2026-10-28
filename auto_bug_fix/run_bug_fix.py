@@ -4831,14 +4831,28 @@ def _restore_target_baseline(
             encoding="utf-8",
             errors="replace",
         )
-        if preserved.returncode == 0:
-            log.info("Moved tip preserved on branch %s", preserve_name)
-        else:
+        if preserved.returncode != 0:
+            # Resetting now would leave the moved commits reachable only
+            # from the pipeline worktree, which cleanup deletes — and when
+            # no candidate.patch was emitted this ref was the only copy of
+            # the agent's work. Fail closed: report instead of resetting.
+            reason = (
+                f"could not preserve the moved tip on {preserve_name} "
+                f"({(preserved.stderr or '').strip()}) — the target branch is "
+                f"left at {current[:12]} rather than reset, so the moved "
+                "commits keep a ref"
+            )
             log.warning(
-                "Could not preserve the moved tip on %s: %s",
+                "Could not preserve the moved tip on %s (%s) — leaving %s at "
+                "%s instead of resetting it; the moved commits would otherwise "
+                "have no remaining ref",
                 preserve_name,
                 (preserved.stderr or "").strip(),
+                branch,
+                current[:12],
             )
+            return reason
+        log.info("Moved tip preserved on branch %s", preserve_name)
         # Detach the worktree HEAD first so the checkout is consistent with
         # the moved ref; the commits stay reachable from the worktree until
         # cleanup, and live on in candidate.patch regardless. If the detach

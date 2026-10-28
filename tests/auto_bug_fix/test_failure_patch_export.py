@@ -449,12 +449,18 @@ class TestRestoreTargetBaselineSafety:
         repo, worktree, frozen = target_worktree
         self._move_branch(repo, "target", worktree)
         real_rev_parse = rbf.git_rev_parse
+        # A real commit that is not the branch's actual tip: the preserved
+        # ref can be created from it, so the run reaches the CAS.
+        tree = _git(repo, "rev-parse", f"{frozen}^{{tree}}").stdout.strip()
+        stale_sha = _git(
+            repo, "commit-tree", tree, "-p", frozen, "-m", "stale tip"
+        ).stdout.strip()
 
         def stale(path, ref):
             # Report a tip that is not the branch's real value, so the
             # compare-and-swap old-value check must fail.
             if ref == "target":
-                return "0" * 40
+                return stale_sha
             return real_rev_parse(path, ref)
 
         monkeypatch.setattr(rbf, "git_rev_parse", stale)
@@ -462,6 +468,30 @@ class TestRestoreTargetBaselineSafety:
 
         assert reason is not None and "CAS" in reason
         assert _git(repo, "rev-parse", "target").stdout.strip() != frozen
+
+    def test_preserve_failure_blocks_the_reset(self, target_worktree, monkeypatch):
+        """A reset with no preserved ref can leave the commits unreachable."""
+        import subprocess as std_subprocess
+
+        import auto_bug_fix.run_bug_fix as rbf
+
+        repo, worktree, frozen = target_worktree
+        moved = self._move_branch(repo, "target", worktree)
+        real_run = std_subprocess.run
+
+        def failing_preserve(args, *a, **k):
+            if list(args[:2]) == ["git", "branch"] and any(
+                "amalgamator-failed/" in str(part) for part in args
+            ):
+                return std_subprocess.CompletedProcess(args, 1, "", "ref lock held")
+            return real_run(args, *a, **k)
+
+        monkeypatch.setattr(rbf.subprocess, "run", failing_preserve)
+
+        reason = _restore_target_baseline(repo, worktree, "target", frozen)
+
+        assert reason is not None and "could not preserve" in reason
+        assert _git(repo, "rev-parse", "target").stdout.strip() == moved
 
     def test_no_frozen_baseline_is_reported_not_silently_skipped(self, target_worktree):
         repo, worktree, frozen = target_worktree
