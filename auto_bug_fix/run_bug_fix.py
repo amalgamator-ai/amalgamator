@@ -22,7 +22,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TextIO, TypedDict, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, TextIO, TypedDict, cast
 
 from auto_bug_fix.claude_utils import (
     BugFixClaudeConfig,
@@ -186,6 +186,7 @@ from auto_bug_fix.git_tools import (
     git_rev_parse,
     git_show_files,
     git_status_porcelain,
+    git_status_porcelain_all,
     is_merge_commit,
     resolve_merge_commit,
 )
@@ -207,7 +208,10 @@ from auto_bug_fix.snapback import (
     snap_back_files,
 )
 from auto_bug_fix.tracker import Tracker
-from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
+from auto_bug_fix.worktree import (
+    cleanup_worktree,
+    create_fresh_worktree,
+)
 
 LOG_FILE = "__run_log_bug_fix.txt"
 DOSSIER_FILE = "dossier.md"
@@ -329,6 +333,12 @@ class PipelineState:
     followup_fixes_commit: str = ""
     failed_prerequisites: list[str] = field(default_factory=list)
     squashed_backport_range: str = ""
+    # Repo-relative paths that the orchestrator's own build/test commands
+    # created as untracked files (see ``_discard_verification_dirt``). They
+    # are build output by construction, so commit boundaries leave them out
+    # even when they reappear — the phase 4b agent runs the same build
+    # command and would otherwise have its output swept into the patch.
+    generated_output: set[str] = field(default_factory=set)
 
 
 def phase_0_triage(
@@ -613,11 +623,7 @@ def phase_3b_regeneration(
     changed = git_diff_name_only(config.repo_path)
     if changed and any_succeeded:
         log.info("Phase 3b: %d files regenerated, committing", len(changed))
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=config.repo_path,
-            capture_output=True,
-        )
+        _stage_or_escalate(config, state, "Phase 3b (regenerated files)")
         git_commit(
             config.repo_path,
             f"Regenerate files for {config.issue_id}\n\nCommands: {', '.join(regen_cmds)}",
@@ -782,101 +788,117 @@ def phase_1_baseline_and_red(
 
     Runs build, test, and all lint/verification commands discovered by triage.
     Stores results so Phase 4+ can distinguish regressions from pre-existing failures.
+
+    The commands run here are verification commands like any other: whatever
+    they leave in the tree is discarded afterwards (see ``_discard_verification_dirt``)
+    so the pre-cherry-pick cleanup commit — and with it the candidate patch —
+    never carries baseline build/test output.
     """
-    # Step 1: Build baseline
-    if config.build_command:
-        build_exit, build_output = capture_output(
-            [config.build_command],
-            config.build_dir,
-            timeout=config.command_timeout,
-        )
-        state.baseline_build_exit = build_exit
-        state.baseline_build_output = build_output
-        if build_exit == 0:
-            log.info("Baseline build: PASSED")
-        else:
-            log.warning(
-                "Baseline build: FAILED (exit %d) — target branch has pre-existing build issues",
-                build_exit,
-            )
-    else:
-        log.info("Baseline build: skipped (no build command)")
-
-    # Step 2: Test baseline (existing logic)
-    if config.test_command:
-        red_exit, red_output = capture_output(
-            [config.test_command],
-            config.build_dir,
-            timeout=config.command_timeout,
-        )
-
-        state.baseline_test_exit = red_exit
-        state.baseline = parse_test_failures(red_output, "")
-        is_bugfix = (
-            state.triage_assessment.get("commit_type", "").lower() in _BUGFIX_TYPES
-        )
-        if red_exit == 0:
-            if state.ported_test_files and is_bugfix:
-                log.warning("RED check passed — deferring to Phase 1.5 triage")
-                state.red_passed_output = red_output
-            else:
-                log.info(
-                    "Baseline tests pass — %s",
-                    (
-                        "feature/refactor commit, RED check not applicable"
-                        if not is_bugfix
-                        else "no ported vulnerability test available — proceeding"
-                    ),
-                )
-    else:
-        log.info("Baseline test: skipped (no test command)")
-
-    # Step 3: Extended verification baseline (lint + optionally triage-discovered tests)
-    lint_cmds = [
-        c
-        for c in state.triage_assessment.get("lint_commands", [])
-        if _validate_shell_command(c)
-    ]
-    if config.lint_command and config.lint_command not in lint_cmds:
-        lint_cmds.insert(0, config.lint_command)
-    verification_cmds = list(lint_cmds)
-    if config.auto_discover_tests:
-        for c in state.triage_assessment.get("verification_commands", []):
-            if _validate_shell_command(c):
-                verification_cmds.append(c)
-    state.baseline_verification = []
-    for vcmd in verification_cmds:
-        try:
-            vresult = subprocess.run(
-                vcmd,
-                shell=True,
-                cwd=config.build_dir,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+    baseline = _worktree_snapshot(config)
+    try:
+        # Step 1: Build baseline
+        if config.build_command:
+            build_exit, build_output = capture_output(
+                [config.build_command],
+                config.build_dir,
                 timeout=config.command_timeout,
             )
-            entry = {
-                "cmd": vcmd,
-                "exit_code": vresult.returncode,
-                "output": (vresult.stdout + "\n" + vresult.stderr)[-3000:],
-            }
-        except subprocess.TimeoutExpired:
-            entry = {
-                "cmd": vcmd,
-                "exit_code": TIMEOUT_EXIT_CODE,
-                "output": f"Timed out after {config.command_timeout}s",
-            }
-        state.baseline_verification.append(entry)
-        if entry["exit_code"] == 0:
-            log.info("Baseline verification passed: %s", vcmd)
+            state.baseline_build_exit = build_exit
+            state.baseline_build_output = build_output
+            if build_exit == 0:
+                log.info("Baseline build: PASSED")
+            else:
+                log.warning(
+                    "Baseline build: FAILED (exit %d) — target branch has "
+                    "pre-existing build issues",
+                    build_exit,
+                )
         else:
-            log.info(
-                "Baseline verification failed (exit %d, pre-existing): %s",
-                entry["exit_code"],
-                vcmd,
+            log.info("Baseline build: skipped (no build command)")
+
+        # Step 2: Test baseline (existing logic)
+        if config.test_command:
+            red_exit, red_output = capture_output(
+                [config.test_command],
+                config.build_dir,
+                timeout=config.command_timeout,
             )
+
+            state.baseline_test_exit = red_exit
+            state.baseline = parse_test_failures(red_output, "")
+            is_bugfix = (
+                state.triage_assessment.get("commit_type", "").lower() in _BUGFIX_TYPES
+            )
+            if red_exit == 0:
+                if state.ported_test_files and is_bugfix:
+                    log.warning("RED check passed — deferring to Phase 1.5 triage")
+                    state.red_passed_output = red_output
+                else:
+                    log.info(
+                        "Baseline tests pass — %s",
+                        (
+                            "feature/refactor commit, RED check not applicable"
+                            if not is_bugfix
+                            else "no ported vulnerability test available — proceeding"
+                        ),
+                    )
+        else:
+            log.info("Baseline test: skipped (no test command)")
+
+        # Step 3: Extended verification baseline (lint + triage-discovered tests)
+        lint_cmds = [
+            c
+            for c in state.triage_assessment.get("lint_commands", [])
+            if _validate_shell_command(c)
+        ]
+        if config.lint_command and config.lint_command not in lint_cmds:
+            lint_cmds.insert(0, config.lint_command)
+        verification_cmds = list(lint_cmds)
+        if config.auto_discover_tests:
+            for c in state.triage_assessment.get("verification_commands", []):
+                if _validate_shell_command(c):
+                    verification_cmds.append(c)
+        state.baseline_verification = []
+        for vcmd in verification_cmds:
+            try:
+                vresult = subprocess.run(
+                    vcmd,
+                    shell=True,
+                    cwd=config.build_dir,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=config.command_timeout,
+                )
+                entry = {
+                    "cmd": vcmd,
+                    "exit_code": vresult.returncode,
+                    "output": (vresult.stdout + "\n" + vresult.stderr)[-3000:],
+                }
+            except subprocess.TimeoutExpired:
+                entry = {
+                    "cmd": vcmd,
+                    "exit_code": TIMEOUT_EXIT_CODE,
+                    "output": f"Timed out after {config.command_timeout}s",
+                }
+            state.baseline_verification.append(entry)
+            if entry["exit_code"] == 0:
+                log.info("Baseline verification passed: %s", vcmd)
+            else:
+                log.info(
+                    "Baseline verification failed (exit %d, pre-existing): %s",
+                    entry["exit_code"],
+                    vcmd,
+                )
+    finally:
+        _finish_verification(
+            config,
+            baseline,
+            state,
+            "Phase 1 baseline",
+            in_flight=sys.exc_info()[0] is not None,
+        )
 
 
 def phase_1_5_red_triage(
@@ -1077,29 +1099,349 @@ def phase_4_verify(
     config: BugFixConfig,
     state: PipelineState,
 ) -> bool:
-    """Build, test, and check allowlist conformance (single attempt)."""
-    passed, _, _, _, _ = _run_build_and_test(config, state)
+    """Build, test, and check allowlist conformance (single attempt).
+
+    Verification commands dirty the tree (centpkg prep re-unpacks and
+    re-patches; compilers write output). Whatever they leave behind is
+    discarded when the check finishes, pass or fail: the invariant is that
+    agent work is always committed *before* a verification runs, so at this
+    point everything uncommitted is, by construction, a side effect — and
+    side effects must never reach the agent-commit boundary of a later
+    phase, a prompt's diff, or a deliverable.
+    """
+    baseline = _worktree_snapshot(config)
+    try:
+        passed, _, _, _, _ = _run_build_and_test(config, state)
+    finally:
+        _finish_verification(
+            config,
+            baseline,
+            state,
+            "Phase 4 verify",
+            in_flight=sys.exc_info()[0] is not None,
+        )
     if passed:
         return True
     raise PipelineEscalation("Phase 4 verify failed")
 
 
-def _non_artifact_dirt(repo_path: str) -> list[str]:
-    """Working-tree changes that are not pipeline artifacts.
+# ---------- Build output vs. agent work at commit boundaries ----------
+
+# git takes pathspecs on the command line; one argv entry per path would hit
+# ARG_MAX on kernel-scale build trees, so a boundary works in batches.
+_PATHSPEC_BATCH = 200
+
+
+class StageResult(NamedTuple):
+    """Build output a commit boundary deliberately left unstaged.
+
+    ``ok`` reports whether every staging step succeeded. Leaving build output
+    unstaged is expected; failing to *stage* is not, and a caller that can
+    still succeed must not treat the two alike (see ``_stage_or_escalate``).
+    """
+
+    fenced_build_dir: str | None
+    generated: set[str]
+    ok: bool = True
+
+
+def _is_under(path: str, rel: str) -> bool:
+    """True when repo-relative *path* is *rel* itself or inside it."""
+    return path == rel or path.startswith(rel + "/")
+
+
+def _fence_build_dir(config: BugFixConfig) -> str | None:
+    """Directory to exclude from a commit boundary, or None when unsafe.
+
+    Build output must not reach the candidate patch, but a build directory
+    is not necessarily generated: ``repository.build_subdir`` means "the
+    directory to run build/test commands in", and the checked-in example
+    uses ``src``. Excluding such a directory would silently drop whatever
+    the agent added there — including a ported fix or test, the exact work
+    the commit exists to carry.
+
+    The fence therefore applies only when the committed tree knows nothing
+    about the directory: no file tracked at HEAD. The index is deliberately
+    not consulted — an agent that stages a build artifact itself must not
+    switch the fence off, or the next ``git add -A`` would sweep the entire
+    build tree into the fix. Everything else is handled per path by
+    ``state.generated_output``.
+    """
+    rel = _build_dir_relpath(config)
+    if rel is None or rel == ".git" or rel.startswith(".git/"):
+        return None
+    tracked = _run_git(
+        config.repo_path,
+        ["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", _literal_pathspec(rel)],
+    )
+    if not tracked.success:
+        # Fail open: committing build output is recoverable (the patch is
+        # noisier, nothing is lost); silently dropping a fix is not.
+        log.warning(
+            "Could not list files tracked at HEAD under build_dir %s "
+            "(exit %d): %s — not fencing it",
+            rel,
+            tracked.exit_code,
+            tracked.stderr.strip(),
+        )
+        return None
+    if tracked.stdout.strip("\0"):
+        log.debug(
+            "build_dir %s holds tracked files — not fenced (anything ported "
+            "there must reach the candidate patch)",
+            rel,
+        )
+        return None
+    return rel
+
+
+def _dirty_paths(config: BugFixConfig) -> tuple[set[str], set[str]] | None:
+    """(tracked-modified, untracked) worktree paths from one status call.
+
+    ``-uall`` throughout: a collapsed ``?? dir/`` line names a directory, so
+    a file inside a pre-existing untracked directory would be invisible.
+    A rename contributes both paths: the destination is on disk, and the
+    source is gone from the worktree but still in HEAD. Dropping either
+    leaves a discard unable to undo the rename.
+    Returns None when ``git status`` fails — callers must fail closed.
+    """
+    result = git_status_porcelain_all(config.repo_path)
+    if not result.success:
+        log.warning(
+            "git status failed (exit %d): %s",
+            result.exit_code,
+            result.stderr.strip(),
+        )
+        return None
+    modified: set[str] = set()
+    untracked: set[str] = set()
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        path, rename_source = _porcelain_line_paths(line)
+        if not path:
+            continue
+        if line.startswith("??"):
+            untracked.add(path.rstrip("/"))
+            continue
+        modified.add(path.rstrip("/"))
+        if rename_source:
+            # A rename (``R  old -> new``) removes ``old`` from the worktree
+            # while ``new`` appears, so both are part of the change. Dropping
+            # the source lets a verification's rename survive as a *staged
+            # deletion* of a file the discard never restores.
+            modified.add(rename_source.rstrip("/"))
+    return modified, untracked
+
+
+def _run_git_pathspec_batches(
+    config: BugFixConfig, args: list[str], paths: list[str]
+) -> bool:
+    """Run one git command over *paths* in batches of literal pathspecs.
+
+    ``args`` must end where the pathspecs belong (e.g.
+    ``["clean", "-fd", "--"]``). Returns False when any batch fails.
+    """
+    ordered = sorted(set(paths))
+    ok = True
+    for start in range(0, len(ordered), _PATHSPEC_BATCH):
+        batch = ordered[start : start + _PATHSPEC_BATCH]
+        result = subprocess.run(
+            ["git", *args, *(_literal_pathspec(p) for p in batch)],
+            cwd=config.repo_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            log.warning(
+                "git %s failed (exit %d): %s",
+                " ".join(args[:2]),
+                result.returncode,
+                result.stderr.strip(),
+            )
+            ok = False
+    return ok
+
+
+def _stage_agent_work(
+    config: BugFixConfig, state: PipelineState | None = None
+) -> StageResult:
+    """Stage the working tree for a commit boundary, minus build output.
+
+    Every agent-commit boundary stages the whole tree. The agent runs the
+    configured build and test commands itself, so its output lands in the
+    checkout too and would otherwise be committed as part of the fix. Two
+    guards keep it out, and neither can drop source:
+
+    * a build directory the committed tree knows nothing about is excluded
+      as a subtree, and anything already staged inside it is unstaged too
+      (``_fence_build_dir``): the pipeline owns every commit, and a stray
+      ``git add -A`` by the agent must not sweep the build tree in;
+    * paths the orchestrator saw a build create — recorded in
+      ``state.generated_output`` while discarding verification dirt — are
+      unstaged again, whether they are still untracked or the agent staged
+      them itself (a session that runs ``git add -A`` turns its output into
+      staged additions, which the untracked set would no longer name). The
+      agent runs the same build command from the same directory, so its
+      output reappears at the same paths after the orchestrator's copy was
+      cleaned away.
+
+    Anything HEAD tracks is always committed, even at a learned path: a
+    learned path was untracked when it was recorded, so if the committed
+    tree now holds it, it is source and a modification there must reach the
+    patch. Anything under a *tracked* build directory is committed for the
+    same reason: that directory is source, and a fix ported there must reach
+    the patch.
+    """
+    fence = _fence_build_dir(config)
+    ok = True
+    # Read the dirty set *before* staging: after `git add` the same files are
+    # reported as staged additions, not as untracked, so the intersection
+    # with the learned generated-output set would be empty.
+    dirty = (
+        _dirty_paths(config) if state is not None and state.generated_output else None
+    )
+    args = ["git", "add", "-A", "--", "."]
+    if fence is not None:
+        args.append(f":(exclude,literal){fence}")
+    staged = subprocess.run(args, cwd=config.repo_path, capture_output=True)
+    if staged.returncode != 0:
+        ok = False
+        log.warning(
+            "git add at a commit boundary failed (exit %d): %s",
+            staged.returncode,
+            staged.stderr.decode("utf-8", "replace").strip(),
+        )
+    if fence is not None and not _run_git_pathspec_batches(
+        config, ["reset", "-q", "HEAD", "--"], [fence]
+    ):
+        ok = False
+        log.warning(
+            "Could not unstage the fenced build directory %s — staged build "
+            "output may reach this commit",
+            fence,
+        )
+    generated: set[str] = set()
+    if state is not None and state.generated_output:
+        if dirty is None:
+            ok = False
+            log.warning(
+                "Could not read the worktree before staging — build output "
+                "learned from earlier verifications may reach this commit"
+            )
+        else:
+            # A learned path the agent staged is reported as a staged
+            # addition, not as untracked — include both sets, then keep only
+            # paths HEAD does not track. A learned path was untracked when it
+            # was recorded, so a path HEAD now tracks is source: unstaging it
+            # would drop a real modification from the commit.
+            candidates = (dirty[0] | dirty[1]) & state.generated_output
+            in_head = (
+                _paths_in_ref(config, "HEAD", sorted(candidates))
+                if candidates
+                else set()
+            )
+            if in_head is None:
+                # Cannot prove which candidates are source: fall back to the
+                # untracked-only rule rather than risk dropping an edit.
+                generated = dirty[1] & state.generated_output
+                ok = False
+                log.warning(
+                    "Could not check learned paths against HEAD — only "
+                    "untracked generated output is left unstaged"
+                )
+            else:
+                generated = candidates - in_head
+            if generated and not _run_git_pathspec_batches(
+                config, ["reset", "-q", "HEAD", "--"], list(generated)
+            ):
+                ok = False
+                log.warning(
+                    "Could not unstage generated output — it may reach this "
+                    "commit: %s",
+                    ", ".join(sorted(generated)[:5]),
+                )
+            elif generated:
+                log.info(
+                    "Commit boundary: %d generated path(s) left unstaged (e.g. %s)",
+                    len(generated),
+                    ", ".join(sorted(generated)[:3]),
+                )
+    return StageResult(fence, generated, ok)
+
+
+def _stage_or_escalate(
+    config: BugFixConfig, state: PipelineState | None, phase_label: str
+) -> StageResult:
+    """``_stage_agent_work`` for a boundary the pipeline can still succeed at.
+
+    Leaving recognized build output unstaged is normal; failing to *stage*
+    is not. At a success-path boundary an incomplete stage means the commit
+    — and therefore ``candidate.patch`` and the preserved branch — may omit
+    the work this phase produced, so it escalates instead of logging.
+    """
+    staged = _stage_agent_work(config, state)
+    if not staged.ok:
+        raise PipelineEscalation(
+            f"{phase_label}: could not stage the worktree for its commit "
+            "boundary — the commit, candidate patch and preserved branch "
+            "may omit this phase's work"
+        )
+    return staged
+
+
+def _non_artifact_dirt(
+    config: BugFixConfig, staged: StageResult | None = None
+) -> list[str] | None:
+    """Working-tree changes a commit boundary did not carry, or None if unknown.
 
     ``git_commit`` unstages everything in ``_PIPELINE_ARTIFACTS`` before
-    committing, so those files legitimately stay dirty afterwards. Anything
-    else left over is real work that did not make it into a commit.
+    committing, and ``_stage_agent_work`` leaves recognized build output
+    unstaged on purpose, so those files legitimately stay dirty afterwards.
+    Anything else left over is real work that did not make it into a
+    commit.
+
+    Returns ``None`` when ``git status`` fails: an unreadable status is not
+    an empty one, and reporting "nothing left over" would let the caller
+    claim the boundary was clean while work may have been dropped
+    (fail closed — the invariant the rest of this module is built around).
     """
+    fence = staged.fenced_build_dir if staged is not None else None
+    generated = staged.generated if staged is not None else set()
+    status = git_status_porcelain_all(config.repo_path)
+    if not status.success:
+        log.warning(
+            "Could not read the worktree after a commit boundary (exit %d): %s",
+            status.exit_code,
+            status.stderr.strip(),
+        )
+        return None
     dirt = []
-    for line in git_status_porcelain(repo_path):
-        path = line[3:].strip() if len(line) > 3 else line.strip()
-        # Renames are reported as "old -> new"; the new path is what matters.
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        path = path.strip('"')
-        if path and path not in _PIPELINE_ARTIFACTS:
-            dirt.append(line)
+    skipped_generated: list[str] = []
+    # -uall: a collapsed '?? runs/' line would never match the file paths in
+    # _PIPELINE_ARTIFACTS, and artifact-only dirt would look like real work.
+    for line in status.stdout.splitlines():
+        path = _porcelain_line_path(line)
+        if not path or path in _PIPELINE_ARTIFACTS:
+            continue
+        if path in generated:
+            # Left unstaged on purpose as learned build output, but worth
+            # naming: if the agent authored a file at a path a verification
+            # once created, it is dropped here and nowhere else.
+            skipped_generated.append(path)
+            continue
+        if fence is not None and _is_under(path, fence):
+            continue
+        dirt.append(line)
+    if skipped_generated:
+        log.info(
+            "Commit boundary: %d path(s) left uncommitted as learned build "
+            "output (not part of the fix): %s",
+            len(skipped_generated),
+            ", ".join(sorted(skipped_generated)[:5]),
+        )
     return dirt
 
 
@@ -1121,30 +1463,50 @@ still fails will simply fail the run.
 """
 
 
-def _rerun_verification(config: BugFixConfig, commands: list[str]) -> list[str]:
-    """Re-run verification commands, returning those that still fail."""
+def _rerun_verification(
+    config: BugFixConfig, commands: list[str], state: PipelineState | None = None
+) -> list[str]:
+    """Re-run verification commands, returning those that still fail.
+
+    Like ``phase_4_verify``, discards whatever the commands left in the
+    tree (pass or fail) — see the invariant documented there.
+    """
     still_failing = []
-    for vcmd in commands:
-        try:
-            result = subprocess.run(
-                vcmd,
-                shell=True,
-                cwd=config.build_dir,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=config.command_timeout,
-            )
-        except subprocess.TimeoutExpired:
-            still_failing.append(vcmd)
-            continue
-        if result.returncode != 0:
-            still_failing.append(vcmd)
+    baseline = _worktree_snapshot(config)
+    try:
+        for vcmd in commands:
+            try:
+                result = subprocess.run(
+                    vcmd,
+                    shell=True,
+                    cwd=config.build_dir,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=config.command_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                still_failing.append(vcmd)
+                continue
+            if result.returncode != 0:
+                still_failing.append(vcmd)
+    finally:
+        _finish_verification(
+            config,
+            baseline,
+            state,
+            "verification re-run",
+            in_flight=sys.exc_info()[0] is not None,
+        )
     return still_failing
 
 
-def _commit_recovery_edits(config: BugFixConfig, phase_label: str) -> bool:
+def _commit_recovery_edits(
+    config: BugFixConfig,
+    phase_label: str,
+    state: PipelineState | None = None,
+) -> bool:
     """Commit agent recovery edits so they reach the deliverables.
 
     The candidate patch (git format-patch), the preserved branch, and the
@@ -1157,15 +1519,33 @@ def _commit_recovery_edits(config: BugFixConfig, phase_label: str) -> bool:
     verified working tree whose deliverables omit those edits is precisely
     the failure this helper exists to prevent, so it must never be reported
     as a success.
+
+    Build output is kept out of the commit by ``_stage_agent_work``: a
+    build directory git knows nothing about is fenced, and paths the
+    orchestrator saw a build create are left unstaged. That cannot separate
+    agent-run modification of a *tracked* file (e.g. centpkg prep
+    re-patching a spec): it is indistinguishable from an edit, and dropping
+    it would risk dropping the fix. Only an isolated build tree could.
     """
     for marker in (RUN_AND_FIX_FAILURE_FILE, RUN_AND_FIX_SUCCESS_FILE):
         path = os.path.join(config.repo_path, marker)
         if os.path.exists(path):
             os.remove(path)
-    if not git_status_porcelain(config.repo_path):
+    # Fail closed: an unreadable status is not a clean tree. Reading a failed
+    # ``git status`` as "nothing to commit" returns False here, and the caller
+    # (a phase that can still succeed) takes that as "nothing to commit" and
+    # reports success with the agent's edits missing from candidate.patch.
+    status = git_status_porcelain_all(config.repo_path)
+    if not status.success:
+        raise PipelineEscalation(
+            f"{phase_label}: could not read the worktree before committing "
+            "recovery edits (git status failed) — the candidate patch, "
+            "preserved branch and range-diff may omit them"
+        )
+    if not status.stdout.strip():
         return False
     head_before = git_rev_parse(config.repo_path, "HEAD")
-    subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+    staged = _stage_agent_work(config, state)
     git_commit(
         config.repo_path,
         f"fixup: build/test recovery for {config.issue_id} ({phase_label})",
@@ -1173,18 +1553,39 @@ def _commit_recovery_edits(config: BugFixConfig, phase_label: str) -> bool:
     )
     if git_rev_parse(config.repo_path, "HEAD") != head_before:
         log.info("%s: recovery edits committed", phase_label)
+        if not staged.ok:
+            # The commit landed, so the failure-path export still carries
+            # whatever was staged — but a staging step failed, so this is not
+            # the complete boundary the phase above is allowed to treat as
+            # success. Same doctrine as _stage_or_escalate.
+            raise PipelineEscalation(
+                f"{phase_label}: recovery edits committed, but staging "
+                "reported a failure — the commit may omit work or include "
+                "build output"
+            )
         return True
 
     # Nothing landed on HEAD. That is expected when the only dirt was pipeline
     # artifacts, which git_commit unstages by design. Anything else still dirty
     # is real work the deliverables would silently drop, so it must not be
     # allowed to pass as a success.
-    remaining = _non_artifact_dirt(config.repo_path)
+    remaining = _non_artifact_dirt(config, staged)
+    if remaining is None:
+        raise PipelineEscalation(
+            f"{phase_label}: could not verify that the recovery edits were "
+            "committed (git status failed) — the candidate patch, preserved "
+            "branch and range-diff may omit them"
+        )
     if remaining:
         raise PipelineEscalation(
             f"{phase_label}: recovery edits could not be committed — the "
             f"candidate patch, preserved branch and range-diff would omit "
             f"them. Still uncommitted:\n" + "\n".join(remaining)
+        )
+    if not staged.ok:
+        raise PipelineEscalation(
+            f"{phase_label}: staging failed at this commit boundary even "
+            "though the tree looks clean — the commit may be incomplete"
         )
     log.info("%s: only pipeline artifacts were dirty, no commit needed", phase_label)
     return False
@@ -1201,6 +1602,10 @@ def phase_4a_build_recovery(
     context = create_context_str(claude_config, config)
 
     claude_config_4a = _phase_config(claude_config, config)
+    # Dirt that predates Phase 4a (pipeline evidence, agent-session build
+    # output) is not ours to discard; only what the build/test commands in
+    # this phase add on top of this baseline.
+    baseline = _worktree_snapshot(config)
 
     for attempt in range(1, config.max_build_test_retries + 1):
         build_exit, build_stdout, build_stderr = run_test_suite(
@@ -1215,10 +1620,20 @@ def phase_4a_build_recovery(
             no_regression, _ = check_regression(failures, state.baseline)
             if test_exit != TIMEOUT_EXIT_CODE and no_regression:
                 log.info("Phase 4a: build+test passed on attempt %d", attempt)
-                _commit_recovery_edits(config, "Phase 4a")
+                # Any agent edits were already committed at the end of the
+                # previous iteration; anything still dirty here is build/test
+                # side effects, which must not reach the deliverables.
+                _discard_or_escalate(
+                    config, baseline, state, f"Phase 4a attempt {attempt}"
+                )
                 return
         else:
             test_stdout, test_stderr = "", ""
+
+        # Same for the failed attempt: discard the side effects before the
+        # agent session, so the commit boundary below and the prompt's diff
+        # see only the agent's own work.
+        _discard_or_escalate(config, baseline, state, f"Phase 4a attempt {attempt}")
 
         build_errors = (build_stdout + "\n" + build_stderr).strip()
         test_errors = (test_stdout + "\n" + test_stderr).strip()
@@ -1261,11 +1676,16 @@ def phase_4a_build_recovery(
             )
 
         # Strict pre-verification boundary: the agent's edits are committed
-        # now, before the next build/test attempt runs. If this phase later
-        # escalates, candidate.patch still carries the work; committing only
-        # on the success path (as this code used to) loses it on every
-        # escalation.
-        _commit_recovery_edits(config, f"Phase 4a attempt {attempt}")
+        # now, before the next build/test attempt runs. This is what keeps
+        # verification side effects out of the deliverables, and a commit
+        # failure here escalates rather than silently dropping verified work
+        # from candidate.patch and the preserved branch.
+        _commit_recovery_edits(config, f"Phase 4a attempt {attempt}", state)
+        # HEAD moved, so the pre-agent baseline no longer describes the
+        # committed tree: re-baseline or the next attempt's discard would
+        # treat the just-committed files as pre-existing and spare any dirt
+        # a later verification puts on them.
+        baseline = _worktree_snapshot(config)
 
     build_exit, _, _ = run_test_suite(
         config.build_command, config.build_dir, timeout=config.command_timeout
@@ -1279,8 +1699,10 @@ def phase_4a_build_recovery(
         no_regression, _ = check_regression(failures, state.baseline)
         if test_exit != TIMEOUT_EXIT_CODE and no_regression:
             log.info("Phase 4a: build+test passed after final attempt")
-            _commit_recovery_edits(config, "Phase 4a")
+            _discard_or_escalate(config, baseline, state, "Phase 4a final attempt")
             return
+
+    _discard_or_escalate(config, baseline, state, "Phase 4a final attempt")
 
     raise PipelineEscalation(
         f"Phase 4a: build/test still failing after {config.max_build_test_retries} recovery attempts"
@@ -1393,7 +1815,7 @@ def phase_4b_run_and_fix(
     if tracker:
         phase_4b_data.update(
             {
-                "output_dir": tracker._output_dir,
+                "output_dir": tracker.output_dir,
                 "repo_path": config.repo_path,
                 "build_dir": config.build_dir,
                 "source_branch": config.source_branch,
@@ -1410,7 +1832,7 @@ def phase_4b_run_and_fix(
                 ),
             }
         )
-        phase_4b_json_path = os.path.join(tracker._output_dir, "phase_4b_input.json")
+        phase_4b_json_path = os.path.join(tracker.output_dir, "phase_4b_input.json")
         with open(phase_4b_json_path, "w") as f:
             json.dump(phase_4b_data, f, indent=2)
         log.info("Phase 4b input written to %s", phase_4b_json_path)
@@ -1439,7 +1861,7 @@ def phase_4b_run_and_fix(
     _4b_start = time.time()
 
     phase_4b_log_path = (
-        os.path.join(tracker._output_dir, "phase_4b_log.txt") if tracker else None
+        os.path.join(tracker.output_dir, "phase_4b_log.txt") if tracker else None
     )
     _4b_log_file: TextIO | None = None
     _prev_stdout = sys.stdout
@@ -1495,7 +1917,7 @@ def phase_4b_run_and_fix(
         # session that somehow writes both files is recorded as a failure.
         for result_file in (failure_file, success_file):
             if os.path.exists(result_file):
-                dest = os.path.join(tracker._output_dir, os.path.basename(result_file))
+                dest = os.path.join(tracker.output_dir, os.path.basename(result_file))
                 shutil.copy2(result_file, dest)
                 log.info("Phase 4b result copied to %s", dest)
                 with open(result_file) as f:
@@ -1518,7 +1940,7 @@ def phase_4b_run_and_fix(
         # Commit the agent-session work now, at the abort boundary: the
         # deliverable must contain what the agent produced, and nothing that
         # ran after this point (there is nothing left to run) can contaminate it.
-        _commit_worktree_edits(config, "Phase 4b (agent-reported failure)")
+        _commit_worktree_edits(config, "Phase 4b (agent-reported failure)", state)
         _finalize("failure")
         raise PipelineEscalation("Phase 4b: run-and-fix loop exhausted retries")
     elif os.path.exists(success_file):
@@ -1529,12 +1951,12 @@ def phase_4b_run_and_fix(
 
         # Commit the agent's edits *before* verification runs, strictly: the
         # checks below re-run the build/test commands, which dirty the tree
-        # themselves (centpkg prep re-unpacks, Maven writes target/). Only
-        # this commit carries the agent's work into candidate.patch, and the
-        # re-verification's side effects stay out of it. If the work cannot
+        # themselves (centpkg prep re-unpacks, Maven writes target/), and the
+        # verification dirt is discarded afterwards — so only this commit
+        # carries the agent's work into candidate.patch. If the work cannot
         # be committed, escalating (with the failure-path patch export) is
         # safer than reporting success without it.
-        if _commit_recovery_edits(config, "Phase 4b (pre-verification)"):
+        if _commit_recovery_edits(config, "Phase 4b (pre-verification)", state):
             state.dossier.add(
                 "Run-and-fix loop",
                 "Recovery edits committed (fixup, pre-verification)",
@@ -1558,7 +1980,7 @@ def phase_4b_run_and_fix(
                 f"Phase 4b: reported success while build/test still fails ({e})"
             ) from None
 
-        still_failing = _rerun_verification(config, extra_verification)
+        still_failing = _rerun_verification(config, extra_verification, state)
         if still_failing:
             state.dossier.add(
                 "Run-and-fix loop",
@@ -1573,7 +1995,8 @@ def phase_4b_run_and_fix(
             )
         # No post-verification commit: the agent's work is already in the
         # pre-verification commit above, and everything the checks left in
-        # the tree is side-effect dirt that must not reach the deliverable.
+        # the tree is side-effect dirt, now discarded by the verifiers
+        # themselves (see _discard_verification_dirt).
         _finalize("success")
     else:
         # The agent session ended without writing either marker (crash, early
@@ -1584,7 +2007,7 @@ def phase_4b_run_and_fix(
             "Phase 4b",
         )
         _finalize("no_result_file")
-        _commit_worktree_edits(config, "Phase 4b (no result file)")
+        _commit_worktree_edits(config, "Phase 4b (no result file)", state)
         raise PipelineEscalation(
             "Phase 4b: run-and-fix loop ended without writing a result file"
         )
@@ -2678,8 +3101,8 @@ def _write_dossier_on_failure(state: PipelineState, tracker: Tracker) -> None:
     try:
         if state.dossier is None:
             return
-        os.makedirs(tracker._output_dir, exist_ok=True)
-        path = os.path.join(tracker._output_dir, DOSSIER_FILE)
+        os.makedirs(tracker.output_dir, exist_ok=True)
+        path = os.path.join(tracker.output_dir, DOSSIER_FILE)
         with open(path, "w", encoding="utf-8") as f:
             f.write(format_dossier(state.dossier))
         log.info("Failure path: dossier written to %s", path)
@@ -2728,8 +3151,7 @@ def _is_test_path(path: str) -> bool:
     patterns cover Python, Go, C, and JavaScript conventions (test_*.py,
     *_test.go, *_test.c, *.test.js). The JVM class convention is matched
     case-sensitively, at the CamelCase boundary (``[a-z0-9]Tests?\\.java``): a
-    lowercased endswith would misclassify ordinary sources like Contest.java
-    or Latest.java.
+    lowercased endswith would misclassify ordinary sources like Contest.java or Latest.java.
     """
     lowered = path.lower()
     parts = lowered.split("/")
@@ -2753,6 +3175,10 @@ def _is_test_path(path: str) -> bool:
 def _changed_files_since(repo_path: str, base_ref: str) -> list[str] | None:
     """Files changed between base_ref and HEAD, or None when git fails.
 
+    Paths are C-unquoted: ``git diff --name-only`` quotes non-ASCII paths
+    the same way porcelain does, and callers (e.g. the test-only patch
+    suppression) match on path segments.
+
     ``None`` (rather than ``[]``) on failure is deliberate: an unreadable
     diff is not an empty one. Phase 5 escalates on it with the real cause
     instead of claiming the patch range is empty, and the failure-path
@@ -2774,50 +3200,84 @@ def _changed_files_since(repo_path: str, base_ref: str) -> list[str] | None:
             result.stderr.strip(),
         )
         return None
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return [
+        decoded
+        for decoded in (
+            _porcelain_path(line.strip()) for line in result.stdout.splitlines()
+        )
+        if decoded
+    ]
 
 
-def _commit_worktree_edits(config: BugFixConfig, phase_label: str) -> bool:
+def _commit_worktree_edits(
+    config: BugFixConfig, phase_label: str, state: PipelineState | None = None
+) -> bool:
     """Best-effort commit of uncommitted agent work on an *aborting* path.
 
     Non-raising sibling of ``_commit_recovery_edits``: when the pipeline is
     already failing (agent-reported failure, missing result marker) it is
     still better to commit the session's work than to let it vanish from
     candidate.patch. On paths that can still succeed, the strict
-    ``_commit_recovery_edits`` is used instead, so a failed commit is never
-    silently ignored. Returns True if a commit was created; a failure is
-    logged, never raised.
+    ``_commit_recovery_edits`` is used instead, so a failed commit is
+    never silently ignored. Returns True if a commit was created; a
+    failure is logged, never raised.
 
-    Call this at the *abort boundary*, immediately after the agent session
-    and before anything else runs. Committing later — at ``run_pipeline``'s
-    exception handler, as an earlier revision of this code did — sweeps in
-    whatever the orchestrator's own re-verification left in the tree
-    (``centpkg prep`` re-unpacking a source tarball is the motivating case),
-    which lands build corruption in the deliverable.
-
-    Known limitation: the agent runs build and test commands during its own
-    session, so its build output is still committed alongside its edits.
-    Isolating that is tracked separately; it cannot be solved here without
-    risking the fix itself.
+    Staging goes through ``_stage_agent_work``: a build directory git knows
+    nothing about is fenced, and paths the orchestrator's own verifications
+    were seen to create are left unstaged. Orchestrator-run verification
+    itself is covered by ``_discard_verification_dirt`` (run in a
+    ``finally`` around every verification), so it can never contaminate this
+    boundary. Known limitation: this cannot separate agent-run modification
+    of a *tracked* file (e.g. a build command that re-patches a spec in
+    place) from an edit — dropping it would risk dropping the fix, so it is
+    committed; only an isolated build tree could separate the two.
     """
     for marker in (RUN_AND_FIX_FAILURE_FILE, RUN_AND_FIX_SUCCESS_FILE):
         path = os.path.join(config.repo_path, marker)
         if os.path.exists(path):
             os.remove(path)
     try:
-        if not git_status_porcelain(config.repo_path):
+        status = git_status_porcelain_all(config.repo_path)
+        if not status.success:
+            # Never read an unreadable status as "nothing to commit" on the
+            # one path whose purpose is to rescue work: try the commit anyway
+            # and let the staging/commit steps report their own errors.
+            log.warning(
+                "Best-effort work commit (%s): git status failed (exit %d): "
+                "%s — attempting the commit without the emptiness check",
+                phase_label,
+                status.exit_code,
+                status.stderr.strip(),
+            )
+        elif not status.stdout.strip():
             return False
         head_before = git_rev_parse(config.repo_path, "HEAD")
-        subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+        staged = _stage_agent_work(config, state)
         git_commit(
             config.repo_path,
             f"fixup: uncommitted work for {config.issue_id} ({phase_label})",
             trailers=_COAUTHOR_TRAILERS,
         )
         committed = git_rev_parse(config.repo_path, "HEAD") != head_before
+        if committed and not staged.ok:
+            # Rescue path: keeping the work beats a clean stage, so the commit
+            # stands. But an incomplete stage (typically the same unreadable
+            # status) means learned build output was never unstaged, so name
+            # the risk — this commit feeds candidate.patch.
+            log.warning(
+                "Best-effort work commit (%s) landed with an incomplete "
+                "stage — build output may be included in the commit",
+                phase_label,
+            )
         if not committed:
-            left = _non_artifact_dirt(config.repo_path)
-            if left:
+            left = _non_artifact_dirt(config, staged)
+            if left is None:
+                log.warning(
+                    "Best-effort work commit (%s): could not read the "
+                    "worktree afterwards — some work may be uncommitted",
+                    phase_label,
+                )
+            elif left:
                 log.warning(
                     "Best-effort work commit (%s) left work uncommitted:\n%s",
                     phase_label,
@@ -2827,6 +3287,673 @@ def _commit_worktree_edits(config: BugFixConfig, phase_label: str) -> bool:
     except Exception as e:
         log.warning("Best-effort work commit (%s) failed: %s", phase_label, e)
         return False
+
+
+def _porcelain_path(field: str) -> str:
+    """Decode a porcelain status path field.
+
+    git quotes paths with non-ASCII or special bytes as C strings with octal
+    escapes (``"\\303\\251data.c"``). Passing that literal to checkout/clean
+    targets a nonexistent path, so the escapes must be decoded first.
+    """
+    if field.startswith('"') and field.endswith('"'):
+        try:
+            return (
+                field[1:-1]
+                .encode("ascii")
+                .decode("unicode_escape")
+                .encode("latin-1")
+                .decode("utf-8", "surrogateescape")
+            )
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            # Undecodable quoted path (invalid UTF-8 filename bytes): pass it
+            # through undecoded, loudly — git will not find the path and the
+            # dirt on it survives the discard, which must not be silent.
+            log.warning(
+                "Could not decode git-quoted path %r — dirt on it may "
+                "survive the verification discard",
+                field,
+            )
+            return field[1:-1]
+    return field
+
+
+def _porcelain_line_paths(line: str) -> tuple[str, str | None]:
+    """(on-disk path, rename source or None) from one porcelain line.
+
+    Rename lines (``R  old -> new``) carry two paths and both matter. ``new``
+    is what the worktree holds now; ``old`` no longer exists on disk but is
+    still in HEAD. A caller that only knows ``new`` cannot restore ``old``,
+    and the half-reverted rename survives as a staged deletion — the source
+    is then committed away by the next commit boundary.
+    """
+    field = line[3:].strip() if len(line) > 3 else line.strip()
+    rename_source: str | None = None
+    codes = line[:2]
+    if " -> " in field and ("R" in codes or "C" in codes):
+        # Both renames and copies print ``src -> dst``. Only a rename takes
+        # the source off the worktree, so only a rename reports it. The
+        # status codes gate the split: an untracked file may legally be
+        # *named* ``a -> b``, and splitting that line would name the wrong
+        # path.
+        old_field, field = field.split(" -> ", 1)
+        if "R" in codes:
+            rename_source = _porcelain_path(old_field)
+    return _porcelain_path(field), rename_source
+
+
+def _porcelain_line_path(line: str) -> str:
+    """Extract the on-disk path from one ``git status --porcelain`` line.
+
+    Shared by every porcelain consumer so they cannot disagree about
+    renames (``old -> new``) or C-quoted paths.
+    """
+    return _porcelain_line_paths(line)[0]
+
+
+class WorktreeSnapshot(NamedTuple):
+    """Worktree state a verification started from.
+
+    ``empty_dirs`` are directories that exist on disk but are invisible to
+    git (empty and untracked): without recording them, the discard's
+    empty-directory prune could not tell a verification-created directory
+    from scaffolding that predates the verification, and would rmdir the
+    latter. ``None`` when the directory walk failed — the prune is then
+    disabled, but the file-level discard still runs.
+
+    ``dirty_ref`` is a commit capturing the *content* of the files that
+    were already modified when the snapshot was taken (``git stash
+    create`` — objects only, the worktree is untouched), or ``None`` when
+    there were none or it could not be created. Without it, a file that
+    was already dirty at the baseline is indistinguishable from one a
+    verification dirtied further, and the safe direction is to leave it
+    alone — with it, the baseline content is restored exactly.
+
+    ``modified`` holds both sides of a rename: the destination (on disk)
+    and the source (still in HEAD, gone from the worktree). Restoring only
+    the destination would leave the source's staged deletion in the index.
+    """
+
+    modified: set[str]
+    untracked: set[str]
+    empty_dirs: set[str] | None
+    dirty_ref: str | None = None
+
+
+def _capture_dirty_ref(config: BugFixConfig, modified: set[str]) -> str | None:
+    """Commit the current dirty tracked state, returning its SHA.
+
+    ``git stash create`` writes objects only — no ref, no worktree or index
+    change — so the snapshot can restore exact baseline content later.
+    Returns None when there is nothing to capture or git refuses (e.g. in
+    the middle of a merge); the discard then reports itself incomplete when
+    such a path was modified during the verification, rather than pretending
+    the baseline content was restored.
+    """
+    if not modified:
+        return None
+    result = _run_git(config.repo_path, ["stash", "create"])
+    sha = result.stdout.strip()
+    if not result.success or not sha:
+        log.warning(
+            "Could not capture baseline content of %d modified path(s) "
+            "(git stash create exit %d): %s — a discard that finds them "
+            "modified again will report itself incomplete",
+            len(modified),
+            result.exit_code,
+            result.stderr.strip(),
+        )
+        return None
+    return sha
+
+
+def _worktree_snapshot(
+    config: BugFixConfig,
+    *,
+    capture_content: bool = True,
+    track_empty_dirs: bool = True,
+) -> WorktreeSnapshot | None:
+    """Worktree state right now, for before/after comparison.
+
+    The discard logic compares two of these snapshots — one taken when a
+    verification starts, one when it ends — so only state that appeared
+    *during* the verification is reverted. Everything that predates it
+    (task files, Phase 0/0.5 evidence like semantic_triage.json, anything
+    the caller left behind) is preserved untouched.
+
+    Untracked directories are expanded file-by-file (``-uall``): plain
+    ``git status`` collapses an untracked directory to a single ``?? dir/``
+    entry, so a new file inside a pre-existing untracked directory would be
+    invisible to the set difference and never discarded.
+
+    ``capture_content`` records the baseline content of already-dirty files
+    (``dirty_ref``) so the *starting* snapshot can restore them exactly.
+    Pass False for the comparison snapshot: its content is never restored
+    from, and capturing it would copy every modified blob a second time —
+    an unreachable commit per discard on trees the size of the kernel.
+
+    ``track_empty_dirs`` records the directories that are empty at this
+    instant, which is what protects pre-existing scaffolding from the
+    discard's prune. Only the *starting* snapshot needs it: the discard
+    derives its prune candidates from the paths it actually removed, so the
+    end-of-verification snapshot does no directory walk. A verification's
+    full tree traversals drop from three (baseline, comparison, prune) to
+    one — the baseline's — and the prune's cost is bounded by the paths that
+    were removed rather than by the size of the checkout.
+
+    Fails closed: when ``git status`` itself fails, returns ``None`` rather
+    than an empty snapshot — an empty-looking baseline would make the discard
+    treat every pre-existing modification as new and destroy it.
+    """
+    dirty = _dirty_paths(config)
+    if dirty is None:
+        log.warning(
+            "Worktree snapshot failed (git status error) — treating as no "
+            "baseline rather than an empty tree"
+        )
+        return None
+    modified, untracked = dirty
+    return WorktreeSnapshot(
+        modified,
+        untracked,
+        _empty_dirs(config) if track_empty_dirs else None,
+        _capture_dirty_ref(config, modified) if capture_content else None,
+    )
+
+
+def _empty_dirs(config: BugFixConfig) -> set[str] | None:
+    """Repo-relative paths of directories with no files anywhere beneath them.
+
+    "Empty" is about the whole subtree, not the immediate listing: after a
+    verification's output is cleaned up, ``build/x/y`` is empty and its
+    parent ``build`` holds nothing but that empty child. Only the leaves
+    would be removable if the judgment stopped at the immediate listing, so
+    every ancestor of a file-free subtree has to be reported too (the prune
+    then goes deepest-first and removes the chain).
+
+    A directory whose only child is the pruned build tree still counts as
+    empty here — ``os.rmdir`` refuses it on disk, and the baseline set
+    protects anything that was already empty before the verification.
+
+    git cannot see any of this, so only a recorded set can protect these
+    directories from the discard's prune. Returns None when the walk fails
+    (the prune is then disabled rather than allowed to guess) — including a
+    permission error partway through, which must not look like "this
+    directory is empty".
+    """
+
+    def _raise(error: OSError) -> None:
+        raise error
+
+    seen: set[str] = set()
+    with_files: set[str] = set()
+    try:
+        repo = os.path.abspath(config.repo_path)
+        build_rel = _build_dir_relpath(config)
+        for root, dirs, files in os.walk(repo, onerror=_raise):
+            if root == repo:
+                rel = ""
+            else:
+                rel = os.path.relpath(root, repo).replace(os.sep, "/")
+            seen.add(rel)
+            if files:
+                # Any file makes this directory and all its ancestors
+                # non-empty; the ancestors are folded in below.
+                with_files.add(rel)
+            # Prune .git and the build tree from the descent: neither can
+            # ever be pruned by the discard (build-dir paths are excluded
+            # from removal), and the build tree is where the multi-GB
+            # directory counts live on kernel-scale checkouts.
+            prefix = rel + "/" if rel else ""
+            dirs[:] = [d for d in dirs if d != ".git" and prefix + d != build_rel]
+    except OSError as e:
+        log.warning("Empty-directory walk failed (%s) — prune disabled", e)
+        return None
+    nonempty = set(with_files)
+    # The repo root always holds .git and everything else; it is never a
+    # prune candidate, so it must never be reported as empty.
+    nonempty.add("")
+    for path in with_files:
+        parent = path
+        while parent:
+            parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
+            if parent in nonempty:
+                break
+            nonempty.add(parent)
+    return seen - nonempty
+
+
+def _build_dir_relpath(config: BugFixConfig) -> str | None:
+    """config.build_dir as a repo-relative POSIX path, or None when it is
+    the repo root itself or lives outside the repository (nothing to exclude)."""
+    try:
+        rel = os.path.relpath(
+            os.path.abspath(config.build_dir), os.path.abspath(config.repo_path)
+        )
+    except ValueError:  # different drives (Windows) — outside the repo
+        return None
+    if rel == "." or rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return None
+    return rel.replace(os.sep, "/")
+
+
+def _discard_verification_dirt(
+    config: BugFixConfig,
+    baseline: WorktreeSnapshot | None,
+    state: PipelineState | None = None,
+) -> bool:
+    """Undo the worktree changes a verification command made.
+
+    Verification commands modify the working tree (centpkg prep re-unpacks
+    and re-patches; compilers and test runners write output). ``baseline``
+    is the ``_worktree_snapshot`` taken when the verification started: only
+    tracked files *newly* modified and untracked paths *newly* appeared are
+    reverted/removed, so pre-existing state is never touched — the safe
+    direction is to leave dirt behind, never to destroy work. Targeted
+    files that were *already* dirty at the baseline are restored to their
+    recorded baseline content (``WorktreeSnapshot.dirty_ref``): content is
+    preserved exactly, and a verification cannot smuggle its change into a
+    later commit merely because the path was dirty when it started. When the
+    baseline content could not be captured, such a path makes the discard
+    report itself incomplete instead of passing silently. Untracked files
+    that predate the verification are never deleted: one the verification
+    merely staged is unstaged back to its baseline state. A verification's
+    rename of a tracked file is undone on both sides — the source restored
+    from HEAD, the destination removed.
+
+    Known limitation: the *content* of a pre-existing untracked file is not
+    captured (it was never in git), so a verification that both edits and
+    stages one leaves the edit in place. Deleting it instead would destroy
+    work the run does not own, so it is kept and named in the log; the next
+    commit boundary's ``git add -A`` may then include that edit.
+
+    The newly-appeared untracked paths are also recorded in
+    ``state.generated_output``: they are build output by construction, so a
+    later commit boundary can leave them unstaged when the agent's own run
+    of the same command recreates them (``_stage_agent_work``).
+
+    A ``None`` baseline (snapshot failure) disables the discard entirely:
+    reverting without a trusted baseline could delete pre-existing work.
+    The configured build directory is never removed, even when a
+    verification command created it: later commands (and the agent) run
+    with ``cwd=config.build_dir`` and would fail on a missing directory.
+    Known limitation: when build_dir IS the repo root (in-tree builds) it
+    cannot be excluded from git; gitignored artifacts survive (clean runs
+    without -x), but non-ignored in-tree build output is discarded after
+    every check and rebuilt by the next one.
+
+    Returns False when the discard could not be completed — no trusted
+    baseline, a failed snapshot, or a git command that failed — so callers
+    can escalate instead of letting the dirt reach a later commit boundary.
+    Never raises.
+    """
+    if baseline is None:
+        log.warning(
+            "No trusted baseline snapshot — skipping verification-dirt "
+            "discard (fail closed; dirt is left in place)"
+        )
+        return False
+    try:
+        # Comparison snapshot only: its content is never restored from, so
+        # do not pay for a second stash commit here — and no directory walk
+        # either, since the prune below derives its candidates from the paths
+        # this discard actually removes.
+        current = _worktree_snapshot(
+            config, capture_content=False, track_empty_dirs=False
+        )
+        if current is None:
+            log.warning(
+                "Post-verification snapshot failed — leaving the tree "
+                "untouched rather than risking pre-existing work"
+            )
+            return False
+        clean = True
+        new_untracked = current.untracked - baseline.untracked
+        if state is not None and new_untracked:
+            state.generated_output |= new_untracked
+        # The comparison only ever subtracts forward, so a file that was
+        # untracked before the verification and is gone after it was removed
+        # by the verification command itself (``make clean`` is the common
+        # case) and would otherwise vanish without a trace. Its content was
+        # never in git, so nothing can restore it, and failing the discard
+        # cannot bring it back — the run would abort for nothing. Report it
+        # loudly instead of passing as a clean discard. ``lexists`` rather
+        # than the set difference alone: a verification that merely staged
+        # such a file moves it from ``untracked`` to ``modified`` while it is
+        # still on disk, and that file is not lost.
+        #
+        # A *non-root* build directory is excluded: everything under it is
+        # pipeline-disposable by policy (``to_remove`` below never cleans
+        # there either), so a clean-before-build verification removing its
+        # artifacts is expected, not lost work. With a repo-root build dir
+        # there is no such subtree and every vanished path is reported — the
+        # orchestrator cannot tell an untracked object file from an
+        # untracked source file, so it warns rather than guess.
+        build_dir_rel = _build_dir_relpath(config)
+        vanished = sorted(
+            path
+            for path in baseline.untracked - current.untracked
+            if not (build_dir_rel is not None and _is_under(path, build_dir_rel))
+            and not os.path.lexists(os.path.join(config.repo_path, path))
+        )
+        if vanished:
+            shown = vanished[:5]
+            log.warning(
+                "Verification deleted %d pre-existing untracked file(s); "
+                "their content was never in git and cannot be restored: %s%s",
+                len(vanished),
+                ", ".join(shown),
+                f" (+{len(vanished) - len(shown)} more)" if len(vanished) > 5 else "",
+            )
+        to_restore = sorted(current.modified - baseline.modified)
+        if to_restore and not _restore_tracked_files(
+            config, to_restore, baseline.untracked
+        ):
+            clean = False
+        # Files already dirty at the baseline are restored to their baseline
+        # *content*, not skipped: a verification that touches one of them
+        # must not be able to smuggle its change into a later commit just
+        # because the path was dirty before it started.
+        protected = sorted(current.modified & baseline.modified)
+        if protected:
+            if baseline.dirty_ref is None:
+                log.warning(
+                    "%d path(s) were already dirty at the baseline and its "
+                    "content was not captured — a verification's further edit "
+                    "to them cannot be reverted: %s",
+                    len(protected),
+                    ", ".join(protected[:5]),
+                )
+                clean = False
+            elif not _restore_from_ref(config, baseline.dirty_ref, protected):
+                clean = False
+        to_remove = sorted(
+            path
+            for path in new_untracked
+            if not (build_dir_rel is not None and _is_under(path, build_dir_rel))
+        )
+        if to_remove and not _run_git_pathspec_batches(
+            config, ["clean", "-fd", "--"], to_remove
+        ):
+            clean = False
+        # git clean removes files, not the directories left empty behind
+        # them. The removed paths name exactly which directories can have
+        # become empty, so the prune needs no further walk of the tree.
+        _prune_emptied_dirs(config, baseline.empty_dirs, to_remove)
+        return clean
+    except Exception as e:
+        log.warning("Verification-dirt discard failed: %s", e)
+        return False
+
+
+def _discard_or_escalate(
+    config: BugFixConfig,
+    baseline: WorktreeSnapshot | None,
+    state: PipelineState | None,
+    phase_label: str,
+) -> None:
+    """Discard verification dirt, escalating when the discard itself failed.
+
+    For call sites outside a ``finally`` block. Inside one, use
+    ``_finish_verification``: raising there would replace an exception that
+    is already propagating.
+    """
+    if _discard_verification_dirt(config, baseline, state):
+        return
+    raise PipelineEscalation(
+        f"{phase_label}: verification dirt could not be discarded — "
+        "uncommitted side effects could reach a later commit boundary"
+    )
+
+
+def _finish_verification(
+    config: BugFixConfig,
+    baseline: WorktreeSnapshot | None,
+    state: PipelineState | None,
+    phase_label: str,
+    *,
+    in_flight: bool,
+) -> None:
+    """Discard verification dirt from a ``finally`` block.
+
+    ``in_flight`` reports whether an exception is already propagating
+    (``sys.exc_info()[0] is not None``). Raising here would replace that
+    exception and hide the real failure, so the escalation is deferred: the
+    run is already aborting and reports its own cause, and the dirty
+    worktree is not part of candidate.patch, which is cut from commits.
+    When nothing is in flight, a failed discard is a contract violation
+    and escalates like ``_discard_or_escalate``.
+    """
+    if _discard_verification_dirt(config, baseline, state):
+        return
+    if in_flight:
+        log.warning(
+            "%s: dirt could not be discarded, but an exception is already "
+            "propagating — leaving the abort path to handle it",
+            phase_label,
+        )
+        return
+    raise PipelineEscalation(
+        f"{phase_label}: verification dirt could not be discarded — "
+        "uncommitted side effects could reach a later commit boundary"
+    )
+
+
+def _literal_pathspec(path: str) -> str:
+    """A pathspec that matches *path* literally.
+
+    Porcelain paths are filenames, not globs: a file literally named
+    ``util/[ab].py`` passed bare to checkout/clean would glob-match
+    ``util/a.py`` too and destroy pre-existing work. ``:(literal)``
+    disables glob interpretation.
+    """
+    return f":(literal){path}"
+
+
+def _paths_in_ref(config: BugFixConfig, ref: str, paths: list[str]) -> set[str] | None:
+    """Which of *paths* exist in the tree of *ref* (batched, literal).
+
+    Returns None when ``git ls-tree`` failed, so callers can fail closed
+    instead of guessing that a path is absent.
+    """
+    ordered = sorted(set(paths))
+    found: set[str] = set()
+    for start in range(0, len(ordered), _PATHSPEC_BATCH):
+        batch = ordered[start : start + _PATHSPEC_BATCH]
+        ls = subprocess.run(
+            [
+                "git",
+                "ls-tree",
+                "--name-only",
+                ref,
+                "--",
+                *(_literal_pathspec(p) for p in batch),
+            ],
+            cwd=config.repo_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if ls.returncode != 0:
+            log.warning(
+                "git ls-tree %s failed while discarding verification dirt "
+                "(exit %d): %s",
+                ref,
+                ls.returncode,
+                ls.stderr.strip(),
+            )
+            return None
+        found.update(
+            decoded
+            for decoded in (
+                _porcelain_path(line.strip()) for line in ls.stdout.splitlines()
+            )
+            if decoded
+        )
+    return found
+
+
+def _restore_from_ref(config: BugFixConfig, ref: str, paths: list[str]) -> bool:
+    """Write the *ref* version of *paths* back to the worktree, unstaged.
+
+    Used to return already-dirty baseline files to the content they had
+    before the verification ran. ``git checkout <ref> -- <path>`` updates
+    the index too, so a reset follows to leave the change in the worktree
+    only — the baseline's staging state is not meaningful between commit
+    boundaries, its content is.
+
+    A path absent from *ref* was *deleted* at the baseline: the index is
+    unstaged and a copy the verification put back is removed, restoring the
+    deletion. Skipping these instead would leave the verification's content
+    in the tree, where the next ``git add -A`` boundary would commit it into
+    the candidate patch — the leak this whole discard exists to stop.
+    """
+    ordered = sorted(set(paths))
+    in_ref = _paths_in_ref(config, ref, ordered)
+    if in_ref is None:
+        return False
+    ok = True
+    if in_ref and not _run_git_pathspec_batches(
+        config, ["checkout", ref, "--"], sorted(in_ref)
+    ):
+        ok = False
+    # Reset every path, not just the restored ones: the checkout staged the
+    # present paths, and a verification that staged its own recreation of a
+    # baseline-deleted path must be unstaged too.
+    if not _run_git_pathspec_batches(config, ["reset", "-q", "HEAD", "--"], ordered):
+        return False
+    for path in ordered:
+        if path in in_ref:
+            continue
+        full = os.path.join(config.repo_path, path)
+        try:
+            if os.path.isfile(full) or os.path.islink(full):
+                os.remove(full)
+        except OSError as e:
+            log.warning("Could not restore a baseline deletion of %s: %s", path, e)
+            ok = False
+    return ok
+
+
+def _restore_tracked_files(
+    config: BugFixConfig,
+    paths: list[str],
+    baseline_untracked: set[str] | None = None,
+) -> bool:
+    """Restore tracked files to HEAD, index included. Returns success.
+
+    ``git checkout -- <path>`` restores the worktree from the *index*, so a
+    verification command that staged changes (``git apply --index``,
+    vendoring build steps) would keep them. Unstage first, then restore
+    from HEAD; a path staged as a *new* file exists in neither, so its
+    worktree copy is removed outright.
+
+    ``baseline_untracked`` are the paths that were already untracked when
+    the verification started. Such a file is not the verification's to
+    delete: if it only *staged* one (``git add``, ``git add -A``), unstaging
+    returns it to its baseline state and the delete below would destroy a
+    file that was never in git and cannot be recovered. The set comes from
+    the same before-snapshot the discard compares against, so it is only
+    incomplete when the snapshot itself failed — in which case the discard
+    is skipped entirely.
+
+    Pathspecs are batched like every other boundary (ARG_MAX on
+    kernel-scale trees). Returns False when any step failed, so the caller
+    can escalate rather than let dirt survive silently.
+    """
+    repo = config.repo_path
+    keep = baseline_untracked or set()
+    if not _run_git_pathspec_batches(config, ["reset", "-q", "HEAD", "--"], paths):
+        return False
+    in_head = _paths_in_ref(config, "HEAD", paths)
+    if in_head is None:
+        return False
+    ordered = sorted(set(paths))
+    ok = True
+    to_checkout = [p for p in ordered if p in in_head]
+    if to_checkout and not _run_git_pathspec_batches(
+        config, ["checkout", "HEAD", "--"], to_checkout
+    ):
+        ok = False
+    left_in_place: list[str] = []
+    for path in ordered:
+        if path in in_head:
+            continue
+        if path in keep:
+            # Pre-existing untracked file, only staged by the verification.
+            # The reset above already restored its baseline state; deleting
+            # it would destroy work the run does not own.
+            left_in_place.append(path)
+            continue
+        # Staged as a new file: after the reset it is untracked on disk —
+        # the reset unstaged it, so remove the worktree copy too. ``islink``
+        # as well as ``isfile``: a dangling symlink (a link to a build
+        # artifact that was never produced) fails ``isfile``, and leaving it
+        # behind puts verification dirt in the next commit boundary.
+        full = os.path.join(repo, path)
+        try:
+            if os.path.isfile(full) or os.path.islink(full):
+                os.remove(full)
+        except OSError as e:
+            log.warning("Could not remove staged-new verification file %s: %s", path, e)
+            ok = False
+    if left_in_place:
+        # One line, not one per file: a verification that runs `git add -A`
+        # on a tree full of untracked output lands here with every one of
+        # them.
+        log.info(
+            "Left %d pre-existing untracked file(s) in place after unstaging "
+            "them at the verification boundary: %s",
+            len(left_in_place),
+            ", ".join(left_in_place[:5]),
+        )
+    return ok
+
+
+def _prune_emptied_dirs(
+    config: BugFixConfig,
+    baseline_empty_dirs: set[str] | None,
+    removed_paths: list[str] | set[str],
+) -> None:
+    """Remove directories that became empty during a verification.
+
+    git clean removes files, not the directories left empty behind them.
+    Directories that were already empty at the baseline are scaffolding the
+    verification did not create — they are kept (git cannot see them, so
+    only the recorded baseline set can protect them). When that set is
+    unavailable (walk failed), the prune is disabled entirely.
+
+    ``removed_paths`` are the untracked paths the discard just deleted; their
+    ancestor directories are the only ones that can have become empty.
+    Walking the whole repository to rediscover them would cost a full tree
+    traversal per verification — on the same kernel-scale checkouts the
+    rest of this module batches pathspecs for — and the answer is already
+    known from what was removed. A directory the verification itself emptied
+    (created and deleted a file inside) is not pruned; that leaves an empty
+    directory behind, which is harmless and recorded by the next baseline.
+
+    Deepest-first so a nested chain created by one command goes in a single
+    pass; ``os.rmdir`` refuses non-empty directories, so scaffolding with
+    contents (build output under the fence, ignored files) survives.
+    """
+    if baseline_empty_dirs is None or not removed_paths:
+        return
+    repo = os.path.abspath(config.repo_path)
+    candidates: set[str] = set()
+    for path in removed_paths:
+        parts = path.split("/")[:-1]
+        while parts:
+            candidates.add("/".join(parts))
+            parts.pop()
+    # The repo root is never a prune candidate, and neither is anything the
+    # baseline recorded as already empty.
+    candidates -= baseline_empty_dirs
+    for path in sorted(candidates, key=lambda p: p.count("/"), reverse=True):
+        try:
+            os.rmdir(os.path.join(repo, *path.split("/")))
+        except OSError as e:
+            log.debug("Not pruning %s: %s", path, e)
 
 
 def _emit_candidate_patch_on_failure(
@@ -2842,10 +3969,10 @@ def _emit_candidate_patch_on_failure(
     HEAD so the verifier can score the work on its merits.
 
     This function never commits anything: the phases commit agent work at
-    their own pre-verification and abort boundaries (see
-    ``_commit_worktree_edits``), so whatever is still uncommitted at abort
-    time is verification-command side effects — an unpacked source tree, a
-    re-patched spec — which must not be swept into the deliverable.
+    their pre-verification boundaries (see ``_commit_worktree_edits``), so
+    whatever is still uncommitted at abort time is verification-command
+    side effects (e.g. an unpacked source tree), which must not be swept
+    into the deliverable.
 
     ``allow_test_only=False`` suppresses the export when every changed file
     is a test file: a ``PipelineStop`` after Phase 0.5c's test port must not
@@ -2878,8 +4005,8 @@ def _emit_candidate_patch_on_failure(
         patch_bytes = git_format_patch_bytes(config.repo_path, base_ref=patch_base)
         if not patch_bytes.strip():
             return
-        os.makedirs(tracker._output_dir, exist_ok=True)
-        patch_path = os.path.join(tracker._output_dir, PATCH_FILE)
+        os.makedirs(tracker.output_dir, exist_ok=True)
+        patch_path = os.path.join(tracker.output_dir, PATCH_FILE)
         with open(patch_path, "wb") as f:
             f.write(patch_bytes)
         log.info(
@@ -2889,45 +4016,6 @@ def _emit_candidate_patch_on_failure(
         )
     except Exception as e:
         log.warning("Failure-path patch export failed: %s", e)
-
-
-def _branch_checkout_holders(
-    source_path: str, sym_ref: str, exclude: str
-) -> list[str] | None:
-    """Worktrees (other than ``exclude``) with ``sym_ref`` checked out.
-
-    Returns None when the worktree list cannot be read — callers must treat
-    that as "unknown" and fail closed, never as "no holders".
-    """
-    result = subprocess.run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=source_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        return None
-    exclude_real = os.path.realpath(exclude)
-    paths: list[tuple[str | None, str | None]] = []
-    current_path: str | None = None
-    current_branch: str | None = None
-    for line in result.stdout.splitlines():
-        if line.startswith("worktree "):
-            paths.append((current_path, current_branch))
-            current_path = line[len("worktree ") :]
-            current_branch = None
-        elif line.startswith("branch "):
-            current_branch = line[len("branch ") :]
-    paths.append((current_path, current_branch))
-    return [
-        path
-        for path, branch in paths
-        if path is not None
-        and branch == sym_ref
-        and os.path.realpath(path) != exclude_real
-    ]
 
 
 def _restore_target_baseline(
@@ -2945,9 +4033,10 @@ def _restore_target_baseline(
     Returns ``None`` when the branch is at the frozen baseline (or was
     restored), and a human-readable reason when it was left moved. Every
     skip case has the same consequence — the verifier may apply
-    candidate.patch to a non-pristine tree and score 0 — so the caller
-    records the reason in the run summary rather than leaving it in a log
-    nobody reads on a benchmark run.
+    candidate.patch to a non-pristine tree and score 0, which is exactly the
+    failure this PR exists to prevent — so the caller records the reason in
+    the run summary rather than leaving it in a log nobody reads on a
+    benchmark run.
 
     This is a ``run_targets`` responsibility: it owns the worktree and the
     source checkout, and only it knows the frozen baseline the branch must
@@ -3108,6 +4197,49 @@ def _restore_target_baseline(
         return f"restore failed: {e}"
 
 
+def _branch_checkout_holders(
+    source_path: str, sym_ref: str, exclude: str
+) -> list[str] | None:
+    """Worktrees (other than ``exclude``) with ``sym_ref`` checked out.
+
+    Returns None when the worktree list cannot be read — callers must treat
+    that as "unknown" and fail closed, never as "no holders".
+    """
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=source_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        return None
+    exclude_real = os.path.realpath(exclude)
+    paths: list[tuple[str | None, str | None]] = []
+    current_path: str | None = None
+    current_branch: str | None = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            paths.append((current_path, current_branch))
+            # Porcelain paths are C-quoted when they contain special
+            # characters; unquote before comparing realpaths, or a worktree
+            # under a path with a space or non-ASCII byte is missed and the
+            # branch is repointed under a live checkout.
+            current_path = _porcelain_path(line[len("worktree ") :])
+            current_branch = None
+        elif line.startswith("branch "):
+            current_branch = line[len("branch ") :]
+    paths.append((current_path, current_branch))
+    return [
+        path
+        for path, branch in paths
+        if path is not None
+        and branch == sym_ref
+        and os.path.realpath(path) != exclude_real
+    ]
+
+
 def run_pipeline(
     config: BugFixConfig | None = None,
     claude_config: ClaudeConfig | None = None,
@@ -3118,12 +4250,6 @@ def run_pipeline(
         raise ConfigError("run_pipeline() requires a config")
     if claude_config is None:
         raise ConfigError("run_pipeline() requires a claude_config")
-
-    if not config.source_fix_commit:
-        raise ConfigError(
-            "source_fix_commit is empty. In patch mode, run ingest_patch() "
-            "before calling run_pipeline."
-        )
 
     # Freeze the target baseline before any agent phase runs. Phase 0.5
     # drives an LLM with shell access inside this worktree, and it may
@@ -3151,6 +4277,16 @@ def run_pipeline(
                 "export falls back to the branch name",
                 config.repo_path,
             )
+
+    # Checked after the freeze, not before: run_targets restores the branch
+    # from this SHA in a ``finally``, so even a run rejected here needs a
+    # baseline recorded — otherwise every such run reports the branch as
+    # "not confirmed at the frozen baseline" when it never moved.
+    if not config.source_fix_commit:
+        raise ConfigError(
+            "source_fix_commit is empty. In patch mode, run ingest_patch() "
+            "before calling run_pipeline."
+        )
 
     from common.model_registry import public_config_snapshot
 
@@ -3270,7 +4406,7 @@ def _run_pipeline_phases(
         )
         triage_dest: str | None = None
         if assessment:
-            triage_dest = os.path.join(tracker._output_dir, "semantic_triage.json")
+            triage_dest = os.path.join(tracker.output_dir, "semantic_triage.json")
             with open(triage_dest, "w") as f:
                 json.dump(assessment, f, indent=2)
 
@@ -3334,9 +4470,7 @@ def _run_pipeline_phases(
                 )
                 tracker.record_gate("test_files_ported", str(len(ported_tests)))
                 if ported_tests:
-                    subprocess.run(
-                        ["git", "add", "-A"], cwd=config.repo_path, capture_output=True
-                    )
+                    _stage_or_escalate(config, state, "Phase 0.5c (test port)")
                     git_commit(
                         config.repo_path,
                         f"Port test files for {config.issue_id} (Phase 0.5c)\n\nPorted before fix to enable RED/GREEN checking",
@@ -3388,20 +4522,31 @@ def _run_pipeline_phases(
                         log.info(
                             "RED triage produced replacement test — rerunning RED check"
                         )
-                        subprocess.run(
-                            ["git", "add", "-A"],
-                            cwd=config.repo_path,
-                            capture_output=True,
+                        _stage_or_escalate(
+                            config, state, "Phase 1.5 (replacement test)"
                         )
                         git_commit(
                             config.repo_path,
                             f"RED triage replacement test for {config.issue_id} (Phase 1.5)",
                         )
-                        rerun_exit, rerun_output = capture_output(
-                            [config.test_command],
-                            config.build_dir,
-                            timeout=config.command_timeout,
-                        )
+                        # Baseline for the rerun's own side effects: the
+                        # replacement test is committed above, so anything the
+                        # rerun dirties is verification dirt, not agent work.
+                        rerun_baseline = _worktree_snapshot(config)
+                        try:
+                            rerun_exit, rerun_output = capture_output(
+                                [config.test_command],
+                                config.build_dir,
+                                timeout=config.command_timeout,
+                            )
+                        finally:
+                            _finish_verification(
+                                config,
+                                rerun_baseline,
+                                state,
+                                "Phase 1.5 RED re-run",
+                                in_flight=sys.exc_info()[0] is not None,
+                            )
                         if rerun_exit != 0:
                             log.info(
                                 "RED triage replacement test confirms vulnerability (exit %d) — continuing",
@@ -3428,7 +4573,7 @@ def _run_pipeline_phases(
                         "RED triage inconclusive — escalating to Phase 4b"
                     )
 
-        subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+        _stage_or_escalate(config, state, "Pre-cherry-pick cleanup")
         status = git_status_porcelain(config.repo_path)
         if status:
             git_commit(
@@ -3497,9 +4642,7 @@ def _run_pipeline_phases(
                 subprocess.run(
                     ["git", "add", "--", f], cwd=config.repo_path, capture_output=True
                 )
-            subprocess.run(
-                ["git", "add", "-A"], cwd=config.repo_path, capture_output=True
-            )
+            _stage_agent_work(config, state)
             git_commit(
                 config.repo_path,
                 f"Port {config.issue_id} (partial — force-resolved for Phase 4b)\n\n"
@@ -3544,9 +4687,7 @@ def _run_pipeline_phases(
                         cwd=config.repo_path,
                         capture_output=True,
                     )
-            subprocess.run(
-                ["git", "add", "-A"], cwd=config.repo_path, capture_output=True
-            )
+            _stage_agent_work(config, state)
             git_commit(
                 config.repo_path,
                 f"Port {config.issue_id} (force-resolved for Phase 4b)\n\n"
@@ -3602,60 +4743,78 @@ def _run_pipeline_phases(
 
     if verification_cmds:
         ext_failures = []
-        with tracker.phase("Phase 4.1 — Extended verification"):
-            for vcmd in verification_cmds:
-                log.info("Phase 4.1: running verification command: %s", vcmd)
-                try:
-                    vresult = subprocess.run(
-                        vcmd,
-                        shell=True,
-                        cwd=config.build_dir,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=config.command_timeout,
-                    )
-                except subprocess.TimeoutExpired:
-                    # A timeout is never treated as a pre-existing failure — we
-                    # cannot conclude anything from a command that didn't finish.
-                    log.warning(
-                        "Phase 4.1: verification timed out — treating as failure: %s",
-                        vcmd,
-                    )
-                    ext_failures.append(
-                        {
-                            "cmd": vcmd,
-                            "output": f"Timed out after {config.command_timeout}s",
-                        }
-                    )
-                    state.dossier.add(
-                        f"Extended verification timed out: {vcmd}",
-                        f"Timed out after {config.command_timeout}s",
-                        "Phase 4.1",
-                    )
-                    continue
-                if vresult.returncode == 0:
-                    log.info("Phase 4.1: verification passed: %s", vcmd)
-                elif vcmd in baseline_failures:
-                    log.info(
-                        "Phase 4.1: verification failed (pre-existing, exit %d): %s",
-                        vresult.returncode,
-                        vcmd,
-                    )
-                else:
-                    output = (vresult.stdout + "\n" + vresult.stderr)[-3000:]
-                    log.warning(
-                        "Phase 4.1: verification failed (NEW, exit %d): %s",
-                        vresult.returncode,
-                        vcmd,
-                    )
-                    ext_failures.append({"cmd": vcmd, "output": output})
-                    state.dossier.add(
-                        f"Extended verification failed: {vcmd}",
-                        output,
-                        "Phase 4.1",
-                    )
+        baseline = _worktree_snapshot(config)
+        try:
+            with tracker.phase("Phase 4.1 — Extended verification"):
+                for vcmd in verification_cmds:
+                    log.info("Phase 4.1: running verification command: %s", vcmd)
+                    try:
+                        vresult = subprocess.run(
+                            vcmd,
+                            shell=True,
+                            cwd=config.build_dir,
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=config.command_timeout,
+                        )
+                    except subprocess.TimeoutExpired:
+                        # A timeout is never treated as a pre-existing failure —
+                        # we cannot conclude anything from a command that didn't
+                        # finish.
+                        log.warning(
+                            "Phase 4.1: verification timed out — treating as "
+                            "failure: %s",
+                            vcmd,
+                        )
+                        ext_failures.append(
+                            {
+                                "cmd": vcmd,
+                                "output": (
+                                    f"Timed out after {config.command_timeout}s"
+                                ),
+                            }
+                        )
+                        state.dossier.add(
+                            f"Extended verification timed out: {vcmd}",
+                            f"Timed out after {config.command_timeout}s",
+                            "Phase 4.1",
+                        )
+                        continue
+                    if vresult.returncode == 0:
+                        log.info("Phase 4.1: verification passed: %s", vcmd)
+                    elif vcmd in baseline_failures:
+                        log.info(
+                            "Phase 4.1: verification failed (pre-existing, "
+                            "exit %d): %s",
+                            vresult.returncode,
+                            vcmd,
+                        )
+                    else:
+                        output = (vresult.stdout + "\n" + vresult.stderr)[-3000:]
+                        log.warning(
+                            "Phase 4.1: verification failed (NEW, exit %d): %s",
+                            vresult.returncode,
+                            vcmd,
+                        )
+                        ext_failures.append({"cmd": vcmd, "output": output})
+                        state.dossier.add(
+                            f"Extended verification failed: {vcmd}",
+                            output,
+                            "Phase 4.1",
+                        )
+        finally:
+            # Discard the verification commands' side effects (pass, fail, or
+            # unexpected exception) so they reach neither Phase 4a's
+            # agent-commit boundary nor Phase 5.
+            _finish_verification(
+                config,
+                baseline,
+                state,
+                "Phase 4.1 extended verification",
+                in_flight=sys.exc_info()[0] is not None,
+            )
 
         if ext_failures:
             log.info(
@@ -3678,23 +4837,37 @@ def _run_pipeline_phases(
 
                 with tracker.phase("Phase 4.1 — Extended verification (post-recovery)"):
                     still_failing = []
-                    for vcmd in verification_cmds:
-                        try:
-                            vresult = subprocess.run(
-                                vcmd,
-                                shell=True,
-                                cwd=config.build_dir,
-                                capture_output=True,
-                                text=True,
-                                encoding="utf-8",
-                                errors="replace",
-                                timeout=config.command_timeout,
-                            )
-                        except subprocess.TimeoutExpired:
-                            still_failing.append(vcmd)
-                            continue
-                        if vresult.returncode != 0 and vcmd not in baseline_failures:
-                            still_failing.append(vcmd)
+                    # Phase 4a's commit boundary has since reset the dirt
+                    # floor; re-baseline before re-running verification.
+                    baseline = _worktree_snapshot(config)
+                    try:
+                        for vcmd in verification_cmds:
+                            try:
+                                vresult = subprocess.run(
+                                    vcmd,
+                                    shell=True,
+                                    cwd=config.build_dir,
+                                    capture_output=True,
+                                    text=True,
+                                    encoding="utf-8",
+                                    errors="replace",
+                                    timeout=config.command_timeout,
+                                )
+                            except subprocess.TimeoutExpired:
+                                still_failing.append(vcmd)
+                                continue
+                            if vresult.returncode != 0 and vcmd not in (
+                                baseline_failures
+                            ):
+                                still_failing.append(vcmd)
+                    finally:
+                        _finish_verification(
+                            config,
+                            baseline,
+                            state,
+                            "Phase 4.1 re-verification",
+                            in_flight=sys.exc_info()[0] is not None,
+                        )
                     if still_failing:
                         log.warning(
                             "Phase 4.1: %d commands still failing after recovery: %s",
@@ -3785,8 +4958,8 @@ def _run_pipeline_phases(
     state.dossier.add(
         "Candidate patch", patch_bytes.decode("utf-8", "replace"), "git format-patch"
     )
-    os.makedirs(tracker._output_dir, exist_ok=True)
-    patch_path = os.path.join(tracker._output_dir, PATCH_FILE)
+    os.makedirs(tracker.output_dir, exist_ok=True)
+    patch_path = os.path.join(tracker.output_dir, PATCH_FILE)
     with open(patch_path, "wb") as f:
         f.write(patch_bytes)
     log.info("Patch written to %s", patch_path)
@@ -3974,6 +5147,9 @@ def run_targets(
                 continue
             worktree_created = True
             target_config.repo_path = worktree_path
+            # Repoint build_dir at the worktree: every path the pipeline
+            # derives from it (verification cwd, build-output guard) must
+            # describe the checkout that is actually being built.
             target_config.build_dir = os.path.join(worktree_path, build_subdir)
             print("Worktree created successfully")
 
