@@ -4300,9 +4300,27 @@ def _discard_verification_dirt(
             for path in new_untracked
             if not (build_dir_rel is not None and _is_under(path, build_dir_rel))
         )
+        # -ff: `git clean -fd` exits 0 on a nested repository without
+        # removing it, so the discard would report a clean tree while the
+        # verification's content survives — and a later `git add -A` would
+        # sweep it into the deliverable. The survivor check below is what
+        # makes the exit code trustworthy in the first place.
         if to_remove and not _run_git_pathspec_batches(
-            config, ["clean", "-fd", "--"], to_remove
+            config, ["clean", "-ffd", "--"], to_remove
         ):
+            clean = False
+        survivors = sorted(
+            path
+            for path in to_remove
+            if os.path.lexists(os.path.join(config.repo_path, path))
+        )
+        if survivors:
+            log.warning(
+                "Verification dirt could not be removed: %d path(s) survived "
+                "git clean (e.g. %s) — they could reach a later commit boundary",
+                len(survivors),
+                ", ".join(survivors[:5]),
+            )
             clean = False
         # git clean removes files, not the directories left empty behind
         # them. The removed paths name exactly which directories can have

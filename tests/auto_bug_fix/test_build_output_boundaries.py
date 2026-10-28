@@ -597,6 +597,32 @@ def test_discard_prunes_directories_its_clean_left_empty(tmp_path):
     assert not (tmp_path / "builddir").exists()
 
 
+def test_discard_removes_a_nested_repository_created_by_a_verification(tmp_path):
+    """`git clean -fd` exits 0 on a nested repository without removing it, so
+    the discard reported a clean tree while the content survived."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    baseline = _worktree_snapshot(config)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=nested, check=True, capture_output=True)
+    (nested / "artifact.txt").write_text("verification content\n")
+
+    assert _discard_verification_dirt(config, baseline, state) is True
+    assert not nested.exists(), "the nested repo and its content are gone"
+
+
+def test_discard_fails_when_a_path_survives_git_clean(tmp_path, monkeypatch):
+    """Whatever the exit code says, the discard only reports clean when the
+    paths it asked git to remove are actually gone."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "gen.o").write_text("output\n")
+
+    monkeypatch.setattr(rbf, "_run_git_pathspec_batches", lambda *a, **k: True)
+
+    assert _discard_verification_dirt(config, baseline, state) is False
+
+
 def test_discard_reports_failure_when_clean_fails(tmp_path, monkeypatch):
     """A discard that could not finish must say so — the caller escalates."""
     from auto_bug_fix import run_bug_fix
