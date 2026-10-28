@@ -689,7 +689,24 @@ def phase_0_5_semantic_triage(
 
     claude_config_triage = _phase_config(claude_config, config)
 
+    # The triage session can commit for itself like any other agent. Nothing
+    # is learned yet — Phase 1's baseline build has not run — so the strip can
+    # only recognize what git already ignores here, which is exactly a
+    # force-added artifact from the session's own `git add -A -f` sweep.
+    head = _run_git(config.repo_path, ["rev-parse", "HEAD"])
+    triage_head = head.stdout.strip() if head.success else ""
     asyncio.run(claude_run(claude_config_triage, [prompt.prompt()], tracker=tracker))
+    if triage_head:
+        _strip_committed_build_output(
+            config, state, triage_head, "Phase 0.5 (semantic triage)"
+        )
+    else:
+        # No HEAD to measure against: nothing can be said about what the
+        # session committed, and the phases below fail on their own terms.
+        log.warning(
+            "Phase 0.5 (semantic triage): could not read HEAD before the "
+            "session — a commit it made is not checked for build output"
+        )
 
     triage_candidates = [
         os.path.join(config.repo_path, SEMANTIC_TRIAGE_FILE),

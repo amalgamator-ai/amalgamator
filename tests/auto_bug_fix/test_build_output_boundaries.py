@@ -1401,3 +1401,34 @@ def test_resolution_skip_path_strips_build_output_from_its_commit(
     tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
     assert "gen.o" not in tree
     assert (tmp_path / "gen.o").exists(), "kept on disk for the build that expects it"
+
+
+def test_semantic_triage_strips_build_output_from_an_agent_commit(
+    tmp_path, monkeypatch
+):
+    """The Phase 0.5 triage agent was the one agent boundary nothing guarded:
+    it runs before Phase 1 learns any output, so a `git add -A` there put its
+    own build tree into HEAD — which in turn disabled the fence for the whole
+    run. Ignore rules are the only evidence available this early."""
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / ".gitignore").write_text("*.o\n")
+    _git_4b(tmp_path, "add", ".gitignore")
+    _git_4b(tmp_path, "commit", "-m", "ignore object files")
+    config.source_fix_commit = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    async def session(cfg, steps, tracker=None):
+        (tmp_path / "gen.o").write_text("compile output\n")
+        (tmp_path / "triage.json").write_text('{"recommendation": "proceed"}\n')
+        # -f: the agent force-adds its build tree over the ignore rules.
+        _git_4b(tmp_path, "add", "-A", "-f")
+        _git_4b(tmp_path, "commit", "-m", "agent commit")
+        return []
+
+    monkeypatch.setattr(rbf, "claude_run", session)
+
+    rbf.phase_0_5_semantic_triage(config, claude_cfg, state, None)
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "gen.o" not in tree
+    assert "triage.json" in tree, "the agent's analysis is work and stays"
+    assert (tmp_path / "gen.o").exists(), "kept on disk for the build that expects it"
