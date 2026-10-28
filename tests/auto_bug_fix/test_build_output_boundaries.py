@@ -1363,3 +1363,41 @@ def test_strip_committed_build_output_is_a_no_op_without_an_agent_commit(tmp_pat
     assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
 
     assert _git_4b(tmp_path, "rev-parse", "HEAD") == base
+
+
+def test_resolution_skip_path_strips_build_output_from_its_commit(
+    tmp_path, monkeypatch
+):
+    """The ``files_to_skip`` path commits and returns without reaching
+    ``_finalize_resolution``, so the strip there never saw it. Whatever the
+    index carried at that commit — including build output staged alongside the
+    conflict — went straight into candidate.patch."""
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    _conflicted_repo(tmp_path)  # real ``UU src.c``, mid-merge
+    state.generated_output = {"gen.o"}
+    (tmp_path / "gen.o").write_text("compile output\n")
+    _git_4b(tmp_path, "add", "gen.o")
+
+    class _Failed:
+        exit_code = 1
+        success = False
+        stderr = "conflict"
+
+    # The conflict is already in the worktree; keep it there instead of
+    # re-running (and aborting) a cherry-pick.
+    monkeypatch.setattr(rbf, "git_cherry_pick", lambda *a, **k: _Failed())
+    monkeypatch.setattr(rbf, "git_cherry_pick_abort", lambda *a, **k: None)
+
+    rbf.cherry_pick_and_resolve(
+        config,
+        claude_cfg,
+        state,
+        None,
+        commit="0" * 40,
+        label="test",
+        files_to_skip=["src.c"],
+    )
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "gen.o" not in tree
+    assert (tmp_path / "gen.o").exists(), "kept on disk for the build that expects it"

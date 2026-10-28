@@ -2399,6 +2399,10 @@ def cherry_pick_and_resolve(
 ) -> str:
     """Cherry-pick a single commit trying multiple strategies. Returns 'clean', 'resolved', or raises."""
 
+    # HEAD before the cherry-pick: the base every agent commit made during
+    # this phase is measured against (``_strip_committed_build_output``).
+    entry_head = git_rev_parse(config.repo_path, "HEAD")
+
     class _CherryPickStrategy(TypedDict):
         strategy: str | None
         strategy_option: str | None
@@ -2540,6 +2544,14 @@ def cherry_pick_and_resolve(
             f"Port {label}\n\n[ Conflict summary: {'; '.join(conflict_summary_parts)} ]"
         )
         git_commit(config.repo_path, msg)
+        # This path returns without reaching ``_finalize_resolution``, so the
+        # strip there never ran over the commit just made. Nothing here
+        # normally carries build output — it is the cherry-pick's own index —
+        # but an agent session that staged the tree earlier can have put it
+        # there, and this commit feeds candidate.patch like any other.
+        _strip_committed_build_output(
+            config, state, entry_head, f"Phase 2+3a ({label})"
+        )
         return "resolved"
 
     original_uu_files = list(uu_files)
