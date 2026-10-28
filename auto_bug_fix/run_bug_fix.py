@@ -1163,8 +1163,14 @@ def _is_under(path: str, rel: str) -> bool:
     return path == rel or path.startswith(rel + "/")
 
 
-def _fence_build_dir(config: BugFixConfig) -> str | None:
+def _fence_build_dir(config: BugFixConfig, ref: str = "HEAD") -> str | None:
     """Directory to exclude from a commit boundary, or None when unsafe.
+
+    *ref* is the tree the question is asked of. The staging boundary asks
+    about HEAD; the post-agent strip asks about the tree as it was *before*
+    the session, because an agent that committed its own build output makes
+    that output tracked at HEAD and would otherwise switch the fence off
+    exactly when the guard needs it.
 
     Build output must not reach the candidate patch, but a build directory
     is not necessarily generated: ``repository.build_subdir`` means "the
@@ -1191,7 +1197,7 @@ def _fence_build_dir(config: BugFixConfig) -> str | None:
         return None
     tracked = _run_git(
         config.repo_path,
-        ["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", _literal_pathspec(rel)],
+        ["ls-tree", "-r", "--name-only", "-z", ref, "--", _literal_pathspec(rel)],
     )
     if not tracked.success:
         # Fail open: committing build output is recoverable (the patch is
@@ -1206,9 +1212,10 @@ def _fence_build_dir(config: BugFixConfig) -> str | None:
         return None
     if tracked.stdout.strip("\0"):
         log.debug(
-            "build_dir %s holds tracked files — not fenced (anything ported "
-            "there must reach the candidate patch)",
+            "build_dir %s holds tracked files at %s — not fenced (anything "
+            "ported there must reach the candidate patch)",
             rel,
+            ref,
         )
         return None
     return rel
@@ -1331,7 +1338,10 @@ def _record_generated_digests(
 
 
 def _recognized_build_output(
-    config: BugFixConfig, state: PipelineState, paths: set[str]
+    config: BugFixConfig,
+    state: PipelineState,
+    paths: set[str],
+    fence: str | None = None,
 ) -> set[str]:
     """Of *paths*, the ones holding content a build was seen to produce there.
 
@@ -1347,6 +1357,13 @@ def _recognized_build_output(
     build output that drifted between runs makes the patch noisier, which
     the run can recover from; a dropped fix it cannot. Unrecognized content
     is named in the log so the noise is traceable.
+
+    Inside *fence* the name is the only evidence there is: digests are not
+    recorded for a fenced subtree (it is designated generated wholesale, and
+    hashing an entire build tree on every verification is pure cost), so a
+    path learned there is exempted by name. Everywhere else a missing digest
+    means the content cannot be proven to be build output, and the file is
+    kept as work rather than dropped on the strength of its name.
     """
     if not paths:
         return set()
@@ -1354,18 +1371,29 @@ def _recognized_build_output(
     current = _hash_worktree_paths(config, [p for p, d in known.items() if d])
     recognized: set[str] = set()
     unrecognized: list[str] = []
+    unproven: list[str] = []
     for path in sorted(paths):
         digests = known[path]
         if not digests:
-            # Nothing was ever recorded for this path — hashing failed, or it
+            # Nothing was ever recorded for this path: hashing failed, or it
             # was learned inside a fenced build directory, where the subtree
-            # exclusion decides and per-path content is never needed. Fall
-            # back to the path rule rather than invent evidence either way.
-            recognized.add(path)
+            # exclusion decides and per-path content is never needed.
+            if fence is not None and _is_under(path, fence):
+                recognized.add(path)
+            else:
+                unproven.append(path)
         elif current.get(path) in digests:
             recognized.add(path)
         else:
             unrecognized.append(path)
+    if unproven:
+        log.warning(
+            "Commit boundary: %d learned path(s) have no recorded content to "
+            "match against — keeping them as work rather than dropping them "
+            "on the strength of the name (e.g. %s)",
+            len(unproven),
+            ", ".join(unproven[:5]),
+        )
     if unrecognized:
         log.warning(
             "Commit boundary: %d learned build-output path(s) no longer hold "
@@ -1524,18 +1552,26 @@ def _strip_committed_build_output(
         modified_paths = [x for x in modified.stdout.split("\0") if x]
         learned = state.generated_output if state is not None else set()
         digests = state.generated_digests if state is not None else {}
+        # The fence of the *pre-session* tree: an agent that committed its
+        # own build output made it tracked at HEAD, which is exactly what
+        # would switch the HEAD-based fence off here.
+        fence = _fence_build_dir(config, base_ref)
 
         candidates = sorted(set(paths) & learned)
         committed = _blobs_in_ref(config, head, candidates) if candidates else {}
         if committed is None:
             return False
         # A learned path with recorded content must still hold content a
-        # build was seen to write; one learned inside a fenced build
-        # directory has none recorded, and the path rule stands there.
+        # build was seen to write. One learned inside a fenced build
+        # directory has none recorded, and the path rule stands there — the
+        # subtree is designated generated wholesale. Outside a fence a name
+        # is not proof, so an unproven path stays committed rather than being
+        # removed from the patch on the strength of its name.
         removed = {
             path
             for path in candidates
-            if not digests.get(path) or committed.get(path) in digests[path]
+            if committed.get(path) in digests.get(path, set())
+            or (not digests.get(path) and fence is not None and _is_under(path, fence))
         }
         removed |= _ignored_paths(config, paths)
 
@@ -1818,7 +1854,7 @@ def _stage_agent_work(
                 # Cannot prove which candidates are source: fall back to the
                 # untracked-only rule rather than risk dropping an edit.
                 generated = _recognized_build_output(
-                    config, state, dirty[1] & state.generated_output
+                    config, state, dirty[1] & state.generated_output, fence
                 )
                 ok = False
                 log.warning(
@@ -1827,7 +1863,7 @@ def _stage_agent_work(
                 )
             else:
                 generated = _recognized_build_output(
-                    config, state, candidates - in_head
+                    config, state, candidates - in_head, fence
                 )
             if generated and not _run_git_pathspec_batches(
                 config, ["reset", "-q", "HEAD", "--"], list(generated)

@@ -48,6 +48,12 @@ def _staged(tmp_path):
     return _git_4b(tmp_path, "diff", "--cached", "--name-only")
 
 
+def _learn(config, state, *paths):
+    """Record generated paths the way a discard does: name plus content."""
+    state.generated_output |= set(paths)
+    rbf._record_generated_digests(config, state, set(paths))
+
+
 # ---------- The fence: untracked build dirs only ----------
 
 
@@ -179,8 +185,8 @@ def test_stage_agent_work_learned_output_at_the_repo_root(tmp_path):
     so output an earlier verification produced is left unstaged by path."""
     config, _, state = _phase_4b_fixtures(tmp_path)
     assert config.build_dir == str(tmp_path)
-    state.generated_output = {"gen.o"}
     (tmp_path / "gen.o").write_text("agent-run build output\n")
+    _learn(config, state, "gen.o")
     (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
 
     result = _stage_agent_work(config, state)
@@ -193,9 +199,9 @@ def test_stage_agent_work_keeps_an_unlearned_untracked_file(tmp_path):
     """Only paths an orchestrator verification actually created are learned;
     a new source file the agent wrote is not build output."""
     config, _, state = _phase_4b_fixtures(tmp_path)
-    state.generated_output = {"gen.o"}
     (tmp_path / "generated.c").write_text("int g = 1;\n")
     (tmp_path / "gen.o").write_text("output\n")
+    _learn(config, state, "gen.o")
 
     _stage_agent_work(config, state)
 
@@ -207,8 +213,8 @@ def test_stage_agent_work_unstages_learned_output_the_agent_staged(tmp_path):
     additions, which the untracked set no longer names. Learned paths must be
     unstaged from the index too, or the output rides into the commit."""
     config, _, state = _phase_4b_fixtures(tmp_path)
-    state.generated_output = {"gen.o"}
     (tmp_path / "gen.o").write_text("agent-run build output\n")
+    _learn(config, state, "gen.o")
     _git_4b(tmp_path, "add", "gen.o")
     (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
 
@@ -308,15 +314,21 @@ def test_discard_does_not_hash_inside_a_fenced_build_dir(tmp_path):
     assert set(state.generated_digests) == {"root-gen.o"}
 
 
-def test_recognized_build_output_falls_back_when_nothing_was_recorded(tmp_path):
-    """No recorded content is not evidence either way — hashing can fail, and
-    fenced paths are skipped by design. The path rule still applies there, so
-    this change can only ever keep more work, never less."""
+def test_recognized_build_output_requires_content_outside_a_fence(tmp_path):
+    """No recorded content is not evidence: hashing can fail, and then a name
+    is all the path has. Outside a fenced build directory that is not proof
+    enough — the file is kept as work. Inside one the name is all there ever
+    is, so the path rule stands there."""
     config, _, state = _phase_4b_fixtures(tmp_path)
-    state.generated_output = {"gen.o"}
     (tmp_path / "gen.o").write_text("output\n")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "out.o").write_text("output\n")
+    state.generated_output = {"gen.o", "build/out.o"}
 
-    assert rbf._recognized_build_output(config, state, {"gen.o"}) == {"gen.o"}
+    assert rbf._recognized_build_output(config, state, {"gen.o"}) == set()
+    assert rbf._recognized_build_output(config, state, {"build/out.o"}, "build") == {
+        "build/out.o"
+    }
 
 
 def test_comparison_snapshot_does_not_capture_content(tmp_path):
@@ -799,8 +811,8 @@ def test_non_artifact_dirt_names_learned_output_it_leaves_behind(tmp_path, caplo
 
     caplog.set_level(logging.INFO, logger="auto_bug_fix.run_bug_fix")
     config, _, state = _phase_4b_fixtures(tmp_path)
-    state.generated_output = {"gen.o"}
     (tmp_path / "gen.o").write_text("output\n")
+    _learn(config, state, "gen.o")
 
     staged = _stage_agent_work(config, state)
 
@@ -961,7 +973,8 @@ def test_phase_4b_pre_verification_commit_excludes_learned_output(tmp_path):
     from auto_bug_fix.run_bug_fix import phase_4b_run_and_fix
 
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
-    state.generated_output = {"gen.o"}
+    (tmp_path / "gen.o").write_text("agent-run build output\n")
+    _learn(config, state, "gen.o")
 
     async def session(cfg, steps):
         (tmp_path / "src.c").write_text("int a = 2; /* fixed by 4b */\n")
@@ -1002,9 +1015,9 @@ def test_commit_worktree_edits_on_an_abort_path_uses_the_staging_guard(tmp_path)
     from auto_bug_fix.run_bug_fix import _commit_worktree_edits
 
     config, _, state = _phase_4b_fixtures(tmp_path)
-    state.generated_output = {"gen.o"}
     (tmp_path / "src.c").write_text("int a = 2; /* fixed */\n")
     (tmp_path / "gen.o").write_text("output\n")
+    _learn(config, state, "gen.o")
 
     assert _commit_worktree_edits(config, "Phase 4b", state) is True
 
@@ -1375,8 +1388,8 @@ def test_resolution_skip_path_strips_build_output_from_its_commit(
     conflict — went straight into candidate.patch."""
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     _conflicted_repo(tmp_path)  # real ``UU src.c``, mid-merge
-    state.generated_output = {"gen.o"}
     (tmp_path / "gen.o").write_text("compile output\n")
+    _learn(config, state, "gen.o")
     _git_4b(tmp_path, "add", "gen.o")
 
     class _Failed:
@@ -1442,7 +1455,8 @@ def test_red_triage_strips_build_output_from_an_agent_commit(tmp_path, monkeypat
     from auto_bug_fix.bug_fix_prompts import RED_TRIAGE_FILE
 
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
-    state.generated_output = {"gen.o"}
+    (tmp_path / "gen.o").write_text("compile output\n")
+    _learn(config, state, "gen.o")
     state.red_passed_output = "PASSED tests/test_x.py"
 
     async def session(cfg, steps, tracker=None):
@@ -1473,7 +1487,8 @@ def test_a_session_that_commits_and_then_raises_is_still_stripped(
     by a session that then errors would ship its build output exactly when
     the run gives up on the phase. The strip has to run in ``finally``."""
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
-    state.generated_output = {"gen.o"}
+    (tmp_path / "gen.o").write_text("compile output\n")
+    _learn(config, state, "gen.o")
     state.red_passed_output = "PASSED tests/test_x.py"
 
     async def session(cfg, steps, tracker=None):
@@ -1500,7 +1515,8 @@ def test_phase_4a_survives_and_strips_a_self_committing_agent(tmp_path):
 
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     config.max_build_test_retries = 1
-    state.generated_output = {"gen.o"}
+    (tmp_path / "gen.o").write_text("compile output\n")
+    _learn(config, state, "gen.o")
 
     async def session(cfg, steps):
         (tmp_path / "src.c").write_text("int a = 3; /* fix */\n")
@@ -1532,7 +1548,8 @@ def test_phase_4b_strips_a_self_committing_agent(tmp_path):
     from unittest.mock import patch
 
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
-    state.generated_output = {"gen.o"}
+    (tmp_path / "gen.o").write_text("compile output\n")
+    _learn(config, state, "gen.o")
 
     async def session(cfg, steps):
         (tmp_path / "src.c").write_text("int a = 4; /* fixed by 4b */\n")
