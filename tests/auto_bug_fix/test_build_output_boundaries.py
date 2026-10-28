@@ -20,7 +20,7 @@ import subprocess
 import pytest
 
 from auto_bug_fix import run_bug_fix as rbf
-from auto_bug_fix.git_tools import git_status_porcelain
+from auto_bug_fix.git_tools import GitResult, git_status_porcelain
 from auto_bug_fix.run_bug_fix import (
     PipelineEscalation,
     StageResult,
@@ -55,6 +55,56 @@ def _learn(config, state, *paths):
 
 
 # ---------- The fence: untracked build dirs only ----------
+
+
+def _fail_ls_tree(monkeypatch):
+    """Make the tree lookup that decides the fence unreadable."""
+
+    def fake(repo, args, *a, **k):
+        if args and args[0] == "ls-tree":
+            return GitResult(1, "", "simulated ls-tree failure")
+        return real_run_git(repo, args, *a, **k)
+
+    real_run_git = rbf._run_git
+    monkeypatch.setattr(rbf, "_run_git", fake)
+
+
+def test_fence_build_dir_fails_closed_only_where_it_can_restage(tmp_path, monkeypatch):
+    """An unreadable tree must not decide the fence for the strip — there the
+    fence only ever removes more — but the staging boundary re-stages what it
+    cannot account for, so it can afford to fence."""
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "rpm-build")
+    (tmp_path / "rpm-build").mkdir()
+    (tmp_path / "rpm-build" / "artifact.rpm").write_text("build output\n")
+    _fail_ls_tree(monkeypatch)
+
+    assert _fence_build_dir(config, fail_closed=True) == "rpm-build"
+    assert _fence_build_dir(config) is None
+
+
+def test_staging_fences_an_unreadable_build_tree_without_dropping_source(
+    tmp_path, monkeypatch
+):
+    """Fencing on an unknown tree keeps output out; the restage keeps the
+    source the same unknown tree might hold."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "rpm-build")
+    (tmp_path / "rpm-build").mkdir()
+    (tmp_path / "rpm-build" / "artifact.rpm").write_text("build output\n")
+    _learn(config, state, "rpm-build/artifact.rpm")
+    (tmp_path / "rpm-build" / "ported.c").write_text("int b; /* source */\n")
+    (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
+    _fail_ls_tree(monkeypatch)
+
+    result = _stage_agent_work(config, state)
+
+    assert result.fenced_build_dir == "rpm-build"
+    assert result.ok
+    staged = _staged(tmp_path).splitlines()
+    assert "src.c" in staged
+    assert "rpm-build/ported.c" in staged
+    assert "rpm-build/artifact.rpm" not in staged
 
 
 def test_stage_agent_work_fences_an_untracked_build_dir(tmp_path):

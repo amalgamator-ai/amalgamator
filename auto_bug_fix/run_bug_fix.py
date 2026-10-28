@@ -1163,7 +1163,9 @@ def _is_under(path: str, rel: str) -> bool:
     return path == rel or path.startswith(rel + "/")
 
 
-def _fence_build_dir(config: BugFixConfig, ref: str = "HEAD") -> str | None:
+def _fence_build_dir(
+    config: BugFixConfig, ref: str = "HEAD", fail_closed: bool = False
+) -> str | None:
     """Directory to exclude from a commit boundary, or None when unsafe.
 
     *ref* is the tree the question is asked of. The staging boundary asks
@@ -1171,6 +1173,14 @@ def _fence_build_dir(config: BugFixConfig, ref: str = "HEAD") -> str | None:
     the session, because an agent that committed its own build output makes
     that output tracked at HEAD and would otherwise switch the fence off
     exactly when the guard needs it.
+
+    *fail_closed* decides what an unreadable tree means. Callers that remove
+    output from an existing commit keep the default and leave the directory
+    alone: there the fence only ever removes more, and committing build
+    output is recoverable while removing a fix is not. The staging boundary
+    passes ``True`` because it re-stages every fenced path it cannot account
+    for (``_restage_unaccounted_fenced``), so fencing an unknown directory
+    keeps build output out without risking source.
 
     Build output must not reach the candidate patch, but a build directory
     is not necessarily generated: ``repository.build_subdir`` means "the
@@ -1200,11 +1210,26 @@ def _fence_build_dir(config: BugFixConfig, ref: str = "HEAD") -> str | None:
         ["ls-tree", "-r", "--name-only", "-z", ref, "--", _literal_pathspec(rel)],
     )
     if not tracked.success:
+        if fail_closed:
+            # The caller re-stages everything under the fence it cannot
+            # account for, so fencing an unknown directory keeps build
+            # output out of the commit without dropping source.
+            log.warning(
+                "Could not list files tracked at %s under build_dir %s "
+                "(exit %d): %s — fencing it; paths that cannot be accounted "
+                "for as build output are staged again",
+                ref,
+                rel,
+                tracked.exit_code,
+                tracked.stderr.strip(),
+            )
+            return rel
         # Fail open: committing build output is recoverable (the patch is
         # noisier, nothing is lost); silently dropping a fix is not.
         log.warning(
-            "Could not list files tracked at HEAD under build_dir %s "
+            "Could not list files tracked at %s under build_dir %s "
             "(exit %d): %s — not fencing it",
+            ref,
             rel,
             tracked.exit_code,
             tracked.stderr.strip(),
@@ -1799,7 +1824,7 @@ def _stage_agent_work(
     the agent authoring a fix at a name some verification once generated
     must not lose it to a name collision.
     """
-    fence = _fence_build_dir(config)
+    fence = _fence_build_dir(config, fail_closed=True)
     ok = True
     learned = state.generated_output if state is not None else set()
     # Read the dirty set *before* staging: after `git add` the same files are
