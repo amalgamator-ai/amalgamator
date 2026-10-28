@@ -701,6 +701,31 @@ def test_discard_reports_failure_when_clean_fails(tmp_path, monkeypatch):
     assert _discard_verification_dirt(config, baseline, state) is False
 
 
+def test_output_from_a_failed_discard_stays_out_of_the_next_commit(
+    tmp_path, monkeypatch
+):
+    """A discard can fail while the run continues (an exception was already
+    propagating). The output it could not remove is still learned, so the
+    next commit boundary must leave it unstaged rather than sweep it in."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "gen.o").write_text("output\n")
+    monkeypatch.setattr(rbf, "_run_git_pathspec_batches", lambda *a, **k: True)
+
+    assert _discard_verification_dirt(config, baseline, state) is False
+    assert "gen.o" in state.generated_output
+
+    monkeypatch.undo()
+    (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
+
+    result = _stage_agent_work(config, state)
+
+    assert result.ok
+    staged = _staged(tmp_path).splitlines()
+    assert "src.c" in staged
+    assert "gen.o" not in staged
+
+
 def test_empty_dirs_reports_failure_on_a_permission_error(tmp_path):
     """`os.walk` swallows errors by default; an unreadable directory must
     disable the prune rather than look empty and get removed."""
