@@ -48,11 +48,13 @@ REINDENTED = BASE.replace("    int", "\tint").replace("    return;", "\treturn;"
 RESOLVED_BY_LLM = REINDENTED.replace("\tint c = 3;", "\tint c = 30;")
 
 
-def _git(cwd: str | Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _git(
+    cwd: str | Path, *args: str, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
-        check=True,
+        check=check,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -253,7 +255,9 @@ def test_run_targets_executes_the_full_pipeline(tmp_path, monkeypatch, provider)
     assert gates["token_audit"] == "0 flagged"
     assert gates["line_provenance"] == "0 findings"
     assert gates["verify"] == "passed"
-    assert gates["semantic_equivalence"] in {"identical", "modified"}
+    # The target re-indented the file, so the port must differ from the source
+    # patch in range-diff terms. "identical" would mean the adaptation was lost.
+    assert gates["semantic_equivalence"] == "modified"
     assert gates["completeness"] == "complete"
 
     # Phase artifacts: semantic triage, candidate patch, dossier, summary.
@@ -284,7 +288,17 @@ def test_run_targets_executes_the_full_pipeline(tmp_path, monkeypatch, provider)
     assert not (tmp_path / "worktrees" / "SMOKE-1_target").exists()
     preserved = _sha(repo, "amalgamator/SMOKE-1")
     # The branch is a descendant of the target tip, not a copy of it.
-    _git(repo, "merge-base", "--is-ancestor", "target", preserved)
+    assert (
+        _git(
+            repo,
+            "merge-base",
+            "--is-ancestor",
+            "target",
+            preserved,
+            check=False,
+        ).returncode
+        == 0
+    )
     assert preserved != _sha(repo, "target")
     ported_file = _git(repo, "show", "amalgamator/SMOKE-1:lib/url.c").stdout
     assert "int c = 30;" in ported_file
