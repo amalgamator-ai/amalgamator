@@ -1263,6 +1263,13 @@ def phase_4a_build_recovery(
                 "Phase 4a: agent made no changes — likely CANNOT_FIX"
             )
 
+        # Strict pre-verification boundary: the agent's edits are committed
+        # now, before the next build/test attempt runs. If this phase later
+        # escalates, candidate.patch still carries the work; committing only
+        # on the success path (as this code used to) loses it on every
+        # escalation.
+        _commit_recovery_edits(config, f"Phase 4a attempt {attempt}")
+
     build_exit, _, _ = run_test_suite(
         config.build_command, config.build_dir, timeout=config.command_timeout
     )
@@ -1511,6 +1518,10 @@ def phase_4b_run_and_fix(
         with open(failure_file) as f:
             failure_text = f.read()
         state.dossier.add("Run-and-fix failure", failure_text, "Phase 4b")
+        # Commit the agent-session work now, at the abort boundary: the
+        # deliverable must contain what the agent produced, and nothing that
+        # ran after this point (there is nothing left to run) can contaminate it.
+        _commit_worktree_edits(config, "Phase 4b (agent-reported failure)")
         _finalize("failure")
         raise PipelineEscalation("Phase 4b: run-and-fix loop exhausted retries")
     elif os.path.exists(success_file):
@@ -1518,6 +1529,20 @@ def phase_4b_run_and_fix(
             "Run-and-fix loop", "Build-test-fix loop succeeded", "Phase 4b"
         )
         log.info("Phase 4b: run-and-fix loop reported success — verifying")
+
+        # Commit the agent's edits *before* verification runs, strictly: the
+        # checks below re-run the build/test commands, which dirty the tree
+        # themselves (centpkg prep re-unpacks, Maven writes target/). Only
+        # this commit carries the agent's work into candidate.patch, and the
+        # re-verification's side effects stay out of it. If the work cannot
+        # be committed, escalating (with the failure-path patch export) is
+        # safer than reporting success without it.
+        if _commit_recovery_edits(config, "Phase 4b (pre-verification)"):
+            state.dossier.add(
+                "Run-and-fix loop",
+                "Recovery edits committed (fixup, pre-verification)",
+                "Phase 4b",
+            )
 
         # The marker says the agent believes it is done. Prove it: on the
         # cherry-pick-failure and verify-failure paths extra_verification is
@@ -1549,12 +1574,9 @@ def phase_4b_run_and_fix(
                 "Phase 4b: reported success while extended verification still "
                 f"fails: {', '.join(still_failing)}"
             )
-        if _commit_recovery_edits(config, "Phase 4b"):
-            state.dossier.add(
-                "Run-and-fix loop",
-                "Recovery edits committed (fixup)",
-                "Phase 4b",
-            )
+        # No post-verification commit: the agent's work is already in the
+        # pre-verification commit above, and everything the checks left in
+        # the tree is side-effect dirt that must not reach the deliverable.
         _finalize("success")
     else:
         # The agent session ended without writing either marker (crash, early
@@ -1565,6 +1587,7 @@ def phase_4b_run_and_fix(
             "Phase 4b",
         )
         _finalize("no_result_file")
+        _commit_worktree_edits(config, "Phase 4b (no result file)")
         raise PipelineEscalation(
             "Phase 4b: run-and-fix loop ended without writing a result file"
         )
@@ -2699,11 +2722,21 @@ def _export_candidate_patch_bytes(config: BugFixConfig) -> bytes:
 
     Success paths must never ship a 0-byte patch: an empty range means no
     deliverable exists (observed 2026-10-15: agent moved the target branch,
-    "target..HEAD" collapsed, a perfect backport exported as nothing).
+    "target..HEAD" collapsed, a perfect backport exported as nothing). The
+    net-diff check catches the degenerate sibling: commits exist in the
+    range but change no file (message-only fixups), which format-patch
+    renders as headers without a diff — still an empty deliverable.
     """
     patch_base = config.frozen_target_sha or config.target_branch
     patch_bytes = git_format_patch_bytes(config.repo_path, base_ref=patch_base)
-    if not patch_bytes.strip():
+    changed = _changed_files_since(config.repo_path, patch_base)
+    if changed is None:
+        raise PipelineEscalation(
+            "Phase 5: could not determine which files changed between the "
+            f"frozen baseline ({patch_base}) and HEAD (git diff failed) — "
+            "refusing to report success without a verified deliverable"
+        )
+    if not patch_bytes.strip() or not changed:
         raise PipelineEscalation(
             "Phase 5: candidate patch is empty — no commits between the "
             f"frozen baseline ({patch_base}) and HEAD; refusing to report "
@@ -2719,10 +2752,20 @@ def _is_test_path(path: str) -> bool:
     already present", RED-triage "not vulnerable") from shipping a patch
     whose only content is the test files Phase 0.5c ported before the stop.
     Errs towards "not a test": a mixed patch always gets emitted.
+
+    Path-segment matches (src/test/, spec/, __tests__/, testdata/) cover the
+    Maven/Gradle/JVM layout where a *directory* marks the tests; basename
+    patterns cover Python, Go, C, and JavaScript conventions (test_*.py,
+    *_test.go, *_test.c, *.test.js). The JVM class convention is matched
+    case-sensitively, at the CamelCase boundary (``[a-z0-9]Tests?\\.java``): a
+    lowercased endswith would misclassify ordinary sources like Contest.java
+    or Latest.java.
     """
     lowered = path.lower()
     parts = lowered.split("/")
-    if any(seg in ("test", "tests", "spec", "__tests__") for seg in parts[:-1]):
+    if any(
+        seg in ("test", "tests", "spec", "__tests__", "testdata") for seg in parts[:-1]
+    ):
         return True
     base = parts[-1]
     return (
@@ -2732,11 +2775,19 @@ def _is_test_path(path: str) -> bool:
         or ".spec." in base
         or base.endswith("_test.py")
         or base.endswith("_test.go")
+        or base.endswith("_test.c")
+        or re.search(r"[a-z0-9]Tests?\.java$", path) is not None
     )
 
 
-def _changed_files_since(repo_path: str, base_ref: str) -> list[str]:
-    """Files changed between base_ref and HEAD (empty on any git failure)."""
+def _changed_files_since(repo_path: str, base_ref: str) -> list[str] | None:
+    """Files changed between base_ref and HEAD, or None when git fails.
+
+    ``None`` (rather than ``[]``) on failure is deliberate: an unreadable
+    diff is not an empty one. Phase 5 escalates on it with the real cause
+    instead of claiming the patch range is empty, and the failure-path
+    suppression stays silent rather than pretending the patch is test-only.
+    """
     result = subprocess.run(
         ["git", "diff", "--name-only", f"{base_ref}..HEAD"],
         cwd=repo_path,
@@ -2746,18 +2797,38 @@ def _changed_files_since(repo_path: str, base_ref: str) -> list[str]:
         errors="replace",
     )
     if result.returncode != 0:
-        return []
-    return [line for line in result.stdout.splitlines() if line.strip()]
+        log.warning(
+            "git diff --name-only %s..HEAD failed (exit %d): %s",
+            base_ref,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return None
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def _snapshot_uncommitted_work(config: BugFixConfig) -> bool:
-    """Best-effort commit of uncommitted agent work on the failure path.
+def _commit_worktree_edits(config: BugFixConfig, phase_label: str) -> bool:
+    """Best-effort commit of uncommitted agent work on an *aborting* path.
 
-    Non-raising sibling of ``_commit_recovery_edits``: Phase 4b raises on
-    re-verify failure *before* its success-path commit runs, and ``git
-    format-patch`` cannot see working-tree edits — without this snapshot a
-    rejected-but-real 4b fix would vanish from candidate.patch. Returns True
-    if a snapshot commit was created. Never raises.
+    Non-raising sibling of ``_commit_recovery_edits``: when the pipeline is
+    already failing (agent-reported failure, missing result marker) it is
+    still better to commit the session's work than to let it vanish from
+    candidate.patch. On paths that can still succeed, the strict
+    ``_commit_recovery_edits`` is used instead, so a failed commit is never
+    silently ignored. Returns True if a commit was created; a failure is
+    logged, never raised.
+
+    Call this at the *abort boundary*, immediately after the agent session
+    and before anything else runs. Committing later — at ``run_pipeline``'s
+    exception handler, as an earlier revision of this code did — sweeps in
+    whatever the orchestrator's own re-verification left in the tree
+    (``centpkg prep`` re-unpacking a source tarball is the motivating case),
+    which lands build corruption in the deliverable.
+
+    Known limitation: the agent runs build and test commands during its own
+    session, so its build output is still committed alongside its edits.
+    Isolating that is tracked separately; it cannot be solved here without
+    risking the fix itself.
     """
     for marker in (RUN_AND_FIX_FAILURE_FILE, RUN_AND_FIX_SUCCESS_FILE):
         path = os.path.join(config.repo_path, marker)
@@ -2770,12 +2841,21 @@ def _snapshot_uncommitted_work(config: BugFixConfig) -> bool:
         subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
         git_commit(
             config.repo_path,
-            f"fixup: failure-path snapshot of uncommitted work for {config.issue_id}",
+            f"fixup: uncommitted work for {config.issue_id} ({phase_label})",
             trailers=_COAUTHOR_TRAILERS,
         )
-        return git_rev_parse(config.repo_path, "HEAD") != head_before
+        committed = git_rev_parse(config.repo_path, "HEAD") != head_before
+        if not committed:
+            left = _non_artifact_dirt(config.repo_path)
+            if left:
+                log.warning(
+                    "Best-effort work commit (%s) left work uncommitted:\n%s",
+                    phase_label,
+                    "\n".join(left),
+                )
+        return committed
     except Exception as e:
-        log.warning("Failure-path work snapshot failed: %s", e)
+        log.warning("Best-effort work commit (%s) failed: %s", phase_label, e)
         return False
 
 
@@ -2791,18 +2871,35 @@ def _emit_candidate_patch_on_failure(
     patch, reward 0). Emit whatever exists between the frozen baseline and
     HEAD so the verifier can score the work on its merits.
 
+    This function never commits anything: the phases commit agent work at
+    their own pre-verification and abort boundaries (see
+    ``_commit_worktree_edits``), so whatever is still uncommitted at abort
+    time is verification-command side effects — an unpacked source tree, a
+    re-patched spec — which must not be swept into the deliverable.
+
     ``allow_test_only=False`` suppresses the export when every changed file
     is a test file: a ``PipelineStop`` after Phase 0.5c's test port must not
-    submit a test-only patch as if it were the fix. Never raises.
+    submit a test-only patch as if it were the fix. Suppression is reserved
+    for ``PipelineStop`` because a stop asserts "there is nothing to port"
+    — any patch from it can only be the ported tests. An escalation makes
+    no such assertion; the escalated fix may be real and merely rejected by
+    an over-strict re-verify, so escalations always emit and let the
+    independent verifier judge. Never raises.
     """
     try:
         if not os.path.isdir(config.repo_path):
             return
-        _snapshot_uncommitted_work(config)
         patch_base = config.frozen_target_sha or config.target_branch
         if not allow_test_only:
             changed = _changed_files_since(config.repo_path, patch_base)
-            if changed and all(_is_test_path(f) for f in changed):
+            if changed is None:
+                # Cannot prove the patch is test-only, and suppressing a real
+                # fix is the worse error: emit and let the verifier judge.
+                log.warning(
+                    "Failure path: could not determine the changed files "
+                    "(git diff failed) — emitting without test-only suppression"
+                )
+            elif changed and all(_is_test_path(f) for f in changed):
                 log.info(
                     "Failure path: only test files changed since the frozen "
                     "baseline — not emitting a candidate patch"
@@ -2824,23 +2921,77 @@ def _emit_candidate_patch_on_failure(
         log.warning("Failure-path patch export failed: %s", e)
 
 
+def _branch_checkout_holders(
+    source_path: str, sym_ref: str, exclude: str
+) -> list[str] | None:
+    """Worktrees (other than ``exclude``) with ``sym_ref`` checked out.
+
+    Returns None when the worktree list cannot be read — callers must treat
+    that as "unknown" and fail closed, never as "no holders".
+    """
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=source_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        return None
+    exclude_real = os.path.realpath(exclude)
+    paths: list[tuple[str | None, str | None]] = []
+    current_path: str | None = None
+    current_branch: str | None = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            paths.append((current_path, current_branch))
+            current_path = line[len("worktree ") :]
+            current_branch = None
+        elif line.startswith("branch "):
+            current_branch = line[len("branch ") :]
+    paths.append((current_path, current_branch))
+    return [
+        path
+        for path, branch in paths
+        if path is not None
+        and branch == sym_ref
+        and os.path.realpath(path) != exclude_real
+    ]
+
+
 def _restore_target_baseline(
     source_path: str, worktree_path: str, branch: str, frozen_sha: str
-) -> None:
+) -> str | None:
     """Point the target branch back at the frozen baseline if the agent moved it.
 
     The task verifier builds its own worktree from the branch NAME; if the
     agent left its commits on the target branch, a pristine-baseline apply
     of candidate.patch would fail. The agent's work stays preserved in
-    candidate.patch (and on the amalgamator/ branch for successful runs).
-    Never raises.
+    candidate.patch, on the ``amalgamator/`` branch for successful runs, and
+    — when no deliverable exists — on the ``amalgamator-failed/`` branch
+    created here, so restoring never discards it.
+
+    Returns ``None`` when the branch is at the frozen baseline (or was
+    restored), and a human-readable reason when it was left moved. Every
+    skip case has the same consequence — the verifier may apply
+    candidate.patch to a non-pristine tree and score 0 — so the caller
+    records the reason in the run summary rather than leaving it in a log
+    nobody reads on a benchmark run.
+
+    This is a ``run_targets`` responsibility: it owns the worktree and the
+    source checkout, and only it knows the frozen baseline the branch must
+    return to. Callers of ``run_pipeline`` that manage their own checkouts
+    must arrange their own cleanup. Never raises.
     """
     try:
         if not frozen_sha:
-            return
+            return (
+                "no frozen baseline was recorded — cannot tell whether the branch moved"
+            )
         current = git_rev_parse(source_path, branch)
         if current == frozen_sha:
-            return
+            return None
         # Only local branches (refs/heads/*) can be repointed. "branch" may
         # name a remote-tracking ref or a tag (origin/main, v1.2); moving a
         # remote-tracking ref corrupts the view of the remote, and
@@ -2857,6 +3008,11 @@ def _restore_target_baseline(
             errors="replace",
         ).stdout.strip()
         if not sym.startswith("refs/heads/"):
+            reason = (
+                f"target ref resolves to {sym or 'nothing'}, not a local "
+                "branch — only refs/heads/* are restored, so it is left at "
+                f"{current[:12]}"
+            )
             log.warning(
                 "Target ref %s resolves to %s, not a local branch — leaving "
                 "it at %s; only refs/heads/* are restored",
@@ -2864,7 +3020,42 @@ def _restore_target_baseline(
                 sym or "nothing",
                 current[:12],
             )
-            return
+            return reason
+        # Never move a branch that another worktree holds checked out: the
+        # ref is shared state, and repointing it under that checkout corrupts
+        # the other worktree's view (its index and HEAD still reference the
+        # old tip while the branch name resolves elsewhere). Our own
+        # pipeline worktree is excluded — it is detached below. The check
+        # fails closed: if the worktree list cannot be read, restoration is
+        # skipped rather than guessing.
+        holders = _branch_checkout_holders(source_path, sym, exclude=worktree_path)
+        if holders is None:
+            reason = (
+                "cannot determine which worktrees hold the target branch "
+                f"(git worktree list failed) — it is left at {current[:12]}"
+            )
+            log.warning(
+                "Cannot determine which worktrees hold %s — leaving it at "
+                "%s; restoration requires a readable worktree list",
+                branch,
+                current[:12],
+            )
+            return reason
+        if holders:
+            reason = (
+                "target branch is checked out in another worktree "
+                f"({', '.join(holders)}) — the shared ref is left at "
+                f"{current[:12]}"
+            )
+            log.warning(
+                "Target branch %s is checked out in %s — leaving it at %s; "
+                "the ref is shared state and will not be moved under another "
+                "worktree",
+                branch,
+                ", ".join(holders),
+                current[:12],
+            )
+            return reason
         log.warning(
             "Target branch %s moved during the run (%s -> %s); restoring "
             "the frozen baseline so the verifier applies candidate.patch "
@@ -2873,10 +3064,31 @@ def _restore_target_baseline(
             frozen_sha[:12],
             current[:12],
         )
+        # Preserve the moved tip first: if no candidate.patch was emitted,
+        # this ref is the only surviving copy of the agent's commits.
+        preserve_name = "amalgamator-failed/" + _sanitize_branch_slug(branch)
+        preserved = subprocess.run(
+            ["git", "branch", "-f", preserve_name, current],
+            cwd=source_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if preserved.returncode == 0:
+            log.info("Moved tip preserved on branch %s", preserve_name)
+        else:
+            log.warning(
+                "Could not preserve the moved tip on %s: %s",
+                preserve_name,
+                (preserved.stderr or "").strip(),
+            )
         # Detach the worktree HEAD first so the checkout is consistent with
         # the moved ref; the commits stay reachable from the worktree until
-        # cleanup, and live on in candidate.patch regardless.
-        subprocess.run(
+        # cleanup, and live on in candidate.patch regardless. If the detach
+        # fails the branch is still checked out here, so moving it would
+        # corrupt this worktree — skip the update entirely.
+        detach = subprocess.run(
             ["git", "checkout", "--detach"],
             cwd=worktree_path,
             capture_output=True,
@@ -2884,8 +3096,24 @@ def _restore_target_baseline(
             encoding="utf-8",
             errors="replace",
         )
+        if detach.returncode != 0:
+            reason = (
+                "git checkout --detach failed in the pipeline worktree — the "
+                f"branch is still checked out there and is left at {current[:12]}"
+            )
+            log.warning(
+                "git checkout --detach failed (%s) — leaving %s at %s; the "
+                "branch is still checked out in the pipeline worktree",
+                (detach.stderr or "").strip(),
+                branch,
+                current[:12],
+            )
+            return reason
+        # Compare-and-swap: if the branch moved again between the read above
+        # and this update, git update-ref fails and the concurrent writer's
+        # value wins — we never clobber commits we did not observe.
         result = subprocess.run(
-            ["git", "update-ref", sym, frozen_sha],
+            ["git", "update-ref", sym, frozen_sha, current],
             cwd=source_path,
             capture_output=True,
             text=True,
@@ -2893,9 +3121,21 @@ def _restore_target_baseline(
             errors="replace",
         )
         if result.returncode != 0:
-            log.warning("git update-ref failed: %s", (result.stderr or "").strip())
+            reason = (
+                f"git update-ref (CAS) failed — {branch} appears to have "
+                "moved concurrently and was left where it was"
+            )
+            log.warning(
+                "git update-ref (CAS) failed — %s moved concurrently; "
+                "leaving it alone: %s",
+                sym,
+                (result.stderr or "").strip(),
+            )
+            return reason
+        return None
     except Exception as e:
         log.warning("Target baseline restore failed: %s", e)
+        return f"restore failed: {e}"
 
 
 def run_pipeline(
@@ -2922,8 +3162,13 @@ def run_pipeline(
     # "target..HEAD" then exported an empty range). Everything that later
     # computes "what did the agent produce" must range from this SHA, not
     # from the movable branch name.
-    # Always re-freeze: a config object reused across runs must not keep
-    # ranging its patches from the previous run's (possibly moved) baseline.
+    # Always re-freeze, by design: this is runtime state of *this* run, and
+    # a config object reused across runs must not keep ranging its patches
+    # from the previous run's (possibly moved) baseline. A caller-provided
+    # frozen_target_sha is therefore intentionally overwritten — passing a
+    # baseline in buys nothing. run_targets constructs a fresh config per
+    # target, so only direct run_pipeline callers reusing a config are
+    # affected, and for them the overwrite is the safe behavior.
     try:
         config.frozen_target_sha = git_rev_parse(config.repo_path, config.target_branch)
     except Exception:
@@ -3666,6 +3911,7 @@ def run_targets(
     by ``parse_targets`` upstream, not defensively here.
     """
     os.makedirs(workdir, exist_ok=True)
+    run_warnings = [] if run_warnings is None else run_warnings
     results: list[TargetResult] = []
 
     for i, spec in enumerate(targets, 1):
@@ -3865,12 +4111,17 @@ def run_targets(
             sys.stdout = saved_stdout
             target_log_file.close()
             if worktree_created:
-                _restore_target_baseline(
+                restored = _restore_target_baseline(
                     source_path,
                     worktree_path,
                     spec.branch,
                     target_config.frozen_target_sha,
                 )
+                if restored:
+                    run_warnings.append(
+                        f"{spec.branch}: target branch not confirmed at the "
+                        f"frozen baseline — {restored}"
+                    )
                 cleanup_worktree(source_path, worktree_path)
 
     _write_summary(results, parent_run_dir, warnings=run_warnings)
