@@ -1,5 +1,7 @@
-# After docs / community policy changes land on main, call the website's
-# Publish Pages reusable workflow (same pattern as Docs Preview → Netlify).
+# After docs / community policy changes land on main, ask the website repo to
+# rebuild and publish GitHub Pages (production).
+#
+# Requires secret WEBSITE_DISPATCH_TOKEN — see CONTRIBUTING.md.
 
 name: Docs Publish
 
@@ -14,16 +16,37 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: docs-publish-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  publish:
-    name: Publish website Pages
-    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/pages.yml@main
-    with:
-      docs_ref: ${{ github.sha }}
+  dispatch-website-publish:
+    name: Trigger website Pages publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: repository_dispatch → amalgamator-ai.github.io
+        env:
+          GH_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
+          DOCS_REF: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::Set secret WEBSITE_DISPATCH_TOKEN (see CONTRIBUTING.md)."
+            exit 1
+          fi
+          gh api \
+            --method POST \
+            repos/amalgamator-ai/amalgamator-ai.github.io/dispatches \
+            --input - <<EOF
+          {
+            "event_type": "docs-publish",
+            "client_payload": {
+              "docs_ref": "${DOCS_REF}",
+              "caller_repo": "${{ github.repository }}",
+              "caller_sha": "${DOCS_REF}"
+            }
+          }
+          EOF
+          echo "Dispatched docs-publish (docs_ref=${DOCS_REF})"
