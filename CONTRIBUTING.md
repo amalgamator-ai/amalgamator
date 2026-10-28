@@ -131,6 +131,17 @@ Releases follow [Semantic Versioning 2.0.0](https://semver.org/). While the vers
 
 Never commit API keys, tokens, or other credentials. Keep local model registries and case files that contain secrets out of your commits.
 
+### Docs site CI (maintainers)
+
+Pull requests that touch `docs/**`, `SECURITY.md`, `CONTRIBUTING.md`, or `CODE_OF_CONDUCT.md` run **Docs Preview** (Netlify) via the website’s reusable workflow. Merges of those paths to `main` run **Docs Publish**, which calls the website’s `pages.yml` reusable workflow to rebuild production.
+
+Required Actions secrets on this repo (preview only):
+
+| Secret | Used by | Purpose |
+|--------|---------|---------|
+| `NETLIFY_AUTH_TOKEN` | Docs Preview | Netlify CLI deploy |
+| `NETLIFY_SITE_ID` | Docs Preview | Netlify site |
+
 ## Code of conduct
 
 This project follows the [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold it — please report unacceptable behavior to the contact listed there.

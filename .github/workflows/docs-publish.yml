@@ -1,0 +1,29 @@
+# After docs / community policy changes land on main, call the website's
+# Publish Pages reusable workflow (same pattern as Docs Preview → Netlify).
+
+name: Docs Publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "SECURITY.md"
+      - "CONTRIBUTING.md"
+      - "CODE_OF_CONDUCT.md"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish website Pages
+    uses: amalgamator-ai/amalgamator-ai.github.io/.github/workflows/pages.yml@main
+    with:
+      docs_ref: ${{ github.sha }}

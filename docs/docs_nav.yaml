@@ -54,11 +54,3 @@ pages:
   - path: reference/faq
     title: FAQ and troubleshooting
     weight: 30
-
-  - path: testing
-    title: Testing
-    weight: 70
-    section: true
-  - path: testing/testing
-    title: Testing notes
-    weight: 10

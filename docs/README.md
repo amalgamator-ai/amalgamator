@@ -44,12 +44,6 @@ needed for product docs).
 | [Artifacts and outputs](reference/artifacts.md) | Where runs write results |
 | [FAQ and troubleshooting](reference/faq.md) | Common failures and how to recover |
 
-## Testing
-
-| Doc | Description |
-|-----|-------------|
-| [Testing notes](testing/testing.md) | Docs/site preview smoke checks |
-
 ## Package deep dives
 
 These READMEs are the authoritative detail for configuration fields, phases,
