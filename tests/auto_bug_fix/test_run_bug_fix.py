@@ -5,13 +5,14 @@
 
 import json
 import os
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from auto_bug_fix.baseline import TIMEOUT_EXIT_CODE
 from auto_bug_fix.bug_fix_config import BugFixConfig
-from auto_bug_fix.config_loader import TargetSpec, _sanitize_ref
+from auto_bug_fix.config_loader import ConfigError, TargetSpec, _sanitize_ref
 from auto_bug_fix.dossier import Dossier
 from auto_bug_fix.run_bug_fix import (
     _COAUTHOR_TRAILERS,
@@ -22,6 +23,7 @@ from auto_bug_fix.run_bug_fix import (
     _run_build_and_test,
     _sanitize_branch_slug,
     identify_test_files,
+    run_pipeline,
     run_targets,
 )
 
@@ -53,6 +55,38 @@ def test_pipeline_escalation_exception():
         raise PipelineEscalation("human intervention required")
     except PipelineEscalation as exc:
         assert "human intervention required" in str(exc)
+
+
+def test_run_pipeline_freezes_baseline_before_mode_preconditions(
+    tmp_git_repo, claude_cfg, tmp_path
+):
+    """A run rejected before its first phase still needs a frozen baseline.
+
+    ``run_targets`` restores the target branch from this SHA in a ``finally``,
+    so a precondition failure must not leave it empty: that would report the
+    branch as "not confirmed at the frozen baseline" though nothing moved it.
+    """
+    config = BugFixConfig(
+        repo_path=tmp_git_repo.repo_path,
+        build_dir=tmp_git_repo.repo_path,
+        source_branch="main",
+        target_branch=tmp_git_repo.target_branch,
+        source_fix_commit="",
+        bug_description="test",
+        issue_id="test-freeze-order",
+    )
+
+    with pytest.raises(ConfigError):
+        run_pipeline(config, claude_cfg, output_dir=str(tmp_path))
+
+    expected = subprocess.run(
+        ["git", "rev-parse", tmp_git_repo.target_branch],
+        cwd=tmp_git_repo.repo_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert config.frozen_target_sha == expected
 
 
 def test_identify_test_files_go():
@@ -702,6 +736,15 @@ def test_red_triage_integration_not_vulnerable_raises_stop(
     """End-to-end: RED passes → triage says not_vulnerable → PipelineStop."""
     from auto_bug_fix.run_bug_fix import phase_1_baseline_and_red
 
+    # A real repo: Phase 1 now escalates when it cannot snapshot the worktree
+    # (no trusted baseline means verification dirt cannot be discarded).
+    _git_4b(tmp_path, "init", "-b", "main")
+    _git_4b(tmp_path, "config", "user.name", "t")
+    _git_4b(tmp_path, "config", "user.email", "t@t")
+    (tmp_path / "src.c").write_text("int a = 1;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "base")
+
     config = _make_config(
         repo_path=str(tmp_path),
         build_dir=str(tmp_path),
@@ -853,6 +896,16 @@ def _phase_4b_fixtures(tmp_path):
     return config, claude_cfg, state
 
 
+def _phase_4b_tracker(tmp_path):
+    """A real Tracker, not a MagicMock: these tests then fail if the pipeline
+    reads an attribute the tracker does not actually expose."""
+    from auto_bug_fix.tracker import Tracker
+
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    return Tracker("tid-1", {}, output_dir=str(out))
+
+
 async def _fake_claude_run(cfg, steps):
     return []
 
@@ -901,12 +954,68 @@ def test_phase_4b_success_commits_recovery_edits(tmp_path):
         phase_4b_run_and_fix(config, claude_cfg, state, None)
 
     assert _git_4b(tmp_path, "rev-parse", "HEAD") != head_before
-    assert "fixup: build/test recovery" in _git_4b(tmp_path, "log", "-1", "--format=%s")
+    # Recovery edits are committed at the strict pre-verification boundary,
+    # before build/test re-run, so verification dirt can never mix in.
+    subject = _git_4b(tmp_path, "log", "-1", "--format=%s")
+    assert "fixup: build/test recovery" in subject
+    assert "pre-verification" in subject
     assert "fixed by 4b" in _git_4b(tmp_path, "show", "HEAD:src.c")
     # The result markers are session plumbing, never part of the backport.
     tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD")
     assert "run_and_fix_success.txt" not in tree
     assert _git_4b(tmp_path, "status", "--porcelain") == ""
+
+
+def test_phase_4b_success_excludes_verification_dirt(tmp_path):
+    """Success path: a passing verification that dirties the tree (centpkg
+    prep re-unpacks and re-patches) must not leak into the deliverable.
+
+    The agent's work is committed at the pre-verification boundary; the
+    verification's own side effects are discarded when it finishes.
+    """
+    from auto_bug_fix.run_bug_fix import (
+        _export_candidate_patch_bytes,
+        phase_4b_run_and_fix,
+    )
+
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
+    # A tracked file for the verification to dirty, like a dist-git spec.
+    (tmp_path / "Makefile").write_text("all:\n")
+    _git_4b(tmp_path, "add", "Makefile")
+    _git_4b(tmp_path, "commit", "-m", "add Makefile")
+    # Pre-existing untracked pipeline evidence (Phase 0/0.5 writes these
+    # into the repo). The discard must not sweep them away.
+    (tmp_path / "semantic_triage.json").write_text("{}")
+    # The REAL verify runs this build command: it passes but dirties a
+    # tracked file and drops untracked build output, like centpkg prep.
+    config.build_command = (
+        'sh -c \'echo "# prep dirt" >> Makefile; '
+        "mkdir -p build; echo dirt > build/artifact.o'"
+    )
+    config.test_command = "true"
+
+    async def session(cfg, steps):
+        (tmp_path / "src.c").write_text("int a = 2; /* fixed by 4b */\n")
+        (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\nRetries: 1/3\n")
+        return []
+
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=session):
+        phase_4b_run_and_fix(config, claude_cfg, state, None)  # must not raise
+
+    # The agent's fix is committed; the verification dirt is gone.
+    assert "fixed by 4b" in _git_4b(tmp_path, "show", "HEAD:src.c")
+    assert "prep dirt" not in _git_4b(tmp_path, "show", "HEAD:Makefile")
+    assert _git_4b(tmp_path, "status", "--porcelain").strip() == (
+        "?? semantic_triage.json"
+    )
+    assert not (tmp_path / "build").exists()
+    # And the Phase 5 deliverable carries the fix without the dirt.
+    config.frozen_target_sha = head_before
+    patch_bytes = _export_candidate_patch_bytes(config)
+    assert b"fixed by 4b" in patch_bytes
+    assert b"prep dirt" not in patch_bytes
+    assert b"artifact.o" not in patch_bytes
 
 
 def test_commit_recovery_edits_artifact_only_dirt_returns_false(tmp_path):
@@ -1657,9 +1766,7 @@ def test_phase_4b_artifact_does_not_claim_success_before_verification(tmp_path):
 
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     config.test_command = "exit 1"
-    tracker = MagicMock()
-    tracker._output_dir = str(tmp_path / "out")
-    os.makedirs(tracker._output_dir, exist_ok=True)
+    tracker = _phase_4b_tracker(tmp_path)
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
     with (
         patch("auto_bug_fix.run_bug_fix._agent_run", new=fake),
@@ -1679,11 +1786,281 @@ def test_phase_4b_artifact_records_success_only_after_verification(tmp_path):
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
     config.build_command = "true"
     config.test_command = "true"
-    tracker = MagicMock()
-    tracker._output_dir = str(tmp_path / "out")
-    os.makedirs(tracker._output_dir, exist_ok=True)
+    tracker = _phase_4b_tracker(tmp_path)
     fake = _marker_writing_claude_run(tmp_path / "run_and_fix_success.txt")
     with patch("auto_bug_fix.run_bug_fix._agent_run", new=fake):
         phase_4b_run_and_fix(config, claude_cfg, state, tracker)
     data = _json.loads((tmp_path / "out" / "phase_4b_input.json").read_text())
     assert data["outcome"] == "success"
+
+
+def test_discard_verification_dirt_restores_deleted_tracked_file(tmp_path):
+    """A verification command that DELETES a tracked file (rm in a script)
+    is side-effect dirt like any other: the discard must bring it back."""
+    from auto_bug_fix.run_bug_fix import (
+        _discard_verification_dirt,
+        _worktree_snapshot,
+    )
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "src.c").unlink()
+
+    _discard_verification_dirt(config, baseline)
+
+    assert (tmp_path / "src.c").exists()
+    assert _git_4b(tmp_path, "status", "--porcelain") == ""
+
+
+def test_discard_verification_dirt_spares_preexisting_untracked(tmp_path):
+    """Dirt that PREDATES the verification is baseline state, not ours to
+    discard: Phase 0/0.5 evidence files must survive the sweep (regression
+    for the blanket `git clean -fd` this replaces)."""
+    from auto_bug_fix.run_bug_fix import (
+        _discard_verification_dirt,
+        _worktree_snapshot,
+    )
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "semantic_triage.json").write_text("{}")
+    (tmp_path / "evidence").mkdir()
+    (tmp_path / "evidence" / "note.txt").write_text("phase 0 evidence\n")
+    baseline = _worktree_snapshot(config)
+    # The verification's own dirt: tracked modification + new build output.
+    (tmp_path / "src.c").write_text("int a = 2;\n")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "x.o").write_text("dirt\n")
+
+    _discard_verification_dirt(config, baseline)
+
+    assert (tmp_path / "src.c").read_text() == "int a = 1;\n"
+    assert not (tmp_path / "build").exists()
+    assert (tmp_path / "semantic_triage.json").exists()
+    assert (tmp_path / "evidence" / "note.txt").exists()
+    assert sorted(_git_4b(tmp_path, "status", "--porcelain").splitlines()) == [
+        "?? evidence/",
+        "?? semantic_triage.json",
+    ]
+
+
+def test_discard_verification_dirt_sees_new_files_in_preexisting_untracked_dir(
+    tmp_path,
+):
+    """git status collapses an untracked directory to one `?? dir/` entry, so
+    without -uall a new file inside a pre-existing untracked directory is
+    invisible to the snapshot diff and never discarded."""
+    from auto_bug_fix.run_bug_fix import (
+        _discard_verification_dirt,
+        _worktree_snapshot,
+    )
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    # Pre-existing untracked build tree, as an earlier phase left it.
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "old.o").write_text("pre-existing\n")
+    baseline = _worktree_snapshot(config)
+    # The verification drops a new artifact next to the pre-existing one.
+    (tmp_path / "build" / "artifact.o").write_text("dirt\n")
+
+    _discard_verification_dirt(config, baseline)
+
+    assert not (tmp_path / "build" / "artifact.o").exists()
+    assert (tmp_path / "build" / "old.o").read_text() == "pre-existing\n"
+
+
+def test_discard_verification_dirt_fails_closed_without_a_baseline(
+    tmp_path, tmp_path_factory
+):
+    """A failed `git status` must not look like an empty tree: with a None
+    baseline the discard is skipped entirely rather than reverting
+    everything it sees (which would destroy pre-existing work)."""
+    from auto_bug_fix.run_bug_fix import (
+        _discard_verification_dirt,
+        _worktree_snapshot,
+    )
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "src.c").write_text("int a = 2;\n")  # pre-existing dirt
+    assert _worktree_snapshot(config) is not None
+
+    not_a_repo = tmp_path_factory.mktemp("not_a_repo")
+    config.repo_path = str(not_a_repo)
+    assert _worktree_snapshot(config) is None
+
+    config.repo_path = str(tmp_path)
+    # ...and it reports failure, so the caller escalates instead of assuming
+    # a clean tree.
+    assert _discard_verification_dirt(config, None) is False
+
+    assert (tmp_path / "src.c").read_text() == "int a = 2;\n"
+
+
+def test_discard_verification_dirt_handles_git_quoted_paths(tmp_path):
+    """git porcelain C-quotes non-ASCII paths ("\303\251data.c"); the discard
+    must decode them, or checkout/clean target a nonexistent path and the
+    dirt silently survives."""
+    from auto_bug_fix.run_bug_fix import (
+        _discard_verification_dirt,
+        _worktree_snapshot,
+    )
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    unicode_name = "édata.c"
+    (tmp_path / unicode_name).write_text("int u = 1;\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "add unicode file")
+    baseline = _worktree_snapshot(config)
+    # Tracked modification + new untracked file with a quoted name.
+    (tmp_path / unicode_name).write_text("int u = 2;\n")
+    (tmp_path / "café.txt").write_text("untracked dirt\n")
+
+    _discard_verification_dirt(config, baseline)
+
+    assert (tmp_path / unicode_name).read_text() == "int u = 1;\n"
+    assert not (tmp_path / "café.txt").exists()
+
+
+def test_discard_verification_dirt_reverts_staged_changes(tmp_path):
+    """`git checkout --` restores from the INDEX, so a verification command
+    that staged its changes (git apply --index, vendoring steps) would keep
+    them. The discard must unstage and restore from HEAD."""
+    from auto_bug_fix.run_bug_fix import (
+        _discard_verification_dirt,
+        _worktree_snapshot,
+    )
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    baseline = _worktree_snapshot(config)
+    # The verification stages a modification of a tracked file...
+    (tmp_path / "src.c").write_text("int a = 2;\n")
+    _git_4b(tmp_path, "add", "src.c")
+    # ...and stages a brand-new file.
+    (tmp_path / "vendored.c").write_text("staged dirt\n")
+    _git_4b(tmp_path, "add", "vendored.c")
+
+    _discard_verification_dirt(config, baseline)
+
+    assert _git_4b(tmp_path, "status", "--porcelain") == ""
+    assert (tmp_path / "src.c").read_text() == "int a = 1;\n"
+    assert not (tmp_path / "vendored.c").exists()
+
+
+def test_discard_verification_dirt_spares_preexisting_empty_dirs(tmp_path):
+    """Empty directories are invisible to git, so only the recorded
+    baseline set can protect them: scaffolding that predates the
+    verification must survive the empty-dir prune."""
+    from auto_bug_fix.run_bug_fix import (
+        _discard_verification_dirt,
+        _worktree_snapshot,
+    )
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "logs").mkdir()  # pre-existing, empty — invisible to git
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "logs" / "x.o").write_text("dirt\n")
+
+    _discard_verification_dirt(config, baseline)
+
+    assert not (tmp_path / "logs" / "x.o").exists()
+    assert (tmp_path / "logs").is_dir(), "pre-existing empty dir was destroyed"
+
+
+def test_changed_files_since_decodes_git_quoted_paths(tmp_path):
+    """git diff --name-only C-quotes non-ASCII paths; consumers (e.g. the
+    test-only patch suppression) match on path segments, so the quotes and
+    octal escapes must be decoded."""
+    from auto_bug_fix.run_bug_fix import _changed_files_since
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "utilités.py").write_text("def test_x(): pass\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "add unicode test")
+
+    changed = _changed_files_since(str(tmp_path), base)
+    assert changed is not None
+    assert "tests/utilités.py" in changed
+
+
+def test_changed_files_since_reports_failure_as_none(tmp_path):
+    """Callers must be able to tell "no changes" from "git diff failed": an
+    empty list is a verified empty range, None means the deliverable is
+    unknown and the caller must not treat it as success."""
+    from auto_bug_fix.run_bug_fix import _changed_files_since
+
+    _phase_4b_fixtures(tmp_path)
+    assert _changed_files_since(str(tmp_path), "no-such-ref") is None
+
+
+def test_discard_verification_dirt_treats_paths_literally(tmp_path):
+    """A file literally named `util/[ab].py` must not glob-match `util/a.py`:
+    restoring the dirt would destroy a pre-existing modification of the
+    other file — the one destruction this helper promises never to do."""
+    from auto_bug_fix.run_bug_fix import (
+        _discard_verification_dirt,
+        _worktree_snapshot,
+    )
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "util").mkdir()
+    (tmp_path / "util" / "[ab].py").write_text("literal = 1\n")
+    (tmp_path / "util" / "a.py").write_text("plain = 1\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "add glob-named file")
+    # Pre-existing modification of the glob-sibling...
+    (tmp_path / "util" / "a.py").write_text("plain = 2\n")
+    baseline = _worktree_snapshot(config)
+    # ...and verification dirt on the literal path (staged, worst case).
+    (tmp_path / "util" / "[ab].py").write_text("literal = 2\n")
+    _git_4b(tmp_path, "add", "-A")
+
+    _discard_verification_dirt(config, baseline)
+
+    assert (tmp_path / "util" / "[ab].py").read_text() == "literal = 1\n"
+    assert (tmp_path / "util" / "a.py").read_text() == "plain = 2\n"
+
+
+def test_commit_recovery_edits_artifact_dir_dirt_is_not_real_work(tmp_path):
+    """Artifact files inside a fully-untracked directory must not look like
+    real work: plain porcelain collapses them to `?? runs/`, which never
+    matches the artifact allowlist and would escalate a verified fix."""
+    import os as _os
+
+    from auto_bug_fix.bug_fix_prompts import RED_TRIAGE_FILE
+    from auto_bug_fix.run_bug_fix import _commit_recovery_edits
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    artifact_dir = tmp_path / "runs"
+    artifact_dir.mkdir()
+    (artifact_dir / RED_TRIAGE_FILE).write_text("{}")
+    head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    assert _commit_recovery_edits(config, "Phase 4b") is False
+    assert _git_4b(tmp_path, "rev-parse", "HEAD") == head_before
+    assert (artifact_dir / RED_TRIAGE_FILE).exists()
+    assert _os.path.exists(artifact_dir / RED_TRIAGE_FILE)
+
+
+def test_discard_verification_dirt_spares_the_configured_build_dir(tmp_path):
+    """A verification command that CREATES the configured build directory
+    must not have it cleaned away: later commands run with
+    cwd=config.build_dir and would fail on the missing directory."""
+    from auto_bug_fix.run_bug_fix import (
+        _discard_verification_dirt,
+        _worktree_snapshot,
+    )
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "build")
+    baseline = _worktree_snapshot(config)
+    # The verification creates the build dir and dirties a tracked file.
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "artifact.o").write_text("dirt\n")
+    (tmp_path / "src.c").write_text("int a = 2;\n")
+
+    _discard_verification_dirt(config, baseline)
+
+    assert (tmp_path / "build").is_dir()
+    # Dirt outside the build dir is still discarded.
+    assert (tmp_path / "src.c").read_text() == "int a = 1;\n"

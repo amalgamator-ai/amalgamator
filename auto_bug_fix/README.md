@@ -63,6 +63,31 @@ Each is individually toggleable under `advanced:` so runs can ablate them.
 | Post-resolution check | `post_resolution_check` | Phase 3a.1 — a verification agent reviews the resolution against the evidence report and fixes violations of the three-way discipline. |
 | Blind review | `blind_review` | Phase 3a.2 — an independent agent reviews the ported diff without seeing the triage, catching anchoring errors. |
 
+### Build output at commit boundaries
+
+Every agent-authored commit, and `candidate.patch` cut from it, must carry the
+fix and not the build tree the agent ran. Two guards apply at each boundary:
+
+- a `build_subdir` the committed tree knows nothing about is excluded as a
+  subtree, and everything under it the pipeline cannot account for as build
+  output is staged again (`_fence_build_dir`, `_restage_unaccounted_fenced`);
+- paths the orchestrator's own verifications were seen to create are left
+  unstaged, matched on content and not only on name (`state.generated_output`,
+  `_recognized_build_output`).
+
+A commit an agent makes itself is stripped afterwards with the tree as it was
+before the session, so committing build output there does not hide it.
+
+**Known limitation:** output is only recognized after a verification has been
+seen to create it. A session that builds before any verification has run —
+notably Phase 0.5c's test port — can therefore commit output at a path nothing
+has learned yet, as can any output inside `build_subdir` that HEAD already
+tracks or at the repository root when `build_subdir` is the root. That output
+reaches the patch. It is recoverable by design (a noisier patch, never lost
+work), and no safe alternative exists: without prior evidence, an untracked
+file a session wrote is indistinguishable from source or test files the same
+session authored.
+
 ---
 
 ## Requirements

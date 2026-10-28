@@ -286,6 +286,38 @@ def test_format_patch_text_is_lossy_but_safe(latin1_repo):
     assert "�" in git_format_patch(str(repo), base_ref=base)
 
 
+def test_format_patch_bytes_names_a_git_failure(latin1_repo, caplog):
+    """An empty result is how both "command failed" and "empty range" look to
+    callers; the failure path must at least be diagnosable from the log."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="auto_bug_fix.git_tools")
+    repo, _, _ = latin1_repo
+
+    produced = git_format_patch_bytes(str(repo), base_ref="does-not-exist")
+
+    assert produced == b""
+    assert "git format-patch does-not-exist failed" in caplog.text
+
+
+def test_format_patch_bytes_count_form_is_not_a_warning(latin1_repo, caplog):
+    """The default ``-<n>`` form (and a falsy ``base_ref`` falling back to it)
+    must produce a patch without tripping the failure warning."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="auto_bug_fix.git_tools")
+    repo, _, _ = latin1_repo
+
+    for produced in (
+        git_format_patch_bytes(str(repo), n=1),
+        git_format_patch_bytes(str(repo), n=1, base_ref=""),
+    ):
+        assert produced.startswith(b"From ")
+        assert b"Bj\xf8rn" in produced
+
+    assert "format-patch" not in caplog.text
+
+
 def test_patch_id_matches_gits_own_on_non_utf8_content(latin1_repo):
     """A patch-id over lossily-decoded text would gate Phase 0 on a wrong value."""
     repo, _, head = latin1_repo
