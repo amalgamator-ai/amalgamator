@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, TextIO, TypedDict, cast
@@ -798,7 +800,7 @@ def phase_1_baseline_and_red(
     never carries baseline build/test output.
     """
     baseline = _worktree_snapshot(config)
-    try:
+    with _discarding_verification_dirt(config, baseline, state, "Phase 1 baseline"):
         # Step 1: Build baseline
         if config.build_command:
             build_exit, build_output = capture_output(
@@ -894,14 +896,6 @@ def phase_1_baseline_and_red(
                     entry["exit_code"],
                     vcmd,
                 )
-    finally:
-        _finish_verification(
-            config,
-            baseline,
-            state,
-            "Phase 1 baseline",
-            in_flight=sys.exc_info()[0] is not None,
-        )
 
 
 def phase_1_5_red_triage(
@@ -1113,16 +1107,8 @@ def phase_4_verify(
     phase, a prompt's diff, or a deliverable.
     """
     baseline = _worktree_snapshot(config)
-    try:
+    with _discarding_verification_dirt(config, baseline, state, "Phase 4 verify"):
         passed, _, _, _, _ = _run_build_and_test(config, state)
-    finally:
-        _finish_verification(
-            config,
-            baseline,
-            state,
-            "Phase 4 verify",
-            in_flight=sys.exc_info()[0] is not None,
-        )
     if passed:
         return True
     raise PipelineEscalation("Phase 4 verify failed")
@@ -1476,7 +1462,7 @@ def _rerun_verification(
     """
     still_failing = []
     baseline = _worktree_snapshot(config)
-    try:
+    with _discarding_verification_dirt(config, baseline, state, "verification re-run"):
         for vcmd in commands:
             try:
                 result = subprocess.run(
@@ -1494,14 +1480,6 @@ def _rerun_verification(
                 continue
             if result.returncode != 0:
                 still_failing.append(vcmd)
-    finally:
-        _finish_verification(
-            config,
-            baseline,
-            state,
-            "verification re-run",
-            in_flight=sys.exc_info()[0] is not None,
-        )
     return still_failing
 
 
@@ -1646,7 +1624,14 @@ def phase_4a_build_recovery(
         if len(test_errors) > MAX_ERROR_CHARS:
             test_errors = test_errors[:MAX_ERROR_CHARS] + "\n\n[TRUNCATED]"
 
-        current_diff = _safe_git_diff(config.repo_path, "HEAD")
+        # Against the frozen baseline, not HEAD: every attempt now commits
+        # the agent's edits at its own boundary and discards the rest, so a
+        # worktree-vs-HEAD diff is empty from attempt 2 on and the prompt's
+        # "what was actually applied" section would go blank exactly when
+        # the agent most needs to see its previous attempts.
+        current_diff = _safe_git_diff(
+            config.repo_path, config.frozen_target_sha or config.target_branch
+        )
 
         pre_fix_files = set(git_diff_name_only(config.repo_path))
 
@@ -3746,13 +3731,18 @@ def _finish_verification(
 ) -> None:
     """Discard verification dirt from a ``finally`` block.
 
-    ``in_flight`` reports whether an exception is already propagating
-    (``sys.exc_info()[0] is not None``). Raising here would replace that
-    exception and hide the real failure, so the escalation is deferred: the
-    run is already aborting and reports its own cause, and the dirty
-    worktree is not part of candidate.patch, which is cut from commits.
-    When nothing is in flight, a failed discard is a contract violation
-    and escalates like ``_discard_or_escalate``.
+    ``in_flight`` reports whether an exception is leaving the verification
+    block this call closes. Raising here would replace that exception and
+    hide the real failure, so the escalation is deferred: that run really
+    is aborting and reports its own cause, and the dirty worktree is not
+    part of candidate.patch, which is cut from commits. When nothing is in
+    flight the run carries on, a later ``git add -A`` would sweep the dirt
+    into the deliverable, and a failed discard is a contract violation that
+    escalates like ``_discard_or_escalate``.
+
+    Callers must not compute the flag from ``sys.exc_info()`` — see
+    ``_discarding_verification_dirt``, which is the supported way to get
+    it right.
     """
     if _discard_verification_dirt(config, baseline, state):
         return
@@ -3767,6 +3757,36 @@ def _finish_verification(
         f"{phase_label}: verification dirt could not be discarded — "
         "uncommitted side effects could reach a later commit boundary"
     )
+
+
+@contextlib.contextmanager
+def _discarding_verification_dirt(
+    config: BugFixConfig,
+    baseline: WorktreeSnapshot | None,
+    state: PipelineState | None,
+    phase_label: str,
+) -> Iterator[None]:
+    """Run a verification, then discard whatever it dirtied — pass or fail.
+
+    The ``in_flight`` flag handed to ``_finish_verification`` must mean
+    "an exception is leaving *this* block", so that a failed discard
+    escalates on the paths where the run carries on. It cannot be derived
+    from ``sys.exc_info()``: that is per-thread and keeps reporting the
+    enclosing handler's exception all the way down the call stack, so every
+    verification reached from inside an ``except`` — which is how Phase 4b
+    and the post-recovery re-verifies are always reached — saw a spurious
+    ``True`` and downgraded its escalation to a warning. The dirt then
+    survived to the next ``git add -A`` and landed in candidate.patch.
+    Catching here is the only reading that is local to the block.
+    """
+    in_flight = False
+    try:
+        yield
+    except BaseException:
+        in_flight = True
+        raise
+    finally:
+        _finish_verification(config, baseline, state, phase_label, in_flight=in_flight)
 
 
 def _literal_pathspec(path: str) -> str:
@@ -4034,6 +4054,16 @@ def _emit_candidate_patch_on_failure(
                 return
         patch_bytes = git_format_patch_bytes(config.repo_path, base_ref=patch_base)
         if not patch_bytes.strip():
+            # Not silent: an empty range here is indistinguishable, from the
+            # verifier's side, from the bug this export exists to fix (a
+            # moved target branch collapsing "target..HEAD"), so say which
+            # baseline produced nothing rather than just writing no file.
+            log.warning(
+                "Failure path: no candidate patch emitted — the range from "
+                "the frozen baseline (%s) to HEAD is empty, so no committed "
+                "agent work exists to export",
+                patch_base,
+            )
             return
         os.makedirs(tracker.output_dir, exist_ok=True)
         patch_path = os.path.join(tracker.output_dir, PATCH_FILE)
@@ -4563,19 +4593,13 @@ def _run_pipeline_phases(
                         # replacement test is committed above, so anything the
                         # rerun dirties is verification dirt, not agent work.
                         rerun_baseline = _worktree_snapshot(config)
-                        try:
+                        with _discarding_verification_dirt(
+                            config, rerun_baseline, state, "Phase 1.5 RED re-run"
+                        ):
                             rerun_exit, rerun_output = capture_output(
                                 [config.test_command],
                                 config.build_dir,
                                 timeout=config.command_timeout,
-                            )
-                        finally:
-                            _finish_verification(
-                                config,
-                                rerun_baseline,
-                                state,
-                                "Phase 1.5 RED re-run",
-                                in_flight=sys.exc_info()[0] is not None,
                             )
                         if rerun_exit != 0:
                             log.info(
@@ -4774,77 +4798,70 @@ def _run_pipeline_phases(
     if verification_cmds:
         ext_failures = []
         baseline = _worktree_snapshot(config)
-        try:
-            with tracker.phase("Phase 4.1 — Extended verification"):
-                for vcmd in verification_cmds:
-                    log.info("Phase 4.1: running verification command: %s", vcmd)
-                    try:
-                        vresult = subprocess.run(
-                            vcmd,
-                            shell=True,
-                            cwd=config.build_dir,
-                            capture_output=True,
-                            text=True,
-                            encoding="utf-8",
-                            errors="replace",
-                            timeout=config.command_timeout,
-                        )
-                    except subprocess.TimeoutExpired:
-                        # A timeout is never treated as a pre-existing failure —
-                        # we cannot conclude anything from a command that didn't
-                        # finish.
-                        log.warning(
-                            "Phase 4.1: verification timed out — treating as "
-                            "failure: %s",
-                            vcmd,
-                        )
-                        ext_failures.append(
-                            {
-                                "cmd": vcmd,
-                                "output": (
-                                    f"Timed out after {config.command_timeout}s"
-                                ),
-                            }
-                        )
-                        state.dossier.add(
-                            f"Extended verification timed out: {vcmd}",
-                            f"Timed out after {config.command_timeout}s",
-                            "Phase 4.1",
-                        )
-                        continue
-                    if vresult.returncode == 0:
-                        log.info("Phase 4.1: verification passed: %s", vcmd)
-                    elif vcmd in baseline_failures:
-                        log.info(
-                            "Phase 4.1: verification failed (pre-existing, "
-                            "exit %d): %s",
-                            vresult.returncode,
-                            vcmd,
-                        )
-                    else:
-                        output = (vresult.stdout + "\n" + vresult.stderr)[-3000:]
-                        log.warning(
-                            "Phase 4.1: verification failed (NEW, exit %d): %s",
-                            vresult.returncode,
-                            vcmd,
-                        )
-                        ext_failures.append({"cmd": vcmd, "output": output})
-                        state.dossier.add(
-                            f"Extended verification failed: {vcmd}",
-                            output,
-                            "Phase 4.1",
-                        )
-        finally:
-            # Discard the verification commands' side effects (pass, fail, or
-            # unexpected exception) so they reach neither Phase 4a's
-            # agent-commit boundary nor Phase 5.
-            _finish_verification(
-                config,
-                baseline,
-                state,
-                "Phase 4.1 extended verification",
-                in_flight=sys.exc_info()[0] is not None,
-            )
+        # Discard the verification commands' side effects (pass, fail, or
+        # unexpected exception) so they reach neither Phase 4a's
+        # agent-commit boundary nor Phase 5.
+        with (
+            _discarding_verification_dirt(
+                config, baseline, state, "Phase 4.1 extended verification"
+            ),
+            tracker.phase("Phase 4.1 — Extended verification"),
+        ):
+            for vcmd in verification_cmds:
+                log.info("Phase 4.1: running verification command: %s", vcmd)
+                try:
+                    vresult = subprocess.run(
+                        vcmd,
+                        shell=True,
+                        cwd=config.build_dir,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=config.command_timeout,
+                    )
+                except subprocess.TimeoutExpired:
+                    # A timeout is never treated as a pre-existing failure —
+                    # we cannot conclude anything from a command that didn't
+                    # finish.
+                    log.warning(
+                        "Phase 4.1: verification timed out — treating as "
+                        "failure: %s",
+                        vcmd,
+                    )
+                    ext_failures.append(
+                        {
+                            "cmd": vcmd,
+                            "output": (f"Timed out after {config.command_timeout}s"),
+                        }
+                    )
+                    state.dossier.add(
+                        f"Extended verification timed out: {vcmd}",
+                        f"Timed out after {config.command_timeout}s",
+                        "Phase 4.1",
+                    )
+                    continue
+                if vresult.returncode == 0:
+                    log.info("Phase 4.1: verification passed: %s", vcmd)
+                elif vcmd in baseline_failures:
+                    log.info(
+                        "Phase 4.1: verification failed (pre-existing, " "exit %d): %s",
+                        vresult.returncode,
+                        vcmd,
+                    )
+                else:
+                    output = (vresult.stdout + "\n" + vresult.stderr)[-3000:]
+                    log.warning(
+                        "Phase 4.1: verification failed (NEW, exit %d): %s",
+                        vresult.returncode,
+                        vcmd,
+                    )
+                    ext_failures.append({"cmd": vcmd, "output": output})
+                    state.dossier.add(
+                        f"Extended verification failed: {vcmd}",
+                        output,
+                        "Phase 4.1",
+                    )
 
         if ext_failures:
             log.info(
@@ -4870,7 +4887,9 @@ def _run_pipeline_phases(
                     # Phase 4a's commit boundary has since reset the dirt
                     # floor; re-baseline before re-running verification.
                     baseline = _worktree_snapshot(config)
-                    try:
+                    with _discarding_verification_dirt(
+                        config, baseline, state, "Phase 4.1 re-verification"
+                    ):
                         for vcmd in verification_cmds:
                             try:
                                 vresult = subprocess.run(
@@ -4890,14 +4909,6 @@ def _run_pipeline_phases(
                                 baseline_failures
                             ):
                                 still_failing.append(vcmd)
-                    finally:
-                        _finish_verification(
-                            config,
-                            baseline,
-                            state,
-                            "Phase 4.1 re-verification",
-                            in_flight=sys.exc_info()[0] is not None,
-                        )
                     if still_failing:
                         log.warning(
                             "Phase 4.1: %d commands still failing after recovery: %s",

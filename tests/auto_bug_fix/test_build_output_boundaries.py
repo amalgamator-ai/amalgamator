@@ -886,3 +886,128 @@ def test_discard_removes_a_staged_new_symlink_with_a_missing_target(tmp_path):
     assert not os.path.lexists(tmp_path / "generated.h")
     _stage_agent_work(config, state)
     assert _staged(tmp_path) == ""
+
+
+# ---------- in_flight must describe *this* block, not the call stack ----------
+
+
+def test_discarding_scope_escalates_from_inside_an_enclosing_except(
+    tmp_path, monkeypatch
+):
+    """The regression: ``sys.exc_info()`` is per-thread and keeps reporting an
+    enclosing handler's exception in every frame below it. Phase 4b and both
+    post-recovery re-verifies are only ever reached from inside an ``except``,
+    and those paths carry on to Phase 5 — so a failed discard there has to
+    escalate, or the dirt it left reaches the next ``git add -A``."""
+    from auto_bug_fix import run_bug_fix
+
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    monkeypatch.setattr(run_bug_fix, "_discard_verification_dirt", lambda *a: False)
+
+    try:
+        raise PipelineEscalation("Phase 4a gave up")
+    except PipelineEscalation:
+        # Nothing escapes the block below, so the run would continue here.
+        with (
+            pytest.raises(PipelineEscalation, match="could not be discarded"),
+            run_bug_fix._discarding_verification_dirt(
+                config, None, state, "Phase 4b re-verify"
+            ),
+        ):
+            pass
+
+
+def test_discarding_scope_defers_to_the_exception_leaving_its_own_body(
+    tmp_path, monkeypatch
+):
+    """When the body itself fails the run really is aborting: the body's
+    exception must survive rather than be replaced by the discard's."""
+    from auto_bug_fix import run_bug_fix
+
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    monkeypatch.setattr(run_bug_fix, "_discard_verification_dirt", lambda *a: False)
+
+    with (
+        pytest.raises(RuntimeError, match="build blew up"),
+        run_bug_fix._discarding_verification_dirt(
+            config, None, state, "Phase 4 verify"
+        ),
+    ):
+        raise RuntimeError("build blew up")
+
+
+def test_discarding_scope_discards_on_the_happy_path(tmp_path):
+    """A clean body still gets its dirt swept."""
+    from auto_bug_fix import run_bug_fix
+
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    baseline = _worktree_snapshot(config)
+    with run_bug_fix._discarding_verification_dirt(
+        config, baseline, state, "Phase 4 verify"
+    ):
+        (tmp_path / "build.log").write_text("verification output\n")
+
+    assert not os.path.lexists(tmp_path / "build.log")
+
+
+def test_no_verification_site_derives_in_flight_from_exc_info():
+    """Pins the contract repo-wide: a new verification site that hand-rolls
+    the flag reintroduces the bug silently, so none may."""
+    import inspect
+
+    from auto_bug_fix import run_bug_fix
+
+    src = inspect.getsource(run_bug_fix)
+    assert "in_flight=sys.exc_info()" not in src
+
+
+# ---------- Phase 4a's recovery prompt must still see the port ----------
+
+
+def test_phase_4a_prompt_diff_survives_the_per_attempt_commit(tmp_path):
+    """Attempt N now commits the agent's edits at its own boundary and the
+    discard wipes the rest, so a worktree-vs-HEAD diff is empty from attempt 2
+    on. The prompt's "what was actually applied" section has to range from the
+    frozen baseline instead, or the agent retries blind to its own work."""
+    from unittest.mock import patch
+
+    from auto_bug_fix.run_bug_fix import phase_4a_build_recovery
+
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    config.max_build_test_retries = 2
+    config.frozen_target_sha = _git_4b(tmp_path, "rev-parse", "HEAD").strip()
+
+    seen = []
+
+    def fake_prompt(**kwargs):
+        seen.append(kwargs["current_diff"])
+
+        class _P:
+            def prompt(self):
+                return "x"
+
+        return _P()
+
+    attempt = {"n": 0}
+
+    async def session(cfg, steps):
+        attempt["n"] += 1
+        (tmp_path / "src.c").write_text(f"int a = {attempt['n'] + 1}; /* try */\n")
+        return []
+
+    with (
+        patch("auto_bug_fix.run_bug_fix._agent_run", new=session),
+        patch("auto_bug_fix.run_bug_fix.BuildErrorRecoveryPrompt", new=fake_prompt),
+        patch(
+            "auto_bug_fix.run_bug_fix.run_test_suite",
+            new=lambda *a, **k: (1, "build broke", ""),
+        ),
+        patch("auto_bug_fix.run_bug_fix.parse_test_failures", new=lambda *a: []),
+        patch("auto_bug_fix.run_bug_fix.check_regression", new=lambda *a: (True, [])),
+        pytest.raises(PipelineEscalation),
+    ):
+        phase_4a_build_recovery(config, claude_cfg, state, None, "fix diff")
+
+    # Attempt 1 has nothing applied yet; attempt 2 must see attempt 1's commit.
+    assert len(seen) >= 2, seen
+    assert "/* try */" in seen[1], seen[1]

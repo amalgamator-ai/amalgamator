@@ -585,3 +585,23 @@ class TestEmptyDeliverable:
 
         with pytest.raises(PipelineEscalation, match="candidate patch is empty"):
             _export_candidate_patch_bytes(_config(worktree, frozen))
+
+
+class TestEmptyFailurePatchIsReported:
+    def test_empty_range_warns_and_names_the_baseline(
+        self, target_worktree, tmp_path, caplog
+    ):
+        """An empty range on the failure path looks exactly like the bug this
+        export exists to fix (a moved branch collapsing ``target..HEAD``).
+        Writing no file and saying nothing removes the only signal that would
+        distinguish "nothing to export" from "the export regressed"."""
+        import logging
+
+        repo, worktree, frozen = target_worktree
+        tracker = _tracker(tmp_path)
+        with caplog.at_level(logging.WARNING):
+            _emit_candidate_patch_on_failure(_config(worktree, frozen), tracker)
+
+        assert not os.path.exists(os.path.join(tracker._output_dir, "candidate.patch"))
+        assert "no candidate patch emitted" in caplog.text
+        assert frozen in caplog.text
