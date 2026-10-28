@@ -1823,6 +1823,15 @@ def _stage_agent_work(
     content a build was seen to write there (``_recognized_build_output``):
     the agent authoring a fix at a name some verification once generated
     must not lose it to a name collision.
+
+    Known limitation: output is recognized only after a verification has
+    been seen to create it. A session that builds before any verification
+    has run (Phase 0.5c's test port) can commit output nothing has learned
+    yet, as can output inside a *tracked* build directory or at the repo
+    root used as ``build_subdir``. That output reaches the commit — the
+    recoverable direction — because without prior evidence an untracked
+    file a session wrote is indistinguishable from source or tests the
+    same session authored.
     """
     fence = _fence_build_dir(config, fail_closed=True)
     ok = True
