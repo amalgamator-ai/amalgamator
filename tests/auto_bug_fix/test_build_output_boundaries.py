@@ -1432,3 +1432,62 @@ def test_semantic_triage_strips_build_output_from_an_agent_commit(
     assert "gen.o" not in tree
     assert "triage.json" in tree, "the agent's analysis is work and stays"
     assert (tmp_path / "gen.o").exists(), "kept on disk for the build that expects it"
+
+
+def test_phase_4a_survives_and_strips_a_self_committing_agent(tmp_path):
+    """A recovery agent that commits for itself looks exactly like one that did
+    nothing — a clean worktree — so the run aborted with CANNOT_FIX while the
+    work sat in HEAD. And the commit it made was never guarded."""
+    from unittest.mock import patch
+
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    config.max_build_test_retries = 1
+    state.generated_output = {"gen.o"}
+
+    async def session(cfg, steps):
+        (tmp_path / "src.c").write_text("int a = 3; /* fix */\n")
+        (tmp_path / "gen.o").write_text("compile output\n")
+        _git_4b(tmp_path, "add", "-A")
+        _git_4b(tmp_path, "commit", "-m", "agent commit")
+        return []
+
+    with (
+        patch("auto_bug_fix.run_bug_fix._agent_run", new=session),
+        patch(
+            "auto_bug_fix.run_bug_fix.run_test_suite",
+            new=lambda *a, **k: (1, "build broke", ""),
+        ),
+        patch("auto_bug_fix.run_bug_fix.parse_test_failures", new=lambda *a: []),
+        patch("auto_bug_fix.run_bug_fix.check_regression", new=lambda *a: (True, [])),
+        pytest.raises(PipelineEscalation, match="still failing"),
+    ):
+        rbf.phase_4a_build_recovery(config, claude_cfg, state, None, "fix diff")
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "gen.o" not in tree
+    assert "int a = 3;" in _git_4b(tmp_path, "show", "HEAD:src.c")
+
+
+def test_phase_4b_strips_a_self_committing_agent(tmp_path):
+    """Phase 4b's session is a full agent with a shell; its own `git add -A &&
+    git commit` was outside every boundary the phase sets up afterwards."""
+    from unittest.mock import patch
+
+    config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
+    state.generated_output = {"gen.o"}
+
+    async def session(cfg, steps):
+        (tmp_path / "src.c").write_text("int a = 4; /* fixed by 4b */\n")
+        (tmp_path / "gen.o").write_text("compile output\n")
+        _git_4b(tmp_path, "add", "-A")
+        _git_4b(tmp_path, "commit", "-m", "agent commit")
+        (tmp_path / "run_and_fix_success.txt").write_text("SUCCESS\nRetries: 1/1\n")
+        return []
+
+    with patch("auto_bug_fix.run_bug_fix._agent_run", new=session):
+        rbf.phase_4b_run_and_fix(config, claude_cfg, state, None)
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "gen.o" not in tree
+    assert "int a = 4;" in _git_4b(tmp_path, "show", "HEAD:src.c")
+    assert (tmp_path / "gen.o").exists(), "kept on disk for the build that expects it"

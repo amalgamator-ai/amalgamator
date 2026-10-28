@@ -2056,13 +2056,30 @@ def phase_4a_build_recovery(
             attempt,
             config.max_build_test_retries,
         )
+        head_before_agent = git_rev_parse(config.repo_path, "HEAD")
         asyncio.run(claude_run(claude_config_4a, [prompt.prompt()], tracker=tracker))
 
         post_fix_files = set(git_diff_name_only(config.repo_path))
-        if post_fix_files == pre_fix_files:
+        if (
+            post_fix_files == pre_fix_files
+            and git_rev_parse(config.repo_path, "HEAD") == head_before_agent
+        ):
+            # Both readings are needed: an agent that committed for itself
+            # leaves the same clean worktree as one that did nothing, and
+            # treating that as CANNOT_FIX aborts a run that has work.
             raise PipelineEscalation(
                 "Phase 4a: agent made no changes — likely CANNOT_FIX"
             )
+
+        # The agent can commit for itself, and a `git add -A` there sweeps
+        # its own build output into the tree — which also switches the fence
+        # off for everything that follows. Take it back out before the
+        # boundary below and before the baseline is re-taken, so the files
+        # stay on disk as untracked dirt rather than being recorded as
+        # pre-existing work the next discard must spare.
+        _strip_committed_build_output(
+            config, state, head_before_agent, f"Phase 4a attempt {attempt}"
+        )
 
         # Strict pre-verification boundary: the agent's edits are committed
         # now, before the next build/test attempt runs. This is what keeps
@@ -2260,6 +2277,7 @@ def phase_4b_run_and_fix(
         )
         sys.stdout = Tee(_prev_stdout, _4b_log_file)
 
+    head_before_agent = git_rev_parse(config.repo_path, "HEAD")
     try:
         timings = asyncio.run(_agent_run(ext_claude_config, steps))
     finally:
@@ -2267,6 +2285,10 @@ def phase_4b_run_and_fix(
             sys.stdout = _prev_stdout
             _4b_log_file.close()
             log.info("Phase 4b log written to %s", phase_4b_log_path)
+
+    # The session is a full agent with a shell and can commit for itself.
+    # Guard that range before any exit path commits, verifies or exports it.
+    _strip_committed_build_output(config, state, head_before_agent, "Phase 4b")
 
     _4b_end = time.time()
 
