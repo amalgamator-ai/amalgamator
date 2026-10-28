@@ -130,6 +130,16 @@ class Tracker:
             start_time=datetime.now(UTC).isoformat(),
         )
 
+    @property
+    def output_dir(self) -> str:
+        """Directory artifacts for this run are written to.
+
+        The pipeline writes its dossier, candidate patch and phase inputs
+        beside the tracker's own run record, so the location is part of the
+        tracker's interface rather than a private detail.
+        """
+        return self._output_dir
+
     @contextmanager
     def phase(self, name: str):
         """Context manager that times a pipeline phase and records its outcome."""

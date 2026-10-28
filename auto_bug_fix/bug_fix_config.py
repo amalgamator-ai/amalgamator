@@ -84,6 +84,8 @@ class BugFixConfig:
     # agent has shell access in the worktree and may attach HEAD to the
     # branch and commit there — observed 2026-10-15). Phase 5's patch export
     # and the failure-path export range from this SHA, not the movable
-    # branch name. Filled in by run_pipeline; empty = not yet frozen.
+    # branch name. Filled in by run_pipeline — which always re-freezes and
+    # overwrites any caller-provided value (see run_pipeline) — empty = not
+    # yet frozen.
     frozen_target_sha: str = ""
     fix_upstream_ref: str = ""
