@@ -234,6 +234,89 @@ def test_stage_agent_work_never_unstages_a_learned_path_head_tracks(tmp_path):
     assert _staged(tmp_path).splitlines() == ["gen.o"]
 
 
+def test_stage_agent_work_keeps_source_the_agent_wrote_at_a_learned_path(tmp_path):
+    """`generated_output` records a *path*, and a path is not an identity. A
+    verification that creates `pkg/generated.go` teaches the pipeline that
+    name; when the agent later authors the ported fix at the same name,
+    unstaging it by name dropped the deliverable with nothing but a log line
+    to show for it. Content the orchestrator never saw a build write is
+    treated as work."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "gen.o").write_text("verification build output\n")
+    _discard_verification_dirt(config, baseline, state)
+    assert state.generated_output == {"gen.o"}
+    assert state.generated_digests["gen.o"]
+
+    # The agent now authors real source at the very same path.
+    (tmp_path / "gen.o").write_text("int ported_fix = 1;\n")
+
+    result = _stage_agent_work(config, state)
+
+    assert result.generated == set()
+    assert _staged(tmp_path).splitlines() == ["gen.o"]
+
+
+def test_stage_agent_work_still_drops_rebuilt_output_at_a_learned_path(tmp_path):
+    """The flip side: the agent runs the same build, the same bytes reappear
+    at the learned path, and the boundary still leaves them out."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "gen.o").write_text("verification build output\n")
+    _discard_verification_dirt(config, baseline, state)
+
+    # The agent's own run of the same build command recreates it.
+    (tmp_path / "gen.o").write_text("verification build output\n")
+    (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
+
+    result = _stage_agent_work(config, state)
+
+    assert result.generated == {"gen.o"}
+    assert _staged(tmp_path).splitlines() == ["src.c"]
+
+
+def test_discard_records_what_the_build_wrote_at_each_learned_path(tmp_path):
+    """Hashes are taken while the files are still on disk — the clean that
+    follows removes them, and nothing could be recorded afterwards."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "gen.o").write_text("output\n")
+    expected = _git_4b(tmp_path, "hash-object", "gen.o")
+
+    assert _discard_verification_dirt(config, baseline, state) is True
+
+    assert not (tmp_path / "gen.o").exists()
+    assert state.generated_digests == {"gen.o": {expected}}
+
+
+def test_discard_does_not_hash_inside_a_fenced_build_dir(tmp_path):
+    """A build tree can hold tens of thousands of files, and the fence
+    excludes the whole subtree, so no boundary ever decides about them one by
+    one. Hashing them would be pure cost."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "rpm-build")
+    (tmp_path / "rpm-build").mkdir()
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "rpm-build" / "artifact.o").write_text("output\n")
+    (tmp_path / "root-gen.o").write_text("output\n")
+
+    _discard_verification_dirt(config, baseline, state)
+
+    assert "rpm-build/artifact.o" in state.generated_output
+    assert set(state.generated_digests) == {"root-gen.o"}
+
+
+def test_recognized_build_output_falls_back_when_nothing_was_recorded(tmp_path):
+    """No recorded content is not evidence either way — hashing can fail, and
+    fenced paths are skipped by design. The path rule still applies there, so
+    this change can only ever keep more work, never less."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    state.generated_output = {"gen.o"}
+    (tmp_path / "gen.o").write_text("output\n")
+
+    assert rbf._recognized_build_output(config, state, {"gen.o"}) == {"gen.o"}
+
+
 def test_comparison_snapshot_does_not_capture_content(tmp_path):
     """Only the starting snapshot restores content; the comparison snapshot
     must not write a second unreachable stash commit on every discard."""

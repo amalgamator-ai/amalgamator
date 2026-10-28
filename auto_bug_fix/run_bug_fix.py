@@ -342,6 +342,11 @@ class PipelineState:
     # even when they reappear — the phase 4b agent runs the same build
     # command and would otherwise have its output swept into the patch.
     generated_output: set[str] = field(default_factory=set)
+    # Blob hashes the orchestrator actually saw a build write at each of
+    # those paths. A learned path is only a *path*: when the agent later
+    # authors real source at one, matching by path alone drops the fix
+    # (``_recognized_build_output``).
+    generated_digests: dict[str, set[str]] = field(default_factory=dict)
 
 
 def phase_0_triage(
@@ -1265,6 +1270,99 @@ def _run_git_pathspec_batches(
     return ok
 
 
+def _hash_worktree_paths(config: BugFixConfig, paths: list[str]) -> dict[str, str]:
+    """Blob hash of each path's current content on disk, best effort.
+
+    Paths that are missing, unreadable or not regular files are simply
+    absent from the result: every caller treats "no hash" as "cannot prove
+    this is build output", which is the safe direction.
+    """
+    regular = [
+        path
+        for path in sorted(set(paths))
+        if os.path.isfile(os.path.join(config.repo_path, path))
+        and not os.path.islink(os.path.join(config.repo_path, path))
+    ]
+    digests: dict[str, str] = {}
+    for start in range(0, len(regular), _PATHSPEC_BATCH):
+        batch = regular[start : start + _PATHSPEC_BATCH]
+        result = _run_git(config.repo_path, ["hash-object", "--", *batch])
+        if not result.success:
+            log.warning(
+                "Could not hash %d worktree path(s) (exit %d): %s",
+                len(batch),
+                result.exit_code,
+                result.stderr.strip(),
+            )
+            continue
+        lines = result.stdout.split()
+        if len(lines) != len(batch):
+            log.warning(
+                "git hash-object returned %d hashes for %d paths — skipping "
+                "the batch rather than pairing them up wrongly",
+                len(lines),
+                len(batch),
+            )
+            continue
+        digests.update(zip(batch, lines, strict=True))
+    return digests
+
+
+def _record_generated_digests(
+    config: BugFixConfig, state: PipelineState, paths: set[str]
+) -> None:
+    """Remember what the build just wrote at each newly created path."""
+    for path, digest in _hash_worktree_paths(config, sorted(paths)).items():
+        state.generated_digests.setdefault(path, set()).add(digest)
+
+
+def _recognized_build_output(
+    config: BugFixConfig, state: PipelineState, paths: set[str]
+) -> set[str]:
+    """Of *paths*, the ones holding content a build was seen to produce there.
+
+    ``state.generated_output`` records paths, and a path is not an identity:
+    a verification that creates ``pkg/generated.go`` teaches the pipeline
+    that name, and if the agent later authors the ported fix at that same
+    name, unstaging it by name drops the deliverable with nothing but a log
+    line to show for it.
+
+    So a path with recorded content must also still hold content the
+    orchestrator watched a build write there. Anything else is treated as
+    work and stays staged —
+    build output that drifted between runs makes the patch noisier, which
+    the run can recover from; a dropped fix it cannot. Unrecognized content
+    is named in the log so the noise is traceable.
+    """
+    if not paths:
+        return set()
+    known = {path: state.generated_digests.get(path) for path in paths}
+    current = _hash_worktree_paths(config, [p for p, d in known.items() if d])
+    recognized: set[str] = set()
+    unrecognized: list[str] = []
+    for path in sorted(paths):
+        digests = known[path]
+        if not digests:
+            # Nothing was ever recorded for this path — hashing failed, or it
+            # was learned inside a fenced build directory, where the subtree
+            # exclusion decides and per-path content is never needed. Fall
+            # back to the path rule rather than invent evidence either way.
+            recognized.add(path)
+        elif current.get(path) in digests:
+            recognized.add(path)
+        else:
+            unrecognized.append(path)
+    if unrecognized:
+        log.warning(
+            "Commit boundary: %d learned build-output path(s) no longer hold "
+            "content this run saw a build write — staging them as work rather "
+            "than dropping them (e.g. %s)",
+            len(unrecognized),
+            ", ".join(unrecognized[:5]),
+        )
+    return recognized
+
+
 def _restage_unaccounted_fenced(
     config: BugFixConfig,
     fence: str,
@@ -1353,7 +1451,10 @@ def _stage_agent_work(
     tree now holds it, it is source and a modification there must reach the
     patch. Anything under a *tracked* build directory is committed for the
     same reason: that directory is source, and a fix ported there must reach
-    the patch.
+    the patch. And a learned path is only ever left out while it still holds
+    content a build was seen to write there (``_recognized_build_output``):
+    the agent authoring a fix at a name some verification once generated
+    must not lose it to a name collision.
     """
     fence = _fence_build_dir(config)
     ok = True
@@ -1409,14 +1510,18 @@ def _stage_agent_work(
             if in_head is None:
                 # Cannot prove which candidates are source: fall back to the
                 # untracked-only rule rather than risk dropping an edit.
-                generated = dirty[1] & state.generated_output
+                generated = _recognized_build_output(
+                    config, state, dirty[1] & state.generated_output
+                )
                 ok = False
                 log.warning(
                     "Could not check learned paths against HEAD — only "
                     "untracked generated output is left unstaged"
                 )
             else:
-                generated = candidates - in_head
+                generated = _recognized_build_output(
+                    config, state, candidates - in_head
+                )
             if generated and not _run_git_pathspec_batches(
                 config, ["reset", "-q", "HEAD", "--"], list(generated)
             ):
@@ -3674,9 +3779,11 @@ def _discard_verification_dirt(
     commit boundary's ``git add -A`` may then include that edit.
 
     The newly-appeared untracked paths are also recorded in
-    ``state.generated_output``: they are build output by construction, so a
+    ``state.generated_output``, with the content hash of each in
+    ``state.generated_digests``: they are build output by construction, so a
     later commit boundary can leave them unstaged when the agent's own run
-    of the same command recreates them (``_stage_agent_work``).
+    of the same command recreates them (``_stage_agent_work``) — but only
+    while the content there is still something a build wrote.
 
     A ``None`` baseline (snapshot failure) disables the discard entirely:
     reverting without a trusted baseline could delete pre-existing work.
@@ -3717,6 +3824,21 @@ def _discard_verification_dirt(
         new_untracked = current.untracked - baseline.untracked
         if state is not None and new_untracked:
             state.generated_output |= new_untracked
+            # Hash now, while the files are still on disk — the clean below
+            # removes them. Paths inside a fenced build directory are skipped:
+            # that subtree is excluded wholesale, so no commit boundary ever
+            # needs to decide about them one by one, and a build tree can hold
+            # tens of thousands of files.
+            fenced = _fence_build_dir(config)
+            _record_generated_digests(
+                config,
+                state,
+                {
+                    path
+                    for path in new_untracked
+                    if not (fenced is not None and _is_under(path, fenced))
+                },
+            )
         # The comparison only ever subtracts forward, so a file that was
         # untracked before the verification and is gone after it was removed
         # by the verification command itself (``make clean`` is the common
