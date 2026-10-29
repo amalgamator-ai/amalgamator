@@ -331,6 +331,16 @@ class PipelineState:
     failed_prerequisites: list[str] = field(default_factory=list)
     skipped_prerequisites: list[str] = field(default_factory=list)
     squashed_backport_range: str = ""
+    # Set when resolution failed and the tree was force-resolved with
+    # --theirs. Such a tree may only be reported as success when build/test
+    # commands independently verified it; otherwise the outcome is
+    # "unverified".
+    force_resolved: bool = False
+    force_resolved_reason: str = ""
+    # True only when `git checkout --theirs` actually ran. The no-conflict
+    # re-apply path can leave a clean tree without using --theirs, and the
+    # diagnostic must not claim otherwise.
+    force_resolved_with_theirs: bool = False
 
 
 def phase_0_triage(
@@ -2508,6 +2518,64 @@ def _backport_completeness(
     return "success", ""
 
 
+def _has_build_or_test_commands(config: BugFixConfig) -> bool:
+    """True when build/test can independently verify a resolved tree."""
+    return bool(
+        (config.build_command or "").strip() or (config.test_command or "").strip()
+    )
+
+
+def _record_verify_gate(config: BugFixConfig, state: PipelineState, tracker) -> None:
+    """Record Phase 4 evidence without claiming a vacuous pass.
+
+    A force-resolved tree with no build/test commands has nothing to verify;
+    the same rule applies to the post-recovery sweep, so both call sites use
+    this helper instead of hard-coding ``passed``.
+    """
+    if state.force_resolved and not _has_build_or_test_commands(config):
+        tracker.record_gate("verify", "unverified")
+        state.dossier.add(
+            "Verification unavailable",
+            "Build and test commands are both empty; the "
+            "force-resolved tree cannot be verified automatically",
+            "Phase 4",
+        )
+    else:
+        tracker.record_gate("verify", "passed")
+
+
+def _force_resolve_outcome(
+    config: BugFixConfig,
+    state: PipelineState,
+    outcome: str,
+    detail: str,
+) -> tuple[str, str]:
+    """Downgrade a force-resolved port that was never independently verified.
+
+    A failed resolution that is papered over with ``git checkout --theirs``
+    (or a clean re-apply) may only be reported as success when build/test
+    commands ran and passed. With both commands empty, Phase 4's
+    "verification" is vacuous: the conflicts were discarded, not resolved.
+    Keep the explicit ``unverified`` outcome instead of promoting it to
+    success, and preserve any completeness evidence that came before it.
+    """
+    if state.force_resolved and not _has_build_or_test_commands(config):
+        reason = state.force_resolved_reason or "resolution failed"
+        how = (
+            "conflicts were force-resolved with --theirs"
+            if state.force_resolved_with_theirs
+            else "the cherry-pick was re-applied after resolution failed"
+        )
+        parts = [
+            reason,
+            f"{how}; no build/test commands were available to verify the result",
+        ]
+        if detail:
+            parts.append(detail)
+        return "unverified", "; ".join(parts)
+    return outcome, detail
+
+
 # Relatedness thresholds for the Phase 4.5 fallback (see
 # _shares_content_with_fix). Derived by measurement, not taste — re-derive them
 # before changing: compare commits with disjoint file sets and check that the
@@ -3004,6 +3072,7 @@ def _run_pipeline_phases(
                 "Force-resolving %d remaining conflicts with --theirs before Phase 4b",
                 len(remaining_conflicts),
             )
+            state.force_resolved_with_theirs = True
             for f in remaining_conflicts:
                 subprocess.run(
                     ["git", "checkout", "--theirs", "--", f],
@@ -3041,6 +3110,7 @@ def _run_pipeline_phases(
             git_cherry_pick(config.repo_path, config.source_fix_commit)
             status = git_status_porcelain(config.repo_path)
             force_conflicts = _conflicted_files(status)
+            state.force_resolved_with_theirs = bool(force_conflicts)
             if force_conflicts:
                 log.info(
                     "Re-applied cherry-pick, force-resolving %d conflicts with --theirs",
@@ -3060,15 +3130,53 @@ def _run_pipeline_phases(
             subprocess.run(
                 ["git", "add", "-A"], cwd=config.repo_path, capture_output=True
             )
+            if force_conflicts:
+                conflict_note = (
+                    f"[ {len(force_conflicts)} conflicts force-resolved "
+                    "with --theirs ]"
+                )
+            else:
+                conflict_note = (
+                    "[ cherry-pick re-applied without --theirs after "
+                    "resolution failed ]"
+                )
             git_commit(
                 config.repo_path,
                 f"Port {config.issue_id} (force-resolved for Phase 4b)\n\n"
-                f"[ All conflicts force-resolved with --theirs ]",
+                f"{conflict_note}",
                 trailers=_COAUTHOR_TRAILERS,
             )
 
-        with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
-            phase_4b_run_and_fix(config, claude_config, state, tracker)
+        # Resolution failed; the tree below is force-resolved, not resolved.
+        # It may only become a success outcome if build/test independently
+        # verify it (Phase 4b). Otherwise the final outcome is "unverified".
+        state.force_resolved = True
+        state.force_resolved_reason = (
+            f"resolution failed ({type(e).__name__}: {str(e)[:200]})"
+        )
+
+        # Enter 4b only when it has something to drive. With both build and
+        # test commands empty the run-and-fix loop has no success criterion:
+        # it cannot distinguish a good port from a --theirs-poisoned one, and
+        # a marker-less session would fail the whole target after the
+        # force-resolved tree is already committed. Let the port stand, but
+        # keep it explicitly unverified.
+        if _has_build_or_test_commands(config):
+            with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
+                phase_4b_run_and_fix(config, claude_config, state, tracker)
+        else:
+            log.warning(
+                "Phase 4b skipped after force-resolve: build and test "
+                "commands are both empty — the force-resolved tree is "
+                "UNVERIFIED and will not be reported as success"
+            )
+            state.dossier.add(
+                "Run-and-fix loop skipped — result unverified",
+                "Build and test commands are both empty — Phase 4b not "
+                "entered after force-resolution; the force-resolved tree "
+                "is unverified and must be reviewed by a human",
+                "Phase 4b",
+            )
         cherry_pick_succeeded = True
 
     if not cherry_pick_succeeded:
@@ -3079,7 +3187,7 @@ def _run_pipeline_phases(
     try:
         with tracker.phase("Phase 4 — Verify"):
             phase_4_verify(config, state)
-            tracker.record_gate("verify", "passed")
+            _record_verify_gate(config, state, tracker)
     except PipelineEscalation:
         try:
             with tracker.phase("Phase 4a — Build error recovery"):
@@ -3090,7 +3198,7 @@ def _run_pipeline_phases(
 
             with tracker.phase("Phase 4 — Verify (post-recovery)"):
                 phase_4_verify(config, state)
-                tracker.record_gate("verify", "passed")
+                _record_verify_gate(config, state, tracker)
         except PipelineEscalation:
             with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
                 phase_4b_run_and_fix(config, claude_config, state, tracker)
@@ -3305,14 +3413,25 @@ def _run_pipeline_phases(
 
     with tracker.phase("Phase 5 — Completeness check"):
         outcome, completeness_detail = _backport_completeness(config, state)
+        outcome, completeness_detail = _force_resolve_outcome(
+            config, state, outcome, completeness_detail
+        )
         tracker.record_gate(
-            "completeness", "partial" if outcome != "success" else "complete"
+            "completeness",
+            (
+                "complete"
+                if outcome == "success"
+                else "unverified" if outcome == "unverified" else "partial"
+            ),
         )
         if outcome != "success":
-            log.warning("Backport is partial: %s", completeness_detail)
-            state.dossier.add(
-                "Partial backport", completeness_detail, "completeness check"
+            log.warning("Backport outcome is %s: %s", outcome, completeness_detail)
+            label = (
+                "Unverified force-resolved port"
+                if outcome == "unverified"
+                else "Partial backport"
             )
+            state.dossier.add(label, completeness_detail, "completeness check")
     tracker.set_outcome(outcome)
     return state.dossier, tracker
 
@@ -3555,9 +3674,13 @@ def run_targets(
                 f"FINISHED target {spec.branch}: outcome={outcome}, duration={duration}s, cost=${cost_usd:.4f}"
             )
 
-            # Preserve partial backports too — an incomplete port is exactly
-            # what a human needs to inspect and finish.
-            if outcome in ("success", "partial_success") and worktree_created:
+            # Preserve partial and unverified backports too — an incomplete or
+            # unverified port is exactly what a human needs to inspect and
+            # finish.
+            if (
+                outcome in ("success", "partial_success", "unverified")
+                and worktree_created
+            ):
                 try:
                     head_sha = git_rev_parse(worktree_path, "HEAD")
                     slug = _sanitize_branch_slug(
