@@ -252,6 +252,19 @@ def test_parse_claude_config_defaults():
     assert claude_config.model == "claude-sonnet-4-6"
     assert claude_config.allowed_tools == ["Read", "Write", "Bash"]
     assert claude_config.perm_mode == "acceptEdits"
+    assert claude_config.xml_tool_fallback is False
+
+
+def test_parse_claude_config_xml_tool_fallback_opt_in():
+    config = {"claude": {"xml_tool_fallback": True}}
+    claude_config = parse_claude_config(config, "/tmp/output")
+    assert claude_config.xml_tool_fallback is True
+
+
+def test_parse_claude_config_xml_tool_fallback_must_be_bool():
+    config = {"claude": {"xml_tool_fallback": "yes"}}
+    with pytest.raises(ConfigError):
+        parse_claude_config(config, "/tmp/output")
 
 
 def test_parse_claude_config_top_level_model():

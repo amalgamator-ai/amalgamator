@@ -106,6 +106,12 @@ class ClaudeConfig:
     command_timeout: int | None = None
     context_length: int | None = None
     profile: ModelProfile | None = None
+    # Provider compatibility mode: some LiteLLM models emit Claude-style
+    # XML tool invocations as plain assistant text.  Off by default —
+    # assistant prose (including fenced examples) must never execute.
+    # When enabled, only a message whose entire content is XML tool blocks
+    # is treated as an invocation.
+    xml_tool_fallback: bool = False
 
     def __post_init__(self):
         if self.profile:
