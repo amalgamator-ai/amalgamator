@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from auto_bug_fix.external_context import ExternalContext
     from common.model_registry import ModelProfile
 
 
@@ -79,3 +80,13 @@ class BugFixConfig:
     # at config time; source_fix_commit is filled in after ingest.
     fix_patch: str = ""
     fix_upstream_ref: str = ""
+
+    # External resolver context (hybrid pipelines). Path to a Markdown
+    # file carrying the output of a prior automated resolver (e.g.
+    # synthmerge) plus deterministic check findings. When present and
+    # non-empty it is injected into the Phase 0.5 triage, Phase 3a
+    # resolution and Phase 3a.1 verification prompts; resolution reuses
+    # trusted prior resolutions verbatim, verification scope is never
+    # reduced. Set via the top-level YAML key ``external_context_file:``.
+    external_context_file: str = ""
+    external_context: ExternalContext | None = None  # loaded context

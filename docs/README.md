@@ -35,6 +35,8 @@ needed for product docs).
 | [Overview](backporting/overview.md) | Scan for missing fixes, then backport them |
 | [Scanner](backporting/scanning.md) | Find branches/tags that still need a fix |
 | [Backport pipeline](backporting/backporting.md) | Git-first port of a fix to another branch |
+| [External resolver context](external-context.md) | Seed a hybrid backport with a prior resolver's output and deterministic findings |
+| [External context template](external-context-template.md) | Fill-in Markdown format for `external_context_file` |
 
 ## Reference
 
