@@ -5,6 +5,7 @@
 
 import json
 import os
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -979,6 +980,227 @@ def test_phase_4b_missing_result_file_escalates(tmp_path):
             assert "without writing a result file" in str(exc)
 
 
+# ---------- Force-resolve success boundary (unverified) ----------
+
+
+def test_force_resolved_without_commands_is_unverified():
+    from auto_bug_fix.run_bug_fix import _force_resolve_outcome
+
+    config = _make_config(build_command="", test_command="")
+    state = PipelineState()
+    state.force_resolved = True
+    state.force_resolved_with_theirs = True
+    state.force_resolved_reason = "resolution failed (RuntimeError: boom)"
+    outcome, detail = _force_resolve_outcome(config, state, "success", "")
+    assert outcome == "unverified"
+    assert "force-resolved with --theirs" in detail
+    assert "no build/test commands" in detail
+
+
+def test_force_resolved_after_clean_reapply_uses_neutral_wording():
+    from auto_bug_fix.run_bug_fix import _force_resolve_outcome
+
+    config = _make_config(build_command="", test_command="")
+    state = PipelineState()
+    state.force_resolved = True
+    state.force_resolved_with_theirs = False
+    state.force_resolved_reason = "resolution failed (RuntimeError: boom)"
+    outcome, detail = _force_resolve_outcome(config, state, "success", "")
+    assert outcome == "unverified"
+    assert "--theirs" not in detail
+    assert "re-applied after resolution failed" in detail
+
+
+def test_force_resolved_preserves_partial_success_detail():
+    from auto_bug_fix.run_bug_fix import _force_resolve_outcome
+
+    config = _make_config(build_command="", test_command="")
+    state = PipelineState()
+    state.force_resolved = True
+    state.force_resolved_with_theirs = True
+    state.force_resolved_reason = "resolution failed (RuntimeError: boom)"
+    outcome, detail = _force_resolve_outcome(
+        config, state, "partial_success", "2/3 of the fix's files were dropped"
+    )
+    assert outcome == "unverified"
+    assert "force-resolved with --theirs" in detail
+    assert "2/3 of the fix's files were dropped" in detail
+
+
+def test_force_resolved_with_build_command_keeps_verified_outcome():
+    from auto_bug_fix.run_bug_fix import _force_resolve_outcome
+
+    config = _make_config(build_command="make", test_command="")
+    state = PipelineState()
+    state.force_resolved = True
+    outcome, detail = _force_resolve_outcome(config, state, "success", "")
+    assert outcome == "success"
+    assert detail == ""
+
+
+def test_empty_commands_without_force_resolve_stay_success():
+    from auto_bug_fix.run_bug_fix import _force_resolve_outcome
+
+    config = _make_config(build_command="", test_command="")
+    state = PipelineState()
+    outcome, detail = _force_resolve_outcome(config, state, "success", "")
+    assert outcome == "success"
+    assert detail == ""
+
+
+# ---------- Force-resolve pipeline boundary ----------
+
+
+def _run_force_resolve_pipeline(
+    tmp_path,
+    monkeypatch,
+    *,
+    verify_fails_once=False,
+    completeness=("success", ""),
+):
+    """Drive run_pipeline through a resolution failure with no build/test commands.
+
+    Every earlier phase and the git side effects are stubbed; the code under
+    test is the force-resolve except branch, the Phase 4 gate, and the Phase 5
+    outcome boundary.
+    """
+    import subprocess
+
+    from auto_bug_fix import run_bug_fix as rbf
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    (repo / "f.c").write_text("int f;\n")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "."], check=True, capture_output=True
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    calls = {"4a": 0, "4b": 0, "verify": 0}
+
+    def fake_triage(config, claude_config, state):
+        state.seed = ["f.c"]
+        state.allowed_modules = ["f.c"]
+        return {"forward_patch_id": "not_found", "ancestry": "seed_files_only"}
+
+    def fake_semantic_triage(config, claude_config, state, tracker):
+        state.triage_assessment = {}
+        return {}
+
+    def fake_baseline(config, claude_config, state):
+        return None
+
+    def fake_resolve(config, claude_config, state, tracker, **kwargs):
+        raise RuntimeError("resolution blew up")
+
+    def fake_verify(config, state):
+        calls["verify"] += 1
+        if verify_fails_once and calls["verify"] == 1:
+            raise PipelineEscalation("initial verify failed")
+        return True
+
+    def fake_4a(config, claude_config, state, tracker, fix_diff):
+        calls["4a"] += 1
+
+    def fake_4b(config, claude_config, state, tracker, extra_verification=None):
+        calls["4b"] += 1
+
+    monkeypatch.setattr(rbf, "phase_0_triage", fake_triage)
+    monkeypatch.setattr(rbf, "phase_0_5_semantic_triage", fake_semantic_triage)
+    monkeypatch.setattr(rbf, "phase_1_baseline_and_red", fake_baseline)
+    monkeypatch.setattr(rbf, "cherry_pick_and_resolve", fake_resolve)
+    monkeypatch.setattr(rbf, "git_status_porcelain", lambda path: "")
+    monkeypatch.setattr(rbf, "git_reset_hard", lambda *a, **k: None)
+    monkeypatch.setattr(rbf, "git_cherry_pick", lambda *a, **k: None)
+    monkeypatch.setattr(rbf, "git_commit", lambda *a, **k: None)
+    monkeypatch.setattr(rbf, "_compute_fix_diff", lambda config: "")
+    monkeypatch.setattr(rbf, "phase_4_verify", fake_verify)
+    monkeypatch.setattr(rbf, "phase_4a_build_recovery", fake_4a)
+    monkeypatch.setattr(rbf, "phase_4b_run_and_fix", fake_4b)
+    monkeypatch.setattr(
+        rbf, "_backport_completeness", lambda config, state: completeness
+    )
+    monkeypatch.setattr(
+        rbf, "phase_4_5_semantic_equivalence", lambda config, state: "identical"
+    )
+    monkeypatch.setattr(rbf, "_squashed_backport_range", lambda config, state: None)
+    monkeypatch.setattr(rbf, "run_range_diff", lambda *a, **k: "")
+    monkeypatch.setattr(rbf, "git_format_patch_bytes", lambda *a, **k: b"patch")
+
+    config = _make_config(
+        repo_path=str(repo),
+        build_dir=str(repo),
+        target_branch="main",
+        build_command="",
+        test_command="",
+        auto_discover_tests=False,
+        evidence_checks=False,
+    )
+    dossier, tracker = rbf.run_pipeline(
+        config, _make_claude_config(), output_dir=str(output_dir)
+    )
+    gates = {phase.phase: phase.gate_decisions for phase in tracker._run.phases}
+    return calls, gates, dossier, tracker
+
+
+def test_force_resolve_pipeline_skips_4b_and_records_unverified(tmp_path, monkeypatch):
+    calls, gates, dossier, tracker = _run_force_resolve_pipeline(tmp_path, monkeypatch)
+
+    assert tracker.outcome == "unverified"
+    assert calls["4b"] == 0
+    assert gates["Phase 4 — Verify"]["verify"] == "unverified"
+    assert gates["Phase 5 — Completeness check"]["completeness"] == "unverified"
+    labels = [item.label for item in dossier.items]
+    assert "Run-and-fix loop skipped — result unverified" in labels
+    assert "Verification unavailable" in labels
+    assert "Unverified force-resolved port" in labels
+
+
+def test_force_resolve_pipeline_post_recovery_gate_is_unverified(tmp_path, monkeypatch):
+    calls, gates, _, tracker = _run_force_resolve_pipeline(
+        tmp_path, monkeypatch, verify_fails_once=True
+    )
+
+    assert tracker.outcome == "unverified"
+    assert calls["4a"] == 1
+    assert calls["4b"] == 0
+    assert gates["Phase 4 — Verify (post-recovery)"]["verify"] == "unverified"
+    assert gates["Phase 5 — Completeness check"]["completeness"] == "unverified"
+
+
+def test_force_resolve_pipeline_keeps_partial_evidence(tmp_path, monkeypatch):
+    _, _, dossier, tracker = _run_force_resolve_pipeline(
+        tmp_path,
+        monkeypatch,
+        completeness=("partial_success", "2/3 of the fix's files were dropped"),
+    )
+
+    assert tracker.outcome == "unverified"
+    item = next(
+        item for item in dossier.items if item.label == "Unverified force-resolved port"
+    )
+    assert "no build/test commands" in item.content
+    assert "2/3 of the fix's files were dropped" in item.content
+
+
 # ---------- Backport completeness (partial_success, non-bugfix only) ----------
 
 
@@ -1067,6 +1289,61 @@ def test_completeness_regenerated_skip_file_counts_as_ported(tmp_path):
     _git_4b(tmp_path, "commit", "-m", "Regenerate files")
     outcome, _ = _backport_completeness(config, state)
     assert outcome == "success"
+
+
+@patch("auto_bug_fix.run_bug_fix.run_pipeline")
+def test_run_targets_preserves_unverified_branch(mock_pipeline, tmp_path):
+    """An unverified port is exactly what a human needs to inspect."""
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=source, check=True)
+    (source / "f.c").write_text("int f;\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+
+    def pipeline_side_effect(config, claude_config, output_dir):
+        _make_tracker_json(output_dir, config.issue_id)
+        return _make_dossier(config.issue_id), MagicMock(outcome="unverified")
+
+    mock_pipeline.side_effect = pipeline_side_effect
+    parent_run_dir = tmp_path / "runs"
+    parent_run_dir.mkdir()
+    base_config = BugFixConfig(
+        **{**_BASE_CFG, "repo_path": str(source), "build_dir": str(source)}
+    )
+
+    results = run_targets(
+        [TargetSpec(branch="main")],
+        base_config,
+        MagicMock(),
+        source_path=str(source),
+        workdir=str(tmp_path / "worktrees"),
+        parent_run_dir=str(parent_run_dir),
+        build_subdir="",
+    )
+
+    assert results[0].outcome == "unverified"
+    preserved = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "--verify", "amalgamator/test-1"],
+        capture_output=True,
+        text=True,
+    )
+    assert preserved.returncode == 0, preserved.stderr
 
 
 @patch("auto_bug_fix.run_bug_fix.cleanup_worktree")
