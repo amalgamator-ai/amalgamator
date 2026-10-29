@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import time
 from abc import ABC, abstractmethod
@@ -173,6 +174,117 @@ def _filter_tools(allowed_tools: list[str] | None) -> list[ToolSchema]:
     allowed = {_CLAUDE_TO_LITELLM_TOOL.get(t, t) for t in allowed_tools}
     filtered = [s for s in ALL_TOOL_SCHEMAS if s["function"]["name"] in allowed]
     return filtered or ALL_TOOL_SCHEMAS
+
+
+# ── XML tool-call fallback (explicit opt-in) ────────────────────────────────
+#
+# Some models (DeepSeek V4 Flash notably) occasionally emit Claude-style XML
+# tool invocations in the message content — e.g.
+#
+#     <bash><command>git status</command></bash>
+#
+# instead of structured OpenAI ``tool_calls``. Without a fallback the loop
+# treats that response as a final answer and ends the session, which surfaces
+# upstream as "ended without writing a result file".
+#
+# The fallback is OFF by default (``ClaudeConfig.xml_tool_fallback``): normal
+# assistant prose must never reach the tool-execution boundary. When enabled,
+# the invocation format is unambiguous — the ENTIRE message must consist of
+# one or more tool blocks, with no surrounding prose or Markdown fence.
+# Well-formed blocks execute; malformed blocks are reported back as errors
+# instead of executing, so the model can correct itself.
+
+_XML_TOOL_TAG_RE = re.compile(
+    r"<(bash|Bash|read_file|Read|write_file|Write)>(.*?)</\1>",
+    re.DOTALL,
+)
+_XML_ARG_TAG_RE = re.compile(
+    r"<(command|path|content)>(.*?)</\1>",
+    re.DOTALL,
+)
+
+_XML_TOOL_ALIAS = {
+    "Bash": "bash",
+    "Read": "read_file",
+    "Write": "write_file",
+}
+
+# Consecutive-signature comparison misses alternation (valid -> malformed ->
+# valid -> ...) because the signature ping-pongs.  Detect short repeating
+# cycles in a bounded history instead of capping legitimate distinct calls.
+_XML_SIG_WINDOW = 12
+_XML_SIG_MIN_CYCLES = 4
+
+
+def _has_repeating_xml_sig(sigs: list[str]) -> bool:
+    """Return True when *sigs* ends in a period 2-3 repeating cycle."""
+    for period in (2, 3):
+        needed = period * _XML_SIG_MIN_CYCLES
+        if len(sigs) < needed:
+            continue
+        tail = sigs[-needed:]
+        if all(tail[i] == tail[i % period] for i in range(len(tail))):
+            return True
+    return False
+
+
+def _parse_xml_tool_message(text: str) -> tuple[list[tuple[str, dict]], list[str]]:
+    """Parse a message that consists entirely of XML tool blocks.
+
+    Returns ``(calls, errors)``.  Prose, quoted examples, and fenced code
+    return ``([], [])`` so they stay text.  A block that is a tool invocation
+    but is missing required arguments is reported in *errors* so the model can
+    correct it; nothing from that block is executed.
+
+    Duplicate argument tags keep the last value, in line with this simple
+    compatibility parser.  XML entities are not decoded (``&amp;`` stays
+    literal), which is acceptable for a fallback shim.
+    """
+    if not text or "<" not in text:
+        return [], []
+    stripped = text.strip()
+    calls: list[tuple[str, dict]] = []
+    errors: list[str] = []
+    spans: list[tuple[int, int]] = []
+    for m in _XML_TOOL_TAG_RE.finditer(stripped):
+        spans.append(m.span())
+        name = _XML_TOOL_ALIAS.get(m.group(1), m.group(1))
+        body = m.group(2)
+        args: dict[str, str] = {}
+        for am in _XML_ARG_TAG_RE.finditer(body):
+            args[am.group(1)] = am.group(2)
+        if name == "bash":
+            if "command" in args:
+                calls.append(("bash", {"command": args["command"]}))
+            else:
+                errors.append("Malformed <bash> tool block: missing <command>.")
+        elif name == "read_file":
+            if "path" in args:
+                calls.append(("read_file", {"path": args["path"]}))
+            else:
+                errors.append("Malformed <read_file> tool block: missing <path>.")
+        elif name == "write_file":
+            missing = [tag for tag in ("path", "content") if tag not in args]
+            if missing:
+                tags = ", ".join(f"<{tag}>" for tag in missing)
+                errors.append(f"Malformed <write_file> tool block: missing {tags}.")
+            else:
+                calls.append(
+                    ("write_file", {"path": args["path"], "content": args["content"]})
+                )
+    if not spans:
+        return [], []
+    # Anything outside the recognized blocks means this was an explanation
+    # ("Here is an example, do not execute it: ..."), not an invocation.
+    remainder = []
+    last = 0
+    for start, end in spans:
+        remainder.append(stripped[last:start])
+        last = end
+    remainder.append(stripped[last:])
+    if "".join(remainder).strip():
+        return [], []
+    return calls, errors
 
 
 # ── Context window management ────────────────────────────────────────────────
@@ -578,6 +690,44 @@ class StepTiming:
     cost_usd: float | None = None
 
 
+def _request_final_answer(
+    model: str,
+    messages: list[dict],
+    extra_kwargs: dict,
+    timing: StepTiming,
+) -> None:
+    """Ask for a final answer after repeated-call loop detection.
+
+    Shared by the structured and XML fallback paths so a loop break still
+    gives the model a chance to write its result file.
+    """
+    from common.llm_client import _strip_thinking
+
+    messages.append(
+        {
+            "role": "user",
+            "content": "You have already called the same tool with the same "
+            "arguments multiple times. Please provide your final "
+            "answer now based on the information you have gathered.",
+        }
+    )
+    try:
+        final_kwargs = {**extra_kwargs, "max_tokens": 4096}
+        final = _litellm_completion_with_streaming(
+            model=model,
+            messages=messages,
+            **final_kwargs,  # pyrefly: ignore [bad-argument-type] (dynamic LiteLLM option passthrough)
+        )
+        final_text = _strip_thinking(final.choices[0].message.content or "")
+        if final_text:
+            print(f"{Fore.CYAN}Agent:{Style.RESET_ALL} {final_text[:500]}")
+        if final.usage:
+            timing.input_tokens += getattr(final.usage, "prompt_tokens", 0)
+            timing.output_tokens += getattr(final.usage, "completion_tokens", 0)
+    except Exception:
+        pass
+
+
 # ── Abstract base ────────────────────────────────────────────────────────────
 
 
@@ -669,6 +819,7 @@ class LiteLLMAgentRunner(AgentRunner):
                 bash_timeout=getattr(config, "command_timeout", None),
                 context_length=getattr(config, "context_length", None),
                 profile=getattr(config, "profile", None),
+                xml_tool_fallback=getattr(config, "xml_tool_fallback", False),
             )
             timing.name = step.name
 
@@ -704,11 +855,14 @@ class LiteLLMAgentRunner(AgentRunner):
         bash_timeout: int | None = None,
         context_length: int | None = None,
         profile: ModelProfile | None = None,
+        xml_tool_fallback: bool = False,
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
 
         When *profile* is provided, transport config (api_base, api_key,
         params) comes from it instead of the module-level globals.
+        *xml_tool_fallback* is an explicit provider compatibility mode;
+        when false, XML-looking assistant text is never executed.
 
         Includes:
         - Duplicate-call detection to break out of loops.
@@ -751,6 +905,7 @@ class LiteLLMAgentRunner(AgentRunner):
         iteration = 0
         last_tool_sig: str | None = None
         repeat_count = 0
+        recent_xml_sigs: list[str] = []
         compaction_count = 0
 
         while iteration < MAX_AGENT_ITERATIONS:
@@ -836,9 +991,103 @@ class LiteLLMAgentRunner(AgentRunner):
                 print(f"{Fore.CYAN}Agent:{Style.RESET_ALL} {content_text[:500]}")
 
             if not message.tool_calls:
-                log.info("Agent finished (no tool calls) on iteration %d", iteration)
-                break
+                xml_calls, xml_errors = (
+                    _parse_xml_tool_message(content_text)
+                    if xml_tool_fallback
+                    else ([], [])
+                )
+                if not xml_calls and not xml_errors:
+                    log.info(
+                        "Agent finished (no tool calls) on iteration %d", iteration
+                    )
+                    break
+                # The model emitted Claude-style XML tool calls in its content
+                # instead of structured tool_calls. Execute them and feed the
+                # results back as a user message (no tool_call_ids exist for
+                # this format). Malformed blocks become error results so the
+                # model can correct them instead of silently losing the call.
+                log.info(
+                    "Parsed %d XML tool call(s) and %d error(s) from agent content",
+                    len(xml_calls),
+                    len(xml_errors),
+                )
+                xml_sig = "|".join(
+                    f"{fn_name}:{json.dumps(fn_args, sort_keys=True)}"
+                    for fn_name, fn_args in xml_calls
+                )
+                if xml_sig == last_tool_sig:
+                    repeat_count += 1
+                    if repeat_count >= 3:
+                        log.warning(
+                            "Breaking loop: same XML tool call " "repeated %d times",
+                            repeat_count + 1,
+                        )
+                        print(
+                            f"{Fore.RED}Agent loop detected — same XML tool call "
+                            f"repeated {repeat_count + 1} times, stopping."
+                            f"{Style.RESET_ALL}"
+                        )
+                        _request_final_answer(model, messages, extra_kwargs, timing)
+                        break
+                else:
+                    repeat_count = 0
+                last_tool_sig = xml_sig
+                recent_xml_sigs.append(xml_sig)
+                if len(recent_xml_sigs) > _XML_SIG_WINDOW:
+                    del recent_xml_sigs[0]
+                if _has_repeating_xml_sig(recent_xml_sigs):
+                    log.warning(
+                        "Breaking loop: repeating XML tool-call pattern (%s)",
+                        " -> ".join(recent_xml_sigs),
+                    )
+                    print(
+                        f"{Fore.RED}Agent loop detected — repeating XML "
+                        f"tool-call pattern, stopping.{Style.RESET_ALL}"
+                    )
+                    _request_final_answer(model, messages, extra_kwargs, timing)
+                    break
+                result_blocks = [
+                    f"<tool_error>\n<output>\n{error}\n</output>\n</tool_error>"
+                    for error in xml_errors
+                ]
+                for fn_name, fn_args in xml_calls:
+                    if fn_name not in allowed_names:
+                        result_blocks.append(
+                            f"<{fn_name}>\n<output>\nError: tool '{fn_name}' "
+                            f"is not allowed by the pipeline configuration.\n"
+                            f"</output>\n</{fn_name}>"
+                        )
+                        continue
+                    print(
+                        f"{Fore.YELLOW}  Tool: {fn_name}"
+                        f"({_summarize_args(fn_args)}){Style.RESET_ALL}"
+                    )
+                    result = _execute_tool(
+                        fn_name,
+                        fn_args,
+                        cwd,
+                        bash_timeout=effective_timeout,
+                        read_cap=read_cap,
+                        bash_cap=bash_cap,
+                    )
+                    print(
+                        f"  Result: {result[:200]}"
+                        f"{'...' if len(result) > 200 else ''}"
+                    )
+                    result_blocks.append(
+                        f"<{fn_name}>\n<output>\n{result}\n</output>\n</{fn_name}>"
+                    )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "<tool_results>\n"
+                        + "\n".join(result_blocks)
+                        + "\n</tool_results>",
+                    }
+                )
+                continue
 
+            recent_xml_sigs.clear()
             tool_sig = "|".join(
                 f"{tc.function.name}:{tc.function.arguments}"
                 for tc in message.tool_calls
@@ -854,37 +1103,7 @@ class LiteLLMAgentRunner(AgentRunner):
                         f"{Fore.RED}Agent loop detected — same tool call repeated "
                         f"{repeat_count + 1} times, stopping.{Style.RESET_ALL}"
                     )
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": "You have already called the same tool with the same "
-                            "arguments multiple times. Please provide your final "
-                            "answer now based on the information you have gathered.",
-                        }
-                    )
-                    try:
-                        final_kwargs = {**extra_kwargs, "max_tokens": 4096}
-                        final = _litellm_completion_with_streaming(
-                            model=model,
-                            messages=messages,
-                            **final_kwargs,  # pyrefly: ignore [bad-argument-type] (dynamic LiteLLM option passthrough)
-                        )
-                        final_text = _strip_thinking(
-                            final.choices[0].message.content or ""
-                        )
-                        if final_text:
-                            print(
-                                f"{Fore.CYAN}Agent:{Style.RESET_ALL} {final_text[:500]}"
-                            )
-                        if final.usage:
-                            timing.input_tokens += getattr(
-                                final.usage, "prompt_tokens", 0
-                            )
-                            timing.output_tokens += getattr(
-                                final.usage, "completion_tokens", 0
-                            )
-                    except Exception:
-                        pass
+                    _request_final_answer(model, messages, extra_kwargs, timing)
                     break
             else:
                 repeat_count = 0
