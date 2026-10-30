@@ -41,6 +41,7 @@ class SemanticTriagePrompt:
     source_branch: str
     target_branch: str
     seed_files: list[str]
+    notes_file: str = "semantic_triage_notes.txt"
 
     prompt_template: ClassVar[str] = """\
 {context}
@@ -58,6 +59,19 @@ Files touched by the commit:
 
 Source branch: {source_branch}
 Target branch: {target_branch}
+
+## Working method (read this first)
+
+- **Budget your exploration to the commit's size.** Triage needs the fix's SHAPE, \
+not a line-by-line audit. For a large commit (dozens of files or more), work from \
+the diffstat and targeted sampling: identify the core mechanism, the main new \
+types/functions, and spot-check representative files. Do NOT systematically \
+inspect every symbol or every file — that is the resolution agent's job, not yours.
+- **Persist findings as you go.** After each step below, append your conclusions \
+to `{notes_file}` (plain text, create it if missing). Your conversation may be \
+compacted; notes on disk survive that. If you ever feel you are re-deriving \
+something you already checked, read `{notes_file}` first, then continue from \
+where the notes end. Compile the final JSON from your notes.
 
 ## Your Task
 
@@ -151,6 +165,21 @@ beyond the basic build+test? Look for:
    - Integration tests if they exist in the commit's scope
    These will be run in addition to the YAML-configured test command.
 
+12. **Decide the adaptation strategy**: Does the fix implement its behavior through a \
+mechanism that EXISTS on the target branch, or through one the target lacks?
+   - `conflict_resolution` (the normal case): the fix's approach — the functions it \
+extends, the structures it modifies, the framework it plugs into — exists on the \
+target; the port is a (possibly adapted) textual resolution of the cherry-pick \
+conflicts.
+   - `semantic_rederivation`: the fix builds on machinery that does not exist on the \
+target at all (e.g. it was written on top of a large refactor, or introduces a new \
+engine/framework mechanism the target predates). Resolving the conflicts line by \
+line cannot produce a working port — the fix's *behavior* must be re-implemented \
+natively for the target. Signal this honestly; a doomed textual resolution wastes \
+the whole run. Check: does the fix's diff reference types/functions/patterns that \
+appear NOWHERE on the target branch, with no small portable prerequisite that \
+supplies them?
+
 ## Output
 
 Write a JSON file to `{output_file}` with this exact structure:
@@ -179,6 +208,7 @@ Write a JSON file to `{output_file}` with this exact structure:
   "regeneration_commands": ["commands to regenerate the skipped files, e.g. make generate"],
   "lint_commands": ["project lint/vet command, e.g. go vet ./..., cargo clippy, ruff check ."],
   "verification_commands": ["additional test commands beyond basic build, e.g. go test ./staging/src/k8s.io/api/... -run TestRoundTrip"],
+  "adaptation_strategy": "conflict_resolution | semantic_rederivation",
   "estimated_difficulty": "EASY | MEDIUM | HARD | EXTREME",
   "recommendation": "PROCEED | PROCEED_WITH_CAUTION | MANUAL_REVIEW",
   "priority_files": ["hand-written source files to check first during conflict resolution"],
@@ -196,6 +226,13 @@ Recommendation guidelines:
 - **PROCEED**: Straightforward backport, expect clean or near-clean cherry-pick
 - **PROCEED_WITH_CAUTION**: Expect conflicts and build errors requiring adaptation
 - **MANUAL_REVIEW**: Very complex, human should review the result carefully
+
+Adaptation strategy guidelines:
+- **conflict_resolution**: the default; use it unless the fix's core mechanism is
+  demonstrably absent from the target
+- **semantic_rederivation**: reserve for fixes whose implementation approach cannot
+  exist on the target without porting an entire refactor or framework; say which
+  mechanism is missing and why in `reasoning`
 """
 
     def prompt(self) -> str:
@@ -207,6 +244,7 @@ Recommendation guidelines:
             target_branch=self.target_branch,
             seed_files="\n".join(f"  - {f}" for f in self.seed_files),
             output_file=SEMANTIC_TRIAGE_FILE,
+            notes_file=self.notes_file,
         )
 
 
@@ -245,9 +283,16 @@ stubs, skip markers, or build tags if needed, but do not port the actual fix cod
 4. Do NOT change existing test logic — only add new tests or update test call-sites \
 to match the new function signatures from the fix.
 
-5. After porting, run the build command to verify the test files compile.
+5. Adapt the tests to the TARGET's test harness, not just its code: if a
+   ported test uses a section the target's test runner mishandles — e.g. an
+   `--EXTENSIONS--` section that double-loads an already-built extension on
+   older branches, polluting every run with startup warnings — adapt the test
+   (drop the section, keep an equivalent SKIPIF guard) so its output is clean
+   and its pass/fail means what it says. A test whose output is polluted
+   cannot establish RED or GREEN.
+6. After porting, run the build command to verify the test files compile.
 
-6. Write the absolute path of every modified test file to `{output_manifest_file}`, \
+7. Write the absolute path of every modified test file to `{output_manifest_file}`, \
 one per line.
 """
 
@@ -276,6 +321,7 @@ class NarrowResolutionAgentPrompt:
     target_branch: str = ""
     baseline_ref: str = ""
     followup_fixes: str = ""
+    notes_file: str = ""
 
     prompt_template: ClassVar[str] = """\
 {context}
@@ -287,7 +333,7 @@ The upstream fix diff for reference:
 <fix_diff>
 {fix_diff}
 </fix_diff>
-{triage_section}
+{triage_section}{notes_section}
 Your task is to resolve ONLY the conflict hunks (marked with <<<<<<<, =======, >>>>>>>). Constraints:
 
 1. Resolve each conflict hunk to produce the intended fix behavior on the target branch.
@@ -368,6 +414,17 @@ if a resolved region seems broken without one, note it in your final summary:
 {followup_fixes}
 """
 
+    _notes_section_template: ClassVar[str] = """
+## Resolution notes (cross-session state):
+Read `{notes_file}` FIRST if it exists — earlier sessions in this port recorded decisions \
+and target adaptations there (symbol mappings, API differences, cleanup conventions). \
+Follow those decisions for consistency. As you resolve, APPEND your own decisions to \
+`{notes_file}` (create it if missing): every non-obvious adaptation you make and the \
+reason for it. Notes survive context compaction; your conversation memory does not. \
+The triage agent's detailed analysis of the fix is at \
+`runs/semantic_triage_notes.txt` — consult it for the fix's core mechanism.
+"""
+
     def prompt(self) -> str:
         triage_section = ""
         if self.triage_assessment:
@@ -386,6 +443,11 @@ if a resolved region seems broken without one, note it in your final summary:
             followup_section = self._followup_section_template.format(
                 followup_fixes=self.followup_fixes,
             )
+        notes_section = ""
+        if self.notes_file:
+            notes_section = self._notes_section_template.format(
+                notes_file=self.notes_file,
+            )
         return self.prompt_template.format(
             context=self.context,
             fix_diff=self.fix_diff,
@@ -394,6 +456,136 @@ if a resolved region seems broken without one, note it in your final summary:
             triage_section=triage_section,
             adaptation_section=adaptation_section,
             followup_section=followup_section,
+            notes_section=notes_section,
+        )
+
+
+@dataclass
+class SemanticRederivationAgentPrompt:
+    """Prompt for Phase 3a in semantic re-derivation mode.
+
+    Selected when triage marks ``adaptation_strategy: semantic_rederivation``:
+    the upstream fix implements its behavior through machinery that does not
+    exist on the target branch, so a line-by-line conflict resolution cannot
+    produce a working port. The agent re-derives the fix's security-relevant
+    behavior natively — including, when right, discarding the cherry-pick
+    entirely.
+    """
+
+    context: str
+    fix_diff: str
+    conflicted_files: list[str]
+    allowed_modules: list[str]
+    triage_assessment: str = ""
+    target_branch: str = ""
+    baseline_ref: str = ""
+    followup_fixes: str = ""
+    notes_file: str = ""
+
+    prompt_template: ClassVar[str] = """\
+{context}
+
+You are the Backport Re-derivation Agent (Phase 3a, semantic mode). The semantic \
+triage determined that this fix implements its behavior through machinery that \
+does NOT exist on the target branch: resolving the cherry-pick conflicts line by \
+line cannot produce a working port.
+
+The cherry-pick left conflicts in these files (evidence of how upstream changed \
+things — not a scaffold you must keep):
+{conflicted_files}
+
+The upstream fix diff for reference (what the fix changes upstream, and how):
+<fix_diff>
+{fix_diff}
+</fix_diff>
+{triage_section}{notes_section}
+Your task: produce a port of this fix on the target branch that reproduces the \
+fix's SECURITY-RELEVANT BEHAVIOR, implemented natively with the target branch's \
+existing mechanisms. Constraints:
+
+1. You may — and should, when the conflicted cherry-pick state is a dead end — \
+discard it entirely: run `git cherry-pick --abort` and work from the clean target \
+tree. Decide deliberately: either resolve the conflicts into a working port, or \
+abort and re-derive; never leave the tree half-way.
+2. Identify the behavior that matters — what the fix protects against (read the \
+bug description, the fix's tests, and the vulnerable code paths) — rather than \
+the machinery the upstream fix happens to use.
+3. Re-derive that behavior on the target using the target's own idioms, data \
+structures, and error-handling conventions. Match the target's code style.
+4. Keep the port minimal and auditable: change only what the security behavior \
+requires. Do NOT port unrelated hardening, refactors, or the upstream test \
+corpus wholesale. A reviewer must be able to read this port as a small, focused \
+security fix.
+5. The fix's regression tests were ported earlier in the pipeline. If your \
+native implementation produces behavior that differs from the upstream tests' \
+exact expectations, adapt the tests to assert the security behavior on this \
+target — but they must still FAIL on the unpatched target and PASS with your \
+port. Never weaken a test to make a broken port pass.
+6. Definition of done: the target builds and the regression tests pass. \
+Resemblance to the upstream diff is not the goal; the behavior is.
+{followup_section}
+## Priority files (start here — the fix's security-relevant surface):
+{allowed_modules}
+
+When finished:
+- Stage and commit your work with a descriptive message referencing the \
+upstream fix.
+- Run `git status`: the tree must be clean — no conflict markers, no unstaged \
+edits.
+"""
+
+    _triage_section_template: ClassVar[str] = """
+## Semantic triage assessment (from pre-analysis):
+<triage_assessment>
+{triage_assessment}
+</triage_assessment>
+
+The triage marked this fix `adaptation_strategy: semantic_rederivation` — its
+`prerequisites` / `prerequisite_details` entries explain which upstream machinery
+is absent from the target. Read them before deciding what to re-derive.
+"""
+
+    _followup_section_template: ClassVar[str] = """
+## Upstream follow-up fixes (informational):
+Upstream later corrected THIS commit with the commits below. Do NOT port them here, but \
+if your re-derivation seems incomplete without one, note it in your final summary:
+{followup_fixes}
+"""
+
+    _notes_section_template: ClassVar[str] = """
+## Resolution notes (cross-session state):
+Read `{notes_file}` FIRST if it exists — earlier sessions in this port recorded decisions \
+and target adaptations there. Follow those decisions for consistency. As you work, APPEND \
+your own decisions to `{notes_file}` (create it if missing): every non-obvious adaptation, \
+mapping, or scope choice you make and the reason for it. Notes survive context compaction; \
+your conversation memory does not. The triage agent's detailed analysis of the fix is at \
+`runs/semantic_triage_notes.txt` — consult it for the fix's core mechanism.
+"""
+
+    def prompt(self) -> str:
+        triage_section = ""
+        if self.triage_assessment:
+            triage_section = self._triage_section_template.format(
+                triage_assessment=self.triage_assessment,
+            )
+        followup_section = ""
+        if self.followup_fixes:
+            followup_section = self._followup_section_template.format(
+                followup_fixes=self.followup_fixes,
+            )
+        notes_section = ""
+        if self.notes_file:
+            notes_section = self._notes_section_template.format(
+                notes_file=self.notes_file,
+            )
+        return self.prompt_template.format(
+            context=self.context,
+            fix_diff=self.fix_diff,
+            conflicted_files="\n".join(f"  - {f}" for f in self.conflicted_files),
+            allowed_modules="\n".join(f"  - {f}" for f in self.allowed_modules),
+            triage_section=triage_section,
+            followup_section=followup_section,
+            notes_section=notes_section,
         )
 
 

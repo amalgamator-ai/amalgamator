@@ -7,6 +7,7 @@ from auto_bug_fix.bug_fix_prompts import (
     BuildErrorRecoveryPrompt,
     NarrowResolutionAgentPrompt,
     PostResolutionCheckPrompt,
+    SemanticRederivationAgentPrompt,
     SemanticTriagePrompt,
     TestPortAgentPrompt,
     TriageBlindReviewPrompt,
@@ -58,6 +59,93 @@ def test_narrow_resolution_prompt_followup_section_optional():
     ).prompt()
     assert "follow-up fixes" in with_followups
     assert "abc1234 fix the fix" in with_followups
+
+
+def test_narrow_resolution_prompt_never_sanctions_abort():
+    """The textual mode must not invite the agent to discard the cherry-pick."""
+    text = NarrowResolutionAgentPrompt(
+        context="<context>test</context>",
+        fix_diff="diff",
+        conflicted_files=["lib/url.c"],
+        allowed_modules=["lib/"],
+        target_branch="origin/release-1.0",
+        baseline_ref="abc123",
+    ).prompt()
+    assert "cherry-pick --abort" not in text
+
+
+def test_semantic_rederivation_prompt_contract():
+    kwargs = dict(
+        context="<context>test</context>",
+        fix_diff="--- a/engine.c\n+++ b/engine.c",
+        conflicted_files=["engine.c", "engine.h"],
+        allowed_modules=["engine.c"],
+        target_branch="origin/eol-branch",
+        baseline_ref="abc123deadbeef",
+    )
+    text = SemanticRederivationAgentPrompt(**kwargs).prompt()
+    # The mode contract: behavior over text, with an explicit escape hatch.
+    assert "Backport Re-derivation Agent" in text
+    assert "SECURITY-RELEVANT BEHAVIOR" in text
+    assert "cherry-pick --abort" in text
+    assert "Never weaken a test" in text
+    # Conflicted files and priority files are listed.
+    assert "engine.h" in text
+    assert "engine.c" in text
+    # No triage assessment and no follow-ups: sections omitted.
+    assert "Semantic triage assessment" not in text
+    assert "follow-up fixes" not in text
+
+    with_triage = SemanticRederivationAgentPrompt(
+        **kwargs,
+        triage_assessment='{"adaptation_strategy": "semantic_rederivation"}',
+        followup_fixes="  - abc1234 fix the fix",
+    ).prompt()
+    assert "Semantic triage assessment" in with_triage
+    assert "semantic_rederivation" in with_triage
+    assert "follow-up fixes" in with_triage
+
+
+def test_semantic_triage_prompt_offers_adaptation_strategy():
+    """The triage schema must ask for the strategy so Phase 3a can select on it."""
+    text = SemanticTriagePrompt(
+        context="<context>test</context>",
+        fix_diff="diff",
+        source_branch="main",
+        target_branch="origin/eol-branch",
+        seed_files=[],
+    ).prompt()
+    assert '"adaptation_strategy"' in text
+    assert "conflict_resolution | semantic_rederivation" in text
+    assert "Decide the adaptation strategy" in text
+
+
+def test_semantic_triage_prompt_preserves_working_method():
+    """Triage must budget exploration and keep notes that survive compaction.
+
+    A mega-fix triage session otherwise surveys symbols one by one, hits the
+    context limit, compacts, forgets, and restarts the survey forever.
+    """
+    text = SemanticTriagePrompt(
+        context="<context>test</context>",
+        fix_diff="diff",
+        source_branch="main",
+        target_branch="origin/eol-branch",
+        seed_files=[],
+        notes_file="runs/semantic_triage_notes.txt",
+    ).prompt()
+    assert "Budget your exploration" in text
+    assert "Persist findings as you go" in text
+    assert "runs/semantic_triage_notes.txt" in text
+    # The default notes path renders when none is passed.
+    default = SemanticTriagePrompt(
+        context="<context>test</context>",
+        fix_diff="diff",
+        source_branch="main",
+        target_branch="origin/eol-branch",
+        seed_files=[],
+    ).prompt()
+    assert "semantic_triage_notes.txt" in default
 
 
 def test_narrow_resolution_prompt_baseline_ref_fallback():
@@ -206,3 +294,60 @@ def test_triage_blind_review_prompt_baseline_ref_fallback():
     )
     text = prompt.prompt()
     assert "git grep '<symbol>' origin/release-1.0" in text
+
+
+def test_resolution_prompts_carry_cross_session_notes():
+    """Both Phase 3a modes must read and append shared resolution notes.
+
+    Chunk sessions (and compactions within one session) lose conversation
+    state; the notes file is the durable cross-session record of adaptation
+    decisions. Off when no notes path is given (backwards-compatible).
+    """
+    kwargs = dict(
+        context="<context>test</context>",
+        fix_diff="diff",
+        conflicted_files=["engine.c"],
+        allowed_modules=["engine.c"],
+        target_branch="origin/eol-branch",
+        baseline_ref="abc123",
+    )
+    narrow = NarrowResolutionAgentPrompt(**kwargs).prompt()
+    semantic = SemanticRederivationAgentPrompt(**kwargs).prompt()
+    assert "Resolution notes" not in narrow
+    assert "Resolution notes" not in semantic
+
+    narrow = NarrowResolutionAgentPrompt(
+        **kwargs, notes_file="runs/resolution_notes.txt"
+    ).prompt()
+    assert "Resolution notes (cross-session state)" in narrow
+    assert "Read `runs/resolution_notes.txt` FIRST" in narrow
+    assert "APPEND your own decisions" in narrow
+
+    semantic = SemanticRederivationAgentPrompt(
+        **kwargs, notes_file="runs/resolution_notes.txt"
+    ).prompt()
+    assert "Resolution notes (cross-session state)" in semantic
+    assert "Read `runs/resolution_notes.txt` FIRST" in semantic
+    assert "APPEND your own decisions" in semantic
+
+
+def test_test_port_prompt_requires_harness_adaptation():
+    """Ported tests must run clean on the target's test harness.
+
+    An --EXTENSIONS-- section that double-loads an already-built extension
+    pollutes every run with startup warnings; a RED-triage agent reading
+    that output cannot establish RED or GREEN and the whole gate chain
+    degrades. The port agent must adapt such sections away.
+    """
+    from auto_bug_fix.bug_fix_prompts import TestPortAgentPrompt
+
+    text = TestPortAgentPrompt(
+        context="<context>test</context>",
+        source_fix_commit="abc123",
+        target_branch="origin/eol-branch",
+        test_files=["ext/foo/tests/bar.phpt"],
+        output_manifest_file="runs/manifest.txt",
+        diff_command="git diff abc123 -- ext/foo/tests/bar.phpt",
+    ).prompt()
+    assert "Adapt the tests to the TARGET's test harness" in text
+    assert "double-loads an already-built extension" in text

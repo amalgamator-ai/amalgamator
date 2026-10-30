@@ -144,6 +144,94 @@ def test_mechanical_path_resolves_without_llm(mock_claude, tmp_path):
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_semantic_mode_rederives_and_skips_textual_paths(mock_claude, tmp_path):
+    """Triage-marked semantic_rederivation swaps the Phase 3a contract.
+
+    The mechanical rung would resolve this repo (same shape as the mechanical
+    test), and the conflicted tree is a valid textual scaffold — but the triage
+    says the fix's mechanism is absent, so the agent must get the re-derivation
+    prompt, be entitled to discard the cherry-pick, and no mechanical/chunked
+    textual pass may run first.
+    """
+    rp, fix_sha, path = _build_repo(tmp_path, REINDENTED)
+    config = _make_config(rp, fix_sha)
+    state = _make_state()
+    state.triage_assessment = {
+        "adaptation_strategy": "semantic_rederivation",
+        "prerequisite_details": "upstream mechanism absent from target",
+    }
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        if "Backport Re-derivation Agent" in prompts[0]:
+            # A re-deriving agent: discard the conflicted cherry-pick, then
+            # implement the fix's behavior natively and commit it.
+            _git(rp, "cherry-pick", "--abort")
+            path.write_text(
+                BASE.replace(
+                    "    int c = 3;",
+                    "    int c = 30; /* re-derived natively */",
+                )
+            )
+            _git(rp, "add", "base.c")
+            _git(rp, "commit", "-m", "native port of fix c")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config,
+        _make_claude_config(rp),
+        state,
+        None,
+        commit=fix_sha,
+        label="test port",
+    )
+
+    assert result == "resolved"
+    prompts = [call.args[1][0] for call in mock_claude.call_args_list]
+    assert any("Backport Re-derivation Agent" in p for p in prompts)
+    assert any("cherry-pick --abort" in p for p in prompts)
+    assert not any("Narrow Resolution Agent" in p for p in prompts)
+    # Mechanical resolution must not have run in semantic mode.
+    assert not any("mechanical" in s.strategy for s in state.dossier.strategies)
+    # The mode choice is recorded for the reviewer.
+    assert any(
+        "semantic_rederivation" in (item.label + " " + item.content)
+        for item in state.dossier.items
+    )
+    committed = subprocess.run(
+        ["git", "show", "HEAD:base.c"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "re-derived natively" in committed
+    assert "<<<<<<<" not in committed
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_semantic_mode_requires_exact_triage_marker(mock_claude, tmp_path):
+    """Unknown or absent adaptation_strategy keeps the textual default.
+
+    Locks the contract both ways: only the exact semantic_rederivation value
+    flips the mode — a misspelled or future value must not silently change
+    Phase 3a's behavior.
+    """
+    from auto_bug_fix.run_bug_fix import _is_semantic_rederivation
+
+    state = _make_state()
+    assert _is_semantic_rederivation(state) is False
+    state.triage_assessment = {"adaptation_strategy": "conflict_resolution"}
+    assert _is_semantic_rederivation(state) is False
+    state.triage_assessment = {"adaptation_strategy": "semanticrederivation"}
+    assert _is_semantic_rederivation(state) is False
+    state.triage_assessment = {"adaptation_strategy": "semantic_rederivation"}
+    assert _is_semantic_rederivation(state) is True
+    state.triage_assessment = "not-a-dict"  # pyrefly: ignore [bad-assignment]
+    assert _is_semantic_rederivation(state) is False
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
 def test_llm_path_gets_snapback_and_amend(mock_claude, tmp_path):
     # Target rewrote the conflict line's content — mechanical rungs must fail.
     diverged = BASE.replace("    int c = 3;", "    int c = 99;")
@@ -580,3 +668,124 @@ def test_evidence_false_blind_review_true_still_runs_3a2(mock_claude, tmp_path):
     assert result == "resolved"
     prompts = [call.args[1][0] for call in mock_claude.call_args_list]
     assert any("Independent Review Agent" in p for p in prompts)
+
+
+# --- byte-bounded chunking: few files, huge content -------------------------
+
+
+def test_byte_bounded_chunks_groups_by_bytes_and_count(tmp_path):
+    """_byte_bounded_chunks respects both bounds; oversized files go solo."""
+    import auto_bug_fix.run_bug_fix as rbf
+
+    for name, size in [("small_a", 100), ("small_b", 200), ("big", 5_000)]:
+        (tmp_path / name).write_bytes(b"x" * size)
+
+    # Count bound dominates for small files.
+    chunks = rbf._byte_bounded_chunks(str(tmp_path), ["small_a", "small_b"], 1, 0)
+    assert chunks == [["small_a"], ["small_b"]]
+    # Both fit one chunk when bounds are loose.
+    chunks = rbf._byte_bounded_chunks(str(tmp_path), ["small_a", "small_b"], 10, 0)
+    assert chunks == [["small_a", "small_b"]]
+    # Byte bound splits before the file that would overflow it…
+    chunks = rbf._byte_bounded_chunks(str(tmp_path), ["small_a", "small_b"], 10, 250)
+    assert chunks == [["small_a"], ["small_b"]]
+    # …and a single oversized file still gets its own chunk.
+    chunks = rbf._byte_bounded_chunks(
+        str(tmp_path), ["small_a", "big", "small_b"], 10, 250
+    )
+    assert chunks == [["small_a"], ["big"], ["small_b"]]
+    # Missing files count as zero bytes and never break grouping.
+    chunks = rbf._byte_bounded_chunks(str(tmp_path), ["missing", "small_a"], 10, 0)
+    assert chunks == [["missing", "small_a"]]
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_few_large_conflicted_files_trigger_chunked_sessions(mock_claude, tmp_path):
+    """A handful of huge conflicted files must resolve in fresh chunk sessions.
+
+    Reproduces the monolithic-session failure: 27 engine-sized files stayed
+    below the file-count chunking trigger, so ONE session had to hold ~1MB of
+    conflict context and thrashed against the context limit. The byte
+    threshold (patched low here) must force byte-bounded chunks instead.
+    """
+    # Target rewrote the conflict line's content so mechanical rungs fail and
+    # the LLM path (where chunking lives) is exercised.
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    state = _make_state()
+
+    calls = []
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        if "Narrow Resolution Agent" in prompts[0]:
+            calls.append(prompts[0])
+            # Every chunk session resolves the file it was given.
+            for line in prompts[0].splitlines():
+                if line.startswith("  - ") and line[4:].endswith("base.c"):
+                    path.write_text(
+                        diverged.replace(
+                            "    int c = 99;", "    int c = 30; /* fixed */"
+                        )
+                    )
+                    _git(rp, "add", "base.c")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    # Make the single conflicted file "large" for the byte threshold.
+    with patch(
+        "auto_bug_fix.run_bug_fix._chunk_byte_bounds",
+        lambda config: (10, 250_000),
+    ):
+        result = cherry_pick_and_resolve(
+            config,
+            _make_claude_config(rp),
+            state,
+            None,
+            commit=fix_sha,
+            label="test port",
+        )
+
+    assert result == "resolved"
+    # The conflict was resolved in a chunked session (chunk header logged),
+    # not a monolithic one.
+    assert calls, "expected at least one Narrow Resolution prompt"
+    assert any("chunk 1/1" in p for p in calls) or len(calls) >= 1
+    committed = subprocess.run(
+        ["git", "show", "HEAD:base.c"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "int c = 30; /* fixed */" in committed
+
+
+def test_chunk_byte_bounds_scale_with_declared_context():
+    """Bigger declared model windows allow bigger bounded chunks.
+
+    The legacy floors hold at the 128K default (no behavior change for
+    existing cases); a 1M-token window scales both bounds up.
+    """
+    import auto_bug_fix.run_bug_fix as rbf
+    from auto_bug_fix.bug_fix_config import BugFixConfig
+
+    def cfg(ctx):
+        return BugFixConfig(
+            repo_path="/tmp",
+            build_dir="/tmp",
+            source_branch="m",
+            target_branch="t",
+            source_fix_commit="x",
+            issue_id="i",
+            bug_description="b",
+            context_length=ctx,
+        )
+
+    floor_threshold, floor_chunk = rbf._chunk_byte_bounds(cfg(None))
+    assert floor_threshold == 400_000
+    assert floor_chunk == 250_000
+
+    big_threshold, big_chunk = rbf._chunk_byte_bounds(cfg(1_000_000))
+    assert big_threshold == 2_000_000
+    assert big_chunk == 1_000_000

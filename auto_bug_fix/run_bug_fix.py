@@ -141,6 +141,7 @@ from auto_bug_fix.bug_fix_prompts import (
     NarrowResolutionAgentPrompt,
     PostResolutionCheckPrompt,
     RedTriagePrompt,
+    SemanticRederivationAgentPrompt,
     SemanticTriagePrompt,
     TestPortAgentPrompt,
     TriageBlindReviewPrompt,
@@ -212,6 +213,8 @@ from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
 LOG_FILE = "__run_log_bug_fix.txt"
 DOSSIER_FILE = "dossier.md"
 PATCH_FILE = "candidate.patch"
+SEMANTIC_TRIAGE_NOTES_FILE = "semantic_triage_notes.txt"
+RESOLUTION_NOTES_FILE = "resolution_notes.txt"
 _PIPELINE_ARTIFACTS = (
     SEMANTIC_TRIAGE_FILE,
     TEST_PORT_MANIFEST_FILE,
@@ -220,6 +223,8 @@ _PIPELINE_ARTIFACTS = (
     RUN_AND_FIX_SUCCESS_FILE,
     os.path.join("runs", SEMANTIC_TRIAGE_FILE),
     os.path.join("runs", RED_TRIAGE_FILE),
+    os.path.join("runs", SEMANTIC_TRIAGE_NOTES_FILE),
+    os.path.join("runs", RESOLUTION_NOTES_FILE),
 )
 
 log = logging.getLogger(__name__)
@@ -669,6 +674,7 @@ def phase_0_5_semantic_triage(
         source_branch=config.source_branch,
         target_branch=config.target_branch,
         seed_files=state.seed,
+        notes_file=os.path.join("runs", SEMANTIC_TRIAGE_NOTES_FILE),
     )
 
     claude_config_triage = _phase_config(claude_config, config)
@@ -1603,6 +1609,86 @@ def phase_4b_run_and_fix(
 MAX_PREREQUISITE_DEPTH = 5
 
 
+# Chunk Phase 3a not only by conflicted-file count but by their total size:
+# a few very large conflicted files (engine sources can be 100KB+ each with
+# conflict markers) overflow a single resolution session's context even when
+# the file count is small. Beyond this total, resolve in byte-bounded chunks
+# so every session holds a bounded amount.
+_CONFLICT_BYTES_CHUNK_THRESHOLD = 400_000
+_CHUNK_MAX_BYTES = 250_000
+
+
+def _chunk_byte_bounds(config: BugFixConfig) -> tuple[int, int]:
+    """(conflict-bytes threshold, max bytes per chunk), scaling with context.
+
+    The constants are the legacy 128K-window floors; a larger declared model
+    window scales the bounds up — roughly half the window's characters
+    triggers chunking and a quarter fits per fresh session — because a
+    bigger window can safely hold more conflicted content per session.
+    """
+    ctx_chars = (config.context_length or 128_000) * 4
+    return (
+        max(_CONFLICT_BYTES_CHUNK_THRESHOLD, ctx_chars // 2),
+        max(_CHUNK_MAX_BYTES, ctx_chars // 4),
+    )
+
+
+def _conflicted_bytes(repo_path: str, files: list[str]) -> int:
+    """Total on-disk size of the conflicted files (0 for missing paths)."""
+    total = 0
+    for f in files:
+        try:
+            total += os.path.getsize(os.path.join(repo_path, f))
+        except OSError:
+            continue
+    return total
+
+
+def _byte_bounded_chunks(
+    repo_path: str, files: list[str], max_files: int, max_bytes: int
+) -> list[list[str]]:
+    """Group files into chunks bounded by both file count and total bytes.
+
+    A chunk is closed before adding a file that would push it over either
+    bound; a single oversized file always gets its own chunk.
+    """
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_bytes = 0
+    for f in files:
+        try:
+            size = os.path.getsize(os.path.join(repo_path, f))
+        except OSError:
+            size = 0
+        if current and (
+            len(current) >= max_files
+            or (max_bytes > 0 and current_bytes + size > max_bytes)
+        ):
+            chunks.append(current)
+            current = []
+            current_bytes = 0
+        current.append(f)
+        current_bytes += size
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _is_semantic_rederivation(state: PipelineState) -> bool:
+    """True when triage marked the fix's mechanism absent from the target.
+
+    Selected via the triage JSON's ``adaptation_strategy`` field: the upstream
+    fix builds on machinery the target predates, so Phase 3a must re-derive the
+    fix's behavior natively instead of resolving conflicts textually. Absent or
+    unknown values keep the default conflict-resolution behavior.
+    """
+    return (
+        isinstance(state.triage_assessment, dict)
+        and state.triage_assessment.get("adaptation_strategy")
+        == "semantic_rederivation"
+    )
+
+
 def cherry_pick_and_resolve(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -1765,7 +1851,27 @@ def cherry_pick_and_resolve(
 
     claude_config_resolve = _phase_config(claude_config, config)
 
-    if config.mechanical_resolution:
+    # Triage may have determined that the fix's mechanism does not exist on the
+    # target at all: textual resolution (mechanical or chunked) would then be a
+    # dead end, so the resolution agent re-derives the fix's behavior instead.
+    semantic_mode = _is_semantic_rederivation(state)
+    if semantic_mode:
+        log.info(
+            "%s: triage selected semantic_rederivation — skipping mechanical "
+            "and chunked textual resolution",
+            label,
+        )
+        if state.dossier:
+            state.dossier.add(
+                "Adaptation strategy",
+                "semantic_rederivation (triage-selected: the fix's mechanism "
+                "is absent from the target; Phase 3a re-derives the behavior)",
+                "Phase 3a mode selection",
+            )
+        if tracker:
+            tracker.record_gate("adaptation_strategy", "semantic_rederivation")
+
+    if not semantic_mode and config.mechanical_resolution:
         try:
             mech = resolve_mechanically(config.repo_path, commit, uu_files)
         except Exception as e:
@@ -1814,29 +1920,70 @@ def cherry_pick_and_resolve(
     CHUNK_SIZE = 30 if max_chunk <= 50_000 else 45
 
     for attempt in range(1, config.max_resolution_retries + 1):
-        if len(uu_files) > CHUNK_SIZE:
+        bytes_threshold, chunk_max_bytes = _chunk_byte_bounds(config)
+        if semantic_mode:
+            prompt = SemanticRederivationAgentPrompt(
+                fix_diff=fix_diff,
+                conflicted_files=uu_files,
+                context=context,
+                allowed_modules=priority,
+                triage_assessment=(
+                    json.dumps(state.triage_assessment, indent=2)
+                    if state.triage_assessment
+                    else ""
+                ),
+                target_branch=config.target_branch,
+                baseline_ref=base_head,
+                followup_fixes=followup_note,
+                notes_file=os.path.join("runs", RESOLUTION_NOTES_FILE),
+            )
+            log.info(
+                "%s attempt %d/%d — semantic re-derivation (%d conflicted files as evidence)",
+                label,
+                attempt,
+                config.max_resolution_retries,
+                len(uu_files),
+            )
+            asyncio.run(
+                claude_run(claude_config_resolve, [prompt.prompt()], tracker=tracker)
+            )
+        elif (
+            len(uu_files) > CHUNK_SIZE
+            or _conflicted_bytes(config.repo_path, uu_files) > bytes_threshold
+        ):
             if len(uu_files) > 100:
                 chunk_size = 10 if max_chunk <= 50_000 else 15
             elif len(fix_diff) > max_chunk:
                 chunk_size = 15 if max_chunk <= 50_000 else 20
             else:
                 chunk_size = CHUNK_SIZE
+            # Byte-bounded grouping: a handful of very large conflicted files
+            # overflows a single session's context just as surely as hundreds
+            # of small ones — each chunk gets a fresh session, so bound what
+            # one session must hold by bytes as well as by file count.
+            chunks = _byte_bounded_chunks(
+                config.repo_path, uu_files, chunk_size, chunk_max_bytes
+            )
             log.info(
-                "%s attempt %d/%d — resolving %d conflicts in chunks of %d",
+                "%s attempt %d/%d — resolving %d conflicts (%d bytes) in %d "
+                "chunks of <=%d files / <=%d bytes",
                 label,
                 attempt,
                 config.max_resolution_retries,
                 len(uu_files),
+                _conflicted_bytes(config.repo_path, uu_files),
+                len(chunks),
                 chunk_size,
+                chunk_max_bytes,
             )
-            for chunk_start in range(0, len(uu_files), chunk_size):
-                chunk = uu_files[chunk_start : chunk_start + chunk_size]
+            for i, chunk in enumerate(chunks, 1):
                 log.info(
-                    "%s: chunk %d-%d of %d",
+                    "%s: chunk %d/%d — %d files (%d bytes)",
                     label,
-                    chunk_start + 1,
-                    chunk_start + len(chunk),
-                    len(uu_files),
+                    i,
+                    len(chunks),
+                    len(chunk),
+                    _conflicted_bytes(config.repo_path, chunk),
                 )
                 chunk_diff = _compute_fix_diff(config, commit, for_files=chunk)
                 prompt = NarrowResolutionAgentPrompt(
@@ -1852,6 +1999,7 @@ def cherry_pick_and_resolve(
                     target_branch=config.target_branch,
                     baseline_ref=base_head,
                     followup_fixes=followup_note,
+                    notes_file=os.path.join("runs", RESOLUTION_NOTES_FILE),
                 )
                 asyncio.run(
                     claude_run(
@@ -1872,6 +2020,7 @@ def cherry_pick_and_resolve(
                 target_branch=config.target_branch,
                 baseline_ref=base_head,
                 followup_fixes=followup_note,
+                notes_file=os.path.join("runs", RESOLUTION_NOTES_FILE),
             )
             log.info(
                 "%s attempt %d/%d — resolving %d conflicts",
@@ -2878,10 +3027,26 @@ def _run_pipeline_phases(
 
         if state.red_passed_output:
             with tracker.phase("Phase 1.5 — RED triage"):
-                triage_result = phase_1_5_red_triage(
-                    config, claude_config, state, tracker
-                )
-                verdict = triage_result.get("verdict", "inconclusive").strip().lower()
+                # A long analysis that ends in "inconclusive" with no
+                # reasoning is a degenerate response, not a verdict — give
+                # the session a second, fresh attempt before escalating.
+                triage_result = {}
+                verdict = "inconclusive"
+                for red_attempt in range(1, 3):
+                    triage_result = phase_1_5_red_triage(
+                        config, claude_config, state, tracker
+                    )
+                    verdict = (
+                        triage_result.get("verdict", "inconclusive").strip().lower()
+                    )
+                    reasoning = (triage_result.get("reasoning") or "").strip()
+                    if verdict != "inconclusive" or reasoning:
+                        break
+                    log.warning(
+                        "Phase 1.5 attempt %d/2: degenerate verdict "
+                        "(inconclusive, no reasoning) — retrying with a fresh session",
+                        red_attempt,
+                    )
                 tracker.record_gate("red_triage_verdict", verdict)
                 state.dossier.add(
                     "RED triage",
