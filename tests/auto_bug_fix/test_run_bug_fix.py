@@ -1222,6 +1222,91 @@ def test_commit_recovery_edits_still_tolerates_artifact_only_dirt(tmp_path):
     assert _commit_recovery_edits(config, "Phase 4b") is False
 
 
+def test_run_pipeline_pins_target_start_sha(tmp_path, monkeypatch):
+    """run_pipeline records the target branch's start commit before any phase runs.
+
+    The worktree is detached, but an agent may check out (and so advance) the
+    target branch mid-run; deliverables diffed against the branch ref would
+    then silently come out empty. The pin is what Phase 5 must export from.
+    """
+    import auto_bug_fix.run_bug_fix as rbf
+
+    _git_4b(tmp_path, "init", "-b", "master")
+    _git_4b(tmp_path, "config", "user.name", "t")
+    _git_4b(tmp_path, "config", "user.email", "t@t")
+    (tmp_path / "src.c").write_text("int a = 1;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "base")
+    _git_4b(tmp_path, "branch", "release")
+    fix_sha = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    captured = {}
+
+    def fake_phases(config, claude_config, state, tracker):
+        captured["sha"] = state.target_start_sha
+        return state.dossier, tracker
+
+    monkeypatch.setattr(rbf, "_run_pipeline_phases", fake_phases)
+
+    from auto_bug_fix.claude_utils import BugFixClaudeConfig
+
+    config = BugFixConfig(
+        repo_path=str(tmp_path),
+        build_dir=str(tmp_path),
+        source_branch="master",
+        target_branch="release",
+        source_fix_commit=fix_sha,
+        bug_description="test bug",
+        issue_id="tid-pin",
+    )
+    claude_cfg = BugFixClaudeConfig(
+        model="test-model",
+        allowed_tools=["Bash"],
+        perm_mode="acceptEdits",
+        cwd=str(tmp_path),
+    )
+    rbf.run_pipeline(config, claude_cfg, output_dir=str(tmp_path / "out"))
+
+    assert captured["sha"] == _git_4b(tmp_path, "rev-parse", "release")
+
+
+def test_candidate_patch_export_survives_target_branch_advancement(tmp_path):
+    """A patch based on the pinned start SHA stays non-empty when the branch moves.
+
+    Reproduces the empty-candidate.patch failure: the agent checks out the
+    target branch in the detached worktree and commits there, so the branch
+    ref equals HEAD and a branch-based export base produces zero bytes.
+    """
+    from auto_bug_fix.git_tools import git_format_patch_bytes, git_rev_parse
+    from auto_bug_fix.worktree import create_fresh_worktree
+
+    _git_4b(tmp_path, "init", "-b", "master")
+    _git_4b(tmp_path, "config", "user.name", "t")
+    _git_4b(tmp_path, "config", "user.email", "t@t")
+    (tmp_path / "src.c").write_text("int a = 1;\n")
+    _git_4b(tmp_path, "add", ".")
+    _git_4b(tmp_path, "commit", "-m", "base")
+    _git_4b(tmp_path, "branch", "release")
+
+    # What run_pipeline pins at start: the branch's pre-state.
+    start_sha = git_rev_parse(str(tmp_path), "release").strip()
+
+    worktree = tmp_path.parent / (tmp_path.name + "-wt")
+    create_fresh_worktree(str(tmp_path), str(worktree), "release")
+
+    # An agent checks out the branch inside the worktree and commits the port.
+    _git_4b(worktree, "checkout", "-q", "release")
+    (worktree / "src.c").write_text("int a = 2;\n")
+    _git_4b(worktree, "add", ".")
+    _git_4b(worktree, "commit", "-m", "port")
+
+    # The regression: a branch-based base now exports an empty patch…
+    assert git_format_patch_bytes(str(worktree), base_ref="release") == b""
+    # …while the pinned start SHA keeps the deliverable.
+    patch = git_format_patch_bytes(str(worktree), base_ref=start_sha)
+    assert b"int a = 2;" in patch
+
+
 def test_phase_4b_success_rejected_while_escalating_command_fails(tmp_path):
     """4b only has to satisfy build+test, so its marker cannot stand alone.
 
@@ -1735,3 +1820,42 @@ def test_phase_4b_artifact_records_success_only_after_verification(tmp_path):
         phase_4b_run_and_fix(config, claude_cfg, state, tracker)
     data = _json.loads((tmp_path / "out" / "phase_4b_input.json").read_text())
     assert data["outcome"] == "success"
+
+
+def test_phase_4_verify_rejects_vacuous_red_state(tmp_path):
+    """Tests that passed pre-fix and were never re-REDdened cannot verify.
+
+    The 4b recovery loop satisfies build+test with whatever tests exist; if
+    those tests passed on the unmodified target, "success" proves nothing.
+    The guard must be a PipelineStop (terminal), not an Escalation —
+    recovery loops must not be able to swallow it.
+    """
+    from auto_bug_fix.run_bug_fix import (
+        PipelineEscalation,
+        PipelineState,
+        PipelineStop,
+        phase_4_verify,
+    )
+
+    config, _, _ = _phase_4b_fixtures(tmp_path)
+    state = PipelineState()
+    state.red_passed_output = "tests passed on the unmodified target"
+
+    with pytest.raises(PipelineStop, match="vacuous"):
+        phase_4_verify(config, state)
+
+    # Cleared RED state flows through to the normal build+test verdict.
+    state.red_passed_output = ""
+    with patch(
+        "auto_bug_fix.run_bug_fix._run_build_and_test",
+        return_value=(True, "", "", "", ""),
+    ):
+        assert phase_4_verify(config, state) is True
+    with (
+        patch(
+            "auto_bug_fix.run_bug_fix._run_build_and_test",
+            return_value=(False, "", "", "", ""),
+        ),
+        pytest.raises(PipelineEscalation, match="verify failed"),
+    ):
+        phase_4_verify(config, state)

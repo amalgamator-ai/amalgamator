@@ -247,6 +247,15 @@ def _unstage_pipeline_artifacts(repo_path: str) -> None:
             cwd=repo_path,
             capture_output=True,
         )
+    # The whole runs/ tree is pipeline scratch space inside the worktree
+    # (triage notes, RED repro scripts, resolution notes, anything agents
+    # park there). It must never ship in a port: a RED repro once captured
+    # an environment dump — credentials included — into a committed file.
+    subprocess.run(
+        ["git", "rm", "-r", "--cached", "--ignore-unmatch", "-f", "runs/"],
+        cwd=repo_path,
+        capture_output=True,
+    )
 
 
 def git_commit(
@@ -334,6 +343,11 @@ class PipelineState:
     followup_fixes_commit: str = ""
     failed_prerequisites: list[str] = field(default_factory=list)
     squashed_backport_range: str = ""
+    # The target branch's commit when the run started. The worktree is
+    # detached, but an agent may check out (and so advance) the target branch
+    # mid-run; deliverables that diff against the branch ref would then
+    # silently come out empty. Export from this immutable SHA instead.
+    target_start_sha: str = ""
 
 
 def phase_0_triage(
@@ -1113,6 +1127,18 @@ def phase_4_verify(
     state: PipelineState,
 ) -> bool:
     """Build, test, and check allowlist conformance (single attempt)."""
+    if state.red_passed_output:
+        # The gate tests passed on the UNMODIFIED target at Phase 1 and no
+        # Phase 1.5 replacement re-established them as RED. "Tests pass" on
+        # the ported tree is then vacuous — it was true before any fix. A
+        # recovery loop (4b) can satisfy build+test with tests that prove
+        # nothing. PipelineStop, not Escalation: recovery loops must not be
+        # able to swallow this — the run ends as an honest failure.
+        raise PipelineStop(
+            "Verification would be vacuous: the gate tests passed on the "
+            "unmodified target and were never re-established as RED — a "
+            "passing test run proves nothing about the fix"
+        )
     passed, _, _, _, _ = _run_build_and_test(config, state)
     if passed:
         return True
@@ -1133,7 +1159,7 @@ def _non_artifact_dirt(repo_path: str) -> list[str]:
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
         path = path.strip('"')
-        if path and path not in _PIPELINE_ARTIFACTS:
+        if path and path not in _PIPELINE_ARTIFACTS and not path.startswith("runs/"):
             dirt.append(line)
     return dirt
 
@@ -2839,6 +2865,14 @@ def run_pipeline(
     )
 
     state = PipelineState()
+    # Pin the target branch's starting commit before any phase (or agent) can
+    # advance the branch ref — see PipelineState.target_start_sha.
+    try:
+        state.target_start_sha = git_rev_parse(
+            config.repo_path, config.target_branch
+        ).strip()
+    except Exception as e:  # noqa: BLE001 (best-effort pin, export falls back)
+        log.warning("Could not pin target start SHA: %s", e)
     state.dossier = Dossier(
         issue_id=config.issue_id,
         source_branch=config.source_branch,
@@ -3449,9 +3483,11 @@ def _run_pipeline_phases(
     )
 
     log.info("Phase 5 — Dossier ready for human review")
-    patch_bytes = git_format_patch_bytes(
-        config.repo_path, base_ref=config.target_branch
-    )
+    # Base the export on the pinned start SHA: if the port's commits ended up
+    # on the target branch itself (agent checked it out mid-run), the branch
+    # ref now equals HEAD and a branch-based base would export an empty patch.
+    patch_base = state.target_start_sha or config.target_branch
+    patch_bytes = git_format_patch_bytes(config.repo_path, base_ref=patch_base)
     # Written as bytes: the patch has to apply, and a repo carrying non-UTF-8
     # source would otherwise be handed a patch full of replacement characters.
     # The dossier copy is for humans, so a lossy decode is fine there.
