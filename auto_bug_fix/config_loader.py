@@ -461,6 +461,13 @@ def load_pipeline_config(
         registry=registry,
         profiles=profiles,
     )
+    # A profile-declared context window (the model's true limit) also applies
+    # to the pipeline-side diff caps and chunk bounds, unless the case file
+    # explicitly overrides it with advanced.context_length.
+    if bug_fix_config.context_length is None and profiles:
+        profile_ctx = getattr(profiles[0], "context_length", None)
+        if profile_ctx and profile_ctx > 0:
+            bug_fix_config.context_length = profile_ctx
     claude_config = parse_claude_config(
         config, output_dir, registry=registry, profiles=profiles
     )
@@ -595,6 +602,13 @@ def load_multi_target_config(
         registry=registry,
         profiles=profiles,
     )
+    # A profile-declared context window (the model's true limit) also applies
+    # to the pipeline-side diff caps and chunk bounds, unless the case file
+    # explicitly overrides it with advanced.context_length.
+    if bug_fix_config.context_length is None and profiles:
+        profile_ctx = getattr(profiles[0], "context_length", None)
+        if profile_ctx and profile_ctx > 0:
+            bug_fix_config.context_length = profile_ctx
     claude_config = parse_claude_config(
         config, output_dir, registry=registry, profiles=profiles
     )

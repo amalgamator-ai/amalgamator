@@ -391,3 +391,96 @@ default: m1
     def test_no_file_returns_none(self, tmp_path):
         reg = find_registry(config_dir=str(tmp_path / "nonexistent"))
         assert reg is None
+
+
+def test_profile_declares_context_length(tmp_path):
+    """A profile can declare the model's true context window.
+
+    Custom gateway model ids are unknown to litellm; the profile is how a
+    deployment states the real window so the agent loop's compaction budget
+    does not silently fall back to the 128K default.
+    """
+    from common.model_registry import load_registry
+
+    registry_file = tmp_path / "models.yaml"
+    registry_file.write_text(
+        "models:\n"
+        "  big:\n"
+        "    provider: litellm\n"
+        "    model: openai/custom/gateway-model\n"
+        "    context_length: 1000000\n"
+        "    params:\n"
+        "      max_tokens: 32768\n"
+        "default: big\n"
+    )
+    profile = load_registry(registry_file).resolve("big")
+    assert profile.context_length == 1_000_000
+
+    # Invalid values are ignored rather than crashing the load.
+    registry_file.write_text(
+        "models:\n"
+        "  bad:\n"
+        "    provider: litellm\n"
+        "    model: openai/custom/gateway-model\n"
+        "    context_length: not-a-number\n"
+        "default: bad\n"
+    )
+    assert load_registry(registry_file).resolve("bad").context_length is None
+
+
+def test_resolve_context_length_prefers_explicit_then_profile():
+    """Priority: explicit config > profile-declared window > default."""
+    from common.agent_runner import DEFAULT_CONTEXT_LENGTH, _resolve_context_length
+    from common.model_registry import ModelProfile
+
+    profile = ModelProfile(
+        id="p",
+        provider="litellm",
+        model="openai/custom/x",
+        context_length=1_000_000,
+    )
+    # Custom gateway ids are unknown to litellm: default without a profile.
+    assert _resolve_context_length("openai/custom/x", None) == DEFAULT_CONTEXT_LENGTH
+    # The profile declares the true window.
+    assert (
+        _resolve_context_length("openai/custom/x", None, profile=profile) == 1_000_000
+    )
+    # An explicit configuration still wins over the profile.
+    assert (
+        _resolve_context_length("openai/custom/x", 200_000, profile=profile) == 200_000
+    )
+
+
+def test_tool_env_scrubs_credentials():
+    """Agent shell commands must not inherit credential-bearing variables.
+
+    An agent once captured an environment dump into a repro script; the tool
+    environment is the last line of defense against secrets landing in run
+    artifacts. Non-secret variables pass through untouched.
+    """
+    import os
+
+    from common.agent_runner import _scrub_tool_env
+
+    saved = {
+        k: os.environ.pop(k)
+        for k in ("ANTHROPIC_API_KEY", "GITHUB_TOKEN")
+        if k in os.environ
+    }
+    os.environ["ANTHROPIC_API_KEY"] = "sk-test-secret"
+    os.environ["GITHUB_TOKEN"] = "ghp-test-secret"
+    os.environ["MYAPP_DATABASE_PASSWORD"] = "hunter2"
+    os.environ["SOME_NORMAL_VAR"] = "fine"
+    try:
+        env = _scrub_tool_env()
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "GITHUB_TOKEN" not in env
+        assert "MYAPP_DATABASE_PASSWORD" not in env
+        assert env["SOME_NORMAL_VAR"] == "fine"
+        assert env.get("PATH")
+    finally:
+        for k in ("ANTHROPIC_API_KEY", "GITHUB_TOKEN", "MYAPP_DATABASE_PASSWORD"):
+            os.environ.pop(k, None)
+        os.environ["SOME_NORMAL_VAR"] = "fine"
+        for k, v in saved.items():
+            os.environ[k] = v

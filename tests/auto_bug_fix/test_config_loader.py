@@ -669,3 +669,49 @@ def test_parse_commit_mode_leaves_patch_empty():
     cfg, _, _ = parse_bug_fix_config(_fix_cfg({"commit": "abc123"}))
     assert cfg.fix_patch == ""
     assert cfg.source_fix_commit == "abc123"
+
+
+def test_profile_context_length_backfills_pipeline_config(tmp_path):
+    """A profile-declared context window flows into the pipeline config.
+
+    The pipeline's diff caps and chunk bounds read BugFixConfig.context_length;
+    without the backfill, a model whose true window is declared only in its
+    profile (custom gateway ids are unknown to litellm) would leave those caps
+    at the 128K default. An explicit advanced.context_length still wins.
+    """
+    from auto_bug_fix.config_loader import load_pipeline_config
+
+    (tmp_path / "models.yaml").write_text(
+        "models:\n"
+        "  glm:\n"
+        "    provider: litellm\n"
+        "    model: openai/custom/glm\n"
+        "    context_length: 1000000\n"
+        "default: glm\n"
+    )
+    case: dict[str, Any] = {
+        "issue_id": "T-1",
+        "bug_description": "b",
+        "repository": {"source_path": str(tmp_path), "workdir": str(tmp_path)},
+        "branches": {"source": "main", "target": "release", "targets": ["release"]},
+        "fix": {"commit": "abc123"},
+        "build": {"command": "make", "test_command": "make test"},
+        "model": "glm",
+    }
+    import yaml as _yaml
+
+    case_file = tmp_path / "case.yaml"
+    case_file.write_text(_yaml.safe_dump(case))
+
+    cfg, claude, _, _ = load_pipeline_config(str(case_file))
+    assert cfg.context_length == 1_000_000
+    assert claude.context_length == 1_000_000
+    assert claude.profile is not None
+    assert claude.profile.context_length == 1_000_000
+
+    # Explicit case-level override beats the profile declaration.
+    case["advanced"] = {"context_length": 200000}
+    case_file.write_text(_yaml.safe_dump(case))
+    cfg, claude, _, _ = load_pipeline_config(str(case_file))
+    assert cfg.context_length == 200_000
+    assert claude.context_length == 200_000

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import time
 from abc import ABC, abstractmethod
@@ -178,13 +179,20 @@ def _filter_tools(allowed_tools: list[str] | None) -> list[ToolSchema]:
 # ── Context window management ────────────────────────────────────────────────
 
 
-def _resolve_context_length(model: str, configured: int | None) -> int:
+def _resolve_context_length(
+    model: str, configured: int | None, profile: ModelProfile | None = None
+) -> int:
     """Determine the context window size for the model.
 
-    Priority: explicit config > litellm model info > default 128K.
+    Priority: explicit config > profile-declared window > litellm model info
+    > default 128K. Custom gateway model ids are unknown to litellm, so the
+    profile is how a deployment declares the model's true window.
     """
     if configured and configured > 0:
         return configured
+    profile_ctx = getattr(profile, "context_length", None)
+    if profile_ctx and profile_ctx > 0:
+        return profile_ctx
     try:
         import litellm
 
@@ -532,6 +540,23 @@ def _tool_write_file(path: str, content: str, cwd: str) -> str:
         return f"Error writing {resolved}: {e}"
 
 
+_SECRET_ENV_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+
+
+def _scrub_tool_env() -> dict[str, str]:
+    """Environment for agent-run shell commands, without credentials.
+
+    Agents capture their own environment surprisingly often (env dumps in
+    repro scripts); the tool environment must not hand them secrets. The
+    model's own transport uses the profile (key file), not these variables.
+    """
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if not any(marker in k.upper() for marker in _SECRET_ENV_MARKERS)
+    }
+
+
 def _tool_bash(
     command: str, cwd: str, timeout: int = DEFAULT_BASH_TIMEOUT, max_chars: int = 30_000
 ) -> str:
@@ -543,6 +568,7 @@ def _tool_bash(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_scrub_tool_env(),
         )
         output = ""
         if result.stdout:
@@ -721,7 +747,7 @@ class LiteLLMAgentRunner(AgentRunner):
         )
 
         # ── Resolve context budget ───────────────────────────────────────
-        ctx_limit = _resolve_context_length(model, context_length)
+        ctx_limit = _resolve_context_length(model, context_length, profile=profile)
         ctx_budget = int(ctx_limit * COMPACTION_THRESHOLD_PCT)
         read_cap, bash_cap = _tool_output_caps(ctx_limit)
         log.info(
@@ -906,8 +932,15 @@ class LiteLLMAgentRunner(AgentRunner):
                         {"role": "tool", "tool_call_id": tc.id, "content": result}
                     )
                     continue
+                # Log the full bash command (not the truncated summary) so a
+                # run can be audited after the fact for out-of-scope access.
+                display_args = (
+                    f"command={fn_args.get('command', '')}"
+                    if fn_name == "bash"
+                    else _summarize_args(fn_args)
+                )
                 print(
-                    f"{Fore.YELLOW}  Tool: {fn_name}({_summarize_args(fn_args)}){Style.RESET_ALL}"
+                    f"{Fore.YELLOW}  Tool: {fn_name}({display_args}){Style.RESET_ALL}"
                 )
                 result = _execute_tool(
                     fn_name,

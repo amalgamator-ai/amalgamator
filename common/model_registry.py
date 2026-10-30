@@ -37,6 +37,10 @@ class ModelProfile:
     api_base: str | None = field(default=None, repr=False)
     api_key: str | None = field(default=None, repr=False)
     params: dict = field(default_factory=dict, repr=False)
+    # The model's true context window, when known. The agent loop uses it as
+    # the compaction budget (overriding its 128K default) when the request
+    # does not carry an explicit context_length.
+    context_length: int | None = None
 
     def __post_init__(self):
         reserved = {
@@ -139,6 +143,14 @@ def _parse_profile(profile_id: str, raw: dict[str, Any]) -> ModelProfile:
         log.warning("Profile '%s': params must be a mapping, ignoring", profile_id)
         params = {}
 
+    context_length = None
+    raw_ctx = raw.get("context_length")
+    if raw_ctx is not None:
+        try:
+            context_length = int(raw_ctx)
+        except (TypeError, ValueError):
+            log.warning("Profile '%s': context_length not an int, ignoring", profile_id)
+
     return ModelProfile(
         id=profile_id,
         provider=provider,
@@ -146,6 +158,7 @@ def _parse_profile(profile_id: str, raw: dict[str, Any]) -> ModelProfile:
         api_base=api_base,
         api_key=api_key,
         params=params,
+        context_length=context_length,
     )
 
 
