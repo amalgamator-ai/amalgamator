@@ -41,6 +41,13 @@ pages:
     title: Backport pipeline
     weight: 30
 
+  - path: external-context
+    title: External resolver context
+    weight: 55
+  - path: external-context-template
+    title: External context template
+    weight: 56
+
   - path: reference
     title: Reference
     weight: 60

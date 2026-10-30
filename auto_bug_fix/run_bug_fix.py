@@ -38,6 +38,32 @@ if TYPE_CHECKING:
     from common.model_registry import ModelProfile
 
 
+def _external_context_section(config: BugFixConfig, phase: str, **kwargs) -> str:
+    """Render the external-resolver context section for one pipeline phase.
+
+    The strategy dispatch: an inactive/absent context renders "" for every
+    phase, so prompts and call sites never branch on it.  *phase* selects
+    the rendering ("triage", "resolution" or "verification") — each phase
+    gets different instructions around the same underlying data.  Keyword
+    arguments are forwarded to the renderer (resolution uses ``files`` to
+    embed only the patches relevant to the current request).
+    """
+    ctx = config.external_context
+    if ctx is None or not ctx.active:
+        return ""
+    renderers = {
+        "triage": ctx.render_triage_section,
+        "resolution": ctx.render_resolution_section,
+        "verification": ctx.render_verification_section,
+        "review": ctx.render_review_section,
+    }
+    renderer = renderers.get(phase)
+    if renderer is None:
+        log.warning("unknown external context phase: %s", phase)
+        return ""
+    return renderer(**kwargs)
+
+
 def _phase_config(
     claude_config: ClaudeConfig,
     config: BugFixConfig,
@@ -683,6 +709,7 @@ def phase_0_5_semantic_triage(
         source_branch=config.source_branch,
         target_branch=config.target_branch,
         seed_files=state.seed,
+        external_context_section=_external_context_section(config, "triage"),
     )
 
     claude_config_triage = _phase_config(claude_config, config)
@@ -1833,6 +1860,9 @@ def cherry_pick_and_resolve(
                     target_branch=config.target_branch,
                     baseline_ref=base_head,
                     followup_fixes=followup_note,
+                    external_context_section=_external_context_section(
+                        config, "resolution", files=chunk
+                    ),
                 )
                 asyncio.run(
                     claude_run(
@@ -1853,6 +1883,9 @@ def cherry_pick_and_resolve(
                 target_branch=config.target_branch,
                 baseline_ref=base_head,
                 followup_fixes=followup_note,
+                external_context_section=_external_context_section(
+                    config, "resolution", files=uu_files
+                ),
             )
             log.info(
                 "%s attempt %d/%d — resolving %d conflicts",
@@ -2216,6 +2249,7 @@ def _finalize_resolution(
             ),
             evidence_report=evidence_report,
             baseline_ref=base_head,
+            external_context_section=_external_context_section(config, "verification"),
         )
         try:
             asyncio.run(
@@ -2285,6 +2319,7 @@ def _finalize_resolution(
                 current_diff=blind_diff,
                 target_branch=config.target_branch,
                 baseline_ref=base_head,
+                external_context_section=_external_context_section(config, "review"),
             )
             try:
                 asyncio.run(
@@ -2763,6 +2798,20 @@ def run_pipeline(
         fix_commit=config.source_fix_commit,
         bug_description=f"Porting fix for {config.issue_id}",
     )
+
+    # Load the external resolver context (hybrid pipelines). Absent or
+    # empty file yields the inactive strategy object: every rendered
+    # section is "" and the pipeline behaves exactly as before.
+    from auto_bug_fix.external_context import load_external_context
+
+    config.external_context = load_external_context(config.external_context_file)
+    if config.external_context.active:
+        log.info(
+            "External resolver context active: %s (%d findings, %d resolved files)",
+            config.external_context.source_path,
+            len(config.external_context.findings),
+            len(config.external_context.resolved_files),
+        )
 
     try:
         return _run_pipeline_phases(config, claude_config, state, tracker)

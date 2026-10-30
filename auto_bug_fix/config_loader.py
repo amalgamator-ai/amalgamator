@@ -345,6 +345,27 @@ def parse_bug_fix_config(
     else:
         source_fix_commit = str(fix["commit"])
 
+    # External resolver context: optional Markdown file with prior
+    # resolver output + deterministic check findings. Missing file is a
+    # load-time error (unlike a runtime degradation, a typo'd path would
+    # otherwise silently run the pipeline without the context the user
+    # explicitly asked for); an empty file just disables the feature.
+    external_context_file = ""
+    if "external_context_file" in config:
+        raw_external_context = config["external_context_file"]
+        if (
+            not isinstance(raw_external_context, str)
+            or not raw_external_context.strip()
+        ):
+            raise ConfigError("external_context_file must be a non-empty path string")
+        external_context_file = _resolve_patch_path(
+            raw_external_context.strip(), config_dir
+        )
+        if not os.path.isfile(external_context_file):
+            raise ConfigError(
+                f"external_context_file not found: {external_context_file}"
+            )
+
     _, phase_4b_profile = profiles or resolve_pipeline_profiles(config, registry)
 
     bug_fix_config = BugFixConfig(
@@ -382,6 +403,7 @@ def parse_bug_fix_config(
         phase_4b_profile=phase_4b_profile,
         fix_patch=fix_patch,
         fix_upstream_ref=fix_upstream_ref,
+        external_context_file=external_context_file,
     )
 
     return bug_fix_config, workdir, source_path
