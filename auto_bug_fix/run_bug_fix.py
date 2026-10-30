@@ -981,6 +981,23 @@ def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
     return cmd
 
 
+def _ported_tests_still_failing(
+    failures: set[str], ported_test_files: list[str]
+) -> set[str]:
+    """Failure names that belong to the ported regression tests.
+
+    Matches either the full path or the basename, so it works when the
+    test-port manifest and the suite's failure lines spell paths differently.
+    """
+    ported = set(ported_test_files)
+    ported.update(os.path.basename(p) for p in ported_test_files)
+    still = set()
+    for name in failures:
+        if name in ported or os.path.basename(name) in ported:
+            still.add(name)
+    return still
+
+
 def _run_build_and_test(
     config: BugFixConfig, state: PipelineState
 ) -> tuple[bool, str, str, str, str]:
@@ -1008,6 +1025,18 @@ def _run_build_and_test(
             )
             return False, build_stdout, build_stderr, test_stdout, test_stderr
         failures = parse_test_failures(test_stdout, test_stderr)
+        ported_failing = _ported_tests_still_failing(failures, state.ported_test_files)
+        if ported_failing:
+            # The ported regression test failed at baseline (RED) and is
+            # expected to pass once the fix lands. A port that leaves it
+            # failing must not verify, even when it introduces no *new*
+            # failures relative to the baseline.
+            log.warning(
+                "Ported regression test still failing after the fix — "
+                "verification failed: %s",
+                ", ".join(sorted(ported_failing)),
+            )
+            return False, build_stdout, build_stderr, test_stdout, test_stderr
         if failures:
             # Named failures — the baseline says which of them are pre-existing.
             passed, _ = check_regression(failures, state.baseline)
@@ -1213,7 +1242,10 @@ def phase_4a_build_recovery(
 
             failures = parse_test_failures(test_stdout, test_stderr)
             no_regression, _ = check_regression(failures, state.baseline)
-            if test_exit != TIMEOUT_EXIT_CODE and no_regression:
+            ported_failing = _ported_tests_still_failing(
+                failures, state.ported_test_files
+            )
+            if test_exit != TIMEOUT_EXIT_CODE and no_regression and not ported_failing:
                 log.info("Phase 4a: build+test passed on attempt %d", attempt)
                 _commit_recovery_edits(config, "Phase 4a")
                 return
@@ -1270,7 +1302,8 @@ def phase_4a_build_recovery(
 
         failures = parse_test_failures(test_stdout, test_stderr)
         no_regression, _ = check_regression(failures, state.baseline)
-        if test_exit != TIMEOUT_EXIT_CODE and no_regression:
+        ported_failing = _ported_tests_still_failing(failures, state.ported_test_files)
+        if test_exit != TIMEOUT_EXIT_CODE and no_regression and not ported_failing:
             log.info("Phase 4a: build+test passed after final attempt")
             _commit_recovery_edits(config, "Phase 4a")
             return

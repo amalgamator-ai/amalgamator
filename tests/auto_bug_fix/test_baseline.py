@@ -95,6 +95,62 @@ def test_parse_jest_fail():
     assert "src/components/Button.test.js" in failures
 
 
+def test_parse_php_run_tests_fail_colored_progress_line():
+    # Real captured `make test` output: run-tests.php overwrites the
+    # "TEST n/m [file]" progress line with \r + ANSI-colored FAIL.
+    stdout = (
+        "TEST 1/2 [ext/tests/http/a_001.phpt]\r\x1b[1;32mPASS\x1b[0m ok [ext/tests/http/a_001.phpt] \n"
+        "TEST 2/2 [ext/tests/http/a_002.phpt]\r\x1b[1;31mFAIL\x1b[0m GHSA-x: over limit "
+        "[ext/tests/http/a_002.phpt] \n"
+        "Tests failed    :     1 ( 50.0%)"
+    )
+    failures = parse_test_failures(stdout, "")
+    assert failures == {"ext/tests/http/a_002.phpt"}
+
+
+def test_parse_php_run_tests_fail_plain():
+    # Same shape without ANSI codes (NO_COLOR or redirected progress line).
+    stdout = (
+        "TEST 1/1 [ext/tests/password/b.phpt]\rFAIL bcrypt errors "
+        "[ext/tests/password/b.phpt] \n"
+    )
+    failures = parse_test_failures(stdout, "")
+    assert failures == {"ext/tests/password/b.phpt"}
+
+
+def test_parse_php_run_tests_summary_not_a_failure():
+    # A fully passing run: progress lines, summary counts, and PASS results
+    # must not parse as failures.
+    stdout = (
+        "Tests passed    :     1 (100.0%)\n"
+        "Tests failed    :     0 (  0.0%)\n"
+        "TEST 1/1 [ext/tests/c.phpt]\r\x1b[1;32mPASS\x1b[0m ghsa-wpj3 "
+        "[ext/tests/c.phpt] \n"
+    )
+    failures = parse_test_failures(stdout, "")
+    assert failures == set()
+
+
+def test_parse_php_run_tests_fail_full_output_with_summary():
+    # Full captured shape of a failing run, including the trailing summary
+    # block. Note: the literal "FAILED TEST SUMMARY" header is picked up by
+    # the generic pytest pattern as a spurious name ("TEST"); it appears
+    # identically in every failing run, never matches a .phpt ported test,
+    # and is therefore harmless. The .phpt path is the name the pipeline
+    # relies on.
+    stdout = (
+        "TEST 1/1 [ext/tests/http/a_002.phpt]\r\x1b[1;31mFAIL\x1b[0m GHSA-x "
+        "[ext/tests/http/a_002.phpt] \n"
+        "=====================================================================\n"
+        "FAILED TEST SUMMARY\n"
+        "---------------------------------------------------------------------\n"
+        "GHSA-x: over limit [ext/tests/http/a_002.phpt]\n"
+    )
+    failures = parse_test_failures(stdout, "")
+    assert "ext/tests/http/a_002.phpt" in failures
+    assert failures - {"TEST"} == {"ext/tests/http/a_002.phpt"}
+
+
 # --- timeout handling ---
 
 

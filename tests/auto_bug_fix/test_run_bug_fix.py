@@ -18,6 +18,7 @@ from auto_bug_fix.run_bug_fix import (
     PipelineEscalation,
     PipelineState,
     PipelineStop,
+    _ported_tests_still_failing,
     _resolve_lint_command,
     _run_build_and_test,
     _sanitize_branch_slug,
@@ -220,6 +221,68 @@ def test_no_lint_command_skips_lint(mock_run, mock_allow, mock_veto):
     passed, _, _, _, _ = _run_build_and_test(config, state)
     assert passed is True
     assert mock_run.call_count == 2
+
+
+# --- ported-test GREEN gate tests ---
+
+
+def test_ported_tests_still_failing_matches_path_and_basename():
+    failures = {
+        "ext/standard/tests/http/a_001.phpt",
+        "other/b_002.phpt",
+        "unrelated_test",
+    }
+    ported = ["ext/standard/tests/http/a_001.phpt", "b_002.phpt"]
+    assert _ported_tests_still_failing(failures, ported) == {
+        "ext/standard/tests/http/a_001.phpt",
+        "other/b_002.phpt",
+    }
+
+
+def test_ported_tests_still_failing_empty_when_clean():
+    assert _ported_tests_still_failing({"x_test"}, []) == set()
+    assert _ported_tests_still_failing(set(), ["a.phpt"]) == set()
+
+
+@patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.run_test_suite")
+def test_ported_test_still_failing_fails_verify(mock_run, mock_allow, mock_veto):
+    # The ported regression test failed at baseline (RED) and keeps failing
+    # after the port. Even though it introduces no *new* failure, verification
+    # must fail: the fix did not turn the test green.
+    fail_output = (
+        "TEST 1/1 [ext/tests/http/a_002.phpt]\r\x1b[1;31mFAIL\x1b[0m GHSA-x "
+        "[ext/tests/http/a_002.phpt] \n"
+    )
+    mock_run.side_effect = [
+        (0, "", ""),  # build
+        (1, fail_output, ""),  # test: same failure as baseline
+    ]
+    config = _make_config(lint_command="")
+    state = PipelineState()
+    state.ported_test_files = ["ext/tests/http/a_002.phpt"]
+    state.baseline = {"ext/tests/http/a_002.phpt"}
+    state.baseline_test_exit = 1
+    passed, _, _, _, _ = _run_build_and_test(config, state)
+    assert passed is False
+
+
+@patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
+@patch("auto_bug_fix.run_bug_fix.run_test_suite")
+def test_ported_test_green_passes_verify(mock_run, mock_allow, mock_veto):
+    mock_run.side_effect = [
+        (0, "", ""),  # build
+        (0, "TEST 1/1 [ext/tests/http/a_002.phpt]\rPASS ok\n", ""),  # test
+    ]
+    config = _make_config(lint_command="")
+    state = PipelineState()
+    state.ported_test_files = ["ext/tests/http/a_002.phpt"]
+    state.baseline = {"ext/tests/http/a_002.phpt"}
+    state.baseline_test_exit = 1
+    passed, _, _, _, _ = _run_build_and_test(config, state)
+    assert passed is True
 
 
 # --- auto_discover_tests tests ---

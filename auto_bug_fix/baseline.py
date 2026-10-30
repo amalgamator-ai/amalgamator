@@ -75,6 +75,12 @@ _FAILURE_PATTERNS = [
     re.compile(r"^\s*FAIL\s+((?:\S+\.(?:js|ts|jsx|tsx))\S*)"),
     # RSpec: rspec ./spec/path_spec.rb:42
     re.compile(r"^\s*rspec\s+(\S+)"),
+    # PHP run-tests.php: overwrites the "TEST n/m [file]" progress line with
+    # "\r" + optionally ANSI-colored "FAIL <title> [<file>.phpt]".
+    re.compile(
+        r"^(?:.*\r)?\s*(?:\x1b\[\d+(?:;\d+)*m)?FAIL"
+        r"(?:\x1b\[\d+(?:;\d+)*m)?\s+.*\[(\S+\.phpt)\]\s*$"
+    ),
 ]
 
 
