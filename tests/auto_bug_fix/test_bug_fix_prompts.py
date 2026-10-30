@@ -351,3 +351,23 @@ def test_test_port_prompt_requires_harness_adaptation():
     ).prompt()
     assert "Adapt the tests to the TARGET's test harness" in text
     assert "double-loads an already-built extension" in text
+
+
+def test_red_triage_prompt_requires_in_place_replacement():
+    """The RED gate re-runs the case's test command verbatim.
+
+    A replacement test written to a new file the command does not reference
+    can never turn the gate RED, however correct it is — the 8.0 run
+    escalated and later stopped honestly on exactly this.
+    """
+    from auto_bug_fix.bug_fix_prompts import RedTriagePrompt
+
+    text = RedTriagePrompt(
+        context="<context>test</context>",
+        bug_description="b",
+        test_output="PASSED",
+        ported_test_files=["ext/zend_test/tests/observer_error_01.phpt"],
+        triage_assessment="{}",
+    ).prompt()
+    assert "REWRITE the test files the test command already names, in place" in text
+    assert "a brand-new test file the command does not reference" in text

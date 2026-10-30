@@ -3130,6 +3130,13 @@ def _run_pipeline_phases(
                             log.warning(
                                 "RED triage replacement test also passes — escalating to Phase 4b"
                             )
+                            if replacement not in config.test_command:
+                                raise PipelineEscalation(
+                                    "RED triage: replacement test is not "
+                                    "referenced by the test command — the gate "
+                                    "cannot see it. Rewrite the test files the "
+                                    "command names, in place"
+                                )
                             raise PipelineEscalation(
                                 "RED triage: replacement test also passes on unmodified code"
                             )

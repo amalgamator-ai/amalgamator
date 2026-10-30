@@ -987,8 +987,12 @@ Write a JSON file to `{output_file}` with this structure:
 }}
 ```
 
-If verdict is "vulnerable", the replacement test file MUST exist and MUST fail when run with \
-the test command. Verify this before writing the JSON.
+If verdict is "vulnerable", the replacement test MUST exist and MUST fail when run with \
+the test command. Verify this before writing the JSON. The replacement must \
+REWRITE the test files the test command already names, in place — the \
+pipeline re-runs that exact command to confirm RED, so a brand-new test \
+file the command does not reference cannot serve as the gate, no matter \
+how correct it is.
 """
 
     def prompt(self) -> str:
