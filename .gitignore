@@ -8,3 +8,9 @@ auto_bug_fix/configs/*.yaml
 .venv/
 .DS_Store
 llm/auto_profile_server_client/results/
+
+# generated run artifacts
+llm/auto_analyze/results/
+llm/auto_code_gen/results/
+llm/auto_profile/results/
+logs/

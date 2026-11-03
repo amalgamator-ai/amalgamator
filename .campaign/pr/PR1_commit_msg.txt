@@ -1,0 +1,9 @@
+platforms/rocm: try AITER attention backends before ROCM_ATTN
+
+ROCM_ATTN only has a custom paged-attention kernel for head_size 64 and 128 on CDNA; outside that set it runs a generic Triton kernel. Models with a larger head size therefore decode through that kernel at every batch size, even though the AITER backends cover those head sizes and are several times faster. The AITER entries are never reached because _get_backend_priorities() lists ROCM_ATTN first and ROCM_ATTN always validates, since it owns the Triton fallback.
+
+Move the AITER entries to the front when the head size has no custom kernel: ROCM_AITER_FA, then ROCM_AITER_UNIFIED_ATTN, then ROCM_ATTN as the fallback. Head sizes 64 and 128 keep the current order, and so does every ROCm architecture other than MI300 (gfx942), which is the only one measured. VLLM_DISABLE_AITER_BACKEND_PRIORITY=1 restores the old order.
+
+Qwen3.5-35B-A3B-FP8, MI300X, 8192 in, two runs per cell: c1 14.810/14.810 -> 4.644/4.611 ms, c8 18.188/18.047 -> 7.866/7.666 ms, c64 49.24/47.85 -> 34.72/33.84 ms. Qwen3.8-27B-FP8 c1: 27.46/27.42 -> 11.16/11.18 ms. Measured on vLLM 76c6f3f2a9, each tree source-mounted into the same pinned ROCm 10 image.
+
+Amalgamator was used for AI assistance

@@ -122,12 +122,21 @@ class ServerProcess:
         )
 
     def stop(self) -> None:
-        """Kill the entire process group (server + tee + workers)."""
+        """Kill the entire process group (server + tee + workers).
+
+        Also waits until the health endpoint stops answering. That wait is
+        load-bearing: vLLM/SGLang can keep serving ``/health`` for tens of
+        seconds while tearing down. If the next server starts in that window,
+        its readiness probe is answered by the *old* process, the following
+        benchmark hits a dead port and records zeros, and the profile stop
+        request fails with connection refused.
+        """
         import os
         import signal
 
         if self.process.poll() is not None:
             log.info("Server already exited (code=%d)", self.process.returncode)
+            self._wait_for_endpoint_down()
             return
 
         pid = self.process.pid
@@ -146,6 +155,27 @@ class ServerProcess:
             except (ProcessLookupError, PermissionError):
                 self.process.kill()
             self.process.wait(timeout=10)
+
+        self._wait_for_endpoint_down()
+
+    def _wait_for_endpoint_down(self, timeout: int = 120) -> None:
+        """Block until the health endpoint stops answering (or timeout)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                r = subprocess.run(
+                    ["curl", "-sf", "--max-time", "3", self.health_url],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except Exception:  # noqa: BLE001 -- treat any probe failure as down
+                return
+            if r.returncode != 0:
+                return
+            time.sleep(SERVER_HEALTH_POLL_SEC)
+        log.warning(
+            "Endpoint %s still answering %ds after stop; continuing",
+            self.health_url, timeout,
+        )
 
     @property
     def is_running(self) -> bool:

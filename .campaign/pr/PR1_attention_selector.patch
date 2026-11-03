@@ -1,0 +1,219 @@
+From ab108b7cfb0a52e95051c63226d46a222641d15f Mon Sep 17 00:00:00 2001
+From: Alexander Matveev <amatveev@redhat.com>
+Date: Mon, 2 Nov 2026 17:52:00 -0500
+Subject: [PATCH] platforms/rocm: try AITER attention backends before ROCM_ATTN
+
+ROCM_ATTN only has a custom paged-attention kernel for head_size 64 and 128 on CDNA; outside that set it runs a generic Triton kernel. Models with a larger head size therefore decode through that kernel at every batch size, even though the AITER backends cover those head sizes and are several times faster. The AITER entries are never reached because _get_backend_priorities() lists ROCM_ATTN first and ROCM_ATTN always validates, since it owns the Triton fallback.
+
+Move the AITER entries to the front when the head size has no custom kernel: ROCM_AITER_FA, then ROCM_AITER_UNIFIED_ATTN, then ROCM_ATTN as the fallback. Head sizes 64 and 128 keep the current order, and so does every ROCm architecture other than MI300 (gfx942), which is the only one measured. VLLM_DISABLE_AITER_BACKEND_PRIORITY=1 restores the old order.
+
+Qwen3.5-35B-A3B-FP8, MI300X, 8192 in, two runs per cell: c1 14.810/14.810 -> 4.644/4.611 ms, c8 18.188/18.047 -> 7.866/7.666 ms, c64 49.24/47.85 -> 34.72/33.84 ms. Qwen3.8-27B-FP8 c1: 27.46/27.42 -> 11.16/11.18 ms. Measured on vLLM 76c6f3f2a9, each tree source-mounted into the same pinned ROCm 10 image.
+
+Amalgamator was used for AI assistance
+
+Signed-off-by: Alexander Matveev <amatveev@redhat.com>
+---
+ .../test_rocm_aiter_backend_priority.py       | 88 +++++++++++++++++++
+ vllm/envs.py                                  |  7 ++
+ vllm/platforms/rocm.py                        | 47 ++++++++++
+ 3 files changed, 142 insertions(+)
+ create mode 100644 tests/platforms/test_rocm_aiter_backend_priority.py
+
+diff --git a/tests/platforms/test_rocm_aiter_backend_priority.py b/tests/platforms/test_rocm_aiter_backend_priority.py
+new file mode 100644
+index 0000000000..827f72e81e
+--- /dev/null
++++ b/tests/platforms/test_rocm_aiter_backend_priority.py
+@@ -0,0 +1,88 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++"""The AITER backends are tried before ROCM_ATTN when ROCM_ATTN has no custom
++paged-attention kernel for the model's head size."""
++
++from unittest.mock import patch
++
++import pytest
++
++import vllm.envs as envs
++from vllm.v1.attention.backends.registry import AttentionBackendEnum
++
++ROCM_ATTN = AttentionBackendEnum.ROCM_ATTN
++AITER_FA = AttentionBackendEnum.ROCM_AITER_FA
++AITER_UNIFIED = AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
++
++
++def _priorities(
++    head_size: int = 256,
++    *,
++    aiter: bool = True,
++    mha: bool = True,
++    use_kv_connector: bool = False,
++    disable_env: bool = False,
++    gfx942: bool = True,
++):
++    from vllm.platforms.rocm import _get_backend_priorities
++
++    with patch("vllm._aiter_ops.is_aiter_found_and_supported",
++               return_value=aiter), patch(
++            "vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled",
++            return_value=mha), patch(
++            "vllm._aiter_ops.rocm_aiter_ops.is_rdna_aiter_enabled",
++            return_value=False), patch(
++            "vllm.platforms.rocm.on_gfx942", return_value=gfx942), patch.object(
++            envs, "VLLM_DISABLE_AITER_BACKEND_PRIORITY", disable_env):
++        return _get_backend_priorities(
++            use_mla=False,
++            use_sparse=False,
++            use_kv_connector=use_kv_connector,
++            head_size=head_size,
++        )
++
++
++@pytest.mark.parametrize("head_size", [256, 192, 320])
++def test_head_sizes_without_custom_kernel_prefer_aiter(head_size):
++    priorities = _priorities(head_size)
++    assert priorities[0] == AITER_FA
++    assert priorities[1] == AITER_UNIFIED
++    assert ROCM_ATTN in priorities  # still a fallback
++
++
++@pytest.mark.parametrize("head_size", [64, 128])
++def test_head_sizes_with_custom_kernel_keep_rocm_attn_first(head_size):
++    priorities = _priorities(head_size)
++    assert priorities[0] == ROCM_ATTN
++    assert AITER_FA in priorities
++
++
++def test_without_mha_unified_is_used():
++    assert _priorities(256, mha=False)[0] == AITER_UNIFIED
++
++
++def test_kill_switch_restores_old_order():
++    assert _priorities(256, disable_env=True)[0] == ROCM_ATTN
++
++
++def test_other_architectures_keep_old_order():
++    # The reordering is scoped to MI300 (gfx942), where it was measured.
++    assert _priorities(256, gfx942=False)[0] == ROCM_ATTN
++
++
++def test_aiter_unavailable_keeps_old_order():
++    # is_mha_enabled() is False whenever AITER itself is unavailable.
++    assert _priorities(256, aiter=False, mha=False)[0] == ROCM_ATTN
++
++
++def test_kv_connector_skips_rocm_attn():
++    priorities = _priorities(256, use_kv_connector=True)
++    assert ROCM_ATTN not in priorities
++    assert priorities[0] == AITER_FA
++
++
++@pytest.mark.parametrize("head_size", [256, 64])
++def test_no_duplicate_entries(head_size):
++    priorities = _priorities(head_size)
++    assert len(priorities) == len(set(priorities))
+diff --git a/vllm/envs.py b/vllm/envs.py
+index e8e26be26c..caa1fb051d 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -150,6 +150,7 @@ if TYPE_CHECKING:
+     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
+     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+     VLLM_ROCM_USE_AITER_MLA: bool = True
++    VLLM_DISABLE_AITER_BACKEND_PRIORITY: bool = False
+     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
+     VLLM_ROCM_USE_AITER_MHA: bool = True
+     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
+@@ -1394,6 +1395,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     "VLLM_ROCM_USE_AITER_MHA": lambda: (
+         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+     ),
++    # Keep the previous ROCM_ATTN-first ordering instead of trying the
++    # AITER attention backends first on ROCm.
++    "VLLM_DISABLE_AITER_BACKEND_PRIORITY": lambda: (
++        os.getenv("VLLM_DISABLE_AITER_BACKEND_PRIORITY", "False").lower()
++        in ("true", "1")
++    ),
+     # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
+     # reads the KV cache as stored (bf16 or fp8, paged or flat). Used by the
+     # ROCM_AITER_MLA_SPARSE backend (DeepSeek V3.2, GLM-5.x) and DeepSeek
+diff --git a/vllm/platforms/rocm.py b/vllm/platforms/rocm.py
+index 000ac9cc18..ce99b94fd1 100644
+--- a/vllm/platforms/rocm.py
++++ b/vllm/platforms/rocm.py
+@@ -528,10 +528,41 @@ def flash_attn_triton_available() -> bool:
+         return False
+ 
+ 
++# Head sizes for which ROCM_ATTN runs its custom paged-attention kernel on
++# CDNA (see use_rocm_custom_paged_attention). Outside this set ROCM_ATTN falls
++# back to a generic Triton kernel.
++_ROCM_ATTN_CUSTOM_HEAD_SIZES = (64, 128)
++
++
++def _prefer_aiter_backends(head_size: int | None) -> bool:
++    """Whether to try the AITER backends ahead of ROCM_ATTN.
++
++    ROCM_ATTN is only competitive when it can use its custom paged-attention
++    kernel; otherwise the AITER backends were faster at every concurrency
++    measured on MI300 (gfx942), which is the only architecture the change is
++    scoped to. Disabled with VLLM_DISABLE_AITER_BACKEND_PRIORITY=1.
++    """
++    if envs.VLLM_DISABLE_AITER_BACKEND_PRIORITY:
++        return False
++    if not on_gfx942():
++        return False
++    if head_size in _ROCM_ATTN_CUSTOM_HEAD_SIZES:
++        return False
++
++    logger.info_once(
++        "Trying AITER attention backends before ROCM_ATTN "
++        "(head_size=%s has no ROCm custom paged-attention kernel); set "
++        "VLLM_DISABLE_AITER_BACKEND_PRIORITY=1 to keep the old order.",
++        head_size,
++    )
++    return True
++
++
+ def _get_backend_priorities(
+     use_mla: bool,
+     use_sparse: bool,
+     use_kv_connector: bool = False,
++    head_size: int | None = None,
+ ) -> list[AttentionBackendEnum]:
+     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+ 
+@@ -564,6 +595,21 @@ def _get_backend_priorities(
+             backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+         else:
+             backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
++
++    # Try the AITER backends before ROCM_ATTN when ROCM_ATTN would run its
++    # generic Triton kernel instead of the CDNA custom one.
++    if _prefer_aiter_backends(head_size):
++        aiter_first = [
++            backend
++            for backend in (
++                AttentionBackendEnum.ROCM_AITER_FA,
++                AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
++            )
++            if backend in backends
++        ]
++        backends = aiter_first + [
++            backend for backend in backends if backend not in aiter_first
++        ]
+     backends.append(AttentionBackendEnum.TRITON_ATTN)
+     backends.append(AttentionBackendEnum.TURBOQUANT)
+     backends.append(AttentionBackendEnum.ROCM_OCTAVE)
+@@ -741,6 +787,7 @@ class RocmPlatform(Platform):
+             attn_selector_config.use_mla,
+             attn_selector_config.use_sparse,
+             attn_selector_config.use_kv_connector,
++            attn_selector_config.head_size,
+         )
+         from vllm.config import get_current_vllm_config_or_none
+ 
+-- 
+2.56.0
+

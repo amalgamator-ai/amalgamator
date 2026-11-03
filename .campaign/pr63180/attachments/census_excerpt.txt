@@ -1,0 +1,12 @@
+  arm env: <none>
+census r10w2_c5r9_tp4_on (on): fse_arm=1 fse_on=1 mono=1 canary=0 miss385=0 miss384=0
+census r10w2_c5r9_tp4_on (on): fse_arm=1 fse_on=1 mono=1 canary=0 miss385=0 miss384=0
+== r10w2_c5r9_tp4_on engaged/ENABLED lines:
+      1 10-28 21:40:53 [rocm.py:1196] prefill fusion above mono: defaulting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 for the heterogeneous native-FP8 fused shared experts (the AITER router/kernel coordination flag); the FP8->MXFP4 requant fusion stays refused under --monokernel. Set VLLM_DISABLE_PREFILL_FUSION_ABOVE_MONO=1 to keep the stock behavior.
+      1 10-28 21:41:15 [model.py:499] prefill fusion above mono engaged: the heterogeneous fused shared experts (native-FP8) run above --monokernel decode (prefill-shaped batches of 16..2048 tokens only; mono decode keeps the stock 384/6 kernels on decode-only steps; disable with VLLM_DISABLE_PREFILL_FUSION_ABOVE_MONO=1)
+  arm env: VLLM_DISABLE_FUSED_SHARED_EXPERTS=1
+census r10w2_c5r9_tp4_off (off): fse_arm=0 fse_on=0 mono=1 canary=0 miss385=0 miss384=0
+census r10w2_c5r9_tp4_off (off): fse_arm=0 fse_on=0 mono=1 canary=0 miss385=0 miss384=0
+== r10w2_c5r9_tp4_off engaged/ENABLED lines:
+  arm env: <none>
+== r10w2_c5r9_tp2_on engaged/ENABLED lines:

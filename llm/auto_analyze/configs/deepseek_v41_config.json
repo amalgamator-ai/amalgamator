@@ -1,0 +1,6 @@
+{
+    "backend": "claude_sdk",
+    "model": "rits/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "context_length": 1000000,
+    "allowed_tools": ["Read", "Write", "Bash"]
+}

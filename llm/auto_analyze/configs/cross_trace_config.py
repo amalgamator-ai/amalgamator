@@ -97,10 +97,11 @@ class CrossTraceConfig:
     output_dir: str = "./cross_trace_output"
     make_improvement_plan: bool = False
 
-    # Iteration control for generation steps
-    num_matching_iterations: int = 3
-    num_compare_iterations: int = 3
-    num_improvement_plan_iterations: int = 3
+    # Iteration control for generation steps (one draft + one review by default;
+    # see the note in single_trace_config.py).
+    num_matching_iterations: int = 1
+    num_compare_iterations: int = 1
+    num_improvement_plan_iterations: int = 1
     matching_skip_review: bool = False
     compare_skip_review: bool = False
     improvement_plan_skip_review: bool = False
@@ -123,9 +124,9 @@ class CrossTraceConfig:
             target_trace_id=data.get("target_trace_id", 0),
             output_dir=data.get("output_dir", "./cross_trace_output"),
             make_improvement_plan=data.get("make_improvement_plan", False),
-            num_matching_iterations=data.get("num_matching_iterations", 3),
-            num_compare_iterations=data.get("num_compare_iterations", 3),
-            num_improvement_plan_iterations=data.get("num_improvement_plan_iterations", 3),
+            num_matching_iterations=data.get("num_matching_iterations", 1),
+            num_compare_iterations=data.get("num_compare_iterations", 1),
+            num_improvement_plan_iterations=data.get("num_improvement_plan_iterations", 1),
             matching_skip_review=data.get("matching_skip_review", False),
             compare_skip_review=data.get("compare_skip_review", False),
             improvement_plan_skip_review=data.get("improvement_plan_skip_review", False),

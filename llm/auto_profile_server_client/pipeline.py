@@ -205,6 +205,10 @@ def _run_via_docker(config: RunConfig, output_dir: str, summary: SummaryWriter) 
 
         port = FRAMEWORK_PORTS.get(fw_entry.name, 8000)
         env = dict(fw_entry.server_args.extra_env)
+        extra_volumes = dict(fw_entry.server_args.source_mount)
+        if extra_volumes:
+            log.info("Mounting source trees into the container: %s",
+                     extra_volumes)
 
         log.info("Launching docker container: %s", container_name)
         result = docker.run(
@@ -213,6 +217,7 @@ def _run_via_docker(config: RunConfig, output_dir: str, summary: SummaryWriter) 
             cmd=full_cmd,
             ports={port: port},
             env=env,
+            extra_volumes=extra_volumes or None,
         )
 
         if result.returncode == 0:

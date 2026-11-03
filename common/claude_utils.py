@@ -294,6 +294,11 @@ def build_claude_options(config: ClaudeConfig):
         "ANTHROPIC_MODEL": config.model,
         "MAX_THINKING_TOKENS": str(config.max_thinking_tokens),
     }
+    # Long-context models: tell the CLI how big the window really is. It
+    # sizes auto-compaction from this, and a window it does not know about
+    # makes it compact (and drop history) far earlier than the model needs.
+    if config.context_length:
+        env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(config.context_length)
     extra = {}
     profile = config.profile
     if profile and (profile.api_key or profile.api_base):

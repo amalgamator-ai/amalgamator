@@ -1,0 +1,66 @@
+================================================================================
+FIRST BENCHMARK RESULTS — DeepSeek-V4.1-Flash on 8x AMD MI355X (dell-mi355x-3)
+================================================================================
+Date: 2026-10-09
+Mode: pure_decode, ISL 4 / OSL 1024, no speculative decoding
+Topology: TP{n}+EP1 for both frameworks, identical ROCm 10 stack
+Images: vllm/vllm-openai-rocm:nightly-rocm100 (vLLM 0.31.1rc1.dev173, ROCm 10.0)
+        lmsysorg/sglang-rocm:v0.5.21-rocm10-mi35x-20261009 (SGLang 0.5.21)
+Configs: llm/auto_profile_server_client/test_configs/deepseek_v41_flash_mi355x_tp{4,8}.json
+Results: llm/auto_profile_server_client/results/deepseek_v41_flash_mi355x_tp{4,8}/
+16/16 runs completed, zero failures. num_prompts = 4 x concurrency per test.
+
+TP4 (TP4+EP1):
++-----+-----------+-----------+------------+------------+----------+----------+-----------+-----------+
+|  b  | vLLM TPOT | SGLang    | vLLM p99   | SGLang p99 | vLLM     | SGLang   | vLLM      | SGLang    |
+|     | (ms)      | TPOT (ms) | TPOT (ms)  | TPOT (ms)  | TTFT(ms) | TTFT(ms) | tok/s     | tok/s     |
++-----+-----------+-----------+------------+------------+----------+----------+-----------+-----------+
+|   1 | 6.99      | 5.90 *    | 6.99       | 6.28       | 78.9 *   | 138.9    | 141.7     | 146.5 *   |
+|  16 | 10.04 *   | 11.13     | 10.12 *    | 13.49      | 93.2 *   | 113.8    | 1581.3 *  | 1251.4    |
+|  64 | 15.52 *   | 20.79     | 15.75 *    | 25.33      | 107.9 *  | 134.4    | 4098.0 *  | 2732.2    |
+| 128 | 19.91 *   | 27.63     | 20.04 *    | 33.93      | 121.7 *  | 158.9    | 6394.0 *  | 4220.8    |
++-----+-----------+-----------+------------+------------+----------+----------+-----------+-----------+
+
+TP8 (TP8+EP1):
++-----+-----------+-----------+------------+------------+----------+----------+-----------+-----------+
+|  b  | vLLM TPOT | SGLang    | vLLM p99   | SGLang p99 | vLLM     | SGLang   | vLLM      | SGLang    |
+|     | (ms)      | TPOT (ms) | TPOT (ms)  | TPOT (ms)  | TTFT(ms) | TTFT(ms) | tok/s     | tok/s     |
++-----+-----------+-----------+------------+------------+----------+----------+-----------+-----------+
+|   1 | 6.82      | 6.36 *    | 6.85       | 6.97       | 79.2 *   | 86.2     | 145.1 *   | 138.1     |
+|  16 | 8.84 *    | 11.83     | 9.04 *     | 16.69      | 148.5    | 149.3    | 1781.9 *  | 1171.1    |
+|  64 | 12.40 *   | 16.92     | 12.51 *    | 21.11      | 202.3    | 127.4 *  | 5083.5 *  | 3340.7    |
+| 128 | 15.41 *   | 23.73     | 15.85 *    | 29.85      | 174.9    | 147.1 *  | 8219.0 *  | 4913.6    |
++-----+-----------+-----------+------------+------------+----------+----------+-----------+-----------+
+(* = better of the two frameworks in that cell)
+
+Context from the earlier TP2+EP1 campaign (same recipe, ISL 4 / OSL 1024):
+  b=1: vLLM TPOT 7.32 ms / TTFT 75.8 ms / 135.4 tok/s
+       SGLang TPOT 7.73 ms / TTFT 112.7 ms / 121.4 tok/s  (profiling trace capture failed)
+
+KEY FINDINGS
+------------
+1. Single-stream decode (b=1) is SGLang's from TP4 up: 5.90 ms at TP4 (-15% vs vLLM),
+   6.36 ms at TP8 (-7%). SGLang sweet spot is TP4; it regresses TP4->TP8 while vLLM
+   improves monotonically (7.32 -> 6.99 -> 6.82 ms). At TP2 vLLM won b=1.
+2. Throughput at any batch (b>=16) is vLLM's decisively: at TP8 +52% (b=16), +52% (b=64),
+   +67% (b=128). Peak of sweep: vLLM TP8 b=128 = 8219 tok/s.
+3. vLLM TP4 (half the GPUs) out-throughputs SGLang TP8 at b=128: 6394 vs 4914 tok/s.
+4. Tail consistency: vLLM p99 TPOT within 0.2-3% of mean in every cell; SGLang +6% to +41%.
+5. TTFT: vLLM leads all TP4 cells; at TP8 SGLang wins b=64 (127 vs 202 ms) and b=128
+   (147 vs 175 ms) despite prefill CUDA graphs disabled (recipe requirement of
+   --enable-decoder-swa-bounded-replay).
+6. TP4->TP8 throughput gain: vLLM +13/24/29% (b=16/64/128); SGLang +22/16% at b=64/128,
+   -6% at b=16.
+
+PRACTICAL PICKS
+---------------
+- Latency-critical single-stream: SGLang TP4 (5.90 ms TPOT, 169 tok/s single stream).
+- Throughput / batch serving: vLLM TP8 (8219 tok/s at b=128), TP4 for efficiency per GPU.
+
+NOTES
+-----
+- SGLang --cuda-graph-max-bs-decode raised 64 -> 128 for the sweep so b=128 stays
+  graph-covered (fairness); recipe otherwise identical for both frameworks.
+- Pipeline change: per-test output subdirectories (results/<tp>/<fw>/<test-name>/)
+  so multi-concurrency sweeps do not overwrite each other's artifacts.
+================================================================================

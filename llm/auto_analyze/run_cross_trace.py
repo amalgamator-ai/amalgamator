@@ -26,9 +26,9 @@ Config JSON fields:
     make_improvement_plan   If true, generate improvement plan for target trace (default: false)
 
     Iteration control (all optional):
-    num_matching_iterations          Max gen=>review iterations for matching (default: 3)
-    num_compare_iterations           Max gen=>review iterations for comparison (default: 3)
-    num_improvement_plan_iterations  Max gen=>review iterations for improvement plan (default: 3)
+    num_matching_iterations          Max gen=>review iterations for matching (default: 1)
+    num_compare_iterations           Max gen=>review iterations for comparison (default: 1)
+    num_improvement_plan_iterations  Max gen=>review iterations for improvement plan (default: 1)
     matching_skip_review             Skip review for matching (default: false)
     compare_skip_review              Skip review for comparison (default: false)
     improvement_plan_skip_review     Skip review for improvement plan (default: false)

@@ -1,0 +1,39 @@
+{
+    "profiles": [
+        {
+            "model": "Qwen/Qwen3.8-27B-FP8",
+            "num_gpus": 1,
+            "input_len": 8192,
+            "output_len": 1024,
+            "frameworks": [
+                {
+                    "name": "vllm",
+                    "enable_trace": true,
+                    "profiler_type": "torch",
+                    "server_args": {
+                        "extra_flags": "--gpu-memory-utilization 0.90",
+                        "extra_env": {
+                            "VLLM_ROCM_USE_AITER": "1",
+                            "HSA_NO_SCRATCH_RECLAIM": "1",
+                            "PYTHONPATH": "/workspace/vllm",
+                            "PYTHONDONTWRITEBYTECODE": "1"
+                        },
+                        "source_mount": {
+                            "/home/amatveev/work/wt76_pr1": "/workspace/vllm"
+                        }
+                    },
+                    "client_args": {"extra_flags": ""}
+                }
+            ]
+        }
+    ],
+    "concurrencies": [1],
+    "num_prompts_multiplier": 8,
+    "stability_threshold_pct": 10.0,
+    "max_stability_retries": 1,
+    "metrics_poll_interval_sec": 1.0,
+    "docker_images": {
+        "vllm": "vllm/vllm-openai-rocm@sha256:4c92e167b9b4739e9c7181ae384fafc2b8e6da0de9ddef7c4829ce0d581b12eb"
+    },
+    "output_dir": "llm/auto_profile_server_client/results/qwen38_post_p1"
+}

@@ -194,16 +194,24 @@ class BenchmarkRunner:
                                     ) -> tuple[int, int]:
         """Compute delay_iterations and active_iterations.
 
-        Targets the pure-decode midpoint of the middle prompt/wave.
+        Targets the pure-decode midpoint of the run.
+
+        delay_iterations counts *engine steps*, not request-tokens. At
+        concurrency C the engine advances all C in-flight requests in one step,
+        so a run of ``num_prompts`` requests needs about
+        ``num_prompts * (output_len + 1) / C`` steps, not one step per token.
+        The previous formula assumed C == 1 unconditionally: profiling a
+        64-concurrency cell of 128 prompts x 128 tokens asked the profiler to
+        wait 8,320 steps for a run that only has ~260, so the active window
+        never opened and no trace was written.
         """
         iters_per_prompt = output_len + 1
-
-        if concurrency >= num_prompts:
-            mid = output_len // 2
-        else:
-            mid_prompt = num_prompts // 2
-            mid = mid_prompt * iters_per_prompt + output_len // 2
-
+        total_steps = max(
+            1, (num_prompts * iters_per_prompt) // max(concurrency, 1))
+        mid = total_steps // 2
+        # Never ask for more captured steps than the run leaves after the
+        # delay, so the window always closes inside the run.
+        active = max(1, min(active, total_steps - mid))
         return mid, active
 
     # ── Time-based profiling helpers ─────────────────────────────────────
@@ -577,6 +585,39 @@ class BenchmarkRunner:
         else:
             log.warning("[%s] No .nsys-rep file at %s", self.test_name, nsys_rep)
 
+    @staticmethod
+    def _wait_for_written_file(path: str, timeout: float = 120.0) -> bool:
+        """Wait until a trace file has finished being written.
+
+        Kineto writes the gzip stream incrementally, so a copy taken too early
+        yields a truncated archive that fails later, far from its cause:
+        `EOFError: Compressed file ended before the end-of-stream marker`. The
+        file is complete when its size stops changing *and* the gzip checksum
+        validates; the checksum is the only reliable signal, since a writer can
+        stall without closing the stream.
+        """
+        import gzip
+        deadline = time.time() + timeout
+        last_size = -1
+        while time.time() < deadline:
+            try:
+                size = Path(path).stat().st_size
+            except OSError:
+                return False
+            if size == last_size and size > 0:
+                if not path.endswith(".gz"):
+                    return True
+                try:
+                    with gzip.open(path, "rb") as fh:
+                        while fh.read(1 << 20):
+                            pass
+                    return True
+                except (EOFError, OSError):
+                    pass
+            last_size = size
+            time.sleep(3)
+        return False
+
     def _finalize_torch_trace(self, out_dir: str, server: ServerProcess) -> None:
         """Copy torch trace files from /tmp to output dir, then stop server.
 
@@ -601,6 +642,13 @@ class BenchmarkRunner:
 
         if traces:
             for src in traces:
+                if not self._wait_for_written_file(src):
+                    log.error(
+                        "[%s] Trace %s never finished writing (size stuck or "
+                        "gzip checksum invalid after 120s); copying it would "
+                        "produce an unreadable archive later.",
+                        self.test_name, src)
+                    continue
                 dst = f"{out_dir}/{Path(src).name}"
                 shutil.copy2(src, dst)
                 log.info("[%s] Torch trace: %s (%.1f MB)",

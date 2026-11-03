@@ -15,6 +15,13 @@ class ServerArgs:
     extra_flags: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
     prepare_cmds: list[str] = field(default_factory=list)
+    # Host path -> container path mounts for this framework's container, e.g.
+    # {"source_mount": {"/home/user/work/vllm": "/workspace/vllm"}} together
+    # with extra_env PYTHONPATH=/workspace/vllm. Without it the container
+    # serves the framework build baked into the image, which is not the tree
+    # the trace is analysed against; the two can disagree as soon as a floating
+    # image tag is re-pulled.
+    source_mount: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

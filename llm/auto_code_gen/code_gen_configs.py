@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 
@@ -107,6 +108,49 @@ def _ensure_worktree(source_dir: str, worktree_name: str) -> str:
     return worktree
 
 
+def _strip_trace_profiler_flags(run_command: str) -> str:
+    """Drop tracing-only profiler flags from an inherited server command.
+
+    auto_profile records the serving command it ran in run_params.txt, and for
+    a trace capture it appends ``--profiler-config <json>`` so the profiler
+    opens a fixed window mid-generation. That window is an artifact of tracing,
+    not part of the workload: inheriting it into the runtime gate makes every
+    arm -- baseline and patched alike -- profile ~50 engine steps in the middle
+    of the measured run, which inflates the tail percentiles and writes a large
+    trace file per measurement. The runtime diagnostic phase injects its own
+    profiler flags when it wants a capture, so the inherited ones are pure
+    overhead here.
+
+    Only server-style commands are touched (they must contain a ``serve``
+    token): for batch ``bench`` commands the profiler flags are part of how
+    that benchmark is driven, not leftovers.
+    """
+    if not run_command:
+        return run_command
+    try:
+        tokens = shlex.split(run_command)
+    except ValueError:
+        return run_command
+    if "serve" not in tokens:
+        return run_command
+
+    kept: list[str] = []
+    dropped = False
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        name = token.split("=", 1)[0]
+        if name == "--profiler-config":
+            dropped = True
+            i += 1 if "=" in token else 2  # flag and its value
+            continue
+        kept.append(token)
+        i += 1
+    if not dropped:
+        return run_command
+    return shlex.join(kept)
+
+
 def _apply_runtime_bench_num_prompts(run_command: str, num_prompts: int) -> str:
     """Rewrite the bench command's sample count for gate measurements.
 
@@ -131,6 +175,58 @@ def _apply_runtime_bench_num_prompts(run_command: str, num_prompts: int) -> str:
             if n:
                 return rewritten
     return run_command
+
+
+def _append_serve_args(run_command: str, extra_args: list[str]) -> str:
+    """Append server arguments to an inherited serving command.
+
+    The runtime gate measures the workload that was traced, so the command is
+    normally taken from run_params.txt verbatim. Some campaigns target a cell
+    the trace did not cover (a higher max-concurrency, a speculative-decoding
+    configuration, a different KV dtype): declaring those flags here keeps the
+    override in the config instead of hand-editing run_params.txt, which would
+    then disagree with the trace the plan was written against. ``argparse``
+    keeps the last occurrence of a repeated option, so an appended
+    ``--max-num-seqs 64`` overrides a traced ``--max-num-seqs 1``.
+
+    Only serving commands are extended: for batch ``bench`` commands the flags
+    belong to the benchmark driver, not to a server.
+    """
+    if not run_command or not extra_args:
+        return run_command
+    try:
+        tokens = shlex.split(run_command)
+    except ValueError:
+        tokens = run_command.split()
+    if "serve" not in tokens:
+        print("WARNING: extra_serve_args is set but target_run_command is not a"
+              " serving command; ignoring them")
+        return run_command
+    return shlex.join(tokens + [str(arg) for arg in extra_args])
+
+
+def _apply_run_command_prefix(run_command: str, prefix: str) -> str:
+    """Put an explicit container invocation in front of the serving command.
+
+    The command recorded in run_params.txt is the one the server ran *inside*
+    its container. Left to itself, the runtime agent invents the container
+    wrapper: it reaches for a floating image tag and guesses which tree to
+    mount, so the A/B gate can end up measuring an image build that never saw
+    the patch. Declaring the wrapper here keeps the environment identical
+    between arms and pinned across runs.
+    """
+    prefix = (prefix or "").strip()
+    if not prefix or not run_command:
+        return run_command
+    # A prefix that has to pass the command through a shell (e.g. a container
+    # wrapper ending in `bash -c`) needs it quoted: the serving command already
+    # contains single-quoted JSON from --speculative-config, so naive quoting
+    # with either quote character breaks it.
+    if "{quoted_command}" in prefix:
+        return prefix.replace("{quoted_command}", shlex.quote(run_command))
+    if "{command}" in prefix:
+        return prefix.replace("{command}", run_command)
+    return f"{prefix} {run_command}"
 
 
 @dataclass
@@ -212,6 +308,18 @@ class CodeGenConfig(PipelineConfig):
     # Applied by rewriting --num-prompts (vllm bench serve) / --num-samples
     # (bench latency) in target_run_command; 0 (default) keeps the trace value.
     runtime_bench_num_prompts: int = 0
+    # Extra server flags appended to the inherited serving command, for a
+    # campaign whose target cell is not the one that was traced (e.g.
+    # ["--max-num-seqs", "64", "--speculative-config", "{...}"]). Repeated
+    # options keep the last value, so these override the traced ones.
+    extra_serve_args: list[str] = field(default_factory=list)
+    # Shell prefix placed in front of the serving command, e.g. a pinned
+    # `docker run ... image`. The traced command is the one the server ran
+    # *inside* its container, so without this the runtime agent has to invent
+    # the container invocation: it picks a floating image tag and guesses the
+    # mounts, which makes the measurement describe a build that may not even
+    # contain the patch under test.
+    run_command_prefix: str = ""
     # Run directly in source_code_dir instead of a run-named git worktree.
     # The default worktree isolates concurrent runs, but a venv installed
     # editable against source_code_dir imports from that exact tree — patching
@@ -423,6 +531,13 @@ class CodeGenConfig(PipelineConfig):
                 '"remote_model_pvc_name" is required when runtime_backend is "remote".'
             )
 
+        extra_serve_args = data.get("extra_serve_args", [])
+        if not isinstance(extra_serve_args, list) or not all(
+                isinstance(arg, str) for arg in extra_serve_args):
+            errors.append('"extra_serve_args" must be a list of strings.')
+
+        run_command_prefix = str(data.get("run_command_prefix", "") or "")
+
         code_port_plan_skip_review = data.get("code_port_plan_skip_review", False)
         test_plan_skip_review = data.get("test_plan_skip_review", False)
         code_gen_skip_review = data.get("code_gen_skip_review", False)
@@ -450,6 +565,8 @@ class CodeGenConfig(PipelineConfig):
             gpu_wait_timeout_minutes=int(gpu_wait_timeout_minutes),
             gpu_ids=gpu_ids,
             runtime_bench_num_prompts=runtime_bench_num_prompts,
+            extra_serve_args=extra_serve_args,
+            run_command_prefix=run_command_prefix,
             runtime_backend=runtime_backend,
             remote_namespace=remote_namespace,
             remote_pvc_name=remote_pvc_name,
@@ -513,8 +630,13 @@ class CodeGenConfig(PipelineConfig):
         self.target_commit_id = target_trace.commit_id
         self.source_commit_id = source_trace.commit_id
         self.source_framework_code_dir = source_trace.framework_source_code
-        self.target_run_command = _apply_runtime_bench_num_prompts(
-            target_trace.run_command, self.runtime_bench_num_prompts)
+        self.target_run_command = _apply_run_command_prefix(
+            _apply_runtime_bench_num_prompts(
+                _append_serve_args(
+                    _strip_trace_profiler_flags(target_trace.run_command),
+                    self.extra_serve_args),
+                self.runtime_bench_num_prompts),
+            self.run_command_prefix)
 
         self.model = target_trace.model
         self.gpu_type = target_trace.gpu_type

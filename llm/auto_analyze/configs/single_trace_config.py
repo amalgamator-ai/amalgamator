@@ -116,10 +116,13 @@ class SingleTraceConfig(SingleTraceParams):
 
     output_dir: str = "./single_trace_output"
 
-    # Iteration control for generation steps
-    num_high_level_ops_iterations: int = 3
-    num_correlation_iterations: int = 3
-    num_perf_analysis_iterations: int = 3
+    # Iteration control for generation steps. One draft + one review per step by
+    # default: three iterations cost ~6 h of agent time per trace (each step is
+    # draft+review on a large document with max-effort thinking) and the later
+    # iterations mostly re-check citations. Raise per run when depth matters.
+    num_high_level_ops_iterations: int = 1
+    num_correlation_iterations: int = 1
+    num_perf_analysis_iterations: int = 1
     high_level_ops_skip_review: bool = False
     correlation_skip_review: bool = False
     perf_analysis_skip_review: bool = False

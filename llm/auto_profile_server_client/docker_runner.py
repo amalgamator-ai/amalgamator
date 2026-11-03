@@ -22,7 +22,16 @@ log = logging.getLogger(__name__)
 
 
 def _gpu_vendor() -> str:
-    """Detect the host GPU vendor from its management CLI."""
+    """Detect the host GPU vendor from device nodes and management CLIs.
+
+    A ROCm device node plus rocm-smi is authoritative and is checked first:
+    some ROCm hosts ship a stub ``nvidia-smi`` (the DigitalOcean MI300X images
+    do), which would otherwise win a plain ``which()`` race and send docker
+    down the ``--runtime nvidia`` path, failing with "unknown or invalid
+    runtime name: nvidia".
+    """
+    if Path("/dev/kfd").exists() and shutil.which("rocm-smi"):
+        return "amd"
     if shutil.which("nvidia-smi"):
         return "nvidia"
     if shutil.which("rocm-smi"):
@@ -212,8 +221,19 @@ class DockerRunner:
         return DockerContainer(name=name, process=proc, image=image)
 
     def ensure_image_updated(self, image: str) -> None:
-        """Pull latest if remote digest differs from local."""
+        """Pull latest if remote digest differs from local.
+
+        A digest-pinned reference (``repo:tag@sha256:...`` or ``repo@sha256:``)
+        is never refreshed: pinning is the caller asking for exactly that build.
+        Floating tags are refreshed, which means a campaign that spans a nightly
+        publish silently switches framework builds between runs — the reason a
+        trace taken "with the fix applied" can describe a different binary than
+        the tree it is analysed against.
+        """
         if not image or image == "none":
+            return
+        if "@sha256:" in image:
+            log.info("Image is digest-pinned, not pulling: %s", image)
             return
 
         log.info("Checking for updates: %s", image)

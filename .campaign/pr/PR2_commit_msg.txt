@@ -1,0 +1,16 @@
+rocm: enable AITER fused shared experts by default on MI300
+
+The shared expert is otherwise executed as a separate dense MLP next to the routed MoE kernel: a gate/up GEMM, activation, down GEMM, the shared-expert gate GEMV, sigmoid, multiply and the surrounding reshapes and quantizes, per layer. AITER runs it as one extra slot of the routed grouped GEMM with the gate folded in, which is what SGLang does by default for the same models.
+
+The new default is scoped to MI300 (gfx942), the only architecture it was measured on. Every other ROCm GPU keeps today's behaviour unless VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is set explicitly, which is also why the variable still works as a kill switch.
+
+The default only decides whether the fusion is requested. resolve_layer_fused_shared_expert still gates every layer on quantization compatibility and on expert parallelism, so checkpoints that cannot use it keep the previous behaviour.
+
+Measured on Qwen/Qwen3.5-35B-A3B-FP8, single MI300X, 8192 in / 1024 out, two runs per cell, one tree per arm, on vLLM 76c6f3f2a9:
+
+  on stock, c1: 14.810/14.810 -> 14.658/14.659 ms (-1.0%)
+  on stock, c8: 18.188/18.047 -> 17.909/17.717 ms (-1.7%)
+  with the AITER attention ordering applied, c1: 4.644/4.611 -> 4.478/4.478 ms (-3.2%)
+  with the AITER attention ordering applied, c8: 7.866/7.666 -> 7.638/7.499 ms (-2.5%)
+
+Amalgamator was used for AI assistance

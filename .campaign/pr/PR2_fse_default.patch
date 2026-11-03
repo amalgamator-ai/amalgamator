@@ -1,0 +1,257 @@
+From a33cd6ffda95db35607cde1d375d3979453fb1d5 Mon Sep 17 00:00:00 2001
+From: Alexander Matveev <amatveev@redhat.com>
+Date: Mon, 2 Nov 2026 17:52:01 -0500
+Subject: [PATCH] rocm: enable AITER fused shared experts by default on MI300
+
+The shared expert is otherwise executed as a separate dense MLP next to the routed MoE kernel: a gate/up GEMM, activation, down GEMM, the shared-expert gate GEMV, sigmoid, multiply and the surrounding reshapes and quantizes, per layer. AITER runs it as one extra slot of the routed grouped GEMM with the gate folded in, which is what SGLang does by default for the same models.
+
+The new default is scoped to MI300 (gfx942), the only architecture it was measured on. Every other ROCm GPU keeps today's behaviour unless VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is set explicitly, which is also why the variable still works as a kill switch.
+
+The default only decides whether the fusion is requested. resolve_layer_fused_shared_expert still gates every layer on quantization compatibility and on expert parallelism, so checkpoints that cannot use it keep the previous behaviour.
+
+Measured on Qwen/Qwen3.5-35B-A3B-FP8, single MI300X, 8192 in / 1024 out, two runs per cell, one tree per arm, on vLLM 76c6f3f2a9:
+
+  on stock, c1: 14.810/14.810 -> 14.658/14.659 ms (-1.0%)
+  on stock, c8: 18.188/18.047 -> 17.909/17.717 ms (-1.7%)
+  with the AITER attention ordering applied, c1: 4.644/4.611 -> 4.478/4.478 ms (-3.2%)
+  with the AITER attention ordering applied, c8: 7.866/7.666 -> 7.638/7.499 ms (-2.5%)
+
+Amalgamator was used for AI assistance
+
+Signed-off-by: Alexander Matveev <amatveev@redhat.com>
+---
+ .../test_fused_shared_expert_default.py       | 126 ++++++++++++++++++
+ vllm/_aiter_ops.py                            |  12 +-
+ .../device_communicators/all2all.py           |   6 +-
+ vllm/envs.py                                  |  12 +-
+ vllm/model_executor/layers/fused_moe/utils.py |   9 ++
+ 5 files changed, 160 insertions(+), 5 deletions(-)
+ create mode 100644 tests/model_executor/layers/test_fused_shared_expert_default.py
+
+diff --git a/tests/model_executor/layers/test_fused_shared_expert_default.py b/tests/model_executor/layers/test_fused_shared_expert_default.py
+new file mode 100644
+index 0000000000..ea805d24b5
+--- /dev/null
++++ b/tests/model_executor/layers/test_fused_shared_expert_default.py
+@@ -0,0 +1,126 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++"""Fused shared experts are requested by default on ROCm/AITER.
++
++The default only decides whether the *request* is made. Whether a given layer
++actually fuses is still resolved per layer by
++``resolve_layer_fused_shared_expert``: quantization compatibility and expert
++parallelism can still turn it off, and the environment variable remains a hard
++kill switch in both directions.
++"""
++
++from unittest.mock import patch
++
++import pytest
++
++import vllm.envs as envs
++from vllm._aiter_ops import rocm_aiter_ops
++from vllm.model_executor.layers.fused_moe.utils import (
++    resolve_layer_fused_shared_expert,
++)
++from vllm.platforms import current_platform
++
++pytestmark = pytest.mark.skipif(
++    current_platform.is_xpu(),
++    reason="ROCm-specific aiter ops are not supported on XPU",
++)
++
++ENV_KEY = "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS"
++
++
++def _env_value(monkeypatch, value):
++    if value is None:
++        monkeypatch.delenv(ENV_KEY, raising=False)
++    else:
++        monkeypatch.setenv(ENV_KEY, value)
++    return envs.environment_variables[ENV_KEY]()
++
++
++def test_enabled_by_default(monkeypatch):
++    assert _env_value(monkeypatch, None) is True
++
++
++@pytest.mark.parametrize("value", ["0", "false", "False"])
++def test_kill_switch(monkeypatch, value):
++    assert _env_value(monkeypatch, value) is False
++
++
++def test_resolver_still_gates_incompatible_quantization(monkeypatch):
++    """The default must not bypass the compatibility resolver."""
++    with patch(
++        "vllm._aiter_ops.rocm_aiter_ops.is_fusion_moe_shared_experts_enabled",
++        return_value=True,
++    ), patch(
++        "vllm.model_executor.layers.fused_moe.utils"
++        ".is_shared_expert_quant_fse_compatible",
++        return_value=(False, "unsupported quantization for FSE"),
++    ):
++        enabled = resolve_layer_fused_shared_expert(
++            quant_config=None,
++            prefix="model.layers.0.mlp",
++            shared_expert_name="shared_expert",
++        )
++    assert enabled is False
++
++
++def test_resolver_enables_when_compatible(monkeypatch):
++    with patch(
++        "vllm._aiter_ops.rocm_aiter_ops.is_fusion_moe_shared_experts_enabled",
++        return_value=True,
++    ), patch(
++        "vllm.model_executor.layers.fused_moe.utils"
++        ".is_shared_expert_quant_fse_compatible",
++        return_value=(True, None),
++    ):
++        enabled = resolve_layer_fused_shared_expert(
++            quant_config=None,
++            prefix="model.layers.0.mlp",
++            shared_expert_name="shared_expert",
++        )
++    assert enabled is True
++
++
++def test_expert_parallel_still_disables_for_models_that_opt_out(monkeypatch):
++    with patch(
++        "vllm._aiter_ops.rocm_aiter_ops.is_fusion_moe_shared_experts_enabled",
++        return_value=True,
++    ), patch(
++        "vllm.config.get_current_vllm_config_or_none"
++    ) as get_cfg:
++        get_cfg.return_value.parallel_config.enable_expert_parallel = True
++        enabled = resolve_layer_fused_shared_expert(
++            quant_config=None,
++            prefix="model.layers.0.mlp",
++            shared_expert_name="shared_expert",
++            disable_under_ep=True,
++        )
++    assert enabled is False
++
++
++def _fse_getter(monkeypatch, *, environ, gfx942, fused_moe=True, shared=True):
++    """Call the real request getter with the architecture and env pinned."""
++    cls = rocm_aiter_ops
++    if environ is None:
++        monkeypatch.delenv(ENV_KEY, raising=False)
++    else:
++        monkeypatch.setenv(ENV_KEY, environ)
++    with patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=True), \
++         patch.object(cls, "_MOE_SHARED_EXPERTS_ENABLED", shared), \
++         patch.object(cls, "is_fused_moe_enabled", return_value=fused_moe), \
++         patch("vllm.platforms.rocm.on_gfx942", return_value=gfx942):
++        return rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
++
++
++def test_default_on_only_on_mi300(monkeypatch):
++    assert _fse_getter(monkeypatch, environ=None, gfx942=True) is True
++    assert _fse_getter(monkeypatch, environ=None, gfx942=False) is False
++
++
++def test_explicit_env_wins_on_other_architectures(monkeypatch):
++    assert _fse_getter(monkeypatch, environ="1", gfx942=False, shared=True) is True
++    assert _fse_getter(monkeypatch, environ="0", gfx942=True, shared=False) is False
++
++
++def test_disabled_when_fused_moe_is_off(monkeypatch):
++    assert _fse_getter(monkeypatch, environ=None, gfx942=True, fused_moe=False) is False
+diff --git a/vllm/_aiter_ops.py b/vllm/_aiter_ops.py
+index b4edad9948..5806d2abc7 100644
+--- a/vllm/_aiter_ops.py
++++ b/vllm/_aiter_ops.py
+@@ -2380,7 +2380,17 @@ class rocm_aiter_ops:
+     @classmethod
+     @if_aiter_supported
+     def is_fusion_moe_shared_experts_enabled(cls) -> bool:
+-        return cls.is_fused_moe_enabled() and cls._MOE_SHARED_EXPERTS_ENABLED
++        if not cls.is_fused_moe_enabled():
++            return False
++        # The default-on policy is scoped to MI300 (gfx942), the only
++        # architecture it was measured on; every other ROCm GPU keeps the
++        # previous default. Setting the variable explicitly always wins, so
++        # other architectures can still opt in (or out).
++        if "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS" in os.environ:
++            return cls._MOE_SHARED_EXPERTS_ENABLED
++        from vllm.platforms.rocm import on_gfx942
++
++        return on_gfx942()
+ 
+     @classmethod
+     @if_aiter_supported
+diff --git a/vllm/distributed/device_communicators/all2all.py b/vllm/distributed/device_communicators/all2all.py
+index 6dc25135cc..d730552c77 100644
+--- a/vllm/distributed/device_communicators/all2all.py
++++ b/vllm/distributed/device_communicators/all2all.py
+@@ -971,8 +971,12 @@ class MoriAll2AllManager(All2AllManagerBase):
+             online_targets = getattr(
+                 vllm_config.model_config.quantization_config, "targets", None
+             )
++            # Ask the same scoped decision the MoE layer will make, so the
++            # sizing below cannot disagree with it.
++            from vllm._aiter_ops import rocm_aiter_ops
++
+             may_fuse_shared_expert = (
+-                envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
++                bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                 and "mxfp4" in (online_targets or {}).values()
+             )
+             heap_size = os.environ.setdefault(
+diff --git a/vllm/envs.py b/vllm/envs.py
+index e8e26be26c..bb6a935428 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -157,7 +157,7 @@ if TYPE_CHECKING:
+     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
+     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
+     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
+-    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
++    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = True
+     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
+     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
+     VLLM_ROCM_FP8_PADDING: bool = True
+@@ -1424,9 +1424,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
+         in ("true", "1")
+     ),
+     # Whether to use aiter fusion shared experts ops.
+-    # By default is disabled.
++    # Defaults to on for MI300 (gfx942) only, where it was measured: the shared
++    # expert then runs as one extra slot of the routed MoE kernel instead of a
++    # separate dense MLP. Other architectures keep the previous default unless
++    # the variable is set explicitly. The per-layer resolver
++    # (fused_moe/utils.py) still gates it on quantization compatibility and
++    # expert parallelism, so checkpoints that cannot use it are unaffected.
++    # Set to 0 to restore the old behaviour anywhere.
+     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
+-        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
++        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "True").lower()
+         in ("true", "1")
+     ),
+     # Whether to use aiter triton kernels for gemm ops.
+diff --git a/vllm/model_executor/layers/fused_moe/utils.py b/vllm/model_executor/layers/fused_moe/utils.py
+index 6a4911e838..baf7ad774d 100644
+--- a/vllm/model_executor/layers/fused_moe/utils.py
++++ b/vllm/model_executor/layers/fused_moe/utils.py
+@@ -149,6 +149,15 @@ def resolve_layer_fused_shared_expert(
+                     quant_key_str,
+                     target_pattern,
+                 )
++    if is_fused_shared_expert_enabled:
++        # The skip path warns once per cause; state the enabled decision
++        # too, so an operator can tell "not compatible" from "not requested"
++        # without inferring it from the absence of a warning.
++        logger.info_once(
++            "AITER fused shared experts are ENABLED for %s; "
++            "disable with VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0.",
++            _normalize_skip_reason(prefix),
++        )
+     if skip_reason is not None:
+         # Keep the full per-layer reason at debug level; the warning below is
+         # deduplicated by cause so a long model logs it once.
+-- 
+2.56.0
+

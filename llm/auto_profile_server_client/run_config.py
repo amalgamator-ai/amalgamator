@@ -28,10 +28,19 @@ def _require(cond: bool, msg: str) -> None:
 def _parse_server_args(raw: dict | None) -> ServerArgs:
     if raw is None:
         return ServerArgs()
+    source_mount = raw.get("source_mount", {}) or {}
+    _require(
+        isinstance(source_mount, dict)
+        and all(isinstance(k, str) and isinstance(v, str)
+                for k, v in source_mount.items()),
+        "server_args.source_mount must be an object mapping host paths to "
+        "container paths (e.g. {'/home/user/work/vllm': '/workspace/vllm'})",
+    )
     return ServerArgs(
         extra_flags=raw.get("extra_flags", ""),
         extra_env=raw.get("extra_env", {}),
         prepare_cmds=raw.get("prepare_cmds", []),
+        source_mount=source_mount,
     )
 
 

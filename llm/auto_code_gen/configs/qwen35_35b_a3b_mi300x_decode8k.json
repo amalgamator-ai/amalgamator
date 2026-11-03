@@ -1,0 +1,36 @@
+{
+    "cross_trace_config": "/home/amatveev/amalgamator/llm/auto_analyze/results/results_analyze_qwen35_35b_a3b_mi300x_decode8k/test_results/test_1/cross_trace_config.json",
+    "improvement_id": 1,
+    "source_code_dir": "/home/amatveev/work/vllm",
+    "output_dir": "/home/amatveev/amalgamator/llm/auto_code_gen/results/qwen35_35b_a3b_mi300x_decode8k",
+    "use_source_worktree": false,
+    "skip_runtime_diagnostics": true,
+    "benchmark_client_command": "vllm bench serve --model Qwen/Qwen3.5-35B-A3B-FP8 --port 8123 --backend openai --dataset-name random --random-input-len 8192 --random-output-len 1024 --num-prompts 8 --max-concurrency 1 --ignore-eos --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 90,95,99 --trust-remote-code --save-result --result-dir /tmp/vllm_bench_results --result-filename bench_result.json",
+    "num_code_port_plan_iterations": 2,
+    "num_test_plan_iterations": 1,
+    "num_code_gen_iterations": 2,
+    "num_runtime_iterations": 2,
+    "runtime_continue_after_success": false,
+    "max_investigation_revisions": 1,
+    "gpu_wait_timeout_minutes": 30,
+    "gpu_ids": "0",
+    "disallowed_modules": [
+        "sglang",
+        "sgl_kernel",
+        "sgl*"
+    ],
+    "use_smaller_model_for_runtime": false,
+    "disable_new_feature_for_runtime": false,
+    "additional_benchmark_configs": [],
+    "code_port_plan_skip_review": false,
+    "test_plan_skip_review": false,
+    "code_gen_skip_review": false,
+    "generate_pr_commands": false,
+    "enable_parallel_research_iteration": false,
+    "thinking-mode": "deep",
+    "agent": {
+        "backend": "claude_sdk",
+        "model": "rits/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        "context_length": 1000000
+    }
+}

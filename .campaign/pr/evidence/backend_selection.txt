@@ -1,0 +1,28 @@
+Attention backend actually selected, captured from each arm's own engine log.
+
+Boot-only runs on the MI300X (gfx942), pinned ROCm 10 image
+(vllm/vllm-openai-rocm@sha256:4c92e167b9b4739e9c7181ae384fafc2b8e6da0de9ddef7c4829ce0d581b12eb),
+same trees as the measurements, `--max-num-seqs 8`, no benchmark. Log lines were
+trimmed to 220 characters by the capture script, so the candidate list is cut
+off; the selected backend name is not.
+
+== stock_q355 model=Qwen/Qwen3.5-35B-A3B-FP8 tree=wt76_stock
+(EngineCore) INFO [rocm.py:897] Found incompatible backend(s) [TURBOQUANT, ROCM_OCTAVE, ULTRAQUANT] with AttentionType.DECODER. Overriding with ROCM_ATTN out of potential backends: ['ROCM_ATTN', 'R
+
+== pr1_q355 model=Qwen/Qwen3.5-35B-A3B-FP8 tree=wt76_pr1
+(EngineCore) INFO [rocm.py:549] Trying AITER attention backends before ROCM_ATTN (head_size=256 has no ROCm custom paged-attention kernel); set VLLM_DISABLE_AITER_BACKEND_PRIORITY=1 to keep the old
+(EngineCore) INFO [rocm.py:941] Found incompatible backend(s) [TURBOQUANT, ROCM_OCTAVE, ULTRAQUANT] with AttentionType.DECODER. Overriding with ROCM_AITER_FA out of potential backends: ['ROCM_AITER
+
+== pr1_q38 model=Qwen/Qwen3.8-27B-FP8 tree=wt76_pr1
+(EngineCore) INFO [rocm.py:549] Trying AITER attention backends before ROCM_ATTN (head_size=256 has no ROCm custom paged-attention kernel); set VLLM_DISABLE_AITER_BACKEND_PRIORITY=1 to keep the old
+(EngineCore) INFO [rocm.py:941] Found incompatible backend(s) [TURBOQUANT, ROCM_OCTAVE, ULTRAQUANT] with AttentionType.DECODER. Overriding with ROCM_AITER_FA out of potential backends: ['ROCM_AITER
+
+Notes:
+- Stock Qwen3.8 was not booted separately: same stock tree, same head_size=256,
+  same priority list as the stock Qwen3.5 arm, so it selects ROCM_ATTN as well.
+- Backend selection does not depend on max_num_seqs in this tree (no
+  max_num_seqs logic in vllm/platforms/rocm.py or vllm/v1/attention/selector.py),
+  so the c1, c8 and c64 cells all select the backend shown here.
+- "Overriding with" rather than "Using" is only because TURBOQUANT /
+  ROCM_OCTAVE / ULTRAQUANT are listed but rejected for DECODER attention; the
+  named backend is the selection.
