@@ -24,6 +24,7 @@ from auto_bug_fix.git_tools import GitResult, git_status_porcelain
 from auto_bug_fix.run_bug_fix import (
     PipelineEscalation,
     StageResult,
+    _agent_commit_guard,
     _branch_checkout_holders,
     _commit_recovery_edits,
     _commit_worktree_edits,
@@ -115,7 +116,7 @@ def test_stage_agent_work_fences_an_untracked_build_dir(tmp_path):
     config.build_dir = str(tmp_path / "rpm-build")
     (tmp_path / "rpm-build").mkdir()
     (tmp_path / "rpm-build" / "artifact.rpm").write_text("build output\n")
-    state.generated_output = {"rpm-build/artifact.rpm"}
+    _learn(config, state, "rpm-build/artifact.rpm")
     (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
 
     result = _stage_agent_work(config, state)
@@ -171,7 +172,7 @@ def test_stage_agent_work_separates_learned_output_from_new_source(tmp_path):
     (tmp_path / "build").mkdir()
     (tmp_path / "build" / "artifact.o").write_text("output\n")
     (tmp_path / "build" / "ported_fix.c").write_text("int n = 1;\n")
-    state.generated_output = {"build/artifact.o"}
+    _learn(config, state, "build/artifact.o")
 
     result = _stage_agent_work(config, state)
 
@@ -187,7 +188,7 @@ def test_stage_agent_work_fails_closed_when_the_fence_cannot_be_checked(tmp_path
     (tmp_path / "rpm-build").mkdir()
     (tmp_path / "rpm-build" / "artifact.o").write_text("output\n")
 
-    result = rbf._restage_unaccounted_fenced(config, "rpm-build", None, set())
+    result = rbf._restage_unaccounted_fenced(config, "rpm-build", None, None)
 
     assert result == (frozenset(), False)
 
@@ -203,7 +204,7 @@ def test_stage_agent_work_clears_a_build_dir_the_agent_staged_in(tmp_path):
     (tmp_path / "rpm-build" / "artifact.rpm").write_text("build output\n")
     _git_4b(tmp_path, "add", "rpm-build/artifact.rpm")
     (tmp_path / "rpm-build" / "unrelated.o").write_text("more output\n")
-    state.generated_output = {"rpm-build/artifact.rpm", "rpm-build/unrelated.o"}
+    _learn(config, state, "rpm-build/artifact.rpm", "rpm-build/unrelated.o")
     (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
 
     result = _stage_agent_work(config, state)
@@ -347,10 +348,11 @@ def test_discard_records_what_the_build_wrote_at_each_learned_path(tmp_path):
     assert state.generated_digests == {"gen.o": {expected}}
 
 
-def test_discard_does_not_hash_inside_a_fenced_build_dir(tmp_path):
-    """A build tree can hold tens of thousands of files, and the fence
-    excludes the whole subtree, so no boundary ever decides about them one by
-    one. Hashing them would be pure cost."""
+def test_discard_hashes_inside_a_fenced_build_dir_too(tmp_path):
+    """The fence decides the whole subtree at staging time, but a *learned*
+    path inside it is still decided per path at a commit boundary — and there
+    a name is not an identity. So fenced paths are hashed as well: the cost is
+    bounded by what one verification created, not by the tree's size."""
     config, _, state = _phase_4b_fixtures(tmp_path)
     config.build_dir = str(tmp_path / "rpm-build")
     (tmp_path / "rpm-build").mkdir()
@@ -361,14 +363,13 @@ def test_discard_does_not_hash_inside_a_fenced_build_dir(tmp_path):
     _discard_verification_dirt(config, baseline, state)
 
     assert "rpm-build/artifact.o" in state.generated_output
-    assert set(state.generated_digests) == {"root-gen.o"}
+    assert set(state.generated_digests) == {"rpm-build/artifact.o", "root-gen.o"}
 
 
-def test_recognized_build_output_requires_content_outside_a_fence(tmp_path):
-    """No recorded content is not evidence: hashing can fail, and then a name
-    is all the path has. Outside a fenced build directory that is not proof
-    enough — the file is kept as work. Inside one the name is all there ever
-    is, so the path rule stands there."""
+def test_recognized_build_output_requires_recorded_content(tmp_path):
+    """A name is not proof, inside a fenced build directory or outside it:
+    when no content was recorded for a learned path — hashing failed, or a
+    caller learned the name without content — the file is kept as work."""
     config, _, state = _phase_4b_fixtures(tmp_path)
     (tmp_path / "gen.o").write_text("output\n")
     (tmp_path / "build").mkdir()
@@ -376,9 +377,27 @@ def test_recognized_build_output_requires_content_outside_a_fence(tmp_path):
     state.generated_output = {"gen.o", "build/out.o"}
 
     assert rbf._recognized_build_output(config, state, {"gen.o"}) == set()
-    assert rbf._recognized_build_output(config, state, {"build/out.o"}, "build") == {
+    assert rbf._recognized_build_output(config, state, {"build/out.o"}) == set()
+
+
+def test_recognized_build_output_matches_content_inside_a_fence(tmp_path):
+    """The rule is the same in both places: recorded content that is still
+    there is build output; recorded content that is gone means work."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "build")
+    (tmp_path / "build").mkdir()
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "build" / "out.o").write_text("build output\n")
+    assert _discard_verification_dirt(config, baseline, state) is True
+    assert state.generated_digests.get("build/out.o")
+
+    (tmp_path / "build" / "out.o").write_text("build output\n")
+    assert rbf._recognized_build_output(config, state, {"build/out.o"}) == {
         "build/out.o"
     }
+
+    (tmp_path / "build" / "out.o").write_text("int ported_fix = 1;\n")
+    assert rbf._recognized_build_output(config, state, {"build/out.o"}) == set()
 
 
 def test_comparison_snapshot_does_not_capture_content(tmp_path):
@@ -407,7 +426,7 @@ def test_stage_agent_work_in_a_linked_worktree_leaves_the_source_repo(tmp_path):
     config.build_dir = str(wt / "build")
     (wt / "build").mkdir()
     (wt / "build" / "artifact.o").write_text("output\n")
-    state.generated_output = {"build/artifact.o"}
+    _learn(config, state, "build/artifact.o")
     (wt / "src.c").write_text("int a = 2; /* fix */\n")
 
     result = _stage_agent_work(config, state)
@@ -1116,7 +1135,7 @@ def test_phase_3b_regeneration_commit_uses_the_staging_guard(tmp_path):
     config.build_dir = str(tmp_path / "rpm-build")
     (tmp_path / "rpm-build").mkdir()
     (tmp_path / "rpm-build" / "artifact.o").write_text("output\n")
-    state.generated_output = {"rpm-build/artifact.o"}
+    _learn(config, state, "rpm-build/artifact.o")
 
     phase_3b_regeneration(config, state, ["echo regenerated > src.c"])
 
@@ -1456,7 +1475,7 @@ def test_agent_commit_no_longer_disables_the_build_dir_fence(tmp_path):
     (tmp_path / "rpm-build").mkdir()
     base = _git_4b(tmp_path, "rev-parse", "HEAD")
     (tmp_path / "rpm-build" / "artifact.o").write_text("output\n")
-    state.generated_output = {"rpm-build/artifact.o"}
+    _learn(config, state, "rpm-build/artifact.o")
     _git_4b(tmp_path, "add", "-A")
     _git_4b(tmp_path, "commit", "-m", "agent commit with build output")
     assert _fence_build_dir(config) is None, "fence disabled by the agent commit"
@@ -1466,23 +1485,51 @@ def test_agent_commit_no_longer_disables_the_build_dir_fence(tmp_path):
     assert _fence_build_dir(config) == "rpm-build"
 
 
-def test_agent_committed_ignored_output_is_untracked_again(tmp_path):
+def test_agent_committed_ignored_output_inside_the_fence_is_untracked_again(
+    tmp_path,
+):
     """A force-added artifact is still recognizable: `git check-ignore
-    --no-index` answers from the ignore rules, not from the index."""
+    --no-index` answers from the ignore rules, not from the index. Inside the
+    fenced build directory the tree is designated generated, so the ignore
+    rules are the evidence the strip removes it on."""
     config, _, state = _phase_4b_fixtures(tmp_path)
-    (tmp_path / ".gitignore").write_text("*.o\n")
+    (tmp_path / ".gitignore").write_text("rpm-build/\n")
     _git_4b(tmp_path, "add", ".gitignore")
-    _git_4b(tmp_path, "commit", "-m", "ignore object files")
+    _git_4b(tmp_path, "commit", "-m", "ignore the build tree")
+    config.build_dir = str(tmp_path / "rpm-build")
+    (tmp_path / "rpm-build").mkdir()
     base = _git_4b(tmp_path, "rev-parse", "HEAD")
-    (tmp_path / "stray.o").write_text("output\n")
-    _git_4b(tmp_path, "add", "-f", "stray.o")
+    (tmp_path / "rpm-build" / "stray.o").write_text("output\n")
+    _git_4b(tmp_path, "add", "-f", "rpm-build/stray.o")
     _git_4b(tmp_path, "commit", "-m", "agent force-added build output")
 
     assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
 
     assert (
-        "stray.o"
+        "rpm-build/stray.o"
         not in _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    )
+
+
+def test_agent_committed_ignored_work_outside_the_fence_is_kept(tmp_path):
+    """Ignore rules alone cannot tell a force-added source, a downstream
+    `.patch` fix or an ignored test fixture from an artifact. Outside a fenced
+    build directory such a path stays in the commit and is named in the log —
+    a noisier patch is recoverable, a dropped deliverable is not."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / ".gitignore").write_text("*.patch\n")
+    _git_4b(tmp_path, "add", ".gitignore")
+    _git_4b(tmp_path, "commit", "-m", "ignore generated patch files")
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "fix.patch").write_text("--- a/src.c\n+++ b/src.c\n")
+    _git_4b(tmp_path, "add", "-f", "fix.patch")
+    _git_4b(tmp_path, "commit", "-m", "agent force-added a downstream fix")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    assert (
+        "fix.patch"
+        in _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
     )
 
 
@@ -1577,15 +1624,19 @@ def test_semantic_triage_strips_build_output_from_an_agent_commit(
     """The Phase 0.5 triage agent was the one agent boundary nothing guarded:
     it runs before Phase 1 learns any output, so a `git add -A` there put its
     own build tree into HEAD — which in turn disabled the fence for the whole
-    run. Ignore rules are the only evidence available this early."""
+    run. Ignore rules plus the fenced build directory are the only evidence
+    available this early; ignored paths outside the fence are kept as
+    possible work."""
     config, claude_cfg, state = _phase_4b_fixtures(tmp_path)
-    (tmp_path / ".gitignore").write_text("*.o\n")
+    (tmp_path / ".gitignore").write_text("build/\n")
     _git_4b(tmp_path, "add", ".gitignore")
-    _git_4b(tmp_path, "commit", "-m", "ignore object files")
+    _git_4b(tmp_path, "commit", "-m", "ignore the build tree")
+    config.build_dir = str(tmp_path / "build")
     config.source_fix_commit = _git_4b(tmp_path, "rev-parse", "HEAD")
 
     async def session(cfg, steps, tracker=None):
-        (tmp_path / "gen.o").write_text("compile output\n")
+        (tmp_path / "build").mkdir(exist_ok=True)
+        (tmp_path / "build" / "gen.o").write_text("compile output\n")
         (tmp_path / "triage.json").write_text('{"recommendation": "proceed"}\n')
         # -f: the agent force-adds its build tree over the ignore rules.
         _git_4b(tmp_path, "add", "-A", "-f")
@@ -1597,9 +1648,11 @@ def test_semantic_triage_strips_build_output_from_an_agent_commit(
     rbf.phase_0_5_semantic_triage(config, claude_cfg, state, None)
 
     tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
-    assert "gen.o" not in tree
+    assert "build/gen.o" not in tree
     assert "triage.json" in tree, "the agent's analysis is work and stays"
-    assert (tmp_path / "gen.o").exists(), "kept on disk for the build that expects it"
+    assert (
+        tmp_path / "build" / "gen.o"
+    ).exists(), "kept on disk for the build that expects it"
 
 
 def test_red_triage_strips_build_output_from_an_agent_commit(tmp_path, monkeypatch):
@@ -1764,3 +1817,247 @@ def test_agent_edit_to_a_learned_tracked_file_is_kept(tmp_path):
     assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
 
     assert _git_4b(tmp_path, "show", "HEAD:src.c") == "int a = 7; /* the fix */"
+
+
+def test_agent_committed_deletion_of_a_generated_tracked_file_is_undone(tmp_path):
+    """A build that deletes a tracked generated file leaves a deletion, which
+    the addition and modification passes never see. The file is gone from
+    HEAD, so content cannot be compared; membership in ``generated_output``
+    is the evidence available, and the file is restored."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _learn_rewritten_tracked_file(config, state)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    _git_4b(tmp_path, "rm", "src.c")
+    _git_4b(tmp_path, "commit", "-m", "agent commit removing a generated file")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    assert _git_4b(tmp_path, "show", "HEAD:src.c") == "int a = 1;"
+    assert "src.c" in _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD")
+
+
+def test_agent_committed_rename_of_a_generated_tracked_file_is_undone(tmp_path):
+    """The same side effect with the file moved instead of removed: the source
+    is restored and the destination goes back to being untracked, so the
+    rename does not reach candidate.patch."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _learn_rewritten_tracked_file(config, state)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    _git_4b(tmp_path, "mv", "src.c", "src_moved.c")
+    _git_4b(tmp_path, "commit", "-m", "agent commit renaming a generated file")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "src.c" in tree
+    assert "src_moved.c" not in tree
+    assert _git_4b(tmp_path, "show", "HEAD:src.c") == "int a = 1;"
+    assert (tmp_path / "src_moved.c").exists(), "kept on disk, no longer tracked"
+
+
+def test_agent_committed_source_at_a_learned_path_inside_the_fence_is_kept(tmp_path):
+    """Content protection applies inside a fenced build directory too: a
+    verification that once created ``build/generated.c`` must not cost the
+    agent the source it later authored at that name."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "build")
+    (tmp_path / "build").mkdir()
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "build" / "generated.c").write_text("verification build output\n")
+    assert _discard_verification_dirt(config, baseline, state) is True
+    assert state.generated_digests.get("build/generated.c")
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    (tmp_path / "build" / "generated.c").write_text("int ported_fix = 1;\n")
+    _git_4b(tmp_path, "add", "-A", "-f")
+    _git_4b(tmp_path, "commit", "-m", "agent commit")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    assert (
+        "build/generated.c"
+        in _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    )
+
+
+def test_stage_agent_work_keeps_source_at_a_learned_path_inside_the_fence(tmp_path):
+    """The staging side of the same rule: the fence withholds only content it
+    can prove a build wrote, so newly authored source under it is staged."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "build")
+    (tmp_path / "build").mkdir()
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "build" / "generated.c").write_text("verification build output\n")
+    assert _discard_verification_dirt(config, baseline, state) is True
+
+    (tmp_path / "build" / "generated.c").write_text("int ported_fix = 1;\n")
+
+    result = _stage_agent_work(config, state)
+
+    assert result.restaged == frozenset({"build/generated.c"})
+    assert "build/generated.c" in _staged(tmp_path).splitlines()
+
+
+def test_stage_agent_work_still_drops_rebuilt_output_inside_the_fence(tmp_path):
+    """The flip side: the same bytes a verification was seen to write reappear
+    under the fence, and the boundary still leaves them out."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    config.build_dir = str(tmp_path / "build")
+    (tmp_path / "build").mkdir()
+    baseline = _worktree_snapshot(config)
+    (tmp_path / "build" / "generated.c").write_text("verification build output\n")
+    assert _discard_verification_dirt(config, baseline, state) is True
+
+    (tmp_path / "build" / "generated.c").write_text("verification build output\n")
+    (tmp_path / "src.c").write_text("int a = 2; /* fix */\n")
+
+    result = _stage_agent_work(config, state)
+
+    assert result.restaged == frozenset()
+    assert _staged(tmp_path).splitlines() == ["src.c"]
+
+
+def test_pre_session_dirty_content_survives_an_agent_commit(tmp_path):
+    """The session starts with an uncommitted edit already in the tree. When
+    the agent commits it, the strip must restore the content the session
+    found — checking out the base commit would drop the pre-session edit."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    pathlib.Path(tmp_path, "src.c").write_text("int a = 2; /* pre-session edit */\n")
+
+    with _agent_commit_guard(config, state, "Phase 3a"):
+        # A verification is seen to write the build's version of the file, so
+        # its digest is recorded and the later strip can match on it.
+        pathlib.Path(tmp_path, "src.c").write_text("/* build stamped this */\n")
+        _learn(config, state, "src.c")
+        _git_4b(tmp_path, "add", "-A")
+        _git_4b(tmp_path, "commit", "-m", "agent commit")
+
+    assert _git_4b(tmp_path, "show", "HEAD:src.c") == (
+        "int a = 2; /* pre-session edit */"
+    )
+
+
+def test_strip_committed_build_output_reports_a_failed_listing(tmp_path, monkeypatch):
+    """The return value feeds the commit guard: a failed listing must report
+    False rather than pass as "nothing to strip"."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "gen.o").write_text("output\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "agent commit")
+
+    real_run_git = rbf._run_git
+
+    def fake(repo, args, *a, **k):
+        if args[:2] == ["diff", "--name-only"] and "--diff-filter=A" in args:
+            return GitResult(128, "", "simulated diff failure")
+        return real_run_git(repo, args, *a, **k)
+
+    monkeypatch.setattr(rbf, "_run_git", fake)
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is False
+
+
+def test_agent_commit_guard_escalates_when_the_strip_fails(tmp_path, monkeypatch):
+    """A strip that fails leaves build output in candidate.patch, which is a
+    contract violation. With nothing else propagating, the guard escalates
+    like every other failed commit boundary instead of passing silently."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    monkeypatch.setattr(rbf, "_strip_committed_build_output", lambda *a, **k: False)
+
+    with (
+        pytest.raises(PipelineEscalation, match="could not be stripped"),
+        _agent_commit_guard(config, state, "Phase 3a"),
+    ):
+        pass
+
+
+def test_agent_commit_guard_defers_to_an_in_flight_exception(
+    tmp_path, monkeypatch, caplog
+):
+    """When the session itself is failing, the strip's failure is reported but
+    the real exception propagates — an escalation here would replace it."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    monkeypatch.setattr(rbf, "_strip_committed_build_output", lambda *a, **k: False)
+
+    with (
+        pytest.raises(RuntimeError, match="session crashed"),
+        _agent_commit_guard(config, state, "Phase 3a"),
+    ):
+        raise RuntimeError("session crashed")
+
+    assert "could not be stripped" in caplog.text
+
+
+def test_force_resolve_fails_closed_when_status_is_unreadable(tmp_path, monkeypatch):
+    """Reading an unreadable status as "no conflicts" would reset a tree that
+    may still hold them, so this boundary fails closed like the others."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _conflicted_repo(tmp_path)
+    head_before = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    monkeypatch.setattr(
+        rbf,
+        "git_status_porcelain_all",
+        lambda repo: GitResult(128, "", "fatal: simulated unreadable status"),
+    )
+
+    with pytest.raises(PipelineEscalation, match="could not read the worktree"):
+        _force_resolve_for_phase_4b(config, state)
+
+    assert _git_4b(tmp_path, "rev-parse", "HEAD") == head_before
+
+
+# ---------- Documented limitations: pinned, not silently changed ----------
+
+
+def test_root_build_dir_unlearned_output_reaches_the_commit(tmp_path):
+    """README limitation: with ``build_subdir`` at the repository root nothing
+    can be fenced, so output no verification has been seen to write is
+    indistinguishable from source and stays in the commit. Noisier patch, not
+    lost work — and an alternative would drop agent-authored files."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    assert config.build_dir == str(tmp_path)
+    (tmp_path / "unlearned.o").write_text("build output\n")
+
+    _stage_agent_work(config, state)
+
+    assert _staged(tmp_path).splitlines() == ["unlearned.o"]
+
+
+def test_tracked_build_dir_output_reaches_the_commit(tmp_path):
+    """README limitation: a ``build_subdir`` HEAD already tracks is never
+    fenced (that is how a source subdirectory is told apart from a build
+    tree), so unlearned output there is committed."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "Makefile").write_text("all:\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "track the build dir")
+    config.build_dir = str(tmp_path / "build")
+    (tmp_path / "build" / "artifact.o").write_text("build output\n")
+
+    result = _stage_agent_work(config, state)
+
+    assert result.fenced_build_dir is None
+    assert "build/artifact.o" in _staged(tmp_path).splitlines()
+
+
+def test_phase_0_5c_committed_output_is_kept_before_anything_is_learned(tmp_path):
+    """README limitation: Phase 0.5c's test port is a session that may build
+    before any verification has run, so nothing is learned and the strip has
+    no evidence. Its committed output reaches the patch rather than risking
+    the ported tests, which are work committed alongside it."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+
+    with _agent_commit_guard(config, state, "Phase 0.5c", base):
+        (tmp_path / "agent-built.o").write_text("build output\n")
+        (tmp_path / "ports").mkdir()
+        (tmp_path / "ports" / "test_fix.py").write_text("def test_x():\n    pass\n")
+        _git_4b(tmp_path, "add", "-A")
+        _git_4b(tmp_path, "commit", "-m", "agent ports tests and builds")
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "agent-built.o" in tree
+    assert "ports/test_fix.py" in tree
