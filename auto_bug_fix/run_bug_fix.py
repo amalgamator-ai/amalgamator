@@ -1366,7 +1366,6 @@ def _recognized_build_output(
     config: BugFixConfig,
     state: PipelineState,
     paths: set[str],
-    fence: str | None = None,
 ) -> set[str]:
     """Of *paths*, the ones holding content a build was seen to produce there.
 
@@ -1383,12 +1382,14 @@ def _recognized_build_output(
     the run can recover from; a dropped fix it cannot. Unrecognized content
     is named in the log so the noise is traceable.
 
-    Inside *fence* the name is the only evidence there is: digests are not
-    recorded for a fenced subtree (it is designated generated wholesale, and
-    hashing an entire build tree on every verification is pure cost), so a
-    path learned there is exempted by name. Everywhere else a missing digest
-    means the content cannot be proven to be build output, and the file is
-    kept as work rather than dropped on the strength of its name.
+    The rule is the same inside a fenced build directory: a fence says the
+    *tree* is generated wholesale and spares the pipeline from deciding
+    file-by-file for output it never recorded, but a path ``generated_output``
+    names is decided on content like any other. ``_discard_verification_dirt``
+    therefore records digests for fenced paths too, and a path with no digest
+    (hashing failed, or it was learned by a caller that supplied none) cannot
+    be proven to be build output — it is kept as work rather than dropped on
+    the strength of its name.
     """
     if not paths:
         return set()
@@ -1400,13 +1401,9 @@ def _recognized_build_output(
     for path in sorted(paths):
         digests = known[path]
         if not digests:
-            # Nothing was ever recorded for this path: hashing failed, or it
-            # was learned inside a fenced build directory, where the subtree
-            # exclusion decides and per-path content is never needed.
-            if fence is not None and _is_under(path, fence):
-                recognized.add(path)
-            else:
-                unproven.append(path)
+            # Nothing was ever recorded for this path — hashing failed, or a
+            # caller learned the name without content. A name is not proof.
+            unproven.append(path)
         elif current.get(path) in digests:
             recognized.add(path)
         else:
@@ -1498,11 +1495,53 @@ def _ignored_paths(config: BugFixConfig, paths: list[str]) -> set[str]:
     return ignored
 
 
+def _stash_worktree_ref(config: BugFixConfig) -> str | None:
+    """A commit holding the tracked worktree as it is right now, or None.
+
+    ``git stash create`` writes the WIP commit without touching the worktree
+    or the index. A later commit boundary can restore a path from it, which
+    is the only way to recover a *pre-session dirty* tracked file: checking
+    out ``base_ref`` would restore the base commit instead and silently drop
+    the uncommitted edit the session found.
+    """
+    result = _run_git(config.repo_path, ["stash", "create", "amalgamator-dirty"])
+    if not result.success:
+        # Best effort: a conflicted index cannot be stashed, and the fallback
+        # (restore from base_ref) is the old behaviour.
+        log.debug(
+            "Could not capture pre-session dirty content (exit %d): %s",
+            result.exit_code,
+            result.stderr.strip(),
+        )
+        return None
+    ref = result.stdout.strip()
+    return ref or None
+
+
+def _rename_pairs(stdout: str) -> list[tuple[str, str]]:
+    """(source, destination) pairs from ``git diff --name-status -z`` output.
+
+    Rename records are ``R100\\0old\\0new\\0``; other records are interleaved
+    in the same stream, so this walks the tokens in triples rather than
+    assuming the output holds renames only.
+    """
+    fields = stdout.split("\0")
+    pairs: list[tuple[str, str]] = []
+    i = 0
+    while i + 2 < len(fields):
+        status, old, new = fields[i], fields[i + 1], fields[i + 2]
+        if status.startswith("R") and old and new:
+            pairs.append((old, new))
+        i += 3
+    return pairs
+
+
 def _strip_committed_build_output(
     config: BugFixConfig,
     state: PipelineState | None,
     base_ref: str,
     phase_label: str,
+    dirty_ref: str | None = None,
 ) -> bool:
     """Take build output back out of commits an agent made for itself.
 
@@ -1520,20 +1559,34 @@ def _strip_committed_build_output(
 
     So the guard runs after the agent as well. Paths *added* between
     *base_ref* and HEAD that the pipeline can account for as build output —
-    content a verification was seen to write there, or a path git ignores —
-    are removed from the tree with ``git rm --cached`` and one follow-up
-    commit. The files stay on disk, because the agent and the verifications
-    after it run builds that expect them, and they go back to being
-    untracked, which re-arms the fence. They were added *inside* the range,
-    so the net ``base_ref..HEAD`` diff no longer mentions them at all and
-    the deliverable is clean.
+    content a verification was seen to write there, or a path git ignores
+    *and* the fence covers — are removed from the tree with ``git rm
+    --cached`` and one follow-up commit.
+    The files stay on disk, because the agent and the verifications after it
+    run builds that expect them, and they go back to being untracked, which
+    re-arms the fence. They were added *inside* the range, so the net
+    ``base_ref..HEAD`` diff no longer mentions them at all and the deliverable
+    is clean.
+
+    An ignored path is not evidence by itself: a downstream ``.patch`` fix or
+    a fixture added with ``git add -f`` is ignored too, and removing it would
+    delete the work. Outside the fence an ignored path is therefore kept and
+    named as a possible output; inside one the tree is designated generated
+    and the path is removed.
 
     A build can also overwrite a *tracked* file (a generated header, a
     stamped version file). That commit is a modification, not an addition,
-    and is restored to its ``base_ref`` content — but only when it still
-    holds content this run saw a build write there, because the path alone
-    would also match the agent's own edit to a file the build happens to
-    regenerate.
+    and is restored — to *dirty_ref* when the guard captured the pre-session
+    worktree (the file may have been dirty when the session started), else
+    to ``base_ref`` — but only when it still holds content this run saw a
+    build write there, because the path alone would also match the agent's
+    own edit to a file the build happens to regenerate.
+
+    The same build can delete or rename a tracked generated file, which the
+    addition and modification passes never see. A deletion of a learned path
+    is restored from the pre-session ref, and a rename whose source is a
+    learned path is undone: the source is restored and the destination is
+    untracked again.
 
     Accounting is the same everywhere in this module, and deliberately
     conservative: output nothing recorded as build output stays committed.
@@ -1575,30 +1628,83 @@ def _strip_committed_build_output(
             )
             return False
         modified_paths = [x for x in modified.stdout.split("\0") if x]
+        deleted = _run_git(
+            config.repo_path,
+            ["diff", "--name-only", "--diff-filter=D", "-z", base_ref, head],
+        )
+        if not deleted.success:
+            log.warning(
+                "%s: could not list files deleted since %s (exit %d): %s — "
+                "a deleted generated file stays deleted in the patch",
+                phase_label,
+                base_ref[:12],
+                deleted.exit_code,
+                deleted.stderr.strip(),
+            )
+            return False
+        deleted_paths = [x for x in deleted.stdout.split("\0") if x]
+        renamed = _run_git(
+            config.repo_path,
+            [
+                "diff",
+                "--name-status",
+                "--diff-filter=R",
+                "--find-renames",
+                "-z",
+                base_ref,
+                head,
+            ],
+        )
+        if not renamed.success:
+            log.warning(
+                "%s: could not list renames since %s (exit %d): %s — a "
+                "renamed generated file stays renamed in the patch",
+                phase_label,
+                base_ref[:12],
+                renamed.exit_code,
+                renamed.stderr.strip(),
+            )
+            return False
+        rename_pairs = _rename_pairs(renamed.stdout)
         learned = state.generated_output if state is not None else set()
         digests = state.generated_digests if state is not None else {}
         # The fence of the *pre-session* tree: an agent that committed its
         # own build output made it tracked at HEAD, which is exactly what
         # would switch the HEAD-based fence off here.
         fence = _fence_build_dir(config, base_ref)
+        restore_ref = dirty_ref or base_ref
 
         candidates = sorted(set(paths) & learned)
         committed = _blobs_in_ref(config, head, candidates) if candidates else {}
         if committed is None:
             return False
         # A learned path with recorded content must still hold content a
-        # build was seen to write. One learned inside a fenced build
-        # directory has none recorded, and the path rule stands there — the
-        # subtree is designated generated wholesale. Outside a fence a name
-        # is not proof, so an unproven path stays committed rather than being
-        # removed from the patch on the strength of its name.
+        # build was seen to write, inside or outside the fence: a name is not
+        # proof, and a verification that once created ``build/generated.c``
+        # must not cost the agent the source it later authored there.
         removed = {
             path
             for path in candidates
-            if committed.get(path) in digests.get(path, set())
-            or (not digests.get(path) and fence is not None and _is_under(path, fence))
+            if digests.get(path) and committed.get(path) in digests[path]
         }
-        removed |= _ignored_paths(config, paths)
+        # An ignored path is only removed where the fence designates the
+        # whole tree generated. Elsewhere the ignore rules cannot tell a
+        # force-added source or fixture from an artifact.
+        ignored = _ignored_paths(config, paths)
+        ignored_accounted = {
+            path for path in ignored if fence is not None and _is_under(path, fence)
+        }
+        removed |= ignored_accounted
+        ignored_kept = ignored - ignored_accounted - removed
+        if ignored_kept:
+            log.warning(
+                "%s: %d ignored path(s) were committed but are outside the "
+                "fenced build directory and have no content evidence — keeping "
+                "them as possible work (e.g. %s)",
+                phase_label,
+                len(ignored_kept),
+                ", ".join(sorted(ignored_kept)[:5]),
+            )
 
         # A build that rewrites a *tracked* file (a generated header, a
         # stamped version file) leaves a modification, not an addition, so
@@ -1620,19 +1726,30 @@ def _strip_committed_build_output(
             if digests.get(path) and modified_committed.get(path) in digests[path]
         }
 
-        if not removed and not restored:
+        # A deletion or rename of a tracked generated file is the same build
+        # side effect as a rewrite. The file is gone from HEAD, so content
+        # cannot be compared; membership in ``generated_output`` (a build was
+        # seen to write there) is the evidence available, the same one the
+        # discard uses to restore deletions.
+        deleted_build = set(deleted_paths) & learned
+        renamed_out = {old for old, _new in rename_pairs if old in learned}
+        renamed_new = {new for old, new in rename_pairs if old in learned}
+        restore_paths = restored | deleted_build | renamed_out
+        untrack_paths = removed | renamed_new
+
+        if not restore_paths and not untrack_paths:
             return True
-        if removed:
+        if untrack_paths:
             log.warning(
                 "%s: %d path(s) of build output were committed by the agent — "
                 "removing them from the tree so they stay out of the candidate "
                 "patch (e.g. %s)",
                 phase_label,
-                len(removed),
-                ", ".join(sorted(removed)[:5]),
+                len(untrack_paths),
+                ", ".join(sorted(untrack_paths)[:5]),
             )
             if not _run_git_pathspec_batches(
-                config, ["rm", "--cached", "-q", "--"], sorted(removed)
+                config, ["rm", "--cached", "-q", "--"], sorted(untrack_paths)
             ):
                 log.warning(
                     "%s: could not untrack agent-committed build output — the "
@@ -1640,31 +1757,32 @@ def _strip_committed_build_output(
                     phase_label,
                 )
                 return False
-        if restored:
+        if restore_paths:
             log.warning(
                 "%s: %d tracked file(s) hold build output the agent committed — "
                 "restoring their pre-session content (e.g. %s)",
                 phase_label,
-                len(restored),
-                ", ".join(sorted(restored)[:5]),
+                len(restore_paths),
+                ", ".join(sorted(restore_paths)[:5]),
             )
             if not _run_git_pathspec_batches(
-                config, ["checkout", base_ref, "--"], sorted(restored)
+                config, ["checkout", restore_ref, "--"], sorted(restore_paths)
             ):
                 log.warning(
-                    "%s: could not restore tracked files overwritten by build "
-                    "output — the build's version stays in the patch",
+                    "%s: could not restore tracked files overwritten or deleted "
+                    "by build output — the build's version stays in the patch",
                     phase_label,
                 )
                 return False
         summary = []
-        if removed:
+        if untrack_paths:
             summary.append(
-                f"{len(removed)} generated path(s) kept on disk, out of the tree"
+                f"{len(untrack_paths)} generated path(s) kept on disk, out of the tree"
             )
-        if restored:
+        if restore_paths:
             summary.append(
-                f"{len(restored)} tracked file(s) restored to their pre-session content"
+                f"{len(restore_paths)} tracked file(s) restored to their "
+                "pre-session content"
             )
         git_commit(
             config.repo_path,
@@ -1679,7 +1797,7 @@ def _strip_committed_build_output(
             )
             return False
         if state is not None:
-            state.generated_output |= removed | restored
+            state.generated_output |= untrack_paths | restore_paths
             # Keep the content key too, so the paths that just went back to
             # being untracked are still judged on content at the next
             # boundary rather than on their name alone.
@@ -1713,16 +1831,47 @@ def _agent_commit_guard(
     for something else too; otherwise it is read here. An unreadable HEAD
     means nothing can be said about what the session committed, which the
     guard reports rather than passing silently.
+
+    The tracked worktree is captured before the session (``_stash_worktree_ref``)
+    so a pre-session dirty file the agent commits can be restored to the
+    content the session found, not to the base commit.
+
+    A strip that fails leaves build output in the candidate patch, which is
+    a contract violation, not a warning: when nothing is already propagating
+    the guard escalates, like every other failed commit boundary. When an
+    exception is in flight it is left to that exception — raising here would
+    replace the real failure.
     """
     base = base_ref
     if base is None:
         head = _run_git(config.repo_path, ["rev-parse", "HEAD"])
         base = head.stdout.strip() if head.success else ""
+    dirty_ref = _stash_worktree_ref(config)
+    in_flight = False
     try:
         yield
+    except BaseException:
+        in_flight = True
+        raise
     finally:
         if base:
-            _strip_committed_build_output(config, state, base, phase_label)
+            stripped = _strip_committed_build_output(
+                config, state, base, phase_label, dirty_ref=dirty_ref
+            )
+            if not stripped:
+                if in_flight:
+                    log.warning(
+                        "%s: build output an agent committed could not be "
+                        "stripped, but an exception is already propagating — "
+                        "leaving the abort path to report it",
+                        phase_label,
+                    )
+                else:
+                    raise PipelineEscalation(
+                        f"{phase_label}: build output an agent committed "
+                        "could not be stripped from the tree — it may reach "
+                        "candidate.patch"
+                    )
         else:
             log.warning(
                 "%s: could not read HEAD before the session — a commit it "
@@ -1735,7 +1884,7 @@ def _restage_unaccounted_fenced(
     config: BugFixConfig,
     fence: str,
     dirty: tuple[set[str], set[str]] | None,
-    learned: set[str],
+    state: PipelineState | None,
 ) -> tuple[frozenset[str], bool]:
     """Put back the fenced paths the pipeline cannot call build output.
 
@@ -1747,13 +1896,20 @@ def _restage_unaccounted_fenced(
     exists to prevent.
 
     The fence therefore withholds only what the pipeline can account for:
-    paths a verification was seen to create (``state.generated_output``),
-    and paths git ignores. Ignored files never reach here at all — ``git
-    status`` does not report them — so a gitignored build tree keeps the
-    full subtree exclusion, which is what real build directories look like.
-    Everything else under the fence is staged again and named in the log,
-    the same trade the fence itself documents: committing build output is
-    recoverable, silently dropping a fix is not.
+    paths a verification was seen to create (``state.generated_output``)
+    *and* whose current content is still one of the contents that build was
+    seen to write (``_recognized_build_output``), plus paths git ignores.
+    Ignored files never reach here at all — ``git status`` does not report
+    them — so a gitignored build tree keeps the full subtree exclusion,
+    which is what real build directories look like. Everything else under
+    the fence is staged again and named in the log, the same trade the fence
+    itself documents: committing build output is recoverable, silently
+    dropping a fix is not.
+
+    Content matters inside the fence for the same reason it matters outside:
+    a verification that once created ``build/generated.c`` teaches the
+    pipeline the name, and an agent that later authors real source there
+    must not lose it to the name collision.
 
     Returns the re-staged paths and whether every step succeeded.
     """
@@ -1768,9 +1924,14 @@ def _restage_unaccounted_fenced(
         return frozenset(), False
     # Both sets: a file the agent authored *and staged* under the fence is
     # reported as a staged addition, not as untracked.
-    unaccounted = {
-        path for path in dirty[0] | dirty[1] if _is_under(path, fence)
-    } - learned
+    under_fence = {path for path in dirty[0] | dirty[1] if _is_under(path, fence)}
+    learned = state.generated_output if state is not None else set()
+    recognized = (
+        _recognized_build_output(config, state, under_fence & learned)
+        if state is not None
+        else set()
+    )
+    unaccounted = under_fence - recognized
     if not unaccounted:
         return frozenset(), True
     log.warning(
@@ -1862,7 +2023,7 @@ def _stage_agent_work(
                 "build output may reach this commit",
                 fence,
             )
-        restaged, fence_ok = _restage_unaccounted_fenced(config, fence, dirty, learned)
+        restaged, fence_ok = _restage_unaccounted_fenced(config, fence, dirty, state)
         ok = ok and fence_ok
     generated: set[str] = set()
     if state is not None and state.generated_output:
@@ -1888,7 +2049,7 @@ def _stage_agent_work(
                 # Cannot prove which candidates are source: fall back to the
                 # untracked-only rule rather than risk dropping an edit.
                 generated = _recognized_build_output(
-                    config, state, dirty[1] & state.generated_output, fence
+                    config, state, dirty[1] & state.generated_output
                 )
                 ok = False
                 log.warning(
@@ -1897,7 +2058,7 @@ def _stage_agent_work(
                 )
             else:
                 generated = _recognized_build_output(
-                    config, state, candidates - in_head, fence
+                    config, state, candidates - in_head
                 )
             if generated and not _run_git_pathspec_batches(
                 config, ["reset", "-q", "HEAD", "--"], list(generated)
@@ -4252,20 +4413,14 @@ def _discard_verification_dirt(
         if state is not None and new_untracked:
             state.generated_output |= new_untracked
             # Hash now, while the files are still on disk — the clean below
-            # removes them. Paths inside a fenced build directory are skipped:
-            # that subtree is excluded wholesale, so no commit boundary ever
-            # needs to decide about them one by one, and a build tree can hold
-            # tens of thousands of files.
-            fenced = _fence_build_dir(config)
-            _record_generated_digests(
-                config,
-                state,
-                {
-                    path
-                    for path in new_untracked
-                    if not (fenced is not None and _is_under(path, fenced))
-                },
-            )
+            # may remove them. Paths inside a fenced build directory are
+            # hashed too: the fence spares the pipeline from deciding about
+            # the whole subtree, but a *learned* path inside it is decided
+            # per path at a commit boundary, where a name is not an identity
+            # (``_recognized_build_output``). This is bounded by what one
+            # verification created, not by the size of a pre-existing tree,
+            # since later verifications see those files in their baseline.
+            _record_generated_digests(config, state, new_untracked)
         # The comparison only ever subtracts forward, so a file that was
         # untracked before the verification and is gone after it was removed
         # by the verification command itself (``make clean`` is the common
@@ -5089,8 +5244,15 @@ def _force_resolve_for_phase_4b(config: BugFixConfig, state: PipelineState) -> N
     stands and carries what it could, but the run must not continue as
     though the boundary had been complete.
     """
-    status = git_status_porcelain(config.repo_path)
-    remaining_conflicts = _conflicted_files(status)
+    status = git_status_porcelain_all(config.repo_path)
+    if not status.success:
+        # Fail closed: an unreadable status taken as "no conflicts" would
+        # reset a tree that may still hold them.
+        raise PipelineEscalation(
+            "Phase 2+3a force-resolve: could not read the worktree "
+            f"(exit {status.exit_code}): {status.stderr.strip()}"
+        )
+    remaining_conflicts = _conflicted_files(status.stdout.splitlines())
     if remaining_conflicts:
         log.info(
             "Force-resolving %d remaining conflicts with --theirs before Phase 4b",
@@ -5137,8 +5299,14 @@ def _force_resolve_for_phase_4b(config: BugFixConfig, state: PipelineState) -> N
             config.repo_path, config.frozen_target_sha or config.target_branch
         )
         git_cherry_pick(config.repo_path, config.source_fix_commit)
-        status = git_status_porcelain(config.repo_path)
-        force_conflicts = _conflicted_files(status)
+        status = git_status_porcelain_all(config.repo_path)
+        if not status.success:
+            raise PipelineEscalation(
+                "Phase 2+3a force-resolve: could not read the worktree after "
+                f"re-applying the cherry-pick (exit {status.exit_code}): "
+                f"{status.stderr.strip()}"
+            )
+        force_conflicts = _conflicted_files(status.stdout.splitlines())
         if force_conflicts:
             log.info(
                 "Re-applied cherry-pick, force-resolving %d conflicts with --theirs",
