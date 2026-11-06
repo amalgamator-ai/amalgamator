@@ -391,6 +391,26 @@ class TestRunPipelineFailureWiring:
         )
         assert (out / "candidate.patch").exists()
 
+    def test_unexpected_error_lands_uncommitted_agent_work(
+        self, target_worktree, tmp_path, monkeypatch, claude_cfg
+    ):
+        """An error after an agent session wrote its fix leaves the edits
+        uncommitted, and the export reads commits only. The fix would be
+        destroyed with the worktree unless the handler lands it first."""
+
+        def prepare(wt):
+            path = os.path.join(wt, "lib", "rescued_fix.c")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("int rescued_fix(void) { return 1; }\n")
+
+        out = self._abort(
+            target_worktree, tmp_path, monkeypatch, claude_cfg, RuntimeError, prepare
+        )
+        patch = out / "candidate.patch"
+        assert patch.exists()
+        assert "rescued_fix" in patch.read_text()
+
 
 class TestRestoreTargetBaselineSafety:
     """The restore repoints a *shared* ref, so every guard must fail closed."""

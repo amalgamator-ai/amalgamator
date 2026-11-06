@@ -312,6 +312,36 @@ def test_phase_4a_commits_agent_recovery_edits(tmp_path, monkeypatch):
     assert _git(repo, "status", "--porcelain").stdout.strip() == ""
 
 
+def test_phase_4a_accepts_a_recovery_authored_as_a_new_file(tmp_path, monkeypatch):
+    """A fix added as a new, untracked file is still a change. ``git diff``
+    does not report untracked paths, so the no-op check must not read it as
+    CANNOT_FIX and abort before the file is committed."""
+    repo = _init_repo(tmp_path)
+    before = _sha(repo)
+
+    def repair(config, _call_number):
+        (Path(config.cwd) / "new_helper.c").write_text("fixed\n")
+
+    calls = _patch_claude_run(monkeypatch, repair)
+
+    phase_4a_build_recovery(
+        _config(
+            repo,
+            build_command="grep -q '^fixed$' new_helper.c",
+            test_command="true",
+            max_build_test_retries=2,
+        ),
+        _claude_config(repo),
+        PipelineState(),
+        tracker=None,
+        fix_diff="",
+    )
+
+    assert len(calls) == 1
+    assert _sha(repo) != before
+    assert _git(repo, "show", "HEAD:new_helper.c").stdout == "fixed\n"
+
+
 def test_phase_4a_escalates_after_exhausting_retries(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
 

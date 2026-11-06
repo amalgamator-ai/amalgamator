@@ -40,6 +40,7 @@ from auto_bug_fix.run_bug_fix import (
     _restore_target_baseline,
     _stage_agent_work,
     _stage_or_escalate,
+    _strip_or_escalate,
     _worktree_snapshot,
 )
 from tests.auto_bug_fix.test_run_bug_fix import _git_4b, _phase_4b_fixtures
@@ -505,6 +506,10 @@ def test_porcelain_line_paths_splits_renames_and_copies():
     # A file may legally be *named* "a -> b"; only R/C lines carry two paths.
     assert _porcelain_line_paths("?? a -> b") == ("a -> b", None)
     assert _porcelain_line_paths('R  "\\303\\251.c" -> "b.c"') == ("b.c", "é.c")
+    # A quoted path may itself contain " -> "; the separator is the one
+    # after the closing quote, not the first occurrence in the line.
+    assert _porcelain_line_paths('R  "a -> b.c" -> c.c') == ("c.c", "a -> b.c")
+    assert _porcelain_line_paths('R  a.c -> "b -> c.c"') == ("b -> c.c", "a.c")
 
 
 def test_discard_keeps_a_preexisting_untracked_file_the_verification_staged(
@@ -524,6 +529,16 @@ def test_discard_keeps_a_preexisting_untracked_file_the_verification_staged(
 
     assert (tmp_path / "evidence.txt").read_text() == "local notes\n"
     assert _git_4b(tmp_path, "status", "--porcelain") == "?? evidence.txt"
+    # Staging is not writing: its content predates the verification, so it
+    # must not be learned as build output. If it were, the digest recorded
+    # here would make every later commit boundary drop the file — and the
+    # file could be the fix the session authored.
+    assert "evidence.txt" not in state.generated_output
+    assert "evidence.txt" not in state.generated_digests
+
+    staged = _stage_agent_work(config, state)
+    assert staged.generated == set()
+    assert "evidence.txt" in _staged(tmp_path)
 
 
 def test_discard_reports_a_preexisting_untracked_file_the_verification_deleted(
@@ -1987,6 +2002,25 @@ def test_agent_commit_guard_defers_to_an_in_flight_exception(
         raise RuntimeError("session crashed")
 
     assert "could not be stripped" in caplog.text
+
+
+def test_strip_or_escalate_refuses_to_continue_with_a_failed_strip(
+    tmp_path, monkeypatch
+):
+    """Every commit these call sites strip feeds candidate.patch, so a strip
+    that failed must abort the phase rather than report it as resolved."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    monkeypatch.setattr(rbf, "_strip_committed_build_output", lambda *a, **k: False)
+
+    with pytest.raises(PipelineEscalation, match="could not be stripped"):
+        _strip_or_escalate(config, state, "HEAD", "Phase 3a (fix)")
+
+
+def test_strip_or_escalate_passes_a_clean_strip(tmp_path, monkeypatch):
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    monkeypatch.setattr(rbf, "_strip_committed_build_output", lambda *a, **k: True)
+
+    _strip_or_escalate(config, state, "HEAD", "Phase 3a (fix)")
 
 
 def test_force_resolve_fails_closed_when_status_is_unreadable(tmp_path, monkeypatch):
