@@ -1880,6 +1880,27 @@ def _agent_commit_guard(
             )
 
 
+def _strip_or_escalate(
+    config: BugFixConfig,
+    state: PipelineState | None,
+    base_ref: str,
+    phase_label: str,
+) -> None:
+    """Strip committed build output, escalating when it cannot be done.
+
+    Every call site here commits work that feeds ``candidate.patch`` and the
+    preserved branch, so a strip that failed leaves build output in the
+    deliverable — the exact failure these guards exist to prevent. Only
+    ``_agent_commit_guard`` may downgrade that to a warning, because it
+    already owns an abort path.
+    """
+    if not _strip_committed_build_output(config, state, base_ref, phase_label):
+        raise PipelineEscalation(
+            f"{phase_label}: build output an agent committed could not be "
+            "stripped from the tree — it may reach candidate.patch"
+        )
+
+
 def _restage_unaccounted_fenced(
     config: BugFixConfig,
     fence: str,
@@ -2367,7 +2388,11 @@ def phase_4a_build_recovery(
             config.repo_path, config.frozen_target_sha or config.target_branch
         )
 
-        pre_fix_files = set(git_diff_name_only(config.repo_path))
+        # The whole worktree, untracked files included: a fix authored as new
+        # files is a common recovery for an API mismatch, and ``git diff``
+        # does not report an untracked path — comparing only its output would
+        # read that fix as "no changes" and abort before it is committed.
+        pre_fix_dirt = _dirty_paths(config)
 
         prompt = BuildErrorRecoveryPrompt(
             context=context,
@@ -2403,9 +2428,11 @@ def phase_4a_build_recovery(
                 claude_run(claude_config_4a, [prompt.prompt()], tracker=tracker)
             )
 
-        post_fix_files = set(git_diff_name_only(config.repo_path))
+        post_fix_dirt = _dirty_paths(config)
         if (
-            post_fix_files == pre_fix_files
+            pre_fix_dirt is not None
+            and post_fix_dirt is not None
+            and post_fix_dirt == pre_fix_dirt
             and git_rev_parse(config.repo_path, "HEAD") == head_before_agent
         ):
             # Both readings are needed: an agent that committed for itself
@@ -2922,9 +2949,7 @@ def cherry_pick_and_resolve(
         # normally carries build output — it is the cherry-pick's own index —
         # but an agent session that staged the tree earlier can have put it
         # there, and this commit feeds candidate.patch like any other.
-        _strip_committed_build_output(
-            config, state, entry_head, f"Phase 2+3a ({label})"
-        )
+        _strip_or_escalate(config, state, entry_head, f"Phase 2+3a ({label})")
         return "resolved"
 
     original_uu_files = list(uu_files)
@@ -3148,7 +3173,7 @@ def _finalize_resolution(
     # The resolution agent commits for itself, so the staging guard never ran
     # over what it committed. Take build output back out before anything
     # downstream reads the range as "the fix".
-    _strip_committed_build_output(config, state, base_head, f"Phase 3a ({label})")
+    _strip_or_escalate(config, state, base_head, f"Phase 3a ({label})")
 
     changed_files = git_diff_name_only_range(repo, base_head, "HEAD")
 
@@ -3514,7 +3539,7 @@ def _finalize_resolution(
 
     # The Phase 3a.1 and 3a.2 agents commit for themselves too, after the
     # strip above — run the guard once more over everything they added.
-    _strip_committed_build_output(config, state, base_head, f"Phase 3a ({label})")
+    _strip_or_escalate(config, state, base_head, f"Phase 3a ({label})")
 
     return "resolved"
 
@@ -4117,6 +4142,41 @@ def _porcelain_path(field: str) -> str:
     return field
 
 
+def _split_rename_field(field: str) -> tuple[str, str] | None:
+    """Split a porcelain ``old -> new`` field, quoting included.
+
+    git C-quotes a path that contains whitespace, so either side of the
+    separator may be quoted. A quoted path is quoted *as a whole*, which
+    means it can contain the literal `` -> `` text that would otherwise be
+    taken for the separator (``"a -> b.c" -> c.c``). Starting the split at
+    the first occurrence would cut inside the quotes and name a path that
+    does not exist; when the field opens with a quote, walk past its closing
+    quote first. Unquoted paths cannot contain whitespace, so the first
+    separator is the real one there.
+
+    Returns None for a field not shaped like a rename/copy record.
+    """
+    if field.startswith('"'):
+        i = 1
+        while i < len(field):
+            if field[i] == "\\":
+                i += 2
+                continue
+            if field[i] == '"':
+                break
+            i += 1
+        else:
+            return None
+        rest = field[i + 1 :]
+        if not rest.startswith(" -> "):
+            return None
+        return field[: i + 1], rest[len(" -> ") :]
+    old, sep, new = field.partition(" -> ")
+    if not sep:
+        return None
+    return old, new
+
+
 def _porcelain_line_paths(line: str) -> tuple[str, str | None]:
     """(on-disk path, rename source or None) from one porcelain line.
 
@@ -4135,9 +4195,11 @@ def _porcelain_line_paths(line: str) -> tuple[str, str | None]:
         # status codes gate the split: an untracked file may legally be
         # *named* ``a -> b``, and splitting that line would name the wrong
         # path.
-        old_field, field = field.split(" -> ", 1)
-        if "R" in codes:
-            rename_source = _porcelain_path(old_field)
+        split = _split_rename_field(field)
+        if split is not None:
+            old_field, field = split
+            if "R" in codes:
+                rename_source = _porcelain_path(old_field)
     return _porcelain_path(field), rename_source
 
 
@@ -4456,13 +4518,22 @@ def _discard_verification_dirt(
                 f" (+{len(vanished) - len(shown)} more)" if len(vanished) > 5 else "",
             )
         to_restore = sorted(current.modified - baseline.modified)
-        if state is not None and to_restore:
+        # A verification that only *staged* a pre-existing untracked file
+        # (``git add``, ``git add -A``) moves it into ``modified`` without
+        # writing it. Its content predates the verification, so it is not
+        # build output — learning it here would make ``_stage_agent_work``
+        # drop that file from every later commit, which is the agent's source
+        # if the session authored it. It still goes through
+        # ``_restore_tracked_files``, which unstages it and leaves it in
+        # place.
+        rewritten = [p for p in to_restore if p not in baseline.untracked]
+        if state is not None and rewritten:
             # A build that rewrites a *tracked* file leaves a modification,
             # not a new path. Record what it wrote while the content is still
             # on disk, so a later commit carrying the build's version can be
             # told apart from the agent's own edit (which will not match).
-            state.generated_output |= set(to_restore)
-            _record_generated_digests(config, state, set(to_restore))
+            state.generated_output |= set(rewritten)
+            _record_generated_digests(config, state, set(rewritten))
         if to_restore and not _restore_tracked_files(
             config, to_restore, baseline.untracked
         ):
@@ -4848,7 +4919,10 @@ def _emit_candidate_patch_on_failure(
     their pre-verification boundaries (see ``_commit_worktree_edits``), so
     whatever is still uncommitted at abort time is verification-command
     side effects (e.g. an unpacked source tree), which must not be swept
-    into the deliverable.
+    into the deliverable. The unexpected-error handler is the exception: an
+    agent session that raised mid-flight has no boundary behind it, so that
+    handler lands the pending work with ``_commit_worktree_edits`` before
+    calling this.
 
     ``allow_test_only=False`` suppresses the export when every changed file
     is a test file: a ``PipelineStop`` after Phase 0.5c's test port must not
@@ -5222,6 +5296,14 @@ def run_pipeline(
     except Exception:
         tracker.set_outcome("error")
         _write_dossier_on_failure(state, tracker)
+        # An unexpected error can leave an agent session's edits in the
+        # worktree with no commit boundary behind them (an SDK/transport
+        # error after the agent wrote its fix is the common case), and the
+        # export below reads commits only. Land that work first — best
+        # effort and non-raising, and ``_stage_agent_work`` keeps build
+        # output out where it can be accounted for. Without this the fix is
+        # destroyed with the worktree.
+        _commit_worktree_edits(config, "failure-path export", state)
         _emit_candidate_patch_on_failure(config, tracker)
         raise
     finally:
