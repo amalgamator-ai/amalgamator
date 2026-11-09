@@ -1798,6 +1798,14 @@ def _learn_rewritten_tracked_file(config, state, content="/* build stamped this 
     return state
 
 
+def _commit_build_content_at_base(config, state, content="/* build stamped this */\n"):
+    """Learn the build's content, then commit it as the session's starting tree."""
+    _learn_rewritten_tracked_file(config, state, content)
+    pathlib.Path(config.repo_path, "src.c").write_text(content)
+    _git_4b(config.repo_path, "add", "-A")
+    _git_4b(config.repo_path, "commit", "-m", "base with committed build output")
+
+
 def test_agent_commit_overwriting_a_tracked_file_is_reverted(tmp_path):
     """A build that rewrites a tracked file leaves a modification, not an
     addition, so the addition pass never saw it and the build's version went
@@ -1834,29 +1842,76 @@ def test_agent_edit_to_a_learned_tracked_file_is_kept(tmp_path):
     assert _git_4b(tmp_path, "show", "HEAD:src.c") == "int a = 7; /* the fix */"
 
 
-def test_agent_committed_deletion_of_a_generated_tracked_file_is_undone(tmp_path):
-    """A build that deletes a tracked generated file leaves a deletion, which
-    the addition and modification passes never see. The file is gone from
-    HEAD, so content cannot be compared; membership in ``generated_output``
-    is the evidence available, and the file is restored."""
+def test_agent_deletion_of_a_learned_path_whose_content_is_source_is_kept(tmp_path):
+    """Membership in ``generated_output`` is not evidence for a deletion: the
+    build's content was discarded, so the file at session start is source, and
+    the agent's deletion of it must survive the strip."""
     config, _, state = _phase_4b_fixtures(tmp_path)
     _learn_rewritten_tracked_file(config, state)
+    assert state.generated_digests.get("src.c"), "the build's content was recorded"
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    _git_4b(tmp_path, "rm", "src.c")
+    _git_4b(tmp_path, "commit", "-m", "agent commit removing source at a learned path")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "src.c" not in tree
+
+
+def test_agent_deletion_of_a_learned_path_with_no_recorded_content_is_kept(tmp_path):
+    """A path learned by name only cannot be proven to be build output, so it
+    follows the same rule as ``_recognized_build_output``: it is work."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    state.generated_output.add("src.c")
+    assert not state.generated_digests.get("src.c")
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    _git_4b(tmp_path, "rm", "src.c")
+    _git_4b(tmp_path, "commit", "-m", "agent commit removing a learned path")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "src.c" not in tree
+
+
+def test_agent_deletion_of_a_committed_generated_file_is_restored(tmp_path):
+    """When the pre-session blob really is build output, the deletion is a
+    build side effect and the file comes back."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _commit_build_content_at_base(config, state)
     base = _git_4b(tmp_path, "rev-parse", "HEAD")
     _git_4b(tmp_path, "rm", "src.c")
     _git_4b(tmp_path, "commit", "-m", "agent commit removing a generated file")
 
     assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
 
-    assert _git_4b(tmp_path, "show", "HEAD:src.c") == "int a = 1;"
+    assert _git_4b(tmp_path, "show", "HEAD:src.c") == "/* build stamped this */"
     assert "src.c" in _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD")
 
 
-def test_agent_committed_rename_of_a_generated_tracked_file_is_undone(tmp_path):
-    """The same side effect with the file moved instead of removed: the source
-    is restored and the destination goes back to being untracked, so the
-    rename does not reach candidate.patch."""
+def test_agent_rename_of_a_learned_path_whose_content_is_source_is_kept(tmp_path):
+    """Renaming source at a once-generated path is work: the source stays gone
+    and the destination stays tracked."""
     config, _, state = _phase_4b_fixtures(tmp_path)
     _learn_rewritten_tracked_file(config, state)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    _git_4b(tmp_path, "mv", "src.c", "src_moved.c")
+    _git_4b(tmp_path, "commit", "-m", "agent commit renaming source at a learned path")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "src.c" not in tree
+    assert "src_moved.c" in tree
+    assert _git_4b(tmp_path, "show", "HEAD:src_moved.c") == "int a = 1;"
+
+
+def test_agent_rename_of_a_committed_generated_file_is_undone(tmp_path):
+    """A pure rename of build output is a build side effect: the source is
+    restored and the destination goes back to being untracked."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _commit_build_content_at_base(config, state)
     base = _git_4b(tmp_path, "rev-parse", "HEAD")
     _git_4b(tmp_path, "mv", "src.c", "src_moved.c")
     _git_4b(tmp_path, "commit", "-m", "agent commit renaming a generated file")
@@ -1866,8 +1921,49 @@ def test_agent_committed_rename_of_a_generated_tracked_file_is_undone(tmp_path):
     tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
     assert "src.c" in tree
     assert "src_moved.c" not in tree
-    assert _git_4b(tmp_path, "show", "HEAD:src.c") == "int a = 1;"
+    assert _git_4b(tmp_path, "show", "HEAD:src.c") == "/* build stamped this */"
     assert (tmp_path / "src_moved.c").exists(), "kept on disk, no longer tracked"
+
+
+def test_agent_rename_of_a_generated_file_with_edits_is_kept(tmp_path):
+    """A rename with enough edits that git reports it as delete+add still
+    keeps the work: the destination is added and the fix reaches the patch."""
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _commit_build_content_at_base(config, state)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    _git_4b(tmp_path, "mv", "src.c", "src_moved.c")
+    pathlib.Path(tmp_path, "src_moved.c").write_text("int ported_fix = 1;\n")
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "agent commit renaming and editing")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "src_moved.c" in tree
+    assert _git_4b(tmp_path, "show", "HEAD:src_moved.c") == "int ported_fix = 1;"
+    assert "int ported_fix = 1;" in _git_4b(tmp_path, "diff", base, "HEAD")
+
+
+def test_agent_rename_of_a_generated_file_with_a_small_edit_is_kept(tmp_path):
+    """When the rename is detected but the destination was edited, the
+    destination bytes no longer match the build's digest and the rename stays."""
+    content = "".join(f"/* line {i} */\n" for i in range(40))
+    config, _, state = _phase_4b_fixtures(tmp_path)
+    _commit_build_content_at_base(config, state, content)
+    base = _git_4b(tmp_path, "rev-parse", "HEAD")
+    _git_4b(tmp_path, "mv", "src.c", "src_moved.c")
+    edited = content.replace("/* line 0 */", "/* line zero: the fix */")
+    pathlib.Path(tmp_path, "src_moved.c").write_text(edited)
+    _git_4b(tmp_path, "add", "-A")
+    _git_4b(tmp_path, "commit", "-m", "agent commit renaming and editing")
+    assert _git_4b(tmp_path, "diff", "--name-status", base, "HEAD").startswith("R")
+
+    assert rbf._strip_committed_build_output(config, state, base, "Phase 3a") is True
+
+    tree = _git_4b(tmp_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert "src.c" not in tree
+    assert "src_moved.c" in tree
+    assert _git_4b(tmp_path, "show", "HEAD:src_moved.c") == edited.rstrip("\n")
 
 
 def test_agent_committed_source_at_a_learned_path_inside_the_fence_is_kept(tmp_path):

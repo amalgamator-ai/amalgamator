@@ -1583,10 +1583,13 @@ def _strip_committed_build_output(
     own edit to a file the build happens to regenerate.
 
     The same build can delete or rename a tracked generated file, which the
-    addition and modification passes never see. A deletion of a learned path
-    is restored from the pre-session ref, and a rename whose source is a
-    learned path is undone: the source is restored and the destination is
-    untracked again.
+    addition and modification passes never see. Both are judged on content
+    like every other pass: a deletion is restored only when the blob the agent
+    removed was one this run watched a build write, and a rename is undone only
+    when the source held that content and the destination still holds the same
+    bytes. An agent that deleted a source file at a once-generated path, or
+    renamed one and carried edits into the destination, keeps that work — a
+    name is not an identity, and a deleted fix is not recoverable.
 
     Accounting is the same everywhere in this module, and deliberately
     conservative: output nothing recorded as build output stays committed.
@@ -1666,6 +1669,13 @@ def _strip_committed_build_output(
             )
             return False
         rename_pairs = _rename_pairs(renamed.stdout)
+        # Rename handling owns both sides of a pair. With rename detection
+        # disabled in the caller's git config the raw D/A lists would name
+        # them too, and the deletion/addition passes would independently
+        # restore the source and drop the destination of a rename that must
+        # stay.
+        rename_sources = {old for old, _new in rename_pairs}
+        rename_dests = {new for _old, new in rename_pairs}
         learned = state.generated_output if state is not None else set()
         digests = state.generated_digests if state is not None else {}
         # The fence of the *pre-session* tree: an agent that committed its
@@ -1674,7 +1684,7 @@ def _strip_committed_build_output(
         fence = _fence_build_dir(config, base_ref)
         restore_ref = dirty_ref or base_ref
 
-        candidates = sorted(set(paths) & learned)
+        candidates = sorted((set(paths) & learned) - rename_dests)
         committed = _blobs_in_ref(config, head, candidates) if candidates else {}
         if committed is None:
             return False
@@ -1727,13 +1737,53 @@ def _strip_committed_build_output(
         }
 
         # A deletion or rename of a tracked generated file is the same build
-        # side effect as a rewrite. The file is gone from HEAD, so content
-        # cannot be compared; membership in ``generated_output`` (a build was
-        # seen to write there) is the evidence available, the same one the
-        # discard uses to restore deletions.
-        deleted_build = set(deleted_paths) & learned
-        renamed_out = {old for old, _new in rename_pairs if old in learned}
-        renamed_new = {new for old, new in rename_pairs if old in learned}
+        # side effect as a rewrite, and gets the same content test. The file
+        # is gone from HEAD but its pre-session blob is still available at
+        # ``base_ref``; membership in ``generated_output`` alone would restore
+        # source an agent deliberately deleted, silently altering the fix.
+        deleted_candidates = sorted((set(deleted_paths) & learned) - rename_sources)
+        deleted_base = (
+            _blobs_in_ref(config, base_ref, deleted_candidates)
+            if deleted_candidates
+            else {}
+        )
+        if deleted_base is None:
+            return False
+        deleted_build = {
+            path
+            for path in deleted_candidates
+            if digests.get(path) and deleted_base.get(path) in digests[path]
+        }
+
+        # A rename is two paths. Undo it only when the source held build
+        # output before the session and the destination still holds those
+        # same bytes: an agent that renamed and edited the file left different
+        # content at the destination, and that work must survive.
+        rename_candidates = [(old, new) for old, new in rename_pairs if old in learned]
+        rename_base = (
+            _blobs_in_ref(config, base_ref, [old for old, _ in rename_candidates])
+            if rename_candidates
+            else {}
+        )
+        if rename_base is None:
+            return False
+        rename_head = (
+            _blobs_in_ref(config, head, [new for _, new in rename_candidates])
+            if rename_candidates
+            else {}
+        )
+        if rename_head is None:
+            return False
+        renamed_pairs = [
+            (old, new)
+            for old, new in rename_candidates
+            if digests.get(old)
+            and rename_base.get(old) in digests[old]
+            and rename_head.get(new) in digests[old]
+        ]
+        renamed_out = {old for old, _ in renamed_pairs}
+        renamed_new = {new for _, new in renamed_pairs}
+
         restore_paths = restored | deleted_build | renamed_out
         untrack_paths = removed | renamed_new
 
