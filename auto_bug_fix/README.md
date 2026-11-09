@@ -63,6 +63,58 @@ Each is individually toggleable under `advanced:` so runs can ablate them.
 | Post-resolution check | `post_resolution_check` | Phase 3a.1 — a verification agent reviews the resolution against the evidence report and fixes violations of the three-way discipline. |
 | Blind review | `blind_review` | Phase 3a.2 — an independent agent reviews the ported diff without seeing the triage, catching anchoring errors. |
 
+### Fused pre-RED (one agent session)
+
+`advanced.fused_pre_red: true` replaces Phases 0.5, 0.5b, and 0.5c with one
+session. Its prompt carries the fix diff, the changed-file list, the build/test
+commands, deterministic patch facts (the commits the patch carries and each
+touched path's target state: `absent`, `same`, `diverged`), and the rules for
+scoping the commit, porting only the fix's tests, and porting only prerequisites
+it can prove are external (with `git merge-base --is-ancestor` against the fix
+and its first parent). It writes
+`pre_red_result.json` and a report to the run artifact directory, then **stops
+before RED**. Deterministic gates keep the session honest: the fix must be
+absent, commits may only be `prereq:`/`test-port:`, a ported fix-ancestor
+prerequisite is rejected, the ported-test list is read back from the commits,
+and session artifacts or build scratch never reach those commits. Phase 0.5.1
+validation and Phase 1 baseline/RED still run; a session that fails a gate is
+discarded and the three separate phases run instead.
+
+### Fused resolution (one agent session)
+
+`advanced.fused_resolution: true` replaces the per-chunk conflict resolver, the
+Phase 3a.1/3a.2 review calls, and Phase 3b regeneration with a **single agent
+session**: one prompt resolves every conflict, completes the backport, builds
+and tests, runs regeneration commands, performs the post-resolution and
+independent review passes, and commits. It is intended for large fixes whose
+backport is not a mechanical cherry-pick, where repeated context loading and
+per-chunk prompts dominate the cost.
+
+The deterministic setup and gates are unchanged: cherry-pick strategies and
+`files_to_skip` reverts still run before the session; after it, the pipeline
+requires a commit, no remaining conflicts or conflict markers, folds leftover
+edits into that commit, and strips build scratch. Phase 4 verification, Phase
+4.5 range-diff, and Phase 5 completeness still run. A session that leaves
+conflicts falls back to the historical per-chunk resolver, which keeps the
+mechanical rungs, snap-back and evidence post-passes; Phase 4 remains the
+authority on build/test. Because both review passes share the resolver's
+context, they are a self-review rather than a blind review; compare against
+the default mode before enabling it by default.
+
+### Fused prompt and resolution optimizations
+
+One further `advanced:` option reduces fused-session cost:
+
+- `fused_compact_prompts: true` — the fused prompts carry the fix's `--stat`
+  and changed-file list instead of the full diff; the agent fetches exact
+  per-file bytes with `git show <fix> -- <file>`. This cuts per-iteration
+  context on large fixes; `tool_read_cap` / `tool_bash_cap` (characters) cap
+  individual tool results so one large file cannot dominate the window.
+
+The fused pre-RED session writes `pre_red_result.json` and its report to the
+run artifact directory, never the worktree; any in-repo copy left by a session
+is removed before the pipeline commits the session's test edits.
+
 ---
 
 ## Requirements

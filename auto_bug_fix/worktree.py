@@ -8,8 +8,46 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
-from auto_bug_fix.git_tools import git_worktree_add, git_worktree_remove
+from auto_bug_fix.git_tools import _run_git, git_worktree_add, git_worktree_remove
+
+# Build/test scratch that agents commonly create inside the worktree. The
+# case build commands point GOCACHE/GOTMPDIR/TMPDIR at $PWD, so without these
+# excludes a `git add -A` in a resolver session stages thousands of cache
+# files into the candidate patch.
+_SCRATCH_EXCLUDES = (
+    ".gocache/",
+    ".gotmp/",
+    ".tmp/",
+    ".agent-tmp/",
+    ".agent-home/",
+    ".pytest_cache/",
+    "__pycache__/",
+)
+
+
+def _add_scratch_excludes(worktree_path: str) -> None:
+    """Add build-scratch patterns to the repository's shared exclude file."""
+    result = _run_git(worktree_path, ["rev-parse", "--git-path", "info/exclude"])
+    if not result.success or not result.stdout.strip():
+        return
+    exclude_path = result.stdout.strip()
+    if not os.path.isabs(exclude_path):
+        exclude_path = os.path.join(worktree_path, exclude_path)
+    exclude = Path(exclude_path)
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        missing = [p for p in _SCRATCH_EXCLUDES if p not in existing]
+        if not missing:
+            return
+        sep = "\n" if existing and not existing.endswith("\n") else ""
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text(
+            existing + sep + "".join(f"{p}\n" for p in missing), encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 def cleanup_worktree(repo_path: str, worktree_path: str) -> None:
@@ -40,3 +78,4 @@ def create_fresh_worktree(repo_path: str, worktree_path: str, ref: str) -> None:
     result = git_worktree_add(repo_path, worktree_path, ref)
     if not result.success:
         raise RuntimeError(f"git worktree add failed: {result.stderr.strip()}")
+    _add_scratch_excludes(worktree_path)

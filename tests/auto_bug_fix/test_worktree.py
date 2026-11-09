@@ -100,3 +100,24 @@ def test_cleanup_noop_when_no_worktree(git_repo, tmp_path):
     wt = str(tmp_path / "nonexistent")
     # Should not raise
     cleanup_worktree(git_repo, wt)
+
+
+def test_create_fresh_worktree_excludes_build_scratch(git_repo, tmp_path):
+    """Build caches created in the worktree must not appear as untracked files."""
+    from pathlib import Path
+
+    from auto_bug_fix.worktree import create_fresh_worktree
+
+    wt = str(tmp_path / "wt")
+    create_fresh_worktree(git_repo, wt, "main")
+    cache = Path(wt) / ".gocache" / "hash"
+    cache.parent.mkdir(parents=True)
+    cache.write_text("cache")
+    (Path(wt) / ".tmp").mkdir()
+    (Path(wt) / ".tmp" / "x").write_text("tmp")
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=wt, capture_output=True, text=True
+    ).stdout
+    assert ".gocache" not in status
+    assert ".tmp" not in status

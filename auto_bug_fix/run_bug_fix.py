@@ -19,9 +19,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from fnmatch import fnmatch
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO, TypedDict, cast
 
 from auto_bug_fix.claude_utils import (
@@ -70,6 +73,8 @@ def _phase_config(
         cwd=config.repo_path,
         command_timeout=claude_config.command_timeout,
         context_length=claude_config.context_length,
+        tool_read_cap=config.tool_read_cap,
+        tool_bash_cap=config.tool_bash_cap,
         thinking=thinking,
         effort=effort or claude_config.effort,
         profile=effective_profile,
@@ -139,6 +144,8 @@ from auto_bug_fix.bug_fix_prompts import (
     SEMANTIC_TRIAGE_FILE,
     TEST_PORT_MANIFEST_FILE,
     BuildErrorRecoveryPrompt,
+    FusedPreRedPrompt,
+    FusedResolutionPrompt,
     NarrowResolutionAgentPrompt,
     PostResolutionCheckPrompt,
     RedTriagePrompt,
@@ -213,8 +220,14 @@ from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
 LOG_FILE = "__run_log_bug_fix.txt"
 DOSSIER_FILE = "dossier.md"
 PATCH_FILE = "candidate.patch"
+FUSED_RESOLUTION_REPORT_FILE = "fused_resolution_report.md"
+FUSED_PRE_RED_REPORT_FILE = "fused_pre_red_report.md"
+FUSED_PRE_RED_RESULT_FILE = "pre_red_result.json"
 _PIPELINE_ARTIFACTS = (
     SEMANTIC_TRIAGE_FILE,
+    FUSED_PRE_RED_RESULT_FILE,
+    FUSED_PRE_RED_REPORT_FILE,
+    FUSED_RESOLUTION_REPORT_FILE,
     TEST_PORT_MANIFEST_FILE,
     RED_TRIAGE_FILE,
     RUN_AND_FIX_FAILURE_FILE,
@@ -256,18 +269,18 @@ def git_commit(
 def git_amend(repo_path: str) -> None:
     """Amend HEAD with the currently staged changes, keeping the message."""
     _unstage_pipeline_artifacts(repo_path)
-    result = subprocess.run(
-        ["git", "commit", "--amend", "--no-edit"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
+    result = _run_git(repo_path, ["commit", "--amend", "--no-edit"])
+    if not result.success:
         log.warning(
             "git commit --amend failed: %s", (result.stderr or result.stdout)[:300]
         )
+
+
+def _git_lines(repo_path: str, *args: str) -> list[str]:
+    """Run a git command and return its non-empty stdout lines."""
+    return [
+        line for line in _run_git(repo_path, list(args)).stdout.splitlines() if line
+    ]
 
 
 class PipelineEscalation(Exception):
@@ -284,13 +297,93 @@ _MARKER_START_RE = re.compile(r"^<{7}( |\r?$)", re.MULTILINE)
 _MARKER_END_RE = re.compile(r"^>{7}( |\r?$)", re.MULTILINE)
 
 _DANGEROUS_SHELL_PATTERNS = (";", "&&", "||", "|", "`", "$(", "${", ">", "<", "\n")
+# An ``export NAME=...`` segment may carry shell expansions in its value (paths
+# like ``$(dirname "$PWD")/.gocache`` are common in project verification
+# commands). Only these are rejected inside such a segment; the command that
+# actually runs is still held to the full list above.
+_EXPORT_SEGMENT_RE = re.compile(r"^\s*export\s+[A-Za-z_][A-Za-z0-9_]*=")
+_EXPORT_FORBIDDEN = ("`", "\n", ">", "<", "|", "&&", "||")
 
 _BUGFIX_TYPES = ("bugfix", "bug-fix", "bug_fix", "fix", "security")
 
 
+def _split_shell_segments(cmd: str) -> list[str]:
+    """Split on top-level semicolons, ignoring quoted text."""
+    segments: list[str] = []
+    current: list[str] = []
+    single = double = False
+    for ch in cmd:
+        if ch == "'" and not double:
+            single = not single
+        elif ch == '"' and not single:
+            double = not double
+        elif ch == ";" and not single and not double:
+            segments.append("".join(current))
+            current = []
+            continue
+        current.append(ch)
+    segments.append("".join(current))
+    return segments
+
+
+def _outside_quotes(text: str) -> str:
+    """Drop quoted spans so literal `|`/`>` in arguments are not read as syntax."""
+    out: list[str] = []
+    single = double = False
+    for ch in text:
+        if ch == "'" and not double:
+            single = not single
+            continue
+        if ch == '"' and not single:
+            double = not double
+            continue
+        if not single and not double:
+            out.append(ch)
+    return "".join(out)
+
+
+def _strip_shell_comment(cmd: str) -> str:
+    """Drop a trailing unquoted shell comment (``# annotation``)."""
+    single = double = False
+    previous = " "
+    for index, ch in enumerate(cmd):
+        if ch == "'" and not double:
+            single = not single
+        elif ch == '"' and not single:
+            double = not double
+        elif ch == "#" and not single and not double and previous.isspace():
+            return cmd[:index].rstrip()
+        previous = ch
+    return cmd
+
+
 def _validate_shell_command(cmd: str) -> bool:
-    """Reject commands with shell metacharacters that could indicate injection."""
-    return not any(p in cmd for p in _DANGEROUS_SHELL_PATTERNS)
+    """Accept one shell command; a leading ``export NAME=...`` prefix is allowed.
+
+    Project commands carry their own environment (PATH, caches), so export
+    values may use ``$VAR``/``${VAR}``/``$(...)``; the final command must be
+    free of every dangerous pattern. Substitution in an export runs a subshell
+    but cannot add a second top-level command.
+    """
+    if not isinstance(cmd, str):
+        return False
+    cmd = _strip_shell_comment(cmd)
+    if not cmd.strip():
+        return False
+    segments = _split_shell_segments(cmd)
+    *exports, final = segments
+    for segment in exports:
+        if not _EXPORT_SEGMENT_RE.match(segment):
+            return False
+        if any(p in segment for p in _EXPORT_FORBIDDEN):
+            return False
+    if not final.strip():
+        return False
+    # Quoted spans are argument text, not shell syntax — but command
+    # substitution inside them still executes.
+    if any(p in final for p in ("`", "$(", "${")):
+        return False
+    return not any(p in _outside_quotes(final) for p in _DANGEROUS_SHELL_PATTERNS)
 
 
 def _conflicted_files(status_lines: list[str]) -> list[str]:
@@ -341,6 +434,11 @@ class PipelineState:
     # re-apply path can leave a clean tree without using --theirs, and the
     # diagnostic must not claim otherwise.
     force_resolved_with_theirs: bool = False
+    # Full refname -> SHA for branches an agent session must never move.
+    protected_refs: dict[str, str] = field(default_factory=dict)
+    # Set when the single-session resolver completed the resolution, internal
+    # review, and regeneration; Phase 3b is then skipped.
+    fused_resolution_ran: bool = False
 
 
 def phase_0_triage(
@@ -543,6 +641,29 @@ def _compute_fix_diff(
     return fix_diff
 
 
+def _compact_fix_overview(config: BugFixConfig, commit: str) -> str:
+    """Stat + file list + fetch instructions instead of the full fix diff.
+
+    Fused sessions used to resend the complete diff (hundreds of KB) on every
+    tool iteration. The agent can fetch exact per-file bytes with `git show`,
+    so the prompt carries only the overview.
+    """
+    rev = f"{commit}^1..{commit}"
+    stat = "\n".join(_git_lines(config.repo_path, "diff", "--stat", rev)).strip()
+    file_list = "\n".join(
+        f"  - {path}"
+        for path in _git_lines(config.repo_path, "diff", "--name-only", rev)
+    )
+    return (
+        f"{stat}\n\n"
+        "The full diff is omitted to save context. For exact bytes, run:\n"
+        f"  git show {commit} -- <file>\n"
+        "or, for the whole merge change:\n"
+        f"  git diff {commit}^1 {commit} -- <file>\n\n"
+        f"Changed files:\n{file_list}"
+    )
+
+
 def phase_3b_regeneration(
     config: BugFixConfig,
     state: PipelineState,
@@ -713,40 +834,20 @@ def phase_0_5_semantic_triage(
     return assessment
 
 
-_TEST_PATTERNS = (
-    "_test.",
-    "test_",
-    "tests/",
-    "/test/",
-    "testing/",
-    "spec/",
-    "_spec.",
-    "testdata/",
-)
-
-
-def identify_test_files(seed_files: list[str]) -> list[str]:
-    """Return seed files that look like test files based on naming patterns."""
-    test_files = []
-    for f in seed_files:
-        lower = f.lower()
-        basename = lower.rsplit("/", 1)[-1]
-        if any(p in lower for p in _TEST_PATTERNS) or basename.startswith("test_"):
-            test_files.append(f)
-    return test_files
-
-
 def phase_0_5c_test_port(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
     state: PipelineState,
     tracker,
 ) -> list[str]:
-    """Identify test files in the fix commit and port them to the target branch."""
+    """Port the test files the triage identified to the target branch."""
     files_to_skip = set(state.triage_assessment.get("files_to_skip", []))
-    test_files = [f for f in identify_test_files(state.seed) if f not in files_to_skip]
+    raw_tests = state.triage_assessment.get("test_files", [])
+    test_files = [
+        str(f) for f in raw_tests if isinstance(f, str) and str(f) not in files_to_skip
+    ]
     if not test_files:
-        log.info("Phase 0.5c: no test files found in fix commit — skipping test port")
+        log.info("Phase 0.5c: triage listed no test files — skipping test port")
         return []
 
     log.info(
@@ -785,6 +886,523 @@ def phase_0_5c_test_port(
 
     state.ported_test_files = ported
     return ported
+
+
+def _fix_diff_for_prompt(config: BugFixConfig, commit: str) -> str:
+    """The fix diff a fused prompt carries (an overview when compact)."""
+    if config.fused_compact_prompts:
+        return _compact_fix_overview(config, commit)
+    return _compute_fix_diff(config, commit)
+
+
+def _run_fused_session(
+    config: BugFixConfig, claude_config: ClaudeConfig, prompt: str, tracker
+) -> None:
+    """Run one fused agent session with the phase's model configuration."""
+    asyncio.run(
+        claude_run(_phase_config(claude_config, config), [prompt], tracker=tracker)
+    )
+
+
+def _fused_artifact_dir(tracker) -> str:
+    """Directory for fused-session reports and result files (outside the repo)."""
+    output_dir = getattr(tracker, "_output_dir", "") if tracker else ""
+    if not output_dir:
+        return tempfile.mkdtemp(prefix="fused-")
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
+def _read_fused_result(path: str) -> dict:
+    """Read a fused session's JSON result; an unusable file yields ``{}``."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("Fused session: cannot read %s: %s", path, e)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _strings(value: object) -> list[str]:
+    """The string entries of a JSON value (a non-list yields ``[]``)."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _dicts(value: object) -> list[dict]:
+    """The object entries of a JSON value (a non-list yields ``[]``)."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _read_report(path: str, limit: int = 20_000) -> str:
+    """A session report, truncated for the dossier; empty when unreadable."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError as e:
+        log.warning("Cannot read session report %s: %s", path, e)
+        return ""
+    return text[:limit] + ("\n[TRUNCATED]" if len(text) > limit else "")
+
+
+def _discard_fused_session(repo: str, base_head: str) -> None:
+    """Drop a session's commits and edits so the caller can fall back."""
+    git_reset_hard(repo, base_head)
+    _run_git(repo, ["clean", "-fd"])
+
+
+def _protected_refs(repo: str, refs: tuple[str, ...]) -> dict[str, str]:
+    """Snapshot the full refname and SHA of branches sessions must not move."""
+    protected: dict[str, str] = {}
+    for ref in refs:
+        full = _run_git(repo, ["rev-parse", "--symbolic-full-name", ref])
+        sha = _run_git(repo, ["rev-parse", ref])
+        if full.success and sha.success and full.stdout.strip():
+            protected[full.stdout.strip()] = sha.stdout.strip()
+    return protected
+
+
+def _restore_protected_refs(config: BugFixConfig, state: PipelineState) -> None:
+    """Undo a session that checked out and committed on a protected branch.
+
+    Sessions work on the worktree's detached HEAD. Committing while attached
+    to the source or target branch moves that branch, which makes the
+    candidate patch (format-patch against the target) empty.
+    """
+    repo = config.repo_path
+    moved = []
+    for ref, sha in state.protected_refs.items():
+        current = _run_git(repo, ["rev-parse", ref])
+        if current.success and current.stdout.strip() != sha:
+            moved.append((ref, sha))
+    if not moved:
+        return
+    # Detach HEAD in place: keeps the worktree and the session's commit.
+    head = _run_git(repo, ["rev-parse", "HEAD"])
+    if head.success and head.stdout.strip():
+        _run_git(repo, ["update-ref", "--no-deref", "HEAD", head.stdout.strip()])
+    for ref, sha in moved:
+        log.warning("Session moved %s — restoring %s", ref, sha[:12])
+        _run_git(repo, ["update-ref", ref, sha])
+
+
+_PRE_RED_COMMIT_PREFIXES = ("prereq:", "test-port:", "fused-pre-red:")
+
+
+def _session_commit_files(repo: str, base_head: str, prefix: str) -> list[str]:
+    """Files changed by the session's commits whose subject starts with *prefix*."""
+    files: list[str] = []
+    for line in _git_lines(repo, "log", "--format=%H%x09%s", f"{base_head}..HEAD"):
+        sha, _, subject = line.partition("\t")
+        if not subject.startswith(prefix):
+            continue
+        for path in git_diff_name_only_range(repo, f"{sha}^", sha):
+            if path not in files:
+                files.append(path)
+    return files
+
+
+def _validate_fused_pre_red(config: BugFixConfig, base_head: str) -> list[str]:
+    """Objections that make a pre-RED session unusable (empty means accept).
+
+    The prompt states these rules; checking them keeps a session that ignored
+    them from poisoning the RED check or the later resolution.
+    """
+    repo = config.repo_path
+    commit = config.source_fix_commit
+    problems: list[str] = []
+    if git_is_ancestor(repo, commit, "HEAD"):
+        problems.append("the main fix is already applied")
+    subjects = _git_lines(repo, "log", "--format=%s", f"{base_head}..HEAD")
+    stray = [s for s in subjects if not s.startswith(_PRE_RED_COMMIT_PREFIXES)]
+    if stray:
+        problems.append("commits outside prereq:/test-port/: " + "; ".join(stray[:5]))
+    # The committing SHA is the ground truth, not the result file's claim.
+    # Only a commit reachable from the fix but NOT from its first parent is
+    # carried by `git diff <fix>^1 <fix>`; commits already on the first
+    # parent are mainline and can be genuine external prerequisites.
+    for subject in subjects:
+        parts = subject.split()
+        if (
+            len(parts) >= 2
+            and parts[0] == "prereq:"
+            and len(parts[1]) >= 7
+            and all(c in "0123456789abcdef" for c in parts[1])
+            and git_is_ancestor(repo, parts[1], commit)
+            and not git_is_ancestor(repo, parts[1], f"{commit}^1")
+        ):
+            problems.append(f"ported fix ancestor {parts[1][:12]} ({subject[:60]})")
+    return problems
+
+
+@dataclass(frozen=True)
+class _FixPath:
+    """One path the fix touches, with the target branch's state for it."""
+
+    status: str  # git name-status letter: A, M, D, R, C, ...
+    state: str  # "absent", "same" or "diverged" on the target
+    path: str  # the fix's path (for a rename, the new path)
+    moves: tuple[str, ...] = ()  # same-basename files on the target
+
+
+def _blob_oids(repo: str, names: list[str]) -> list[str | None]:
+    """Object ids for ``<ref>:<path>`` names, ``None`` where the path is missing.
+
+    One ``git cat-file --batch-check`` process answers every name; a missing
+    object prints ``<name> missing`` instead of an object id.
+    """
+    if not names:
+        return []
+    out = _run_git(
+        repo, ["cat-file", "--batch-check"], input="\n".join(names) + "\n"
+    ).stdout
+    oids: list[str | None] = []
+    for line in out.splitlines():
+        words = line.split()
+        oids.append(None if not words or words[-1] == "missing" else words[0])
+    return oids
+
+
+def _changed_paths(repo: str, commit: str) -> list[tuple[str, str, str]]:
+    """``(status, base path, fix path)`` for every path ``commit`` changes.
+
+    ``-z`` separates fields with NUL, so spaces and quotes in paths are safe;
+    a rename or copy reports the old and new path, every other status repeats
+    the same path. ``"M\0a.go\0R100\0old.go\0new.go\0"`` becomes
+    ``[("M", "a.go", "a.go"), ("R", "old.go", "new.go")]``.
+    """
+    out = _run_git(
+        repo, ["diff", "--name-status", "-z", "-M", f"{commit}^1", commit]
+    ).stdout
+    fields = iter(out.split("\0"))
+    paths: list[tuple[str, str, str]] = []
+    while (status := next(fields, None)) is not None:
+        if not status:
+            continue
+        base = next(fields, None)
+        if base is None:
+            break
+        fix_path = next(fields, None) if status[0] in "RC" else base
+        if fix_path is None:
+            break
+        paths.append((status[0], base, fix_path))
+    return paths
+
+
+def _path_states(repo: str, target_ref: str, commit: str) -> list[_FixPath]:
+    """Classify every path the fix touches against the target branch.
+
+    Compares the target's blob with the fix's base blob (``commit^1``, or the
+    added blob for a path the fix creates) and records same-basename files on
+    the target as move hints for paths the target lacks.
+    """
+    changed = _changed_paths(repo, commit)
+    target_oids = _blob_oids(repo, [f"{target_ref}:{path}" for _, _, path in changed])
+    base_oids = _blob_oids(
+        repo,
+        [
+            f"{commit}:{path}" if status == "A" else f"{commit}^1:{base}"
+            for status, base, path in changed
+        ],
+    )
+    by_basename: dict[str, list[str]] = {}
+    for path in _git_lines(repo, "ls-tree", "-r", "--name-only", target_ref):
+        by_basename.setdefault(os.path.basename(path), []).append(path)
+
+    states: list[_FixPath] = []
+    for (status, _base, path), target_oid, base_oid in zip(
+        changed, target_oids, base_oids, strict=False
+    ):
+        if target_oid is None:
+            state = "absent"
+        elif target_oid == base_oid:
+            state = "same"
+        else:
+            state = "diverged"
+        moves: tuple[str, ...] = ()
+        if state == "absent" and status != "A":
+            others = [
+                candidate
+                for candidate in by_basename.get(os.path.basename(path), [])
+                if candidate != path
+            ]
+            moves = tuple(others[:3])
+        states.append(_FixPath(status, state, path, moves))
+    return states
+
+
+def _dependency_root(path: str) -> str:
+    """Prefix under which dependency-tree paths are collapsed in the facts.
+
+    ``vendor/github.com/x/y/z.go`` -> ``vendor/github.com/x/``;
+    ``internal/third_party/selinux/a.go`` -> ``internal/third_party/``;
+    an ordinary source path -> ``""`` (listed individually).
+    """
+    if path.startswith("vendor/"):
+        depth = 3
+    elif path.startswith(("staging/", "third_party/", "internal/third_party/")):
+        depth = 2
+    else:
+        return ""
+    return "/".join(path.split("/")[:depth]) + "/"
+
+
+def _render_facts_line(item: _FixPath) -> str:
+    """One ``status state path`` facts line, with the move hint when there is one."""
+    hint = ""
+    if item.moves:
+        hint = f"  [same name on target: {', '.join(item.moves)}]"
+    return f"    {item.status} {item.state:8} {item.path}{hint}"
+
+
+def _render_facts_section(lines: list[str], title: str, items: list[_FixPath]) -> None:
+    """Append one facts section, collapsing dependency trees into a count."""
+    lines.append(f"  {title}")
+    if not items:
+        lines.append("    (none)")
+        return
+    grouped: dict[tuple[str, str, str], list[_FixPath]] = {}
+    for item in items:
+        root = _dependency_root(item.path)
+        if root:
+            grouped.setdefault((item.status, item.state, root), []).append(item)
+        else:
+            lines.append(_render_facts_line(item))
+    # Sorted so the block is stable regardless of the diff's path order.
+    for (_status, _state, root), group in sorted(grouped.items()):
+        if len(group) == 1:
+            lines.append(_render_facts_line(group[0]))
+        else:
+            first = group[0]
+            lines.append(
+                f"    {first.status} {first.state:8} {root} ({len(group)} paths)"
+            )
+
+
+def _pre_red_facts(repo: str, target_ref: str, commit: str) -> tuple[str, bool]:
+    """Render the deterministic facts block for the fused pre-RED prompt.
+
+    The pre-RED agent must decide what to port, what to adapt and what the
+    target already provides. This function answers the mechanical part from
+    git alone: the commits the fix carries (already inside its diff, never
+    port them), the patch size, and for every path the fix touches what the
+    target has there — ``absent`` (no such path), ``same`` (bytes equal the
+    fix's base, so its hunks apply as written) or ``diverged``.
+
+    An absent path that existed in the base is either a missing package (port
+    it as a prerequisite) or a file the target keeps under another name. When
+    the target has a file with the same basename, it is printed as a
+    ``[same name on target: ...]`` hint; the agent compares the API before
+    treating it as a move.
+
+    Example::
+
+        `1a2b3c4d5e6f` is a merge; 2 commit(s) are carried inside the patch (reachable from the fix, not from `1a2b3c4d5e6f^1`). Never port them:
+        Patch: 3 files changed, 42 insertions(+), 7 deletions(-).
+
+        Target state per path (base = `1a2b3c4d5e6f^1`):
+          supplied by the patch (the target lacks them; do not port):
+            A absent   pkg/guard.go
+          present in the base but missing on the target (same-name hints list possible moves; compare the API):
+            M absent   lib/old/guard.go  [same name on target: lib/guard.go]
+          identical on target and base (the fix's hunks apply cleanly; no inspection):
+            M same     README.md
+          diverged from the base (adaptation likely):
+            M diverged pkg/server.go
+
+    Returns the block and whether a pre-RED build is worth running: only a
+    genuine missing package (absent, not added by the fix, no hint) can make
+    the target stop compiling.
+    """
+    states = _path_states(repo, target_ref, commit)
+    carried = _git_lines(repo, "rev-list", "--oneline", commit, f"^{commit}^1")
+    shortstat = _git_lines(repo, "diff", "--shortstat", f"{commit}^1", commit)
+    parents = _git_lines(repo, "rev-list", "--parents", "-n", "1", commit)
+    kind = "merge" if parents and len(parents[0].split()) > 2 else "single commit"
+
+    lines = [
+        f"`{commit[:12]}` is a {kind}; {len(carried)} commit(s) are carried inside "
+        f"the patch (reachable from the fix, not from `{commit}^1`). Never port them:",
+    ]
+    lines += [f"  - {entry}" for entry in carried[:40]]
+    if len(carried) > 40:
+        lines.append(f"  ... and {len(carried) - 40} more")
+    lines.append(f"Patch: {shortstat[0].strip() if shortstat else 'no diff'}.")
+    lines.append("")
+    lines.append(f"Target state per path (base = `{commit}^1`):")
+    _render_facts_section(
+        lines,
+        "supplied by the patch (the target lacks them; do not port):",
+        [item for item in states if item.state == "absent" and item.status == "A"],
+    )
+    _render_facts_section(
+        lines,
+        "present in the base but missing on the target (same-name hints list "
+        "possible moves; compare the API):",
+        [item for item in states if item.state == "absent" and item.status != "A"],
+    )
+    _render_facts_section(
+        lines,
+        "identical on target and base (the fix's hunks apply cleanly; no inspection):",
+        [item for item in states if item.state == "same"],
+    )
+    _render_facts_section(
+        lines,
+        "diverged from the base (adaptation likely):",
+        [item for item in states if item.state == "diverged"],
+    )
+    needs_build = any(
+        item.state == "absent" and item.status != "A" and not item.moves
+        for item in states
+    )
+    return "\n".join(lines), needs_build
+
+
+def _run_fused_pre_red(
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+) -> dict | None:
+    """One session for triage, prerequisite discovery and the test port.
+
+    Returns the triage assessment on success, or None so the caller runs the
+    separate Phase 0.5/0.5b/0.5c functions.
+    """
+    repo = config.repo_path
+    commit = config.source_fix_commit
+    base_head = git_rev_parse(repo, "HEAD")
+    output_dir = _fused_artifact_dir(tracker)
+    result_path = os.path.join(output_dir, FUSED_PRE_RED_RESULT_FILE)
+    report_path = os.path.join(output_dir, FUSED_PRE_RED_REPORT_FILE)
+
+    facts, needs_build = _pre_red_facts(repo, config.target_branch, commit)
+    prompt = FusedPreRedPrompt(
+        context=create_context_str(claude_config, config),
+        fix_diff=_fix_diff_for_prompt(config, commit),
+        source_branch=config.source_branch,
+        target_branch=config.target_branch,
+        fix_commit=commit,
+        base_head=base_head,
+        build_command=config.build_command,
+        test_command=config.test_command,
+        seed_files=state.seed,
+        result_path=result_path,
+        report_path=report_path,
+        facts=facts,
+        skip_build=not needs_build,
+    )
+    if tracker:
+        tracker.record_gate("pre_red_mode", "fused")
+    log.info(
+        "Phase 0.5+0.5b+0.5c — fused pre-RED session (%d seed files)", len(state.seed)
+    )
+    _run_fused_session(config, claude_config, prompt.prompt(), tracker)
+    _restore_protected_refs(config, state)
+
+    result = _read_fused_result(result_path)
+    triage = result.get("triage")
+    if not isinstance(triage, dict) or not triage:
+        # A session may write the result into the worktree despite the path.
+        result = _read_fused_result(os.path.join(repo, FUSED_PRE_RED_RESULT_FILE))
+        triage = result.get("triage")
+    if not isinstance(triage, dict) or not triage:
+        log.warning(
+            "Fused pre-RED: no usable triage result at %s — falling back",
+            result_path,
+        )
+        _discard_fused_session(repo, base_head)
+        return None
+    problems = _validate_fused_pre_red(config, base_head)
+    if problems:
+        log.warning(
+            "Fused pre-RED session rejected (%s) — falling back", "; ".join(problems)
+        )
+        _discard_fused_session(repo, base_head)
+        return None
+
+    # Session artifacts must not be committed; leftover edits are the session's
+    # own changes and must reach the RED check as a commit.
+    for name in (
+        FUSED_PRE_RED_RESULT_FILE,
+        FUSED_PRE_RED_REPORT_FILE,
+        SEMANTIC_TRIAGE_FILE,
+    ):
+        Path(repo, name).unlink(missing_ok=True)
+    if git_status_porcelain(repo):
+        _run_git(repo, ["add", "-A"])
+        git_commit(
+            repo,
+            f"fused-pre-red: commit remaining pre-RED changes for {config.issue_id}",
+        )
+
+    triage = dict(triage)
+    triage["test_files"] = _strings(result.get("test_files"))
+    triage["prerequisites"] = _dicts(result.get("prerequisites"))
+    # The test-port commits are ground truth; fall back to the result file.
+    tests_ported = _session_commit_files(repo, base_head, "test-port:") or _strings(
+        result.get("tests_ported")
+    )
+    failed = [
+        str(p.get("symbol", "?"))
+        for p in triage["prerequisites"]
+        if p.get("decision") == "failed"
+    ]
+    unexpected = [t for t in tests_ported if t not in state.seed]
+    if unexpected:
+        log.warning(
+            "Fused pre-RED: ported tests outside the fix's file set: %s",
+            ", ".join(unexpected[:5]),
+        )
+
+    state.ported_test_files = tests_ported
+    state.triage_assessment = triage
+    priority = triage.get("priority_files")
+    state.priority_files = (
+        priority if isinstance(priority, list) else state.allowed_modules
+    )
+    state.failed_prerequisites.extend(failed)
+
+    if state.dossier:
+        state.dossier.add(
+            "Semantic triage (fused pre-RED)",
+            json.dumps(triage, indent=2),
+            "Phase 0.5+0.5b+0.5c fused session",
+        )
+        state.dossier.add(
+            "Prerequisites (fused pre-RED)",
+            json.dumps(triage["prerequisites"], indent=2),
+            "Phase 0.5+0.5b+0.5c fused session",
+        )
+        state.dossier.add(
+            "Test port (fused pre-RED)",
+            "\n".join(tests_ported) if tests_ported else "no tests ported",
+            "Phase 0.5+0.5b+0.5c fused session",
+        )
+        report = _read_report(report_path)
+        state.dossier.add(
+            "Fused pre-RED session report",
+            report if report.strip() else f"No report produced at {report_path}",
+            "Phase 0.5+0.5b+0.5c fused session",
+        )
+
+    if tracker:
+        ported_count = sum(
+            1 for p in triage["prerequisites"] if p.get("decision") == "ported"
+        )
+        tracker.record_gate("prerequisites_ported", str(ported_count))
+        tracker.record_gate("test_files_ported", str(len(tests_ported)))
+        if failed:
+            tracker.record_gate("prerequisites_failed", str(len(failed)))
+        build = result.get("build")
+        if isinstance(build, dict):
+            tracker.record_gate("pre_red_build_exit", str(build.get("exit_code", "?")))
+    return triage
 
 
 def phase_1_baseline_and_red(
@@ -1204,6 +1822,98 @@ def _commit_recovery_edits(config: BugFixConfig, phase_label: str) -> bool:
     return False
 
 
+def _fused_check_commands(state: PipelineState) -> list[str]:
+    """Lint and verification commands the fused session must run itself."""
+    assessment = state.triage_assessment or {}
+    commands: list[str] = []
+    for key in ("lint_commands", "verification_commands"):
+        for cmd in assessment.get(key) or []:
+            if isinstance(cmd, str) and cmd.strip() and cmd not in commands:
+                commands.append(cmd)
+    return commands[:10]
+
+
+# Formatting checks that fail only on whitespace, with their in-place fixer.
+# Data only: add one line per ecosystem. The first row is the common
+# `hack/verify-<name>.sh` -> `hack/update-<name>.sh` repository convention.
+_FORMATTER_FIXES = (
+    (r"((?:\./)?hack/)verify-([\w.-]+)\.sh\b", r"\1update-\2.sh"),
+    (r"\bgofmt\s+-l\b", "gofmt -w"),
+    (r"\bgofumpt\s+-l\b", "gofumpt -w"),
+    (r"\b(shfmt)\s+-d\b", r"\1 -w"),
+    (r"\bblack\s+(--check|--diff)\b", "black"),
+    (r"\bruff\s+format\s+--check\b", "ruff format"),
+    (r"\b(isort)\s+--check-only\b", r"\1"),
+    (r"\b(rustfmt)\s+--check\b", r"\1"),
+    (r"\b(prettier)\s+(--check|-c)\b", r"\1 --write"),
+    (r"\b(clang-format)\s+--dry-run\b", r"\1 -i"),
+    (r"\bterraform\s+fmt\s+-check\b", "terraform fmt"),
+)
+
+
+def _formatter_repair_command(cmd: str) -> str | None:
+    """In-place fixer for a known formatting check, if the command matches one."""
+    for pattern, replacement in _FORMATTER_FIXES:
+        repaired = re.sub(pattern, replacement, cmd)
+        if repaired != cmd:
+            return repaired
+    return None
+
+
+def _run_shell_ok(cmd: str, config: BugFixConfig) -> bool:
+    try:
+        exit_code, _, _ = run_test_suite(
+            cmd, config.build_dir, timeout=config.command_timeout
+        )
+    except OSError as e:
+        log.warning("Phase 4.1: formatter command failed to run: %s", e)
+        return False
+    return exit_code == 0
+
+
+def _repair_known_formatter_failures(
+    config: BugFixConfig,
+    failures: list[dict],
+    state: PipelineState,
+) -> list[dict]:
+    """Repair formatting-only verification failures without an agent session.
+
+    A formatter check that fails because of whitespace should not cost a
+    Phase 4b agent call: run the in-place fixer and re-check. Returns the
+    failures that remain.
+    """
+    remaining: list[dict] = []
+    repaired_any = False
+    for failure in failures:
+        cmd = str(failure.get("cmd", ""))
+        repair = _formatter_repair_command(cmd)
+        if repair is None or not _run_shell_ok(repair, config):
+            if repair is not None:
+                log.warning("Phase 4.1: formatter repair failed: %s", repair)
+            remaining.append(failure)
+            continue
+        if not _run_shell_ok(cmd, config):
+            log.warning("Phase 4.1: formatter repair did not satisfy: %s", cmd)
+            remaining.append(failure)
+            continue
+        log.info("Phase 4.1: deterministic formatter repair fixed: %s", cmd)
+        repaired_any = True
+        state.dossier.add(
+            "Deterministic formatter repair",
+            f"Ran `{repair}`; `{cmd}` now passes.",
+            "Phase 4.1",
+        )
+    if repaired_any:
+        # Recovery edits must be commit-based or the candidate patch, preserved
+        # branch, and range-diff would omit them.
+        try:
+            _commit_recovery_edits(config, "Phase 4.1 formatter repair")
+        except PipelineEscalation as e:
+            log.warning("Phase 4.1: cannot commit formatter repair: %s", e)
+            return failures
+    return remaining
+
+
 def phase_4a_build_recovery(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -1584,22 +2294,117 @@ def phase_4b_run_and_fix(
 MAX_PREREQUISITE_DEPTH = 5
 
 
-def cherry_pick_and_resolve(
+_SCRATCH_PREFIXES = (
+    ".gocache/",
+    ".gotmp/",
+    ".tmp/",
+    ".agent-tmp/",
+    ".agent-home/",
+    ".pytest_cache/",
+    "__pycache__/",
+)
+
+# Files test runs commonly leave behind. They belong in a backport only when the
+# fix itself adds them (the caller passes those paths as `keep`).
+_TEST_OUTPUT_PATTERNS = (
+    "*.diffs",
+    "regression.out",
+    "*.tap",
+    "junit.xml",
+    "coverage.out",
+    ".coverage",
+)
+_TEST_OUTPUT_DIRS = ("htmlcov/", ".nyc_output/", "test-results/")
+
+
+def _is_test_output(repo: str, ref: str, path: str) -> bool:
+    """True for test-run output absent from *ref* (never part of a backport)."""
+    name = os.path.basename(path)
+    if not path.startswith(_TEST_OUTPUT_DIRS) and not any(
+        fnmatch(name, pattern) for pattern in _TEST_OUTPUT_PATTERNS
+    ):
+        return False
+    return not git_cat_file_exists(repo, ref, path)
+
+
+def _strip_session_scratch(
+    repo: str, base_head: str, keep: set[str] | None = None
+) -> list[str]:
+    """Drop force-added build scratch and test-run output from the commit.
+
+    The worktree excludes prevent `git add -A` from staging the scratch paths,
+    but an agent can still force-add them or commit test output. Squash the
+    session's commits onto ``base_head`` and re-commit without those files;
+    they stay on disk and never reach the candidate patch.
+    """
+    keep = keep or set()
+    changed = git_diff_name_only_range(repo, base_head, "HEAD")
+
+    def is_droppable(path: str) -> bool:
+        if path.startswith(_SCRATCH_PREFIXES) or path in _PIPELINE_ARTIFACTS:
+            return True
+        if path in keep:
+            return False
+        return _is_test_output(repo, base_head, path)
+
+    dropped = [f for f in changed if is_droppable(f)]
+    if not dropped:
+        return []
+
+    log.warning(
+        "Fused session committed %d scratch/test-output files — stripping them",
+        len(dropped),
+    )
+    message = _run_git(repo, ["log", "-1", "--format=%B"]).stdout.strip()
+    reset = _run_git(repo, ["reset", "--soft", base_head])
+    if not reset.success:
+        log.warning("Could not squash fused commit: %s", reset.stderr[:300])
+        return []
+    _run_git(repo, ["rm", "-r", "--cached", "--ignore-unmatch", "-q", *dropped])
+    commit = _run_git(
+        repo, ["commit", "--no-verify", "-m", message or "Fused backport"]
+    )
+    if not commit.success:
+        log.warning("Could not re-commit without scratch: %s", commit.stderr[:300])
+    return dropped
+
+
+def _add_fused_report_to_dossier(state: PipelineState, report_path: str) -> None:
+    """Surface the fused session's own report in the pipeline dossier."""
+    report = _read_report(report_path)
+    if not report.strip():
+        state.dossier.add(
+            "Fused resolution session",
+            f"No session report produced at {report_path}; Phase 4 remains the "
+            "authority on build/test.",
+            "Phase 2+3a fused session",
+        )
+        return
+    state.dossier.add(
+        "Fused resolution session report", report, "Phase 2+3a fused session"
+    )
+
+
+class _CherryPickStrategy(TypedDict):
+    strategy: str | None
+    strategy_option: str | None
+    name: str
+
+
+def _apply_cherry_pick(
     config: BugFixConfig,
-    claude_config: ClaudeConfig,
     state: PipelineState,
-    tracker,
     commit: str,
     label: str,
-    files_to_skip: list[str] | None = None,
-) -> str:
-    """Cherry-pick a single commit trying multiple strategies. Returns 'clean', 'resolved', or raises."""
+    files_to_skip: set[str],
+) -> tuple[str, list[str], list[str]]:
+    """Apply a cherry-pick with strategy fallback and revert skip-only files.
 
-    class _CherryPickStrategy(TypedDict):
-        strategy: str | None
-        strategy_option: str | None
-        name: str
-
+    Returns ``(outcome, conflicted_files, summary_parts)``. The outcome is
+    ``"clean"`` (applied with no conflicts), ``"resolved"`` (conflicts were
+    only in skip files, which were reverted and committed), or ``"conflicts"``
+    (the tree is left mid-cherry-pick for resolution).
+    """
     strategies: list[_CherryPickStrategy] = [
         {"strategy": None, "strategy_option": None, "name": "default"},
         {"strategy": None, "strategy_option": "patience", "name": "patience"},
@@ -1630,7 +2435,7 @@ def cherry_pick_and_resolve(
             log.info("%s: clean cherry-pick (strategy: %s)", label, strat["name"])
             if state.dossier:
                 state.dossier.add_strategy(strat["name"], "clean")
-            return "clean"
+            return "clean", [], []
 
         if uu_files:
             if best_strategy is None or len(uu_files) < best_strategy[1]:
@@ -1668,31 +2473,17 @@ def cherry_pick_and_resolve(
         strategy=strat["strategy"],
         strategy_option=strat["strategy_option"],
     )
-    status = git_status_porcelain(config.repo_path)
-    uu_files = _conflicted_files(status)
-
+    uu_files = _conflicted_files(git_status_porcelain(config.repo_path))
     if not uu_files:
         log.info("%s: clean cherry-pick on retry (strategy: %s)", label, strat["name"])
-        return "clean"
+        return "clean", [], []
 
     conflict_summary_parts = []
-    skip_set = set(files_to_skip or [])
-    if skip_set:
+    if files_to_skip:
         # Reset ALL skip files to target version — both conflicting and cleanly-applied
-        all_changed = (
-            subprocess.run(
-                ["git", "diff", "--name-only", "HEAD"],
-                cwd=config.repo_path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-            .stdout.strip()
-            .splitlines()
-        )
+        all_changed = _git_lines(config.repo_path, "diff", "--name-only", "HEAD")
         skip_applied_clean = [
-            f for f in all_changed if f in skip_set and f not in uu_files
+            f for f in all_changed if f in files_to_skip and f not in uu_files
         ]
         if skip_applied_clean:
             log.info(
@@ -1701,13 +2492,9 @@ def cherry_pick_and_resolve(
                 len(skip_applied_clean),
             )
             for f in skip_applied_clean:
-                subprocess.run(
-                    ["git", "checkout", "HEAD", "--", f],
-                    cwd=config.repo_path,
-                    capture_output=True,
-                )
+                _run_git(config.repo_path, ["checkout", "HEAD", "--", f])
 
-        auto_resolved = [f for f in uu_files if f in skip_set]
+        auto_resolved = [f for f in uu_files if f in files_to_skip]
         if auto_resolved:
             log.info(
                 "%s: reverting %d conflicting skip files to target version",
@@ -1715,31 +2502,76 @@ def cherry_pick_and_resolve(
                 len(auto_resolved),
             )
             for f in auto_resolved:
-                subprocess.run(
-                    ["git", "checkout", "HEAD", "--", f],
-                    cwd=config.repo_path,
-                    capture_output=True,
-                )
-                subprocess.run(
-                    ["git", "add", "--", f], cwd=config.repo_path, capture_output=True
-                )
+                _run_git(config.repo_path, ["checkout", "HEAD", "--", f])
+                _run_git(config.repo_path, ["add", "--", f])
 
         total_skipped = len(skip_applied_clean) + len(auto_resolved)
         if total_skipped:
             conflict_summary_parts.append(
                 f"Reverted {total_skipped} files to target version (files_to_skip)"
             )
-            uu_files = [f for f in uu_files if f not in skip_set]
+            uu_files = [f for f in uu_files if f not in files_to_skip]
 
     if not uu_files:
         msg = (
             f"Port {label}\n\n[ Conflict summary: {'; '.join(conflict_summary_parts)} ]"
         )
         git_commit(config.repo_path, msg)
-        return "resolved"
+        return "resolved", [], conflict_summary_parts
+    return "conflicts", uu_files, conflict_summary_parts
+
+
+def cherry_pick_and_resolve(
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+    commit: str,
+    label: str,
+    files_to_skip: list[str] | None = None,
+) -> str:
+    """Cherry-pick a single commit trying multiple strategies.
+
+    Returns 'clean' or 'resolved', or raises when resolution is impossible.
+    """
+    skip_set = set(files_to_skip or [])
+    outcome, uu_files, conflict_summary_parts = _apply_cherry_pick(
+        config, state, commit, label, skip_set
+    )
+    if outcome != "conflicts":
+        return outcome
+    base_head = git_rev_parse(config.repo_path, "HEAD")
+
+    if config.fused_resolution:
+        fused_result = _run_fused_resolution(
+            config,
+            claude_config,
+            state,
+            tracker,
+            commit=commit,
+            label=label,
+            base_head=base_head,
+            conflicted_files=uu_files,
+            files_to_skip=sorted(skip_set),
+            conflict_summary_parts=conflict_summary_parts,
+        )
+        if fused_result:
+            return fused_result
+        log.warning(
+            "%s: fused resolution did not finish — retrying with the per-chunk "
+            "resolver",
+            label,
+        )
+        if tracker:
+            tracker.record_gate("resolution_mode", "fused_fallback")
+        git_reset_hard(config.repo_path, base_head)
+        outcome, uu_files, conflict_summary_parts = _apply_cherry_pick(
+            config, state, commit, label, skip_set
+        )
+        if outcome != "conflicts":
+            return outcome
 
     original_uu_files = list(uu_files)
-    base_head = git_rev_parse(config.repo_path, "HEAD")
     fix_diff = _compute_fix_diff(config, commit)
     context = create_context_str(claude_config, config)
     priority = state.priority_files if state.priority_files else state.allowed_modules
@@ -1892,6 +2724,137 @@ def cherry_pick_and_resolve(
     raise PipelineEscalation(
         f"{label}: failed after {config.max_resolution_retries} attempts"
     )
+
+
+def _committed_conflict_markers(repo: str, base_head: str) -> list[str]:
+    """Files changed since *base_head* that carry both conflict markers."""
+    marked: list[str] = []
+    for path in git_diff_name_only_range(repo, base_head, "HEAD"):
+        abs_path = os.path.join(repo, path)
+        if not os.path.isfile(abs_path) or os.path.getsize(abs_path) > 5_000_000:
+            continue
+        try:
+            with open(abs_path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        if _MARKER_START_RE.search(text) and _MARKER_END_RE.search(text):
+            marked.append(path)
+    return marked
+
+
+def _run_fused_resolution(
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+    *,
+    commit: str,
+    label: str,
+    base_head: str,
+    conflicted_files: list[str],
+    files_to_skip: list[str],
+    conflict_summary_parts: list[str],
+) -> str | None:
+    """One session to resolve, complete, build/test, review and commit.
+
+    Returns "resolved", or None when the caller must redo the cherry-pick and
+    use the per-chunk resolver.
+    """
+    repo = config.repo_path
+    report_path = os.path.join(
+        _fused_artifact_dir(tracker), FUSED_RESOLUTION_REPORT_FILE
+    )
+    followup_fixes = (
+        "\n".join(f"  - {f}" for f in state.followup_fixes)
+        if state.followup_fixes and _is_followup_target(repo, commit, state)
+        else ""
+    )
+    triage_regeneration = state.triage_assessment.get("regeneration_commands")
+    prompt = FusedResolutionPrompt(
+        context=create_context_str(claude_config, config),
+        fix_diff=_fix_diff_for_prompt(config, commit),
+        fix_commit=commit,
+        conflicted_files=conflicted_files,
+        triage_assessment=(
+            json.dumps(state.triage_assessment, indent=2)
+            if state.triage_assessment
+            else ""
+        ),
+        build_command=config.build_command,
+        test_command=config.test_command,
+        check_commands=_fused_check_commands(state),
+        regeneration_commands=[
+            cmd for cmd in _strings(triage_regeneration) if cmd.strip()
+        ],
+        files_to_skip=files_to_skip,
+        baseline_ref=base_head,
+        target_branch=config.target_branch,
+        report_path=report_path,
+        followup_fixes=followup_fixes,
+    )
+    log.info(
+        "%s: fused session — resolving %d conflicts in one prompt",
+        label,
+        len(conflicted_files),
+    )
+    if tracker:
+        tracker.record_gate("resolution_mode", "fused")
+    _run_fused_session(config, claude_config, prompt.prompt(), tracker)
+    _restore_protected_refs(config, state)
+    _add_fused_report_to_dossier(state, report_path)
+
+    remaining = _conflicted_files(git_status_porcelain(repo))
+    if remaining:
+        log.warning("%s: fused session left %d conflicts", label, len(remaining))
+        return None
+    if git_rev_parse(repo, "HEAD") == base_head:
+        if not _non_artifact_dirt(repo):
+            log.warning("%s: fused session changed nothing", label)
+            return None
+        git_commit(
+            repo,
+            f"Port {label}\n\n[ Fused resolution session ]",
+            trailers=_COAUTHOR_TRAILERS,
+        )
+        if git_rev_parse(repo, "HEAD") == base_head:
+            log.warning("%s: fused changes could not be committed", label)
+            return None
+    if _non_artifact_dirt(repo):
+        # Leftover edits would affect the verified build but miss the
+        # candidate patch, so fold them into the session's commit.
+        _run_git(repo, ["add", "-A"])
+        git_amend(repo)
+        log.info("%s: committed leftover session edits", label)
+    markers = _committed_conflict_markers(repo, base_head)
+    if markers:
+        log.warning(
+            "%s: fused session committed conflict markers in %d files",
+            label,
+            len(markers),
+        )
+        return None
+    stripped = _strip_session_scratch(repo, base_head, keep=set(state.seed))
+    if stripped and state.dossier:
+        state.dossier.add(
+            "Build scratch stripped from fused commit",
+            "\n".join(stripped[:50])
+            + (f"\n... and {len(stripped) - 50} more" if len(stripped) > 50 else ""),
+            "Phase 2+3a fused session",
+        )
+    if state.dossier:
+        state.dossier.add(
+            "Fused resolution",
+            f"{len(conflicted_files)} source conflicts resolved in one session; "
+            "completion, build/test, checks and review ran in-session.",
+            "Phase 2+3a fused session",
+        )
+    conflict_summary_parts.append(
+        f"Fused session resolved {len(conflicted_files)} source conflicts "
+        "in one prompt"
+    )
+    state.fused_resolution_ran = True
+    return "resolved"
 
 
 def _is_followup_target(repo_path: str, commit: str, state: PipelineState) -> bool:
@@ -2370,8 +3333,12 @@ def port_prerequisite_chain(
         )
 
         old_commit = config.source_fix_commit
+        old_fused = config.fused_resolution
         try:
             config.source_fix_commit = sha
+            # The fused session is tailored to the main fix's triage and
+            # regeneration commands; prerequisites must use the legacy path.
+            config.fused_resolution = False
             result = cherry_pick_and_resolve(
                 config,
                 claude_config,
@@ -2393,6 +3360,7 @@ def port_prerequisite_chain(
             )
         finally:
             config.source_fix_commit = old_commit
+            config.fused_resolution = old_fused
 
     return ported
 
@@ -2785,6 +3753,9 @@ def _run_pipeline_phases(
     tracker: Tracker,
 ) -> tuple[Dossier, Tracker]:
     """Execute all pipeline phases. Separated from run_pipeline for try/finally tracker saving."""
+    state.protected_refs = _protected_refs(
+        config.repo_path, (config.target_branch, config.source_branch)
+    )
     if config.fix_patch:
         msg = _run_git(
             config.repo_path, ["log", "-1", "--format=%B", config.source_fix_commit]
@@ -2839,8 +3810,19 @@ def _run_pipeline_phases(
                 tracker.record_gate("followup_fixes", str(len(state.followup_fixes)))
 
     with tracker.phase("Phase 0.5 — Semantic triage"):
-
-        assessment = phase_0_5_semantic_triage(config, claude_config, state, tracker)
+        assessment: dict = {}
+        if config.fused_pre_red:
+            assessment = _run_fused_pre_red(config, claude_config, state, tracker) or {}
+            if not assessment:
+                log.warning(
+                    "Fused pre-RED session failed — falling back to separate "
+                    "Phase 0.5/0.5b/0.5c"
+                )
+                tracker.record_gate("pre_red_mode", "fused_fallback")
+        if not assessment:
+            assessment = phase_0_5_semantic_triage(
+                config, claude_config, state, tracker
+            )
         state.dossier.add(
             "Semantic triage",
             json.dumps(assessment, indent=2) if assessment else "no assessment",
@@ -2895,7 +3877,7 @@ def _run_pipeline_phases(
         portable_prereqs = [
             p for p in prereqs if p.get("portable", False) and p.get("introduced_by")
         ]
-        if portable_prereqs:
+        if portable_prereqs and not config.fused_pre_red:
             with tracker.phase("Phase 0.5b — Prerequisite chain"):
                 ported = port_prerequisite_chain(config, claude_config, state, tracker)
                 state.dossier.add(
@@ -2905,8 +3887,8 @@ def _run_pipeline_phases(
                 )
                 tracker.record_gate("prerequisites_ported", str(len(ported)))
 
-        test_files_in_commit = identify_test_files(state.seed)
-        if test_files_in_commit:
+        test_files_in_commit = _strings(state.triage_assessment.get("test_files"))
+        if test_files_in_commit and not config.fused_pre_red:
             with tracker.phase("Phase 0.5c — Test port"):
                 ported_tests = phase_0_5c_test_port(
                     config, claude_config, state, tracker
@@ -3012,7 +3994,24 @@ def _run_pipeline_phases(
                         "RED triage inconclusive — escalating to Phase 4b"
                     )
 
-        subprocess.run(["git", "add", "-A"], cwd=config.repo_path, capture_output=True)
+        # Test-run output left by the RED check must not enter the candidate.
+        untracked = [
+            line[3:].strip()
+            for line in git_status_porcelain(config.repo_path)
+            if line.startswith("?? ")
+        ]
+        artifacts = [
+            path
+            for path in untracked
+            if _is_test_output(config.repo_path, config.target_branch, path)
+        ]
+        if artifacts:
+            log.warning(
+                "Removing %d untracked test-output files before the cherry-pick",
+                len(artifacts),
+            )
+            _run_git(config.repo_path, ["clean", "-f", "-d", "--", *artifacts])
+        _run_git(config.repo_path, ["add", "-A"])
         status = git_status_porcelain(config.repo_path)
         if status:
             git_commit(
@@ -3031,6 +4030,7 @@ def _run_pipeline_phases(
                 label=f"main commit ({config.issue_id})",
                 files_to_skip=files_to_skip,
             )
+            _restore_protected_refs(config, state)
             state.cherry_pick_path = cp_result
             state.dossier.cherry_pick_path = cp_result
             tracker.record_gate("cherry_pick", cp_result)
@@ -3049,13 +4049,16 @@ def _run_pipeline_phases(
             if _validate_shell_command(c)
         ]
         files_skipped = state.triage_assessment.get("files_to_skip", [])
-        if regen_cmds and files_skipped:
+        if regen_cmds and files_skipped and not state.fused_resolution_ran:
             with tracker.phase("Phase 3b — Regeneration"):
                 phase_3b_regeneration(config, state, regen_cmds)
 
         cherry_pick_succeeded = True
 
     except (PipelineEscalation, RuntimeError, OSError, subprocess.SubprocessError) as e:
+        # A session may have moved a branch before failing; the recovery path
+        # resets to the target branch, so restore the refs first.
+        _restore_protected_refs(config, state)
         log.warning(
             "Cherry-pick resolution failed (%s: %s) — force-resolving and escalating to Phase 4b",
             type(e).__name__,
@@ -3279,6 +4282,9 @@ def _run_pipeline_phases(
                     )
 
         if ext_failures:
+            ext_failures = _repair_known_formatter_failures(config, ext_failures, state)
+
+        if ext_failures:
             log.info(
                 "Phase 4.1: %d verification commands failed — triggering Phase 4a recovery",
                 len(ext_failures),
@@ -3391,6 +4397,7 @@ def _run_pipeline_phases(
     )
 
     log.info("Phase 5 — Dossier ready for human review")
+    _restore_protected_refs(config, state)
     patch_bytes = git_format_patch_bytes(
         config.repo_path, base_ref=config.target_branch
     )

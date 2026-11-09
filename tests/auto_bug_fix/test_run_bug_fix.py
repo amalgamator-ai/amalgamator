@@ -22,7 +22,6 @@ from auto_bug_fix.run_bug_fix import (
     _resolve_lint_command,
     _run_build_and_test,
     _sanitize_branch_slug,
-    identify_test_files,
     run_targets,
 )
 
@@ -54,52 +53,6 @@ def test_pipeline_escalation_exception():
         raise PipelineEscalation("human intervention required")
     except PipelineEscalation as exc:
         assert "human intervention required" in str(exc)
-
-
-def test_identify_test_files_go():
-    files = [
-        "pkg/controller/replicaset/replica_set.go",
-        "pkg/controller/replicaset/replica_set_test.go",
-        "pkg/controller/controller_utils.go",
-        "pkg/controller/controller_utils_test.go",
-    ]
-    result = identify_test_files(files)
-    assert "pkg/controller/replicaset/replica_set_test.go" in result
-    assert "pkg/controller/controller_utils_test.go" in result
-    assert "pkg/controller/replicaset/replica_set.go" not in result
-    assert len(result) == 2
-
-
-def test_identify_test_files_python():
-    files = [
-        "src/main.py",
-        "tests/test_main.py",
-        "tests/conftest.py",
-        "src/utils.py",
-    ]
-    result = identify_test_files(files)
-    assert "tests/test_main.py" in result
-    assert "tests/conftest.py" in result
-    assert "src/main.py" not in result
-
-
-def test_identify_test_files_none():
-    files = ["lib/url.c", "lib/parser.c", "include/header.h"]
-    result = identify_test_files(files)
-    assert result == []
-
-
-def test_identify_test_files_spec():
-    files = ["app/models/user.rb", "spec/models/user_spec.rb"]
-    result = identify_test_files(files)
-    assert "spec/models/user_spec.rb" in result
-    assert len(result) == 1
-
-
-def test_identify_test_files_no_false_positives():
-    files = ["latest/foo.c", "contest.md", "lib/attestation.go", "pkg/protesting.h"]
-    result = identify_test_files(files)
-    assert result == []
 
 
 def _make_config(**overrides):
@@ -1964,3 +1917,117 @@ def test_phase_4b_artifact_records_success_only_after_verification(tmp_path):
         phase_4b_run_and_fix(config, claude_cfg, state, tracker)
     data = _json.loads((tmp_path / "out" / "phase_4b_input.json").read_text())
     assert data["outcome"] == "success"
+
+
+# --- shell command validation ---
+
+
+def test_validate_shell_command_allows_export_prefix():
+    from auto_bug_fix.run_bug_fix import _validate_shell_command
+
+    cmd = (
+        "export PATH=/opt/go/bin:$PATH; "
+        'export GOCACHE="$(dirname "$PWD")/.gocache"; '
+        "gofmt -l pkg/file.go"
+    )
+    assert _validate_shell_command(cmd) is True
+    assert _validate_shell_command("go vet ./...") is True
+    # Quoted alternation is argument text, and a trailing comment is ignored.
+    assert _validate_shell_command("go test -run 'A|B' ./pkg") is True
+    assert (
+        _validate_shell_command(
+            "./hack/verify-lint.sh ./pkg  # only if installed; fallback"
+        )
+        is True
+    )
+
+
+def test_validate_shell_command_rejects_composed_commands():
+    from auto_bug_fix.run_bug_fix import _validate_shell_command
+
+    # A second non-export segment is still rejected.
+    assert _validate_shell_command("export X=1; rm -rf build; echo done") is False
+    # Pipelines, redirects, and command substitution in the final command.
+    assert _validate_shell_command("go test ./... | tee out.log") is False
+    assert _validate_shell_command("go test ./... > out.log") is False
+    assert _validate_shell_command("go test $(cat list)") is False
+    assert _validate_shell_command("export X=`id`; true") is False
+    assert _validate_shell_command("") is False
+
+
+# --- deterministic formatter repair ---
+
+
+def test_formatter_repair_command_mapping():
+    from auto_bug_fix.run_bug_fix import _formatter_repair_command as fixer
+
+    # Repository verify -> update convention, language-agnostic.
+    assert fixer("hack/verify-gofmt.sh") == "hack/update-gofmt.sh"
+    assert fixer("./hack/verify-lint.sh ./pkg") == "./hack/update-lint.sh ./pkg"
+    # Common ecosystem checks -> in-place mode.
+    assert fixer("gofmt -l pkg/a.go") == "gofmt -w pkg/a.go"
+    assert fixer("gofumpt -l .") == "gofumpt -w ."
+    assert fixer("black --check src") == "black src"
+    assert fixer("ruff format --check .") == "ruff format ."
+    assert fixer("isort --check-only .") == "isort ."
+    assert fixer("rustfmt --check src/lib.rs") == "rustfmt src/lib.rs"
+    assert fixer("prettier --check web/") == "prettier --write web/"
+    assert (
+        fixer("clang-format --dry-run --Werror a.c") == "clang-format -i --Werror a.c"
+    )
+    assert fixer("terraform fmt -check") == "terraform fmt"
+    assert fixer("go vet ./...") is None
+
+
+def _write_formatter_scripts(root, fixable: bool) -> None:
+    hack = root / "hack"
+    hack.mkdir()
+    verify = hack / "verify-gofmt.sh"
+    verify.write_text(
+        "#!/bin/sh\n"
+        + ("if grep -q BAD fmt.go; then exit 1; fi\n" if fixable else "exit 1\n")
+        + "exit 0\n"
+    )
+    update = hack / "update-gofmt.sh"
+    update.write_text("#!/bin/sh\nsed -i 's/BAD/OK/' fmt.go\n")
+    verify.chmod(0o755)
+    update.chmod(0o755)
+    (root / "fmt.go").write_text("package p\n// BAD\n")
+
+
+def test_formatter_repair_fixes_known_check(tmp_path):
+    from auto_bug_fix.run_bug_fix import _repair_known_formatter_failures
+
+    _write_formatter_scripts(tmp_path, fixable=True)
+    config = _make_config(build_dir=str(tmp_path))
+    state = PipelineState()
+    with patch(
+        "auto_bug_fix.run_bug_fix._commit_recovery_edits", return_value=True
+    ) as commit:
+        remaining = _repair_known_formatter_failures(
+            config, [{"cmd": "hack/verify-gofmt.sh", "output": "fmt.go"}], state
+        )
+    assert remaining == []
+    assert "OK" in (tmp_path / "fmt.go").read_text()
+    assert commit.call_count == 1
+    assert any(item.source == "Phase 4.1" for item in state.dossier.items)
+
+
+def test_formatter_repair_leaves_unfixable_failure(tmp_path):
+    from auto_bug_fix.run_bug_fix import _repair_known_formatter_failures
+
+    _write_formatter_scripts(tmp_path, fixable=False)
+    config = _make_config(build_dir=str(tmp_path))
+    state = PipelineState()
+    failure = {"cmd": "hack/verify-gofmt.sh", "output": "boom"}
+    remaining = _repair_known_formatter_failures(config, [failure], state)
+    assert remaining == [failure]
+
+
+def test_formatter_repair_ignores_non_formatter_failure(tmp_path):
+    from auto_bug_fix.run_bug_fix import _repair_known_formatter_failures
+
+    config = _make_config(build_dir=str(tmp_path))
+    state = PipelineState()
+    failure = {"cmd": "go vet ./...", "output": "vet error"}
+    assert _repair_known_formatter_failures(config, [failure], state) == [failure]

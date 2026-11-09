@@ -63,6 +63,18 @@ class BugFixConfig:
     evidence_checks: bool = True  # token audit + substitution mining + follow-up scan
     post_resolution_check: bool = True  # Phase 3a.1 verification agent
     blind_review: bool = True  # Phase 3a.2 triage-blind review agent
+    # Collapse conflict resolution, regeneration, 3a.1, and 3a.2 into one agent
+    # session. The deterministic post-passes and Phase 4 verification still run.
+    fused_resolution: bool = False
+    # Collapse semantic triage, prerequisite porting, and test port into one
+    # pre-RED agent session with deterministic evidence and post-validation.
+    fused_pre_red: bool = False
+    # Omit the full fix diff from fused prompts; the agent fetches per-file
+    # bytes with `git show <fix> -- <file>`.
+    fused_compact_prompts: bool = False
+    # Tool output caps for the agent loop (None = context-derived defaults).
+    tool_read_cap: int | None = None
+    tool_bash_cap: int | None = None
     # Non-bugfix ports only: fraction of the fix's files that may be dropped
     # (skipped and never regenerated) before the outcome is downgraded from
     # success to partial_success.

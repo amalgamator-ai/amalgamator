@@ -116,6 +116,14 @@ def advanced_str(advanced: dict[str, Any], key: str, default: str) -> str:
     return raw.strip()
 
 
+def advanced_int(advanced: dict[str, Any], key: str) -> int | None:
+    """Read a positive number from the ``advanced:`` section (else ``None``)."""
+    raw = advanced.get(key)
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+        return int(raw)
+    return None
+
+
 def load_config_file(config_path: str) -> dict[str, Any]:
     """Load YAML or JSON config file."""
     path = Path(config_path)
@@ -375,6 +383,11 @@ def parse_bug_fix_config(
         evidence_checks=bool(advanced.get("evidence_checks", True)),
         post_resolution_check=bool(advanced.get("post_resolution_check", True)),
         blind_review=bool(advanced.get("blind_review", True)),
+        fused_resolution=bool(advanced.get("fused_resolution", False)),
+        fused_pre_red=bool(advanced.get("fused_pre_red", False)),
+        fused_compact_prompts=bool(advanced.get("fused_compact_prompts", False)),
+        tool_read_cap=advanced_int(advanced, "tool_read_cap"),
+        tool_bash_cap=advanced_int(advanced, "tool_bash_cap"),
         partial_success_skip_ratio=advanced_float(
             advanced, "partial_success_skip_ratio", 0.5, minimum=0.0, maximum=1.0
         ),

@@ -112,6 +112,10 @@ class ClaudeConfig:
     # When enabled, only a message whose entire content is XML tool blocks
     # is treated as an invocation.
     xml_tool_fallback: bool = False
+    # Optional per-agent overrides for tool output truncation. None keeps the
+    # context-length-derived defaults.
+    tool_read_cap: int | None = None
+    tool_bash_cap: int | None = None
 
     def __post_init__(self):
         if self.profile:

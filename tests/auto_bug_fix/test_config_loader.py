@@ -682,3 +682,35 @@ def test_parse_commit_mode_leaves_patch_empty():
     cfg, _, _ = parse_bug_fix_config(_fix_cfg({"commit": "abc123"}))
     assert cfg.fix_patch == ""
     assert cfg.source_fix_commit == "abc123"
+
+
+def test_fused_resolution_flag_defaults_off_and_parses():
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
+    assert cfg.fused_resolution is False
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({"fused_resolution": True}))
+    assert cfg.fused_resolution is True
+
+
+def test_fused_pre_red_flag_defaults_off_and_parses():
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
+    assert cfg.fused_pre_red is False
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({"fused_pre_red": True}))
+    assert cfg.fused_pre_red is True
+
+
+def test_fused_optimization_flags_parse():
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced(
+            {
+                "fused_compact_prompts": True,
+                "tool_read_cap": 12000,
+                "tool_bash_cap": 8000,
+            }
+        )
+    )
+    assert cfg.fused_compact_prompts is True
+    assert cfg.tool_read_cap == 12000
+    assert cfg.tool_bash_cap == 8000
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
+    assert cfg.fused_compact_prompts is False
+    assert cfg.tool_read_cap is None and cfg.tool_bash_cap is None

@@ -325,7 +325,10 @@ def test_test_port_skips_files_to_skip(tmp_path, monkeypatch):
     calls = _patch_test_port(monkeypatch, _empty_manifest)
     state = PipelineState()
     state.seed = ["tests/test_url.py"]
-    state.triage_assessment = {"files_to_skip": ["tests/test_url.py"]}
+    state.triage_assessment = {
+        "test_files": ["tests/test_url.py"],
+        "files_to_skip": ["tests/test_url.py"],
+    }
 
     result = phase_0_5c_test_port(
         _config(tmp_path, "abc123"), _claude_config(tmp_path), state, tracker=None
@@ -345,7 +348,10 @@ def test_test_port_reads_manifest_and_sets_state(tmp_path, monkeypatch):
     )
     state = PipelineState()
     state.seed = ["lib/url.c", "tests/test_url.py", "tests/test_other.py"]
-    state.triage_assessment = {"files_to_skip": ["tests/test_other.py"]}
+    state.triage_assessment = {
+        "test_files": ["tests/test_url.py", "tests/test_other.py"],
+        "files_to_skip": ["tests/test_other.py"],
+    }
     repo = tmp_path / "repo"
     repo.mkdir()
 
@@ -373,6 +379,7 @@ def test_test_port_uses_diff_range_for_merge_commit(tmp_path, monkeypatch):
     )
     state = PipelineState()
     state.seed = ["tests/test_url.py"]
+    state.triage_assessment = {"test_files": ["tests/test_url.py"]}
     repo = tmp_path / "repo"
     repo.mkdir()
 
@@ -387,6 +394,7 @@ def test_test_port_missing_manifest_leaves_state_empty(tmp_path, monkeypatch):
     _patch_test_port(monkeypatch, _empty_manifest)
     state = PipelineState()
     state.seed = ["tests/test_url.py"]
+    state.triage_assessment = {"test_files": ["tests/test_url.py"]}
     repo = tmp_path / "repo"
     repo.mkdir()
 

@@ -820,6 +820,8 @@ class LiteLLMAgentRunner(AgentRunner):
                 context_length=getattr(config, "context_length", None),
                 profile=getattr(config, "profile", None),
                 xml_tool_fallback=getattr(config, "xml_tool_fallback", False),
+                tool_read_cap=getattr(config, "tool_read_cap", None),
+                tool_bash_cap=getattr(config, "tool_bash_cap", None),
             )
             timing.name = step.name
 
@@ -856,6 +858,8 @@ class LiteLLMAgentRunner(AgentRunner):
         context_length: int | None = None,
         profile: ModelProfile | None = None,
         xml_tool_fallback: bool = False,
+        tool_read_cap: int | None = None,
+        tool_bash_cap: int | None = None,
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
 
@@ -878,6 +882,10 @@ class LiteLLMAgentRunner(AgentRunner):
         ctx_limit = _resolve_context_length(model, context_length)
         ctx_budget = int(ctx_limit * COMPACTION_THRESHOLD_PCT)
         read_cap, bash_cap = _tool_output_caps(ctx_limit)
+        if tool_read_cap is not None:
+            read_cap = tool_read_cap
+        if tool_bash_cap is not None:
+            bash_cap = tool_bash_cap
         log.info(
             "Context window: limit=%d, budget=%d (%.0f%%), "
             "tool caps read=%d bash=%d",
