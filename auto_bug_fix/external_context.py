@@ -41,11 +41,14 @@ The Markdown format is intentionally simple and human-writable::
     (unified diff or resolved content for the file)
     ```
 
-Only the existence, non-emptiness and the two structured sections
-("Suspect findings" bullets, "Resolved files" per-file fenced blocks)
-are machine-parsed; everything else is passed through verbatim to the
-prompts.  An absent, empty, or unparseable file disables the feature
-silently — the pipeline then behaves exactly as before.
+Only the three structured sections (``## Metadata``, ``## Suspect findings``
+and ``## Resolved files``) are machine-parsed and rendered.  Free-form
+commentary and unknown ``##`` sections are *not* injected into prompts;
+unknown section names are logged so a mis-formatted emitter is visible.
+An absent or empty file disables the feature silently, as does a non-empty
+file that contains none of the three recognized sections — the pipeline
+then behaves exactly as before.  Parse issues never raise: partially
+malformed files degrade to the sections that did parse.
 """
 
 from __future__ import annotations
@@ -53,17 +56,67 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
-_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+_HEADING_RES = {
+    2: re.compile(r"^##(?!#)\s+(.+?)\s*$"),
+    3: re.compile(r"^###(?!#)\s+(.+?)\s*$"),
+}
 _FINDING_RE = re.compile(r"^\s*-\s+(.+?)\s*$", re.MULTILINE)
-_FILE_HEADER_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
-_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+_FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
+_FENCE_CLOSE_RE = re.compile(r"^[ ]{0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
 _FINDING_TAG_RE = re.compile(
     r"^\[(strong|advisory)\]\[([a-z_]+)\]\[(observed|inferred)/(high|medium|low)\]\s+(.*)$"
 )
+
+
+def _iter_lines(text: str) -> Iterator[tuple[int, str, str]]:
+    """Yield ``(offset, line_without_eol, raw_line)`` for every line."""
+    offset = 0
+    for raw_line in text.splitlines(keepends=True):
+        yield offset, raw_line.rstrip("\r\n"), raw_line
+        offset += len(raw_line)
+
+
+def _opening_fence(line: str) -> str | None:
+    """Return the opening fence run (e.g. ``` or ````), or None."""
+    m = _FENCE_OPEN_RE.match(line)
+    return m.group("marker") if m else None
+
+
+def _is_closing_fence(line: str, marker: str) -> bool:
+    """True when *line* closes a block opened with *marker*."""
+    m = _FENCE_CLOSE_RE.match(line)
+    if not m:
+        return False
+    run = m.group("marker")
+    return run[0] == marker[0] and len(run) >= len(marker)
+
+
+def _iter_headings(text: str, level: int) -> Iterator[tuple[str, int, int]]:
+    """Yield ``(title, heading_start, content_start)`` outside fenced blocks.
+
+    Markdown headings inside a fenced diff/content block are data, not
+    structure.  Fence markers are tracked by character and run length, so a
+    longer outer fence can safely contain shorter fences.
+    """
+    pattern = _HEADING_RES[level]
+    marker: str | None = None
+    for offset, line, raw_line in _iter_lines(text):
+        if marker is not None:
+            if _is_closing_fence(line, marker):
+                marker = None
+            continue
+        opening = _opening_fence(line)
+        if opening is not None:
+            marker = opening
+            continue
+        m = pattern.match(line)
+        if m:
+            yield m.group(1).strip(), offset, offset + len(raw_line)
 
 
 def _without_fenced_blocks(text: str) -> str:
@@ -75,17 +128,17 @@ def _without_fenced_blocks(text: str) -> str:
     it).
     """
     out: list[str] = []
-    pos = 0
-    while True:
-        start = text.find("```", pos)
-        if start < 0:
-            out.append(text[pos:])
-            return "".join(out)
-        out.append(text[pos:start])
-        end = text.find("```", start + 3)
-        if end < 0:
-            return "".join(out)
-        pos = end + 3
+    marker: str | None = None
+    for _, line, raw_line in _iter_lines(text):
+        if marker is None:
+            opening = _opening_fence(line)
+            if opening is not None:
+                marker = opening
+            else:
+                out.append(raw_line)
+        elif _is_closing_fence(line, marker):
+            marker = None
+    return "".join(out)
 
 
 @dataclass
@@ -115,6 +168,7 @@ class ExternalContext:
     """
 
     source_path: str = ""
+    # Retained for diagnostics only; the raw file text is never rendered.
     raw: str = ""
     metadata: dict[str, str] = field(default_factory=dict)
     findings: list[str] = field(default_factory=list)
@@ -125,12 +179,17 @@ class ExternalContext:
     findings_status: str = "unavailable"
     # file path -> extracted fenced block (resolved content/patch)
     resolved_files: dict[str, str] = field(default_factory=dict)
+    # Lower-cased names of the recognized structured sections that were
+    # present.  Free-form prose and unknown sections do not activate the
+    # strategy object (they are not injected, so activating on them would
+    # only add a false "a prior resolver ran" claim).
+    found_sections: set[str] = field(default_factory=set)
     parse_errors: list[str] = field(default_factory=list)
 
     @property
     def active(self) -> bool:
-        """True when any usable content was loaded."""
-        return bool(self.raw.strip())
+        """True when the file carried at least one recognized section."""
+        return bool(self.raw.strip()) and bool(self.found_sections)
 
     @property
     def has_findings(self) -> bool:
@@ -346,13 +405,16 @@ class ExternalContext:
 
 
 def _split_sections(raw: str) -> dict[str, str]:
-    """Split the Markdown into its ``##`` sections."""
+    """Split the Markdown into its top-level ``##`` sections.
+
+    Headings inside fenced blocks (e.g. a resolved file that itself contains
+    Markdown headings) are content, not section boundaries.
+    """
     sections: dict[str, str] = {}
-    matches = list(_SECTION_RE.finditer(raw))
-    for i, m in enumerate(matches):
-        start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
-        sections[m.group(1).strip().lower()] = raw[start:end].strip()
+    headings = list(_iter_headings(raw, 2))
+    for i, (title, _, content_start) in enumerate(headings):
+        end = headings[i + 1][1] if i + 1 < len(headings) else len(raw)
+        sections[title.lower()] = raw[content_start:end].strip()
     return sections
 
 
@@ -398,25 +460,58 @@ def _parse_finding_details(raw_findings: list[str]) -> list[FindingDetail]:
     return details
 
 
+def _extract_fenced_block(text: str) -> tuple[str | None, str | None]:
+    """Extract the first fenced block from a resolved file's body.
+
+    Returns ``(content, problem)``.  The closing fence is the last closing
+    candidate that leaves only whitespace before the end of the body, so a
+    resolved patch/content that itself contains fenced Markdown is kept
+    intact instead of being truncated at its first inner triple-backtick
+    line.  Missing or ambiguous closing fences are reported, never silently
+    truncated.
+    """
+    marker: str | None = None
+    content_start: int | None = None
+    candidates: list[tuple[int, int]] = []
+    for offset, line, raw_line in _iter_lines(text):
+        if marker is None:
+            opening = _opening_fence(line)
+            if opening is not None:
+                marker = opening
+                content_start = offset + len(raw_line)
+            continue
+        if _is_closing_fence(line, marker):
+            candidates.append((offset, offset + len(raw_line)))
+    if marker is None:
+        return None, None
+    if content_start is None:
+        return None, "missing opening fence"
+    for start, end in reversed(candidates):
+        if not text[end:].strip():
+            return text[content_start:start], None
+    return None, "unclosed fenced block"
+
+
 def _parse_resolved_files(section: str) -> tuple[dict[str, str], list[str]]:
     """Parse ``### <path>`` headers each followed by a fenced block.
 
-    Returns the parsed files and any parse errors.  An unclosed fence is
-    reported explicitly instead of silently dropping the file.
+    Headers inside fenced content are ignored.  Returns the parsed files and
+    any parse errors; a missing or unclosed fence is reported explicitly
+    instead of silently dropping or truncating the file.
     """
     resolved: dict[str, str] = {}
     errors: list[str] = []
-    headers = list(_FILE_HEADER_RE.finditer(section))
-    for i, h in enumerate(headers):
-        start = h.end()
-        end = headers[i + 1].start() if i + 1 < len(headers) else len(section)
-        body = section[start:end]
-        fence = _FENCE_RE.search(body)
-        path = h.group(1).strip()
-        if fence and path:
-            resolved[path] = fence.group(1).rstrip("\n")
-        elif path and "```" in body:
-            errors.append(f"unclosed fenced block for {path!r} in '## Resolved files'")
+    headers = list(_iter_headings(section, 3))
+    for i, (path, _, content_start) in enumerate(headers):
+        end = headers[i + 1][1] if i + 1 < len(headers) else len(section)
+        body = section[content_start:end]
+        content, problem = _extract_fenced_block(body)
+        if content is not None:
+            resolved[path] = content.rstrip("\n")
+        elif problem:
+            errors.append(f"{problem} for {path!r} in '## Resolved files'")
+        else:
+            errors.append(f"missing fenced block for {path!r} in '## Resolved files'")
     return resolved, errors
 
 
@@ -424,8 +519,9 @@ def load_external_context(path: str | None) -> ExternalContext:
     """Load and parse an external-context Markdown file.
 
     Returns an empty (inactive) :class:`ExternalContext` when *path* is
-    falsy, the file is missing, or it is empty.  Parse issues never raise:
-    they are recorded in ``parse_errors`` and the affected section is
+    falsy, the file is missing, or it is empty.  A non-empty file with none
+    of the three recognized sections is also inactive.  Parse issues never
+    raise: they are recorded in ``parse_errors`` and the affected section is
     skipped, so a malformed context file can only degrade to "no context",
     never break a run.
     """
@@ -444,7 +540,9 @@ def load_external_context(path: str | None) -> ExternalContext:
         return ctx
 
     sections = _split_sections(raw)
-    unknown = set(sections) - {"metadata", "suspect findings", "resolved files"}
+    known_sections = {"metadata", "suspect findings", "resolved files"}
+    ctx.found_sections = set(sections) & known_sections
+    unknown = set(sections) - known_sections
     if unknown:
         ctx.parse_errors.append(
             "unknown sections ignored: " + ", ".join(sorted(unknown))
@@ -477,9 +575,10 @@ def load_external_context(path: str | None) -> ExternalContext:
         )
         ctx.parse_errors.extend(resolved_errors)
 
-    # A context with neither findings nor resolutions is still useful as
-    # raw context, but note it so operators can spot a mis-formatted file.
-    if not ctx.findings and not ctx.resolved_files and not ctx.metadata:
+    # A file with no recognized section contributes nothing to any prompt,
+    # so it stays inactive.  Note it so operators can spot a mis-formatted
+    # file instead of silently losing the context.
+    if not ctx.found_sections:
         ctx.parse_errors.append(
             "no recognizable sections (expected '## Metadata', "
             "'## Suspect findings', '## Resolved files')"

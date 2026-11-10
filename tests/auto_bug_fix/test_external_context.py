@@ -114,14 +114,18 @@ class TestLoadExternalContext:
         assert ctx.findings == ["a.c:1: bad symbol"]
         assert ctx.resolved_files == {}
 
-    def test_malformed_file_degrades_not_raises(self):
+    def test_unparseable_file_is_inactive_not_raising(self):
         path = _write_md("# nothing recognizable\njust prose\n")
         try:
             ctx = load_external_context(path)
         finally:
             os.unlink(path)
-        assert ctx.active  # raw text is still usable context
-        assert ctx.parse_errors  # but the operator is warned
+        # Nothing would be rendered, so activating would only add a false
+        # "a prior resolver ran" claim.  The operator is still warned.
+        assert not ctx.active
+        assert ctx.parse_errors
+        assert ctx.render_triage_section() == ""
+        assert ctx.render_resolution_section() == ""
 
     def test_default_context_is_empty_strategy(self):
         ctx = ExternalContext()
@@ -167,6 +171,63 @@ class TestParserRobustness:
             os.unlink(path)
         assert "a.c" not in ctx.resolved_files
         assert any("unclosed fenced block" in e for e in ctx.parse_errors)
+
+    def test_headings_inside_fenced_content_are_not_structure(self):
+        path = _write_md(
+            "## Metadata\n- resolver: synthmerge\n- checker: check-backport.py\n\n"
+            "## Resolved files\n\n"
+            "### docs/README.md\n"
+            "```markdown\n"
+            "# Title\n"
+            "## Not a section\n"
+            "### not/a/file.c\n"
+            "text\n"
+            "```\n\n"
+            "### real.c\n"
+            "```diff\n"
+            "+real\n"
+            "```\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert set(ctx.resolved_files) == {"docs/README.md", "real.c"}
+        content = ctx.resolved_files["docs/README.md"]
+        assert "## Not a section" in content
+        assert "### not/a/file.c" in content
+        assert ctx.resolved_files["real.c"] == "+real"
+        assert not any("unknown sections" in e for e in ctx.parse_errors)
+
+    def test_nested_fence_in_resolved_content_is_preserved(self):
+        path = _write_md(
+            "## Resolved files\n\n"
+            "### docs/README.md\n"
+            "```markdown\n"
+            "Before\n"
+            "```python\n"
+            "print('hi')\n"
+            "```\n"
+            "After\n"
+            "```\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        content = ctx.resolved_files["docs/README.md"]
+        assert "```python" in content
+        assert "print('hi')" in content
+        assert content.rstrip().endswith("After")
+
+    def test_missing_fence_is_reported(self):
+        path = _write_md("## Resolved files\n\n### a.c\nno fenced content\n")
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert "a.c" not in ctx.resolved_files
+        assert any("missing fenced block" in e for e in ctx.parse_errors)
 
 
 class TestSectionRenderers:
@@ -278,9 +339,12 @@ class TestSectionRenderers:
             ctx = load_external_context(path)
         finally:
             os.unlink(path)
+        # No recognized section: the feature stays off, so no prompt gets a
+        # prior-resolver claim or an "unavailable" finding block.
+        assert not ctx.active
         assert ctx.findings_status == "unavailable"
-        assert "all deterministic checks passed" not in ctx.render_resolution_section()
-        assert "unavailable" in ctx.render_review_section()
+        assert ctx.render_resolution_section() == ""
+        assert ctx.render_review_section() == ""
 
 
 class TestPromptInjection:

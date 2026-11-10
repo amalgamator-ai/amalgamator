@@ -45,16 +45,27 @@ Loading is fail-safe in one direction only:
 - key absent → feature off, pipeline identical to before;
 - file missing or non-string path → `ConfigError` at load time (the user
   explicitly asked for context; a typo must not silently disable it);
-- file present but empty or partially malformed → feature degrades to
-  whatever sections parsed; parse issues are logged, never raised.
+- file present but empty, or with none of the three recognized sections →
+  feature off, pipeline identical to before (a warning is logged);
+- file present and partially malformed → feature degrades to whatever
+  sections parsed; parse issues are logged, never raised.
 
 ## The Markdown contract (what the emitter must know)
 
-Only three sections are machine-parsed — `## Metadata` (key: value
-bullets), `## Suspect findings` (one bullet per finding, `path:line:
+Only three sections are machine-parsed and rendered — `## Metadata` (key:
+value bullets), `## Suspect findings` (one bullet per finding, `path:line:
 reason` preferred), `## Resolved files` (`### <path>` headers each
-followed by a fenced diff block). Everything else is passed through
-verbatim.
+followed by a fenced diff block). Free-form commentary and other `##`
+sections are **not** injected into prompts; unknown section names are
+logged so a mis-formatted emitter is visible. The raw file text is
+retained for diagnostics only and is never rendered.
+
+Headings inside fenced blocks are content, not structure. If a resolved
+file's content itself contains a fenced block, wrap it in a longer outer
+fence (for example four backticks around a block containing three) so the
+inner fence cannot terminate the section; the parser also prefers the last
+closing fence in a file body and reports an ambiguous/unclosed block
+instead of silently truncating it.
 
 Rules that bit us, now part of the contract:
 

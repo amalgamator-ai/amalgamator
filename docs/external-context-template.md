@@ -7,7 +7,11 @@ external_context_file: <this-file>.md
 ```
 
 Only `## Metadata`, `## Suspect findings` and `## Resolved files` are
-machine-parsed; everything else is commentary passed through verbatim.
+machine-parsed and rendered. Free-form commentary and other `##` sections
+are not injected into prompts (unknown section names are logged); a file
+with none of the three sections is treated as no context. If a resolved
+file's content itself contains a fenced block, wrap it in a longer outer
+fence (four backticks around a block containing three).
 
 Rules (see `docs/external-context.md` for the full contract):
 
