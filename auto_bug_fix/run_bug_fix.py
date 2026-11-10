@@ -73,6 +73,7 @@ def _phase_config(
         thinking=thinking,
         effort=effort or claude_config.effort,
         profile=effective_profile,
+        xml_tool_fallback=claude_config.xml_tool_fallback,
     )
 
 

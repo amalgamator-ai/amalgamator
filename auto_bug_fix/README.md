@@ -343,6 +343,7 @@ credentials.
 | `api_base`, `api_key`, `api_key_file`, `model_params` | Unset | Legacy inline model settings; see the selection rules above |
 | `claude.allowed_tools` | `[Read, Write, Bash]` | Tools available to the agents |
 | `claude.perm_mode` | `acceptEdits` | Agent permission mode |
+| `claude.xml_tool_fallback` | `false` | Provider compatibility mode: accept a message whose entire content is Claude-style XML tool blocks when the endpoint emits them as text instead of structured `tool_calls`. Malformed blocks are reported back as errors; nothing from them executes. Off by default — quoted examples stay text |
 
 Repository paths support `~` and environment-variable expansion. Use absolute
 repository/workdir paths to make cases independent of the invocation directory;
