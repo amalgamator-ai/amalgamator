@@ -188,7 +188,7 @@ runs/case_20260929_153000/
     └── <issue>_<ts>.json        # machine-readable tracker (gates, phases, outcome)
 ```
 
-The ported commits are also preserved as a branch in the worktree's repo, named `amalgamator/<issue-id>` (or `amalgamator/<commit>-to-<target>` when `issue_id` is empty), so the result survives worktree cleanup and can be pushed or cherry-picked from directly.
+The ported commits are also preserved as a branch in the worktree's repo, named `amalgamator/<issue-id>` (or `amalgamator/<commit>-to-<target>` when `issue_id` is empty), for `success`, `partial_success`, and `unverified` outcomes, so the result survives worktree cleanup and can be pushed or cherry-picked from directly.
 
 ---
 
@@ -434,6 +434,7 @@ Per-target override keys: `issue_id`, `bug_description`, `build_command`, `test_
 |---|---|
 | `success` (exit 0) | Fix ported, verified, dossier written |
 | `partial_success` (exit 1) | Non-bugfix port finished and builds, but dropped a large share of the fix's files or lost prerequisites — see the dossier's "Partial backport" section. Never fires for bug fix commits. |
+| `unverified` (exit 1) | Resolution failed and the tree was force-resolved with `--theirs` (or re-applied cleanly), but no build/test commands were available to verify it. Commits are preserved on `amalgamator/<issue-id>` for human review; see the dossier's "Unverified force-resolved port" and "Verification unavailable" sections. |
 | `PIPELINE STOP` | A gate decided no backport is needed (fix already present, or target not vulnerable) — this is a *good* outcome, documented in the dossier |
 | `PIPELINE ESCALATION` | The pipeline could not finish safely and handed off (Phase 4b) or stopped with a partial, force-resolved state for a human |
 | `PIPELINE ERROR` | Unexpected failure; see `run_log.txt` |
