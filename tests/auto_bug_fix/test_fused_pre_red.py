@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.claude_utils import BugFixClaudeConfig
@@ -136,8 +136,10 @@ def test_fused_pre_red_reads_result_and_commits_session(mock_claude, tmp_path):
             ],
         )
         (run_dir / "fused_pre_red_report.md").write_text("# report\n")
-        # A test port commit the session made itself.
+        # A test port commit the session made itself, with force-added scratch.
         (Path(rp) / "base_test.c").write_text("int t;\n")
+        (Path(rp) / ".gocache").mkdir()
+        (Path(rp) / ".gocache" / "x").write_text("cache\n")
         _git(rp, "add", "-A")
         _git(rp, "commit", "-m", "test-port: TEST-1")
         return []
@@ -162,6 +164,7 @@ def test_fused_pre_red_reads_result_and_commits_session(mock_claude, tmp_path):
     assert "pre_red_result.json" not in tracked
     assert "fused_pre_red_report.md" not in tracked
     assert "base_test.c" in tracked
+    assert ".gocache/x" not in tracked
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")
@@ -346,6 +349,7 @@ def test_strip_session_scratch_drops_test_output_keeps_fix_files(tmp_path):
 
     dropped = _strip_session_scratch(rp, base, keep={"expected.diffs"})
 
+    assert dropped is not None
     assert set(dropped) == {
         "regression.diffs",
         "contrib/fuzzystrmatch/regression.out",
@@ -358,6 +362,47 @@ def test_strip_session_scratch_drops_test_output_keeps_fix_files(tmp_path):
         text=True,
     ).stdout.splitlines()
     assert files == ["expected.diffs"]
+
+
+def _scratch_commit(rp):
+    (Path(rp) / ".gocache").mkdir()
+    (Path(rp) / ".gocache" / "x").write_text("cache\n")
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "session")
+
+
+def test_strip_session_scratch_fails_closed_on_reset_error(tmp_path):
+    from auto_bug_fix import run_bug_fix as rbf
+
+    rp, _fix = _repo(tmp_path)
+    base = _sha(rp)
+    _scratch_commit(rp)
+    real = rbf._run_git
+
+    def fake(repo, args, **kwargs):
+        if list(args[:2]) == ["reset", "--soft"]:
+            return MagicMock(success=False, stderr="boom", stdout="")
+        return real(repo, args, **kwargs)
+
+    with patch.object(rbf, "_run_git", side_effect=fake):
+        assert rbf._strip_session_scratch(rp, base) is None
+
+
+def test_strip_session_scratch_fails_closed_on_commit_error(tmp_path):
+    from auto_bug_fix import run_bug_fix as rbf
+
+    rp, _fix = _repo(tmp_path)
+    base = _sha(rp)
+    _scratch_commit(rp)
+    real = rbf._run_git
+
+    def fake(repo, args, **kwargs):
+        if list(args[:2]) == ["commit", "--no-verify"]:
+            return MagicMock(success=False, stderr="boom", stdout="")
+        return real(repo, args, **kwargs)
+
+    with patch.object(rbf, "_run_git", side_effect=fake):
+        assert rbf._strip_session_scratch(rp, base) is None
 
 
 def test_pre_red_facts_classify_paths(tmp_path):

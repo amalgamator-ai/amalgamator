@@ -589,8 +589,8 @@ def test_evidence_false_blind_review_true_still_runs_3a2(mock_claude, tmp_path):
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")
-def test_fused_resolution_uses_one_prompt_and_skips_reviews(mock_claude, tmp_path):
-    """Fused mode resolves in one session; 3a.1/3a.2 are not run separately."""
+def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(mock_claude, tmp_path):
+    """Fused mode resolves in one session; 3a.1 is skipped, 3a.2 still runs."""
     diverged = BASE.replace("    int c = 3;", "    int c = 99;")
     rp, fix_sha, path = _build_repo(tmp_path, diverged)
     config = _make_config(rp, fix_sha)
@@ -632,7 +632,7 @@ def test_fused_resolution_uses_one_prompt_and_skips_reviews(mock_claude, tmp_pat
     )
 
     assert result == "resolved"
-    assert len(seen_prompts) == 1
+    assert len(seen_prompts) == 2  # resolution session + triage-blind review
     prompt = seen_prompts[0]
     assert "Backport Resolution Agent" in prompt
     assert "A. RESOLVE" in prompt and "F. COMMIT" in prompt
@@ -642,7 +642,8 @@ def test_fused_resolution_uses_one_prompt_and_skips_reviews(mock_claude, tmp_pat
     assert "Stay on the detached HEAD" in prompt  # never move the target branch
     assert "fused_resolution_report.md" in prompt
     assert not any("Post-Resolution Verification Agent" in p for p in seen_prompts)
-    assert not any("Independent Review Agent" in p for p in seen_prompts)
+    # The independent read survives fused mode: 3a.2 runs on the clean diff.
+    assert any("Independent Review Agent" in p for p in seen_prompts)
     assert state.fused_resolution_ran is True
 
 
@@ -727,6 +728,7 @@ def test_fused_commit_scratch_is_stripped(mock_claude, tmp_path):
     rp, fix_sha, path = _build_repo(tmp_path, diverged)
     config = _make_config(rp, fix_sha)
     config.fused_resolution = True
+    config.blind_review = False  # keep the test on the session's own commit
     state = _make_state()
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -765,3 +767,39 @@ def test_fused_commit_scratch_is_stripped(mock_claude, tmp_path):
     ).stdout.splitlines()
     assert "base.c" in files
     assert not any(f.startswith(".gocache") for f in files)
+
+
+def test_fused_semantic_check_accepts_a_related_result(tmp_path):
+    from auto_bug_fix.run_bug_fix import _fused_resolution_unmatched
+
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    base_head = _sha(rp)
+    path.write_text(diverged.replace("    int c = 99;", "    int c = 30; /* fixed */"))
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "backport")
+
+    assert (
+        _fused_resolution_unmatched(
+            _make_config(rp, fix_sha), _make_state(), fix_sha, base_head
+        )
+        is False
+    )
+
+
+def test_fused_semantic_check_rejects_an_unrelated_result(tmp_path):
+    from auto_bug_fix.run_bug_fix import _fused_resolution_unmatched
+
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    base_head = _sha(rp)
+    path.write_text(diverged.replace("    int d = 4;", "    int d = 40;"))
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "unrelated rewrite")
+
+    assert (
+        _fused_resolution_unmatched(
+            _make_config(rp, fix_sha), _make_state(), fix_sha, base_head
+        )
+        is True
+    )

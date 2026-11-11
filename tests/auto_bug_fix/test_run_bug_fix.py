@@ -19,9 +19,11 @@ from auto_bug_fix.run_bug_fix import (
     PipelineEscalation,
     PipelineState,
     PipelineStop,
+    _planned_test_files,
     _resolve_lint_command,
     _run_build_and_test,
     _sanitize_branch_slug,
+    identify_test_files,
     run_targets,
 )
 
@@ -1955,6 +1957,33 @@ def test_validate_shell_command_rejects_composed_commands():
     assert _validate_shell_command("") is False
 
 
+def test_validate_shell_command_bounds_export_substitutions():
+    from auto_bug_fix.run_bug_fix import _validate_shell_command
+
+    # Path helpers in an export value are accepted...
+    assert _validate_shell_command("export X=$(pwd); make test") is True
+    assert _validate_shell_command("export X=$(mktemp -d); make test") is True
+    assert (
+        _validate_shell_command('export X=$(dirname "$PWD")/.cache; make test') is True
+    )
+    assert _validate_shell_command('export X="a;b"; make test') is True
+    # ...arbitrary command substitution is not.
+    assert _validate_shell_command("export X=$(rm -rf cache); make test") is False
+    assert _validate_shell_command("export X=$(cat /etc/passwd); make test") is False
+    assert _validate_shell_command("export X=$(sh -c 'id'); make test") is False
+    assert _validate_shell_command("export X=$(pwd)$(id); make test") is False
+
+
+def test_validate_shell_command_handles_escapes():
+    from auto_bug_fix.run_bug_fix import _validate_shell_command
+
+    # An escaped quote is text, not a delimiter, and an escaped `#` is not a
+    # comment; both must parse the way the shell does.
+    assert _validate_shell_command('echo "a\\"b;c"') is True
+    assert _validate_shell_command("echo foo\\#bar") is True
+    assert _validate_shell_command("echo hi\\; rm -rf /") is True
+
+
 # --- deterministic formatter repair ---
 
 
@@ -2031,3 +2060,103 @@ def test_formatter_repair_ignores_non_formatter_failure(tmp_path):
     state = PipelineState()
     failure = {"cmd": "go vet ./...", "output": "vet error"}
     assert _repair_known_formatter_failures(config, [failure], state) == [failure]
+
+
+def test_identify_test_files_go():
+    files = [
+        "pkg/controller/replicaset/replica_set.go",
+        "pkg/controller/replicaset/replica_set_test.go",
+        "pkg/controller/controller_utils.go",
+        "pkg/controller/controller_utils_test.go",
+    ]
+    result = identify_test_files(files)
+    assert "pkg/controller/replicaset/replica_set_test.go" in result
+    assert "pkg/controller/controller_utils_test.go" in result
+    assert "pkg/controller/replicaset/replica_set.go" not in result
+    assert len(result) == 2
+
+
+def test_identify_test_files_python():
+    files = ["src/main.py", "tests/test_main.py", "tests/conftest.py", "src/utils.py"]
+    result = identify_test_files(files)
+    assert "tests/test_main.py" in result
+    assert "tests/conftest.py" in result
+    assert "src/main.py" not in result
+
+
+def test_identify_test_files_none():
+    assert identify_test_files(["lib/url.c", "lib/parser.c", "include/header.h"]) == []
+
+
+def test_identify_test_files_spec():
+    result = identify_test_files(["app/models/user.rb", "spec/models/user_spec.rb"])
+    assert result == ["spec/models/user_spec.rb"]
+
+
+def test_identify_test_files_no_false_positives():
+    files = ["latest/foo.c", "contest.md", "lib/attestation.go", "pkg/protesting.h"]
+    assert identify_test_files(files) == []
+
+
+def test_planned_test_files_keeps_deterministic_floor():
+    """An empty triage list must not disable the test port in legacy mode."""
+    state = PipelineState()
+    state.seed = ["src/main.py", "tests/test_main.py", "src/utils.py"]
+    state.triage_assessment = {"test_files": [], "files_to_skip": []}
+    assert _planned_test_files(state) == ["tests/test_main.py"]
+
+
+def test_planned_test_files_unions_triage_and_patterns():
+    state = PipelineState()
+    state.seed = ["golden/expected.out", "tests/test_main.py", "src/x.c"]
+    # Triage can name a seed file the naming patterns miss...
+    state.triage_assessment = {"test_files": ["golden/expected.out"]}
+    assert _planned_test_files(state) == [
+        "golden/expected.out",
+        "tests/test_main.py",
+    ]
+    # ...but it cannot widen the port beyond files the fix touches.
+    state.triage_assessment = {"test_files": ["other/test_extra.py"]}
+    assert _planned_test_files(state) == ["tests/test_main.py"]
+
+
+def test_planned_test_files_applies_files_to_skip():
+    state = PipelineState()
+    state.seed = ["tests/test_main.py", "tests/test_slow.py"]
+    state.triage_assessment = {
+        "test_files": [],
+        "files_to_skip": ["tests/test_slow.py"],
+    }
+    assert _planned_test_files(state) == ["tests/test_main.py"]
+
+
+def test_formatter_repair_reverts_edits_outside_the_backport(tmp_path):
+    from auto_bug_fix.run_bug_fix import _revert_formatter_collateral
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.name", "t")
+    git("config", "user.email", "t@t")
+    (repo / "gone.c").write_text("int gone;\n")
+    (repo / "unrelated.c").write_text("int u;\n")
+    git("add", ".")
+    git("commit", "-m", "base")
+    git("branch", "target")
+    git("checkout", "-q", "--detach", "target")
+    (repo / "gone.c").write_text("int gone = 1;\n")
+    git("add", ".")
+    git("commit", "-m", "backport")
+    # The formatter rewrote an unrelated, pre-existing file.
+    (repo / "unrelated.c").write_text("int u = 2;\n")
+
+    config = _make_config(repo_path=str(repo), target_branch="target")
+    collateral = _revert_formatter_collateral(config, dirty_before=set())
+
+    assert collateral == ["unrelated.c"]
+    assert (repo / "unrelated.c").read_text() == "int u;\n"
+    assert (repo / "gone.c").read_text() == "int gone = 1;\n"

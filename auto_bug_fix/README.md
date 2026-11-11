@@ -82,24 +82,39 @@ discarded and the three separate phases run instead.
 
 ### Fused resolution (one agent session)
 
-`advanced.fused_resolution: true` replaces the per-chunk conflict resolver, the
-Phase 3a.1/3a.2 review calls, and Phase 3b regeneration with a **single agent
-session**: one prompt resolves every conflict, completes the backport, builds
-and tests, runs regeneration commands, performs the post-resolution and
-independent review passes, and commits. It is intended for large fixes whose
-backport is not a mechanical cherry-pick, where repeated context loading and
-per-chunk prompts dominate the cost.
+`advanced.fused_resolution: true` replaces the per-chunk conflict resolver,
+Phase 3a.1, and Phase 3b regeneration with a **single agent session**: one
+prompt resolves every conflict, completes the backport, builds and tests, runs
+regeneration commands, performs the post-resolution pass and commits. The
+triage-blind review (`blind_review`, default on) still runs afterwards, from
+the same clean diff, restoring the independent read of the result. It is
+intended for large fixes whose backport is not a mechanical cherry-pick, where
+repeated context loading and per-chunk prompts dominate the cost.
 
 The deterministic setup and gates are unchanged: cherry-pick strategies and
 `files_to_skip` reverts still run before the session; after it, the pipeline
 requires a commit, no remaining conflicts or conflict markers, folds leftover
-edits into that commit, and strips build scratch. Phase 4 verification, Phase
-4.5 range-diff, and Phase 5 completeness still run. A session that leaves
-conflicts falls back to the historical per-chunk resolver, which keeps the
-mechanical rungs, snap-back and evidence post-passes; Phase 4 remains the
-authority on build/test. Because both review passes share the resolver's
-context, they are a self-review rather than a blind review; compare against
-the default mode before enabling it by default.
+edits into that commit, and strips build scratch (a strip failure falls back).
+A range-diff relatedness check rejects a result that shares nothing with the
+fix, and such a result falls back to the per-chunk resolver like any other
+gate failure. Phase 4 verification, Phase 4.5 range-diff, and Phase 5
+completeness still run.
+
+What fused resolution does **not** run: the per-chunk resolver and its retry
+loop, the substitution-mining / rename-restoration / snap-back post-passes, the
+token / line-provenance / dead-config audits, the evidence-fed verification
+agent (3a.1), and Phase 3b's HEAD-capture rollback point. Regeneration commands
+run in-session without a timeout or rollback, so a codegen that half-writes
+files and exits 0 is caught only if it breaks the build or Phase 4.1 checks.
+The dossier records this evidence scope, `summary.json` carries
+`resolution_mode`, and the outcome line says `success (fused resolution,
+self-reviewed)`.
+
+Prerequisite ports in fused pre-RED are bounded to the prompt's candidate list
+and are not passed through the per-chunk resolver, post-passes, or audits; they
+are checked by the same commit-prefix, carried-prerequisite and Phase 4 gates.
+Keep `fused_resolution` off when those nets matter more than cost, and compare
+against the default mode before enabling it by default.
 
 ### Fused prompt and resolution optimizations
 

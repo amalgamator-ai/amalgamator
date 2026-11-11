@@ -303,16 +303,45 @@ _DANGEROUS_SHELL_PATTERNS = (";", "&&", "||", "|", "`", "$(", "${", ">", "<", "\
 # actually runs is still held to the full list above.
 _EXPORT_SEGMENT_RE = re.compile(r"^\s*export\s+[A-Za-z_][A-Za-z0-9_]*=")
 _EXPORT_FORBIDDEN = ("`", "\n", ">", "<", "|", "&&", "||")
+# Command substitution in an export value is executed by the pipeline (Phase
+# 4.1), outside the session, so only path-helper shapes are accepted.
+_EXPORT_SUBST_RE = re.compile(r"\$\(([^()]*)\)")
+_EXPORT_SUBST_ALLOWED_RE = re.compile(
+    r"^(?:pwd|mktemp\s+-d(?:\s+\S+)*|dirname\s+\S.*)$"
+)
+
+
+def _export_substitution_ok(segment: str) -> bool:
+    """True when every ``$(...)`` in an export segment is an allowed shape."""
+    if "`" in segment:
+        return False
+    remainder = _EXPORT_SUBST_RE.sub("", segment)
+    if "$(" in remainder:
+        return False
+    return all(
+        _EXPORT_SUBST_ALLOWED_RE.match(inner.strip())
+        for inner in _EXPORT_SUBST_RE.findall(segment)
+    )
+
 
 _BUGFIX_TYPES = ("bugfix", "bug-fix", "bug_fix", "fix", "security")
 
 
 def _split_shell_segments(cmd: str) -> list[str]:
-    """Split on top-level semicolons, ignoring quoted text."""
+    """Split on top-level semicolons, ignoring quoted and escaped text."""
     segments: list[str] = []
     current: list[str] = []
     single = double = False
+    escaped = False
     for ch in cmd:
+        if escaped:
+            current.append(ch)
+            escaped = False
+            continue
+        if ch == "\\" and not single:
+            current.append(ch)
+            escaped = True
+            continue
         if ch == "'" and not double:
             single = not single
         elif ch == '"' and not single:
@@ -330,7 +359,14 @@ def _outside_quotes(text: str) -> str:
     """Drop quoted spans so literal `|`/`>` in arguments are not read as syntax."""
     out: list[str] = []
     single = double = False
+    escaped = False
     for ch in text:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and not single:
+            escaped = True
+            continue
         if ch == "'" and not double:
             single = not single
             continue
@@ -345,8 +381,17 @@ def _outside_quotes(text: str) -> str:
 def _strip_shell_comment(cmd: str) -> str:
     """Drop a trailing unquoted shell comment (``# annotation``)."""
     single = double = False
+    escaped = False
     previous = " "
     for index, ch in enumerate(cmd):
+        if escaped:
+            escaped = False
+            previous = ch
+            continue
+        if ch == "\\" and not single:
+            escaped = True
+            previous = ch
+            continue
         if ch == "'" and not double:
             single = not single
         elif ch == '"' and not single:
@@ -361,9 +406,10 @@ def _validate_shell_command(cmd: str) -> bool:
     """Accept one shell command; a leading ``export NAME=...`` prefix is allowed.
 
     Project commands carry their own environment (PATH, caches), so export
-    values may use ``$VAR``/``${VAR}``/``$(...)``; the final command must be
-    free of every dangerous pattern. Substitution in an export runs a subshell
-    but cannot add a second top-level command.
+    values may use ``$VAR``/``${VAR}`` and path-helper substitutions
+    (``$(pwd)``, ``$(dirname ...)``, ``$(mktemp -d)``); the final command must
+    be free of every dangerous pattern. Other substitutions in an export run
+    arbitrary code in the pipeline's name, so they are rejected.
     """
     if not isinstance(cmd, str):
         return False
@@ -376,6 +422,8 @@ def _validate_shell_command(cmd: str) -> bool:
         if not _EXPORT_SEGMENT_RE.match(segment):
             return False
         if any(p in segment for p in _EXPORT_FORBIDDEN):
+            return False
+        if not _export_substitution_ok(segment):
             return False
     if not final.strip():
         return False
@@ -840,14 +888,10 @@ def phase_0_5c_test_port(
     state: PipelineState,
     tracker,
 ) -> list[str]:
-    """Port the test files the triage identified to the target branch."""
-    files_to_skip = set(state.triage_assessment.get("files_to_skip", []))
-    raw_tests = state.triage_assessment.get("test_files", [])
-    test_files = [
-        str(f) for f in raw_tests if isinstance(f, str) and str(f) not in files_to_skip
-    ]
+    """Port the test files the triage and seed discovery identified."""
+    test_files = _planned_test_files(state)
     if not test_files:
-        log.info("Phase 0.5c: triage listed no test files — skipping test port")
+        log.info("Phase 0.5c: no test files in the fix — skipping test port")
         return []
 
     log.info(
@@ -937,6 +981,52 @@ def _dicts(value: object) -> list[dict]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+# Deterministic test-file floor. Triage may add paths these patterns miss
+# (golden files, fixtures); it may never remove this guarantee.
+_TEST_PATTERNS = (
+    "_test.",
+    "test_",
+    "tests/",
+    "/test/",
+    "testing/",
+    "spec/",
+    "_spec.",
+    "testdata/",
+)
+
+
+def identify_test_files(seed_files: list[str]) -> list[str]:
+    """Return seed files that look like test files based on naming patterns."""
+    test_files = []
+    for f in seed_files:
+        lower = f.lower()
+        basename = lower.rsplit("/", 1)[-1]
+        if any(p in lower for p in _TEST_PATTERNS) or basename.startswith("test_"):
+            test_files.append(f)
+    return test_files
+
+
+def _planned_test_files(state: PipelineState) -> list[str]:
+    """Test files to port: triage's judgement unioned with the seed floor.
+
+    Both inputs are filtered to files the fix actually touches — triage
+    naming a path outside the fix must not widen the port — and triage's
+    ``files_to_skip`` still wins.
+    """
+    seed = list(state.seed)
+    seed_set = set(seed)
+    files_to_skip = set(_strings(state.triage_assessment.get("files_to_skip")))
+    triage_tests = _strings(state.triage_assessment.get("test_files"))
+    unexpected = [f for f in triage_tests if f not in seed_set]
+    if unexpected:
+        log.warning(
+            "Triage listed test files outside the fix: %s — ignoring",
+            ", ".join(unexpected[:5]),
+        )
+    merged = dict.fromkeys(triage_tests + identify_test_files(seed))
+    return [f for f in merged if f in seed_set and f not in files_to_skip]
 
 
 def _read_report(path: str, limit: int = 20_000) -> str:
@@ -1339,6 +1429,19 @@ def _run_fused_pre_red(
         git_commit(
             repo,
             f"fused-pre-red: commit remaining pre-RED changes for {config.issue_id}",
+        )
+    # The leftovers commit is `git add -A`, so anything force-added here would
+    # reach the candidate patch; apply the same strip the resolver path uses.
+    stripped = _strip_session_scratch(repo, base_head, keep=set(state.seed))
+    if stripped is None:
+        log.warning("Fused pre-RED: could not strip session scratch — falling back")
+        _discard_fused_session(repo, base_head)
+        return None
+    if stripped and state.dossier:
+        state.dossier.add(
+            "Build scratch stripped from fused pre-RED commit",
+            "\n".join(stripped[:50]),
+            "Phase 0.5+0.5b+0.5c fused session",
         )
 
     triage = dict(triage)
@@ -1871,6 +1974,29 @@ def _run_shell_ok(cmd: str, config: BugFixConfig) -> bool:
     return exit_code == 0
 
 
+def _revert_formatter_collateral(
+    config: BugFixConfig, dirty_before: set[str]
+) -> list[str]:
+    """Undo formatter edits to files this backport does not touch.
+
+    Repo-wide fixers reformat pre-existing unformatted files; those lines must
+    keep the target branch's bytes. Files the fix touches are kept.
+    """
+    repo = config.repo_path
+    try:
+        backport_files = set(
+            _git_lines(repo, "diff", "--name-only", f"{config.target_branch}..HEAD")
+        )
+        dirty_now = set(git_diff_name_only(repo))
+    except Exception as e:
+        log.warning("Formatter repair scope check failed: %s", e)
+        return []
+    collateral = sorted(dirty_now - dirty_before - backport_files)
+    for path in collateral:
+        _run_git(repo, ["checkout", "--", path])
+    return collateral
+
+
 def _repair_known_formatter_failures(
     config: BugFixConfig,
     failures: list[dict],
@@ -1887,11 +2013,30 @@ def _repair_known_formatter_failures(
     for failure in failures:
         cmd = str(failure.get("cmd", ""))
         repair = _formatter_repair_command(cmd)
+        dirty_before: set[str] = set()
+        if repair is not None:
+            try:
+                dirty_before = set(git_diff_name_only(config.repo_path))
+            except Exception:
+                dirty_before = set()
         if repair is None or not _run_shell_ok(repair, config):
             if repair is not None:
                 log.warning("Phase 4.1: formatter repair failed: %s", repair)
             remaining.append(failure)
             continue
+        collateral = _revert_formatter_collateral(config, dirty_before)
+        if collateral:
+            log.info(
+                "Phase 4.1: reverted formatter edits to %d unrelated files: %s",
+                len(collateral),
+                ", ".join(collateral[:5]),
+            )
+            state.dossier.add(
+                "Formatter repair scope",
+                "Reverted formatter edits outside the backport: "
+                + ", ".join(collateral[:20]),
+                "Phase 4.1",
+            )
         if not _run_shell_ok(cmd, config):
             log.warning("Phase 4.1: formatter repair did not satisfy: %s", cmd)
             remaining.append(failure)
@@ -2329,13 +2474,16 @@ def _is_test_output(repo: str, ref: str, path: str) -> bool:
 
 def _strip_session_scratch(
     repo: str, base_head: str, keep: set[str] | None = None
-) -> list[str]:
+) -> list[str] | None:
     """Drop force-added build scratch and test-run output from the commit.
 
     The worktree excludes prevent `git add -A` from staging the scratch paths,
     but an agent can still force-add them or commit test output. Squash the
     session's commits onto ``base_head`` and re-commit without those files;
     they stay on disk and never reach the candidate patch.
+
+    Returns the dropped paths, or ``None`` when the strip could not complete —
+    a half-stripped branch must not be reported as a success.
     """
     keep = keep or set()
     changed = git_diff_name_only_range(repo, base_head, "HEAD")
@@ -2355,17 +2503,26 @@ def _strip_session_scratch(
         "Fused session committed %d scratch/test-output files — stripping them",
         len(dropped),
     )
-    message = _run_git(repo, ["log", "-1", "--format=%B"]).stdout.strip()
+    messages = _run_git(
+        repo, ["log", "--reverse", "--format=%B", f"{base_head}..HEAD"]
+    ).stdout.strip()
     reset = _run_git(repo, ["reset", "--soft", base_head])
     if not reset.success:
         log.warning("Could not squash fused commit: %s", reset.stderr[:300])
-        return []
-    _run_git(repo, ["rm", "-r", "--cached", "--ignore-unmatch", "-q", *dropped])
+        return None
+    removed = _run_git(
+        repo, ["rm", "-r", "--cached", "--ignore-unmatch", "-q", *dropped]
+    )
+    if not removed.success:
+        log.warning("Could not unstage stripped files: %s", removed.stderr[:300])
+        return None
     commit = _run_git(
-        repo, ["commit", "--no-verify", "-m", message or "Fused backport"]
+        repo,
+        ["commit", "--no-verify", "-m", messages or "Fused backport"],
     )
     if not commit.success:
         log.warning("Could not re-commit without scratch: %s", commit.stderr[:300])
+        return None
     return dropped
 
 
@@ -2743,6 +2900,49 @@ def _committed_conflict_markers(repo: str, base_head: str) -> list[str]:
     return marked
 
 
+_FUSED_RESOLUTION_SCOPE = (
+    "One resolution session produced this backport; it self-reviewed. The "
+    "per-chunk resolver, substitution/rename/snap-back post-passes, "
+    "token/line-provenance/dead-config audits, the evidence-fed verification "
+    "agent and Phase 3b's rollback point did not run. Phase 4 build/test, 4.1 "
+    "checks and 4.5 range-diff still apply. The triage-blind review (3a.2) is "
+    "run separately when `blind_review` is enabled."
+)
+
+
+def _fused_resolution_unmatched(
+    config: BugFixConfig, state: PipelineState, commit: str, base_head: str
+) -> bool:
+    """True when the fused result cannot be tied to the fix's changes.
+
+    Range-diff pairing is forced (the pipeline's commits would otherwise read
+    as unmatched), so the relatedness check supplies the verdict: a session
+    that resolved nothing relevant must go through the per-chunk resolver.
+    """
+    repo = config.repo_path
+    fix_range = (
+        f"{commit}^1..{commit}"
+        if is_merge_commit(repo, commit)
+        else f"{commit}^..{commit}"
+    )
+    # Squash for the comparison: a session may leave several commits, and
+    # range-diff would report each extra one as unmatched.
+    cached_squash = state.squashed_backport_range
+    try:
+        backport_range = _squashed_backport_range(config, state)
+        if backport_range is None:
+            backport_range = f"{base_head}..HEAD"
+        rd_output = run_range_diff(repo, fix_range, backport_range, creation_factor=999)
+    except Exception:
+        return False
+    finally:
+        # Phase 4.5 must squash the final tree, not this intermediate one.
+        state.squashed_backport_range = cached_squash
+    if parse_equivalence(rd_output) == "unmatched":
+        return True
+    return not _shares_content_with_fix(config, state)
+
+
 def _run_fused_resolution(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -2835,6 +3035,9 @@ def _run_fused_resolution(
         )
         return None
     stripped = _strip_session_scratch(repo, base_head, keep=set(state.seed))
+    if stripped is None:
+        log.warning("%s: could not strip session scratch cleanly — falling back", label)
+        return None
     if stripped and state.dossier:
         state.dossier.add(
             "Build scratch stripped from fused commit",
@@ -2842,11 +3045,34 @@ def _run_fused_resolution(
             + (f"\n... and {len(stripped) - 50} more" if len(stripped) > 50 else ""),
             "Phase 2+3a fused session",
         )
+    if _fused_resolution_unmatched(config, state, commit, base_head):
+        log.warning(
+            "%s: fused result shares too little with the fix — falling back", label
+        )
+        if tracker:
+            tracker.record_gate("semantic_equivalence", "fused_unmatched")
+        if state.dossier:
+            state.dossier.add(
+                "Fused semantic check",
+                "The fused result has too little in common with the fix; the "
+                "per-chunk resolver is used instead.",
+                "Phase 2+3a fused session",
+            )
+        return None
+    if config.blind_review:
+        _run_triage_blind_review(
+            config, _phase_config(claude_config, config), state, tracker, base_head
+        )
     if state.dossier:
         state.dossier.add(
             "Fused resolution",
             f"{len(conflicted_files)} source conflicts resolved in one session; "
             "completion, build/test, checks and review ran in-session.",
+            "Phase 2+3a fused session",
+        )
+        state.dossier.add(
+            "Evidence scope (fused resolution)",
+            _FUSED_RESOLUTION_SCOPE,
             "Phase 2+3a fused session",
         )
     conflict_summary_parts.append(
@@ -3239,43 +3465,69 @@ def _finalize_resolution(
                     log.warning("Post-3a.1 token re-audit failed: %s", e)
 
     if config.blind_review:
-        blind_diff = _safe_git_diff(repo, base_head)
-        if blind_diff.strip():
-            log.info("Phase 3a.2 — triage-blind independent review")
-            blind_prompt = TriageBlindReviewPrompt(
-                context=context,
-                fix_diff=fix_diff,
-                current_diff=blind_diff,
-                target_branch=config.target_branch,
-                baseline_ref=base_head,
-            )
-            try:
-                asyncio.run(
-                    claude_run(
-                        claude_config_resolve, [blind_prompt.prompt()], tracker=tracker
-                    )
-                )
-            except Exception:
-                log.warning("Phase 3a.2 — blind review failed, continuing")
-            else:
-                blind_status = git_status_porcelain(repo)
-                if blind_status:
-                    subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
-                    git_commit(
-                        repo,
-                        "fixup: independent review corrections (Phase 3a.2)",
-                        trailers=_COAUTHOR_TRAILERS,
-                    )
-                    log.info("Phase 3a.2 — blind review committed corrections")
-                    if state.dossier:
-                        state.dossier.add(
-                            "Independent review corrections",
-                            "Triage-blind reviewer found and fixed symbol "
-                            "adaptations that were incorrect.",
-                            "Phase 3a.2",
-                        )
+        _run_triage_blind_review(
+            config,
+            claude_config_resolve,
+            state,
+            tracker,
+            base_head,
+        )
 
     return "resolved"
+
+
+def _run_triage_blind_review(
+    config: BugFixConfig,
+    claude_config_resolve: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+    base_head: str,
+) -> None:
+    """One triage-blind review of the current resolution (Phase 3a.2).
+
+    Runs in the ladder and after a fused resolution session: the resolver has
+    seen the fix and its own adaptations, so an independent read of the diff is
+    the check that catches anchoring errors.
+    """
+    repo = config.repo_path
+    blind_diff = _safe_git_diff(repo, base_head)
+    if not blind_diff.strip():
+        return
+    log.info("Phase 3a.2 — triage-blind independent review")
+    prompt = TriageBlindReviewPrompt(
+        context=create_context_str(claude_config_resolve, config),
+        fix_diff=_compute_fix_diff(config, config.source_fix_commit),
+        current_diff=blind_diff,
+        target_branch=config.target_branch,
+        baseline_ref=base_head,
+    )
+    try:
+        asyncio.run(
+            claude_run(
+                claude_config_resolve,
+                [prompt.prompt()],
+                tracker=tracker,
+            )
+        )
+    except Exception:
+        log.warning("Phase 3a.2 — blind review failed, continuing")
+        return
+    if not git_status_porcelain(repo):
+        return
+    subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
+    git_commit(
+        repo,
+        "fixup: independent review corrections (Phase 3a.2)",
+        trailers=_COAUTHOR_TRAILERS,
+    )
+    log.info("Phase 3a.2 — blind review committed corrections")
+    if state.dossier:
+        state.dossier.add(
+            "Independent review corrections",
+            "Triage-blind reviewer found and fixed symbol "
+            "adaptations that were incorrect.",
+            "Phase 3a.2",
+        )
 
 
 def port_prerequisite_chain(
@@ -3887,7 +4139,7 @@ def _run_pipeline_phases(
                 )
                 tracker.record_gate("prerequisites_ported", str(len(ported)))
 
-        test_files_in_commit = _strings(state.triage_assessment.get("test_files"))
+        test_files_in_commit = _planned_test_files(state)
         if test_files_in_commit and not config.fused_pre_red:
             with tracker.phase("Phase 0.5c — Test port"):
                 ported_tests = phase_0_5c_test_port(
@@ -4453,6 +4705,30 @@ class TargetResult:
     dossier_path: str
     tracker_path: str
     error: str = ""
+    pre_red_mode: str = ""
+    resolution_mode: str = ""
+
+
+def _read_tracker_modes(target_run_dir: str, issue_id: str) -> dict[str, str]:
+    """The pre-RED and resolution modes recorded as tracker gates."""
+    import glob
+
+    pattern = os.path.join(target_run_dir, f"{issue_id}_*.json")
+    matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    modes = {"pre_red_mode": "", "resolution_mode": ""}
+    if not matches:
+        return modes
+    try:
+        with open(matches[0]) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return modes
+    for phase in data.get("phases", []):
+        gates = phase.get("gate_decisions") or {}
+        for key in modes:
+            if gates.get(key):
+                modes[key] = str(gates[key])
+    return modes
 
 
 def _read_tracker_cost(target_run_dir: str, issue_id: str) -> tuple[float, str]:
@@ -4665,6 +4941,13 @@ def run_targets(
                     dossier_path = os.path.join(sanitized, DOSSIER_FILE)
 
             duration = round(time.time() - target_start, 1)
+            modes = _read_tracker_modes(target_run_dir, target_config.issue_id)
+            pre_red_mode = modes["pre_red_mode"] or (
+                "fused" if target_config.fused_pre_red else "legacy"
+            )
+            resolution_mode = modes["resolution_mode"] or (
+                "fused" if target_config.fused_resolution else "legacy"
+            )
             results.append(
                 TargetResult(
                     target_branch=spec.branch,
@@ -4675,10 +4958,21 @@ def run_targets(
                     dossier_path=dossier_path,
                     tracker_path=tracker_rel,
                     error=error_msg,
+                    pre_red_mode=pre_red_mode,
+                    resolution_mode=resolution_mode,
                 )
             )
+            evidence = []
+            if resolution_mode == "fused":
+                evidence.append("fused resolution, self-reviewed")
+            elif resolution_mode == "fused_fallback":
+                evidence.append("fused fallback → per-chunk resolver")
+            if pre_red_mode in ("fused", "fused_fallback"):
+                evidence.append("fused pre-RED")
+            suffix = f" ({', '.join(evidence)})" if evidence else ""
             print(
-                f"FINISHED target {spec.branch}: outcome={outcome}, duration={duration}s, cost=${cost_usd:.4f}"
+                f"FINISHED target {spec.branch}: outcome={outcome}{suffix}, "
+                f"duration={duration}s, cost=${cost_usd:.4f}"
             )
 
             # Preserve partial and unverified backports too — an incomplete or
