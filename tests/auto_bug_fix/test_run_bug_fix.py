@@ -1981,6 +1981,8 @@ def test_validate_shell_command_handles_escapes():
     # comment; both must parse the way the shell does.
     assert _validate_shell_command('echo "a\\"b;c"') is True
     assert _validate_shell_command("echo foo\\#bar") is True
+    # `#` is a comment only at a token boundary.
+    assert _validate_shell_command("echo foo#bar") is True
     assert _validate_shell_command("echo hi\\; rm -rf /") is True
 
 
