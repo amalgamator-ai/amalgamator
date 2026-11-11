@@ -26,6 +26,10 @@ Rules (see `docs/external-context.md` for the full contract):
 - A clean run emits **no** bullet under `## Suspect findings` — a
   `- (none)` placeholder would parse as a phantom finding. (In the hybrid
   flow the driver would not escalate a clean run in the first place.)
+- `findings-count` must equal the number of top-level bullets. A mismatch,
+  an invalid count, or `checker:` without a count makes the check result
+  unavailable (no trusted files), never a clean zero-findings pass.
+  Indented bullets under a finding are detail, not new findings.
 - `## Resolved files` carries only files NOT named in a finding; flagged
   files are excluded (their prior content is noise for re-derivation).
 - Findings may carry inline upstream-tree observations and advisory
@@ -49,6 +53,7 @@ Rules (see `docs/external-context.md` for the full contract):
 - retries: 7 relocation retries, 1 extra-conflict-lines escalation
 - duration_s: 61.5
 - checker: check-backport.py (dead-symbol, undefined-symbol, makefile-obj)
+- findings-count: 5
 
 ## Suspect findings
 Findings from the deterministic checks that triggered this escalation.

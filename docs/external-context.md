@@ -60,18 +60,27 @@ sections are **not** injected into prompts; unknown section names are
 logged so a mis-formatted emitter is visible. The raw file text is
 retained for diagnostics only and is never rendered.
 
-Headings inside fenced blocks are content, not structure. If a resolved
-file's content itself contains a fenced block, wrap it in a longer outer
-fence (for example four backticks around a block containing three) so the
-inner fence cannot terminate the section; the parser also prefers the last
-closing fence in a file body and reports an ambiguous/unclosed block
-instead of silently truncating it.
+Headings inside fenced blocks are content, not structure. Fences follow
+Markdown's length rules: a closing fence needs the same character and at
+least the opening run's length. If a resolved file's content itself
+contains a fenced block, wrap it in a longer outer fence (for example four
+backticks around a block containing three) so the inner fence cannot
+terminate the section. A resolved-file body with more than one top-level
+block is ambiguous and is reported rather than merged; prose after the
+single block is ignored, and an unclosed fence is reported instead of
+silently truncating the file.
 
 Rules that bit us, now part of the contract:
 
 - **No placeholder bullets.** A clean run emits *no* bullet under
   `## Suspect findings` — a `- (none)` placeholder would parse as a
   phantom finding and mislead every downstream phase.
+- **`findings-count` proves the list is complete.** The emitter writes the
+  declared count in Metadata. A count that does not match the parsed
+  top-level bullets, an invalid count, or `checker:` provenance with no
+  count makes the check result **unavailable**, not a clean zero-findings
+  pass. Indented bullets under a finding are detail, not additional
+  findings.
 - **Findings are copied verbatim, with their tags.** The emitter prefixes
   every bullet with `[severity][class][evidence/confidence]` and never
   paraphrases or softens the text. The tags are the contract:
@@ -92,7 +101,8 @@ Rules that bit us, now part of the contract:
   these as evidence to check, not as instructions to obey blindly.
 - **Flagged files are excluded from `## Resolved files`.** Their prior
   content is noise for re-derivation; non-flagged files are the trusted
-  set.
+  set only when the findings list is complete and usable. If the result is
+  unavailable, no file is trusted.
 - **Metadata is regexed from the prior resolver's captured stdout**
   (conflict count, relocation retries, extra-conflict-lines escalation,
   duration, endpoint label). It is provenance for orientation, never
@@ -126,15 +136,17 @@ conditional sections:
 
 | Phase | Renderer | What the agent is told |
 |---|---|---|
-| 0.5 semantic triage | `render_triage_section()` | a prior resolver exists; its cleared files are low-risk, its flagged files deserve priority |
-| 3a narrow resolution | `render_resolution_section()` | reproduce trusted prior resolutions **verbatim** (splice, never retype) — the exact saved patch bytes for the files in the current request are embedded in the prompt; re-derive only suspect regions from the fix diff, verifying each finding first (it may be a false positive); the prior resolver's keep/drop decisions are not authoritative — the three-way discipline wins |
+| 0.5 semantic triage | `render_triage_section()` | a prior resolver exists; when the check result is usable, its cleared files are low-risk and its flagged files deserve priority. If the result is unavailable, no file is treated as cleared |
+| 3a narrow resolution | `render_resolution_section()` | when the check result is usable, reproduce trusted prior resolutions **verbatim** (splice, never retype) — the exact saved patch bytes for the files in the current request are embedded in the prompt — and re-derive suspect regions from the fix diff, verifying each finding first (it may be a false positive). If the result is unavailable, there are **no trusted regions**: resolve every conflict from the fix diff and treat prior output only as a hint. The prior resolver's keep/drop decisions are never authoritative — the three-way discipline wins |
 | 3a.1 verification | `render_verification_section()` | findings are injected as evidence; **verification scope is never reduced** — every hunk is verified, including trusted ones |
 | 3a.2 blind review | `render_review_section()` | **findings + metadata only — the trusted resolutions are deliberately withheld** so the reviewer stays independent of the resolution agent's choices. Two mandates: (1) do not reintroduce a symbol flagged as dead/undefined unless the finding is demonstrably a false positive; (2) a wholesale revert of the port is out of mandate — report, don't revert |
 
 The trusted/suspect split is derived from the deterministic checks, not
 from the prior resolver's self-assessment: a file is "trusted" only
-because the scans found nothing wrong with it, and it still goes through
-full verification later.
+because a complete check result with a matching `findings-count` found
+nothing wrong with it. A missing, mismatched, or unparseable result means
+there are no trusted regions, so resolution re-derives from the fix diff.
+Every trusted file still goes through full verification later.
 
 The 3a.2 row is hard-won: in the first hybrid run the blind reviewer —
 then the only unseeded agent — followed the base-prompt rule *"if a

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Red Hat, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the external resolver context (hybrid synthmerge→amalgamator)."""
 
 import os
@@ -138,7 +141,8 @@ class TestLoadExternalContext:
 class TestParserRobustness:
     def test_bullets_inside_fences_are_not_findings(self):
         path = _write_md(
-            "## Metadata\n- resolver: synthmerge\n- checker: check-backport.py\n\n"
+            "## Metadata\n- resolver: synthmerge\n- checker: check-backport.py\n"
+            "- findings-count: 1\n\n"
             "## Suspect findings\n"
             "- [strong][undefined_symbol][observed/medium] a.c:1: real finding\n"
             "```diff\n"
@@ -203,13 +207,13 @@ class TestParserRobustness:
         path = _write_md(
             "## Resolved files\n\n"
             "### docs/README.md\n"
-            "```markdown\n"
+            "````markdown\n"
             "Before\n"
             "```python\n"
             "print('hi')\n"
             "```\n"
             "After\n"
-            "```\n"
+            "````\n"
         )
         try:
             ctx = load_external_context(path)
@@ -228,6 +232,125 @@ class TestParserRobustness:
             os.unlink(path)
         assert "a.c" not in ctx.resolved_files
         assert any("missing fenced block" in e for e in ctx.parse_errors)
+
+    def test_multiple_fenced_blocks_are_ambiguous_not_merged(self):
+        path = _write_md(
+            "## Resolved files\n\n"
+            "### a.c\n"
+            "Example:\n"
+            "```diff\n"
+            "+example\n"
+            "```\n"
+            "Real patch:\n"
+            "```diff\n"
+            "+real\n"
+            "```\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert "a.c" not in ctx.resolved_files
+        assert any("multiple fenced blocks" in e for e in ctx.parse_errors)
+
+    def test_trailing_commentary_after_block_is_ignored(self):
+        path = _write_md(
+            "## Resolved files\n\n"
+            "### a.c\n"
+            "```diff\n"
+            "+real\n"
+            "```\n"
+            "Note: commentary after the block is not part of the patch.\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert ctx.resolved_files["a.c"] == "+real"
+        assert not any("unclosed fenced block" in e for e in ctx.parse_errors)
+
+    def test_fenced_metadata_is_not_provenance(self):
+        path = _write_md(
+            "## Metadata\n- resolver: synthmerge\n"
+            "```text\n"
+            "- checker: fake-checker\n"
+            "- findings-count: 0\n"
+            "```\n\n"
+            "## Suspect findings\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert "checker" not in ctx.metadata
+        assert "findings-count" not in ctx.metadata
+        assert ctx.findings_status == "unavailable"
+
+    def test_markdown_heading_variants_are_recognized(self):
+        path = _write_md(
+            "  ## Metadata ##\n"
+            "- resolver: synthmerge\n"
+            "- checker: check-backport.py\n"
+            "- findings-count: 0\n\n"
+            "  ## Suspect findings ##\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert ctx.active
+        assert "metadata" in ctx.found_sections
+        assert "suspect findings" in ctx.found_sections
+        assert ctx.findings_status == "parsed"
+
+    def test_duplicate_sections_are_reported(self):
+        path = _write_md(
+            "## Metadata\n- resolver: first\n\n"
+            "## Metadata\n- resolver: second\n\n"
+            "## Suspect findings\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert ctx.metadata["resolver"] == "second"
+        assert any("duplicate '## Metadata'" in e for e in ctx.parse_errors)
+
+    def test_indented_detail_bullets_are_not_findings(self):
+        path = _write_md(
+            "## Metadata\n- checker: check-backport.py\n- findings-count: 1\n\n"
+            "## Suspect findings\n"
+            "- [strong][dead_symbol][observed/high] a.c:1: real finding\n"
+            "  - detail: a nested note\n"
+            "    - deeper detail\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert ctx.findings == [
+            "[strong][dead_symbol][observed/high] a.c:1: real finding"
+        ]
+        assert ctx.findings_status == "parsed"
+
+    def test_unclosed_fence_in_findings_is_reported_and_unavailable(self):
+        path = _write_md(
+            "## Metadata\n- checker: check-backport.py\n- findings-count: 1\n\n"
+            "## Suspect findings\n"
+            "- real finding\n"
+            "```diff\n"
+            "- phantom\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert ctx.findings == ["real finding"]
+        assert ctx.findings_status == "unavailable"
+        assert any(
+            "unclosed fenced block in '## Suspect findings'" in e
+            for e in ctx.parse_errors
+        )
 
 
 class TestSectionRenderers:
@@ -309,6 +432,61 @@ class TestSectionRenderers:
         rendered = ctx.render_resolution_section()
         assert "none reported" in rendered
         assert "all deterministic checks passed" not in rendered
+
+    def test_declared_count_mismatch_is_unavailable_not_clean(self):
+        path = _write_md(
+            "## Metadata\n- resolver: synthmerge\n"
+            "- checker: check-backport.py\n- findings-count: 3\n\n"
+            "## Suspect findings\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert ctx.findings_status == "unavailable"
+        rendered = ctx.render_resolution_section()
+        assert "unavailable" in rendered
+        assert "none reported" not in rendered
+        # the declared count is still visible, so the discrepancy is obvious
+        assert "findings-count: 3" in rendered
+        assert any("does not match" in e for e in ctx.parse_errors)
+
+    def test_checker_without_findings_count_is_unavailable(self):
+        path = _write_md(
+            "## Metadata\n- resolver: synthmerge\n- checker: check-backport.py\n\n"
+            "## Suspect findings\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert ctx.findings_status == "unavailable"
+        assert any("without findings-count" in e for e in ctx.parse_errors)
+
+    def test_unavailable_findings_disable_verbatim_trust(self):
+        path = _write_md(
+            "## Metadata\n- resolver: synthmerge\n"
+            "- checker: check-backport.py\n- findings-count: 2\n\n"
+            "## Suspect findings\n"
+            "- a.c:1: only one finding parsed\n\n"
+            "## Resolved files\n\n"
+            "### a.c\n"
+            "```diff\n"
+            "+prior\n"
+            "```\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert ctx.findings_status == "unavailable"
+        resolution = ctx.render_resolution_section()
+        assert "NO TRUSTED REGIONS" in resolution
+        assert "NOT named in the SUSPECT FINDINGS" not in resolution
+        assert "UNVERIFIED" in resolution
+        triage = ctx.render_triage_section()
+        assert "likely low-risk" not in triage
+        assert "no file can be treated as cleared" in triage
 
     def test_findings_section_without_provenance_is_unavailable(self):
         path = _write_md(
