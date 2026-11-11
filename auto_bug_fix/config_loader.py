@@ -415,6 +415,10 @@ def parse_claude_config(
         claude = {}
     profile, _ = profiles or resolve_pipeline_profiles(config, registry)
 
+    xml_tool_fallback = claude.get("xml_tool_fallback", False)
+    if not isinstance(xml_tool_fallback, bool):
+        raise ConfigError("claude.xml_tool_fallback must be a boolean")
+
     # Deprecated: set module-level state in llm_client for callers that
     # haven't adopted profiles yet. Named selections never seed legacy globals.
     model_ref = _pipeline_model_name(config)
@@ -435,6 +439,7 @@ def parse_claude_config(
         perm_mode=claude.get("perm_mode", "acceptEdits"),
         cwd=output_dir,
         profile=profile,
+        xml_tool_fallback=xml_tool_fallback,
     )
 
 
