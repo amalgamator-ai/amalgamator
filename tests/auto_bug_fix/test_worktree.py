@@ -121,3 +121,28 @@ def test_create_fresh_worktree_excludes_build_scratch(git_repo, tmp_path):
     ).stdout
     assert ".gocache" not in status
     assert ".tmp" not in status
+
+
+def test_scratch_excludes_are_removed_on_cleanup(git_repo, tmp_path):
+    """Only the patterns this worktree added may be removed; user lines stay."""
+    from pathlib import Path
+
+    from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
+
+    exclude = Path(git_repo) / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("user-ignore\n__pycache__/\n")
+
+    wt = str(tmp_path / "wt")
+    create_fresh_worktree(git_repo, wt, "main")
+    after_add = exclude.read_text()
+    assert ".gocache/" in after_add
+    assert "user-ignore" in after_add
+
+    cleanup_worktree(git_repo, wt)
+    after_cleanup = exclude.read_text()
+    # Ours are gone, the pre-existing lines remain.
+    assert ".gocache/" not in after_cleanup
+    assert ".agent-home/" not in after_cleanup
+    assert "user-ignore" in after_cleanup
+    assert "__pycache__/" in after_cleanup

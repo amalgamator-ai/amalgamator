@@ -1992,9 +1992,11 @@ def test_validate_shell_command_handles_escapes():
 def test_formatter_repair_command_mapping():
     from auto_bug_fix.run_bug_fix import _formatter_repair_command as fixer
 
-    # Repository verify -> update convention, language-agnostic.
+    # Repository verify -> update convention, formatter scripts only.
     assert fixer("hack/verify-gofmt.sh") == "hack/update-gofmt.sh"
-    assert fixer("./hack/verify-lint.sh ./pkg") == "./hack/update-lint.sh ./pkg"
+    assert fixer("./hack/verify-gofmt.sh ./pkg") == "./hack/update-gofmt.sh ./pkg"
+    assert fixer("hack/verify-vendor.sh") is None
+    assert fixer("hack/verify-generated-protobuf.sh") is None
     # Common ecosystem checks -> in-place mode.
     assert fixer("gofmt -l pkg/a.go") == "gofmt -w pkg/a.go"
     assert fixer("gofumpt -l .") == "gofumpt -w ."

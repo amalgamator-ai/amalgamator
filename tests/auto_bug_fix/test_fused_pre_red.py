@@ -506,6 +506,32 @@ def test_fused_pre_red_prompt_states_all_tasks():
     assert "Skip the build" in skipped
 
 
+def test_fused_check_commands_flattens_string_values():
+    from auto_bug_fix.run_bug_fix import _fused_check_commands
+
+    state = PipelineState()
+    state.triage_assessment = {
+        "lint_commands": "gofmt -l .",
+        "verification_commands": ["make check"],
+    }
+    assert _fused_check_commands(state) == ["gofmt -l .", "make check"]
+
+
+def test_validate_rejects_cherry_picked_fix_under_allowed_prefix(tmp_path):
+    from auto_bug_fix.run_bug_fix import _validate_fused_pre_red
+
+    rp, fix = _repo(tmp_path)
+    base = _sha(rp)
+    # A cherry-pick is a copy: ancestry stays false, but the fix is applied.
+    (Path(rp) / "base.c").write_text("int x = 2;\n")
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "test-port: apply upstream fix")
+
+    problems = _validate_fused_pre_red(_config(rp, fix), base)
+
+    assert any("already applied" in problem for problem in problems)
+
+
 def test_compact_fix_overview_has_fetch_instructions(tmp_path):
     from auto_bug_fix.run_bug_fix import _compact_fix_overview
 

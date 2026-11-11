@@ -803,3 +803,53 @@ def test_fused_semantic_check_rejects_an_unrelated_result(tmp_path):
         )
         is True
     )
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_mechanical_resolution_runs_before_the_fused_session(
+    mock_claude, tmp_path, monkeypatch
+):
+    from auto_bug_fix import run_bug_fix as rbf
+
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    config.fused_resolution = True
+    config.mechanical_resolution = True
+    config.blind_review = False
+    state = _make_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    tracker = Tracker(
+        issue_id="TEST-1", config_dict={}, model="test-model", output_dir=str(run_dir)
+    )
+    events: list[str] = []
+
+    def fake_mechanical(repo, commit, files):
+        events.append("mechanical")
+        return {}
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        events.append("claude")
+        path.write_text(
+            diverged.replace("    int c = 99;", "    int c = 30; /* fixed */")
+        )
+        _git(rp, "add", "-A")
+        _git(rp, "commit", "-m", "backport")
+        return []
+
+    monkeypatch.setattr(rbf, "resolve_mechanically", fake_mechanical)
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config,
+        _make_claude_config(rp),
+        state,
+        tracker,
+        commit=fix_sha,
+        label="test port",
+    )
+
+    assert result == "resolved"
+    assert events[0] == "mechanical"
+    assert "claude" in events

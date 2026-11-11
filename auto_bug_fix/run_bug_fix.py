@@ -1097,6 +1097,23 @@ def _session_commit_files(repo: str, base_head: str, prefix: str) -> list[str]:
     return files
 
 
+def _fix_content_applied(repo: str, commit: str) -> bool:
+    """True when HEAD already carries the fix's production bytes.
+
+    Ancestry alone misses a cherry-picked fix (a copy, not an ancestor) that
+    the session re-committed under an allowed prefix; that state makes RED
+    unable to reproduce the bug. Test-only paths are excluded because the test
+    port legitimately matches the fix there.
+    """
+    changed = [fix_path for _status, _base, fix_path in _changed_paths(repo, commit)]
+    production = [p for p in changed if p not in set(identify_test_files(changed))]
+    if not production:
+        return False
+    head_oids = _blob_oids(repo, [f"HEAD:{p}" for p in production])
+    fix_oids = _blob_oids(repo, [f"{commit}:{p}" for p in production])
+    return head_oids == fix_oids
+
+
 def _validate_fused_pre_red(config: BugFixConfig, base_head: str) -> list[str]:
     """Objections that make a pre-RED session unusable (empty means accept).
 
@@ -1108,6 +1125,8 @@ def _validate_fused_pre_red(config: BugFixConfig, base_head: str) -> list[str]:
     problems: list[str] = []
     if git_is_ancestor(repo, commit, "HEAD"):
         problems.append("the main fix is already applied")
+    elif _fix_content_applied(repo, commit):
+        problems.append("the fix's production changes are already applied")
     subjects = _git_lines(repo, "log", "--format=%s", f"{base_head}..HEAD")
     stray = [s for s in subjects if not s.startswith(_PRE_RED_COMMIT_PREFIXES)]
     if stray:
@@ -1930,17 +1949,19 @@ def _fused_check_commands(state: PipelineState) -> list[str]:
     assessment = state.triage_assessment or {}
     commands: list[str] = []
     for key in ("lint_commands", "verification_commands"):
-        for cmd in assessment.get(key) or []:
-            if isinstance(cmd, str) and cmd.strip() and cmd not in commands:
+        value = assessment.get(key)
+        # A triage that emits a bare string must yield one command, not its
+        # characters.
+        entries = [value] if isinstance(value, str) else _strings(value)
+        for cmd in entries:
+            if cmd.strip() and cmd not in commands:
                 commands.append(cmd)
     return commands[:10]
 
 
 # Formatting checks that fail only on whitespace, with their in-place fixer.
-# Data only: add one line per ecosystem. The first row is the common
-# `hack/verify-<name>.sh` -> `hack/update-<name>.sh` repository convention.
+# Data only: add one line per ecosystem.
 _FORMATTER_FIXES = (
-    (r"((?:\./)?hack/)verify-([\w.-]+)\.sh\b", r"\1update-\2.sh"),
     (r"\bgofmt\s+-l\b", "gofmt -w"),
     (r"\bgofumpt\s+-l\b", "gofumpt -w"),
     (r"\b(shfmt)\s+-d\b", r"\1 -w"),
@@ -1952,10 +1973,34 @@ _FORMATTER_FIXES = (
     (r"\b(clang-format)\s+--dry-run\b", r"\1 -i"),
     (r"\bterraform\s+fmt\s+-check\b", "terraform fmt"),
 )
+# `hack/verify-<name>.sh` -> `hack/update-<name>.sh` is only safe when <name>
+# is a formatter; verify-vendor.sh and friends update far more than whitespace.
+_VERIFY_SCRIPT_RE = re.compile(r"((?:\./)?hack/)verify-([\w.-]+)\.sh\b")
+_FORMATTER_SCRIPT_NAMES = frozenset(
+    {
+        "gofmt",
+        "goimports",
+        "gofumpt",
+        "clang-format",
+        "black",
+        "isort",
+        "rustfmt",
+        "shfmt",
+        "prettier",
+        "terraform-fmt",
+    }
+)
 
 
 def _formatter_repair_command(cmd: str) -> str | None:
     """In-place fixer for a known formatting check, if the command matches one."""
+    match = _VERIFY_SCRIPT_RE.search(cmd)
+    if match and match.group(2) in _FORMATTER_SCRIPT_NAMES:
+        return (
+            cmd[: match.start()]
+            + f"{match.group(1)}update-{match.group(2)}.sh"
+            + cmd[match.end() :]
+        )
     for pattern, replacement in _FORMATTER_FIXES:
         repaired = re.sub(pattern, replacement, cmd)
         if repaired != cmd:
@@ -2678,6 +2723,51 @@ def _apply_cherry_pick(
     return "conflicts", uu_files, conflict_summary_parts
 
 
+def _resolve_conflicts_mechanically(
+    config: BugFixConfig,
+    state: PipelineState,
+    tracker,
+    commit: str,
+    label: str,
+    uu_files: list[str],
+    conflict_summary_parts: list[str],
+) -> list[str]:
+    """Re-apply source bytes deterministically before any LLM sees the conflicts.
+
+    Runs before the fused session so a conflict the mechanical rungs can settle
+    never reaches the model, and again after a fused fallback's fresh
+    cherry-pick.
+    """
+    if not config.mechanical_resolution or not uu_files:
+        return uu_files
+    original = list(uu_files)
+    try:
+        mech = resolve_mechanically(config.repo_path, commit, uu_files)
+    except Exception as e:
+        log.warning(
+            "%s: mechanical resolution failed (continuing to LLM): %s", label, e
+        )
+        mech = {}
+    if not mech:
+        return uu_files
+    log.info(
+        "%s: mechanically re-applied %d/%d conflicted files",
+        label,
+        len(mech),
+        len(uu_files),
+    )
+    if state.dossier:
+        for f, rung in sorted(mech.items()):
+            state.dossier.add_strategy(f"mechanical:{rung}", f"resolved {f}")
+    conflict_summary_parts.append(
+        f"Mechanically re-applied {len(mech)} files (git apply, relaxed context)"
+    )
+    remaining = [f for f in uu_files if f not in mech]
+    if tracker:
+        tracker.record_gate("mechanical_resolution", f"{len(mech)}/{len(original)}")
+    return remaining
+
+
 def cherry_pick_and_resolve(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -2698,8 +2788,11 @@ def cherry_pick_and_resolve(
     if outcome != "conflicts":
         return outcome
     base_head = git_rev_parse(config.repo_path, "HEAD")
+    uu_files = _resolve_conflicts_mechanically(
+        config, state, tracker, commit, label, uu_files, conflict_summary_parts
+    )
 
-    if config.fused_resolution:
+    if uu_files and config.fused_resolution:
         fused_result = _run_fused_resolution(
             config,
             claude_config,
@@ -2727,6 +2820,9 @@ def cherry_pick_and_resolve(
         )
         if outcome != "conflicts":
             return outcome
+        uu_files = _resolve_conflicts_mechanically(
+            config, state, tracker, commit, label, uu_files, conflict_summary_parts
+        )
 
     original_uu_files = list(uu_files)
     fix_diff = _compute_fix_diff(config, commit)
@@ -2734,33 +2830,6 @@ def cherry_pick_and_resolve(
     priority = state.priority_files if state.priority_files else state.allowed_modules
 
     claude_config_resolve = _phase_config(claude_config, config)
-
-    if config.mechanical_resolution:
-        try:
-            mech = resolve_mechanically(config.repo_path, commit, uu_files)
-        except Exception as e:
-            log.warning(
-                "%s: mechanical resolution failed (continuing to LLM): %s", label, e
-            )
-            mech = {}
-        if mech:
-            log.info(
-                "%s: mechanically re-applied %d/%d conflicted files",
-                label,
-                len(mech),
-                len(uu_files),
-            )
-            if state.dossier:
-                for f, rung in sorted(mech.items()):
-                    state.dossier.add_strategy(f"mechanical:{rung}", f"resolved {f}")
-            conflict_summary_parts.append(
-                f"Mechanically re-applied {len(mech)} files (git apply, relaxed context)"
-            )
-            uu_files = [f for f in uu_files if f not in mech]
-            if tracker:
-                tracker.record_gate(
-                    "mechanical_resolution", f"{len(mech)}/{len(original_uu_files)}"
-                )
 
     if not uu_files:
         return _finalize_resolution(
@@ -4063,9 +4132,11 @@ def _run_pipeline_phases(
 
     with tracker.phase("Phase 0.5 — Semantic triage"):
         assessment: dict = {}
+        fused_pre_red_ok = False
         if config.fused_pre_red:
             assessment = _run_fused_pre_red(config, claude_config, state, tracker) or {}
-            if not assessment:
+            fused_pre_red_ok = bool(assessment)
+            if not fused_pre_red_ok:
                 log.warning(
                     "Fused pre-RED session failed — falling back to separate "
                     "Phase 0.5/0.5b/0.5c"
@@ -4129,7 +4200,7 @@ def _run_pipeline_phases(
         portable_prereqs = [
             p for p in prereqs if p.get("portable", False) and p.get("introduced_by")
         ]
-        if portable_prereqs and not config.fused_pre_red:
+        if portable_prereqs and not fused_pre_red_ok:
             with tracker.phase("Phase 0.5b — Prerequisite chain"):
                 ported = port_prerequisite_chain(config, claude_config, state, tracker)
                 state.dossier.add(
@@ -4140,7 +4211,7 @@ def _run_pipeline_phases(
                 tracker.record_gate("prerequisites_ported", str(len(ported)))
 
         test_files_in_commit = _planned_test_files(state)
-        if test_files_in_commit and not config.fused_pre_red:
+        if test_files_in_commit and not fused_pre_red_ok:
             with tracker.phase("Phase 0.5c — Test port"):
                 ported_tests = phase_0_5c_test_port(
                     config, claude_config, state, tracker
