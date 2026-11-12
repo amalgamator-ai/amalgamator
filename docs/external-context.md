@@ -1,4 +1,4 @@
-# External Resolver Context (hybrid synthmerge → amalgamator pipeline)
+# External Resolver Context (hybrid backport pipeline)
 
 ## Motivation
 
@@ -18,14 +18,18 @@ and escalate to the full amalgamator pipeline **only** when the checks
 fail — handing amalgamator both the prior resolver's output and the
 check findings so it does not start from zero. The resolver this design
 was built and validated with is
-[synthmerge](https://gitlab.com/aarcange/synthmerge) (all numbers below);
-the adapter's gate, escalation and arbiter are resolver-agnostic.
+[synthmerge](https://gitlab.com/aarcange/synthmerge); its gate,
+escalation and arbiter are resolver-agnostic. The producer side (the
+deterministic checker, the external-context emitter, the driver and the
+arbiter) lives in the separate
+[amalgamator-hybrid](https://github.com/amalgamator-ai/amalgamator-hybrid)
+repository; this document is the consumer-side contract.
 
 Validated at scale: on a 400-case kernel-backport evaluation with the
 same model at every stage, the hybrid scored 42.5% combined
 exact/whitespace-stripped matches against known human results vs 35.5%
 for the fast resolver alone — the escalation converted 37 misses into
-matches at 7 degradations (see the adapter repo's README for the full
+matches at 7 degradations (the adapter repository carries the full
 numbers and the deterministic arbiter that bounds the damage).
 
 ## The mechanism
@@ -49,6 +53,41 @@ Loading is fail-safe in one direction only:
   feature off, pipeline identical to before (a warning is logged);
 - file present and partially malformed → feature degrades to whatever
   sections parsed; parse issues are logged, never raised.
+
+## Format version
+
+The contract is versioned so the producer and this parser can evolve
+independently. A current file declares it in Metadata:
+
+```markdown
+## Metadata
+- format: external-context/1
+```
+
+- **Absent** is accepted as the legacy unversioned format (v0), so existing
+  files keep working.
+- A **minor** component is accepted (`external-context/1.2`); only the major
+  version selects the parsing rules.
+- An **unrecognized or unsupported major** version makes the check result
+  *unavailable* (no trusted regions) instead of trusting future-contract
+  content under v1 semantics.
+
+Producers should validate every emitted file with the consumer's own parser
+before handing it over:
+
+```bash
+python -m auto_bug_fix.external_context --check --require-format path/to/context.md
+# exit 0 = usable; 2 = unusable/structurally invalid; 1 = missing file
+# add --json for a machine-readable report
+```
+
+`--check` alone accepts an unversioned (v0) file, because the consumer must
+keep supporting existing and hand-written contexts. `--require-format` is a
+producer-side policy: an emitter's CI uses it to ensure every artifact
+declares its contract, so the version gate never silently disengages.
+
+This is the executable half of the contract: a format change that the
+consumer would silently distrust fails the producer's CI instead.
 
 ## The Markdown contract (what the emitter must know)
 
@@ -191,20 +230,20 @@ interacting with external-context runs:
   cherry-pick; the prior resolutions are context, not state. Since the
   cherry-pick is deterministic (same base + same upstream commit → same
   conflicts), the prior resolutions remain directly reusable.
-- **The checker and the driver live in this repo's
-  [`adapter/`](../adapter/README.md) subdirectory:
-  `check-backport.py` requires a clean committed snapshot, scans `HEAD`
-  (with base and upstream treeishes supplying comparison) and emits this
-  Markdown; `hybrid-backport.sh` orchestrates the whole flow and
-  `arbiter.py` decides the result (below). `strip-artifacts.py` removes
-  pipeline bookkeeping from the delivered tree.
+- **The checker and the driver live in the separate
+  [amalgamator-hybrid](https://github.com/amalgamator-ai/amalgamator-hybrid)
+  repository**: `check-backport.py` requires a clean committed snapshot,
+  scans `HEAD` (with base and upstream treeishes supplying comparison) and
+  emits this Markdown; `hybrid-backport.sh` orchestrates the whole flow,
+  runs the deterministic arbiter and strips pipeline bookkeeping from the
+  delivered tree.
 
 ## Example end-to-end flow
 
 ```mermaid
 flowchart TD
     input["backport request<br/>(repo @ base, upstream fix sha)"]
-    input --> orch["Adapter driver — hybrid-backport.sh<br/>(adapter repo)"]
+    input --> orch["Adapter driver — hybrid-backport.sh<br/>(amalgamator-hybrid repo)"]
 
     subgraph SM["resolver worktree @ base — PLUGGABLE front-end<br/>(tested: synthmerge) — ephemeral, driver-owned"]
         cp["git cherry-pick -x &lt;upstream&gt;"]
@@ -215,7 +254,7 @@ flowchart TD
 
     orch --> cp
 
-    subgraph GATE["check-backport.py — deterministic, zero LLM (adapter repo)"]
+    subgraph GATE["check-backport.py — deterministic, zero LLM (amalgamator-hybrid repo)"]
         scan["scan committed HEAD (clean tree required):<br/>dead symbols · used-but-undefined · Makefile objs<br/>(findings tagged strong/advisory)"]
         md["external-context.md<br/>## Metadata (stdout regexes)<br/>## Suspect findings (tagged)<br/>## Resolved files (non-flagged diffs)"]
         scan --> md
@@ -296,6 +335,6 @@ Invariants the diagram encodes:
   the upstream-conditioned restoration rule in the review prompt
 - `auto_bug_fix/run_bug_fix.py` — one-time load in `run_pipeline`, section wiring
 - `docs/external-context-template.md` — fill-in template for the Markdown file
-- `adapter/` — the hybrid adapter (`check-backport.py` emitter,
-  `arbiter.py` post-escalation verdict, `strip-artifacts.py` tree cleanup,
-  `hybrid-backport.sh` driver)
+- `amalgamator-hybrid` (separate repository) — the producer side:
+  `check-backport.py` gate + emitter and the `hybrid-backport.sh` driver
+  (including the deterministic arbiter and stray-file stripping)
