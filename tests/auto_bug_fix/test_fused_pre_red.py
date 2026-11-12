@@ -168,6 +168,64 @@ def test_fused_pre_red_reads_result_and_commits_session(mock_claude, tmp_path):
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_strip_keeps_test_port_attribution(mock_claude, tmp_path):
+    """The strip must not erase which files the test-port commit touched."""
+    rp, fix = _repo(tmp_path)
+    state = _state()
+    run_dir, tracker = _tracker(tmp_path)
+
+    async def fake(claude_config, prompts, tracker=None):
+        (Path(rp) / "dep.c").write_text("dep\n")
+        _git(rp, "add", "-A")
+        _git(rp, "commit", "-m", "prereq: add dep")
+        (Path(rp) / "base_test.c").write_text("int t;\n")
+        (Path(rp) / ".gocache").mkdir()
+        (Path(rp) / ".gocache" / "x").write_text("cache\n")
+        _git(rp, "add", "-A")
+        _git(rp, "commit", "-m", "test-port: TEST-1")
+        _write_result(run_dir)
+        return []
+
+    mock_claude.side_effect = fake
+    result = _run_fused_pre_red(_config(rp, fix), _claude(rp), state, tracker)
+
+    assert result is not None
+    assert "base_test.c" in state.ported_test_files
+    assert ".gocache/x" not in state.ported_test_files
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_fused_pre_red_rejects_uncommitted_fix(mock_claude, tmp_path):
+    """Validation runs after the leftovers commit, so dirty fix edits count."""
+    rp, fix = _repo(tmp_path)
+    state = _state()
+    run_dir, tracker = _tracker(tmp_path)
+
+    async def fake(claude_config, prompts, tracker=None):
+        (Path(rp) / "base.c").write_text("int x = 2;\n")
+        _write_result(run_dir, triage={"test_files": []}, tests_ported=[])
+        return []
+
+    mock_claude.side_effect = fake
+    assert _run_fused_pre_red(_config(rp, fix), _claude(rp), state, tracker) is None
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_fused_pre_red_requires_planned_tests(mock_claude, tmp_path):
+    """A session that skips the expected regression tests must fall back."""
+    rp, fix = _repo(tmp_path)
+    state = _state()
+    run_dir, tracker = _tracker(tmp_path)
+
+    async def fake(claude_config, prompts, tracker=None):
+        _write_result(run_dir, tests_ported=[])
+        return []
+
+    mock_claude.side_effect = fake
+    assert _run_fused_pre_red(_config(rp, fix), _claude(rp), state, tracker) is None
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
 def test_fused_pre_red_falls_back_without_result(mock_claude, tmp_path):
     rp, fix = _repo(tmp_path)
     state = _state()
@@ -362,6 +420,11 @@ def test_strip_session_scratch_drops_test_output_keeps_fix_files(tmp_path):
         text=True,
     ).stdout.splitlines()
     assert files == ["expected.diffs"]
+    # Dropped files leave the working tree too, so a later `git add -A`
+    # cannot bring them back.
+    assert not (Path(rp) / "regression.diffs").exists()
+    assert not (Path(rp) / ".gocache" / "x").exists()
+    assert (Path(rp) / "expected.diffs").exists()
 
 
 def _scratch_commit(rp):

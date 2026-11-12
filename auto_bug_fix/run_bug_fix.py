@@ -302,7 +302,7 @@ _DANGEROUS_SHELL_PATTERNS = (";", "&&", "||", "|", "`", "$(", "${", ">", "<", "\
 # commands). Only these are rejected inside such a segment; the command that
 # actually runs is still held to the full list above.
 _EXPORT_SEGMENT_RE = re.compile(r"^\s*export\s+[A-Za-z_][A-Za-z0-9_]*=")
-_EXPORT_FORBIDDEN = ("`", "\n", ">", "<", "|", "&&", "||")
+_EXPORT_FORBIDDEN = ("`", "\n", ">", "<", "|", "&&", "||", "&")
 # Command substitution in an export value is executed by the pipeline (Phase
 # 4.1), outside the session, so only path-helper shapes are accepted.
 _EXPORT_SUBST_RE = re.compile(r"\$\(([^()]*)\)")
@@ -318,10 +318,14 @@ def _export_substitution_ok(segment: str) -> bool:
     remainder = _EXPORT_SUBST_RE.sub("", segment)
     if "$(" in remainder:
         return False
-    return all(
-        _EXPORT_SUBST_ALLOWED_RE.match(inner.strip())
-        for inner in _EXPORT_SUBST_RE.findall(segment)
-    )
+    for inner in _EXPORT_SUBST_RE.findall(segment):
+        # A `;` or `&` inside any substitution would run a second command, even
+        # when the outer segment's quoted text hides it from the splitter.
+        if any(ch in inner for ch in ";&"):
+            return False
+        if not _EXPORT_SUBST_ALLOWED_RE.match(inner.strip()):
+            return False
+    return True
 
 
 _BUGFIX_TYPES = ("bugfix", "bug-fix", "bug_fix", "fix", "security")
@@ -413,7 +417,13 @@ def _validate_shell_command(cmd: str) -> bool:
     """
     if not isinstance(cmd, str):
         return False
-    cmd = _strip_shell_comment(cmd)
+    # A comment strip must not hide a second line: the caller runs the original
+    # string. A single trailing newline is harmless; an inner one is a second
+    # command.
+    outside = _outside_quotes(cmd).rstrip("\r\n")
+    if "\n" in outside or "\r" in outside:
+        return False
+    cmd = _strip_shell_comment(cmd).rstrip("\r\n")
     if not cmd.strip():
         return False
     segments = _split_shell_segments(cmd)
@@ -1411,8 +1421,10 @@ def _run_fused_pre_red(
     log.info(
         "Phase 0.5+0.5b+0.5c — fused pre-RED session (%d seed files)", len(state.seed)
     )
-    _run_fused_session(config, claude_config, prompt.prompt(), tracker)
-    _restore_protected_refs(config, state)
+    try:
+        _run_fused_session(config, claude_config, prompt.prompt(), tracker)
+    finally:
+        _restore_protected_refs(config, state)
 
     result = _read_fused_result(result_path)
     triage = result.get("triage")
@@ -1424,13 +1436,6 @@ def _run_fused_pre_red(
         log.warning(
             "Fused pre-RED: no usable triage result at %s — falling back",
             result_path,
-        )
-        _discard_fused_session(repo, base_head)
-        return None
-    problems = _validate_fused_pre_red(config, base_head)
-    if problems:
-        log.warning(
-            "Fused pre-RED session rejected (%s) — falling back", "; ".join(problems)
         )
         _discard_fused_session(repo, base_head)
         return None
@@ -1449,6 +1454,22 @@ def _run_fused_pre_red(
             repo,
             f"fused-pre-red: commit remaining pre-RED changes for {config.issue_id}",
         )
+    # Validate after the leftovers commit: uncommitted production edits must
+    # not slip past the "fix already applied" checks.
+    problems = _validate_fused_pre_red(config, base_head)
+    if problems:
+        log.warning(
+            "Fused pre-RED session rejected (%s) — falling back", "; ".join(problems)
+        )
+        _discard_fused_session(repo, base_head)
+        return None
+
+    # Attribute tests before the strip: squashing the session's commits would
+    # otherwise lose the test-port subjects and silently fall back to the
+    # session's self-reported list.
+    tests_ported = _session_commit_files(repo, base_head, "test-port:") or _strings(
+        result.get("tests_ported")
+    )
     # The leftovers commit is `git add -A`, so anything force-added here would
     # reach the candidate patch; apply the same strip the resolver path uses.
     stripped = _strip_session_scratch(repo, base_head, keep=set(state.seed))
@@ -1456,20 +1477,30 @@ def _run_fused_pre_red(
         log.warning("Fused pre-RED: could not strip session scratch — falling back")
         _discard_fused_session(repo, base_head)
         return None
-    if stripped and state.dossier:
-        state.dossier.add(
-            "Build scratch stripped from fused pre-RED commit",
-            "\n".join(stripped[:50]),
-            "Phase 0.5+0.5b+0.5c fused session",
-        )
+    if stripped:
+        dropped = set(stripped)
+        tests_ported = [f for f in tests_ported if f not in dropped]
+        if state.dossier:
+            state.dossier.add(
+                "Build scratch stripped from fused pre-RED commit",
+                "\n".join(stripped[:50]),
+                "Phase 0.5+0.5b+0.5c fused session",
+            )
 
     triage = dict(triage)
     triage["test_files"] = _strings(result.get("test_files"))
     triage["prerequisites"] = _dicts(result.get("prerequisites"))
-    # The test-port commits are ground truth; fall back to the result file.
-    tests_ported = _session_commit_files(repo, base_head, "test-port:") or _strings(
-        result.get("tests_ported")
-    )
+    state.triage_assessment = triage
+    missing_tests = [
+        f for f in _planned_test_files(state) if f not in set(tests_ported)
+    ]
+    if missing_tests:
+        log.warning(
+            "Fused pre-RED: expected test files were not ported (%s) — falling back",
+            ", ".join(missing_tests[:5]),
+        )
+        _discard_fused_session(repo, base_head)
+        return None
     failed = [
         str(p.get("symbol", "?"))
         for p in triage["prerequisites"]
@@ -2524,8 +2555,9 @@ def _strip_session_scratch(
 
     The worktree excludes prevent `git add -A` from staging the scratch paths,
     but an agent can still force-add them or commit test output. Squash the
-    session's commits onto ``base_head`` and re-commit without those files;
-    they stay on disk and never reach the candidate patch.
+    session's commits onto ``base_head`` and re-commit without those files, and
+    delete them from the working tree so a later recovery ``git add -A`` cannot
+    bring them back.
 
     Returns the dropped paths, or ``None`` when the strip could not complete —
     a half-stripped branch must not be reported as a success.
@@ -2568,6 +2600,18 @@ def _strip_session_scratch(
     if not commit.success:
         log.warning("Could not re-commit without scratch: %s", commit.stderr[:300])
         return None
+    for path in dropped:
+        try:
+            os.remove(os.path.join(repo, path))
+        except OSError:
+            continue
+        parent = os.path.dirname(os.path.join(repo, path))
+        while parent.startswith(repo + os.sep):
+            try:
+                os.rmdir(parent)
+            except OSError:
+                break
+            parent = os.path.dirname(parent)
     return dropped
 
 
@@ -2814,7 +2858,9 @@ def cherry_pick_and_resolve(
         )
         if tracker:
             tracker.record_gate("resolution_mode", "fused_fallback")
-        git_reset_hard(config.repo_path, base_head)
+        # Reset and clean: a failed session may have written untracked files
+        # that would block the fresh cherry-pick.
+        _discard_fused_session(config.repo_path, base_head)
         outcome, uu_files, conflict_summary_parts = _apply_cherry_pick(
             config, state, commit, label, skip_set
         )
@@ -3002,7 +3048,8 @@ def _fused_resolution_unmatched(
         if backport_range is None:
             backport_range = f"{base_head}..HEAD"
         rd_output = run_range_diff(repo, fix_range, backport_range, creation_factor=999)
-    except Exception:
+    except Exception as e:
+        log.warning("Fused semantic check failed, keeping the result: %s", e)
         return False
     finally:
         # Phase 4.5 must squash the final tree, not this intermediate one.
@@ -3069,8 +3116,10 @@ def _run_fused_resolution(
     )
     if tracker:
         tracker.record_gate("resolution_mode", "fused")
-    _run_fused_session(config, claude_config, prompt.prompt(), tracker)
-    _restore_protected_refs(config, state)
+    try:
+        _run_fused_session(config, claude_config, prompt.prompt(), tracker)
+    finally:
+        _restore_protected_refs(config, state)
     _add_fused_report_to_dossier(state, report_path)
 
     remaining = _conflicted_files(git_status_porcelain(repo))
@@ -3581,6 +3630,8 @@ def _run_triage_blind_review(
     except Exception:
         log.warning("Phase 3a.2 — blind review failed, continuing")
         return
+    finally:
+        _restore_protected_refs(config, state)
     if not git_status_porcelain(repo):
         return
     subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
