@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -190,6 +193,18 @@ def git_status_porcelain(repo_path: str) -> list[str]:
     return [line for line in r.stdout.splitlines() if line.strip()]
 
 
+def git_status_porcelain_all(repo_path: str) -> GitResult:
+    """Porcelain status with untracked directories expanded file-by-file.
+
+    Plain ``git status`` collapses an untracked directory to a single
+    ``?? dir/`` entry; callers that match individual file paths (artifact
+    allowlists, verification-dirt baselines) need the expanded form. Returns
+    the full result so callers can fail closed on a nonzero exit instead of
+    reading an empty list as an empty tree.
+    """
+    return _run_git(repo_path, ["status", "--porcelain", "--untracked-files=all"])
+
+
 def git_diff_name_only(repo_path: str, ref: str = "HEAD") -> list[str]:
     """Return list of file paths that differ from ref."""
     r = _run_git(repo_path, ["diff", "--name-only", ref])
@@ -237,6 +252,16 @@ def git_format_patch_bytes(
         else ["format-patch", f"-{n}", "--stdout"]
     )
     result = subprocess.run(["git"] + args, cwd=repo_path, capture_output=True)
+    if result.returncode != 0:
+        # An empty result is how both "failed" and "no commits in range" look
+        # to the caller; name the cause so an empty deliverable on a failure
+        # path is diagnosable (Phase 5 escalates on empty bytes either way).
+        log.warning(
+            "git format-patch %s failed (exit %d): %s",
+            base_ref or f"-{n}",
+            result.returncode,
+            result.stderr.decode("utf-8", "replace").strip(),
+        )
     return result.stdout
 
 

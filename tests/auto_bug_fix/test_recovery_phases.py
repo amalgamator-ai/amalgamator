@@ -303,10 +303,43 @@ def test_phase_4a_commits_agent_recovery_edits(tmp_path, monkeypatch):
     assert len(calls) == 1
     assert _sha(repo) != before
     assert _git(repo, "show", "HEAD:tracked.txt").stdout == "fixed\n"
+    # Phase 4a commits at each attempt's own boundary, so the label carries
+    # the attempt number: the recovery agent's edits have to reach the
+    # candidate patch even when a later attempt escalates.
     assert _git(repo, "log", "-1", "--format=%s").stdout.strip() == (
-        "fixup: build/test recovery for REC-1 (Phase 4a)"
+        "fixup: build/test recovery for REC-1 (Phase 4a attempt 1)"
     )
     assert _git(repo, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_phase_4a_accepts_a_recovery_authored_as_a_new_file(tmp_path, monkeypatch):
+    """A fix added as a new, untracked file is still a change. ``git diff``
+    does not report untracked paths, so the no-op check must not read it as
+    CANNOT_FIX and abort before the file is committed."""
+    repo = _init_repo(tmp_path)
+    before = _sha(repo)
+
+    def repair(config, _call_number):
+        (Path(config.cwd) / "new_helper.c").write_text("fixed\n")
+
+    calls = _patch_claude_run(monkeypatch, repair)
+
+    phase_4a_build_recovery(
+        _config(
+            repo,
+            build_command="grep -q '^fixed$' new_helper.c",
+            test_command="true",
+            max_build_test_retries=2,
+        ),
+        _claude_config(repo),
+        PipelineState(),
+        tracker=None,
+        fix_diff="",
+    )
+
+    assert len(calls) == 1
+    assert _sha(repo) != before
+    assert _git(repo, "show", "HEAD:new_helper.c").stdout == "fixed\n"
 
 
 def test_phase_4a_escalates_after_exhausting_retries(tmp_path, monkeypatch):
@@ -351,7 +384,10 @@ def test_phase_4a_escalates_after_exhausting_retries(tmp_path, monkeypatch):
 def test_rerun_verification_returns_still_failing_commands(
     tmp_path, command, timeout, expected
 ):
-    config = _config(tmp_path, command_timeout=timeout)
+    # A real repository, not a bare tmp_path: the re-run snapshots the
+    # worktree and discards what the commands dirty, and a failed discard
+    # escalates rather than letting the dirt reach a later commit boundary.
+    config = _config(_init_repo(tmp_path), command_timeout=timeout)
 
     assert _rerun_verification(config, [command]) == expected
 
@@ -445,6 +481,12 @@ def _run_extended_verification_pipeline(
     )
     monkeypatch.setattr(run_bug_fix, "run_range_diff", lambda *a, **k: "")
     monkeypatch.setattr(run_bug_fix, "git_format_patch_bytes", lambda *a, **k: b"patch")
+    # The export refuses a patch whose range changes no file, so the stubbed
+    # bytes need a stubbed range to match: every phase that would have
+    # produced a commit here is itself a stub.
+    monkeypatch.setattr(
+        run_bug_fix, "_changed_files_since", lambda *a, **k: ["generated.c"]
+    )
 
     config = _config(
         repo,
