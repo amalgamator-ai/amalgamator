@@ -1,13 +1,13 @@
 # Copyright (c) 2026 Red Hat, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""External resolver context (hybrid synthmerge→amalgamator pipeline).
+"""External resolver context (hybrid backport pipeline).
 
 A case configuration may point at a Markdown file that carries context
-produced by an *external* conflict resolver (e.g. synthmerge) plus the
-findings of deterministic post-resolution checks (e.g. dead-symbol and
-undefined-symbol scans).  When present and non-empty, that context is
-injected into selected pipeline prompts:
+produced by an *external* conflict resolver (the reference implementation
+is synthmerge) plus the findings of deterministic post-resolution checks
+(e.g. dead-symbol and undefined-symbol scans).  When present and non-empty,
+that context is injected into selected pipeline prompts:
 
 * Phase 0.5 (semantic triage) — informs the complexity assessment and
   the priority-file selection;
@@ -31,6 +31,7 @@ The Markdown format is intentionally simple and human-writable::
     # External Resolver Context
 
     ## Metadata
+    - format: external-context/1
     - resolver: synthmerge 0.3.15
     - endpoint: Turnstile DeepSeek V4 Flash
     - command: synthmerge -c ... --vibe --continue
@@ -66,9 +67,12 @@ malformed files degrade to the sections that did parse.
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 import os
 import re
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
@@ -86,6 +90,13 @@ _FENCE_CLOSE_RE = re.compile(r"^[ ]{0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
 _FINDING_TAG_RE = re.compile(
     r"^\[(strong|advisory)\]\[([a-z_]+)\]\[(observed|inferred)/(high|medium|low)\]\s+(.*)$"
 )
+
+# The Markdown contract is versioned so the producer (the hybrid adapter,
+# or a hand-written file) and this parser can evolve independently.  Absent
+# is accepted as the unversioned legacy format; an unsupported major version
+# makes the check result unavailable instead of trusting it under v1 rules.
+SUPPORTED_FORMAT_MAJOR = 1
+_FORMAT_RE = re.compile(r"^external-context/(\d+)(?:\.(\d+))?$")
 
 
 @dataclass(frozen=True)
@@ -663,6 +674,32 @@ def _parse_resolved_files(section: str) -> tuple[dict[str, str], list[str]]:
     return resolved, errors
 
 
+def _format_problem(metadata: dict[str, str]) -> str | None:
+    """Return a problem for an unrecognized or unsupported format marker.
+
+    The marker is optional for backward compatibility with unversioned
+    (``v0``) files.  A present-but-unsupported major version makes the check
+    result unavailable: a file written for a future contract must never be
+    trusted under this parser's section and tag semantics.
+    """
+    value = metadata.get("format")
+    if value is None:
+        return None
+    match = _FORMAT_RE.match(value)
+    if not match:
+        return (
+            f"unrecognized format {value!r} — expected "
+            f"external-context/{SUPPORTED_FORMAT_MAJOR}"
+        )
+    major = int(match.group(1))
+    if major != SUPPORTED_FORMAT_MAJOR:
+        return (
+            f"unsupported external-context format {value!r} — this parser "
+            f"supports external-context/{SUPPORTED_FORMAT_MAJOR}"
+        )
+    return None
+
+
 def load_external_context(path: str | None) -> ExternalContext:
     """Load and parse an external-context Markdown file.
 
@@ -701,6 +738,11 @@ def load_external_context(path: str | None) -> ExternalContext:
     if "metadata" in sections:
         ctx.metadata, metadata_errors = _parse_metadata(sections["metadata"])
         ctx.parse_errors.extend(metadata_errors)
+
+    format_problem = _format_problem(ctx.metadata)
+    if format_problem:
+        ctx.parse_errors.append(format_problem)
+
     if "suspect findings" in sections:
         ctx.findings, finding_errors = _parse_findings(sections["suspect findings"])
         ctx.finding_details = _parse_finding_details(ctx.findings)
@@ -718,6 +760,8 @@ def load_external_context(path: str | None) -> ExternalContext:
                 + ", ".join(sorted(ambiguous_sections))
                 + " — check result unavailable"
             )
+        elif format_problem:
+            problem = format_problem + " — check result unavailable"
         else:
             declared_count = ctx.metadata.get("findings-count")
             checker = ctx.metadata.get("checker")
@@ -782,3 +826,89 @@ def load_external_context(path: str | None) -> ExternalContext:
     for err in ctx.parse_errors:
         log.warning("external context: %s", err)
     return ctx
+
+
+def _check_problems(ctx: ExternalContext) -> list[str]:
+    """Return the reasons a producer-side check should reject *ctx*.
+
+    Unknown sections are explicitly allowed by the contract (they are
+    ignored, not injected), so that notice alone does not fail the check.
+    Every other parse issue is a producer bug: the consumer would silently
+    drop content or distrust the whole file.
+    """
+    problems: list[str] = []
+    if not ctx.active:
+        problems.append("no recognized sections — the consumer would ignore this file")
+    if ctx.findings_status != "parsed":
+        problems.append(
+            "check result unavailable — the consumer would not trust any file"
+        )
+    for err in ctx.parse_errors:
+        if not err.startswith("unknown sections ignored:"):
+            problems.append(err)
+    return list(dict.fromkeys(problems))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Validate an external-context Markdown file (producer CI entry point).
+
+    Exit codes: 0 = usable, 2 = unusable/structurally invalid,
+    1 = the file does not exist.  Producers (for example the hybrid
+    adapter's ``check-backport.py``) should run this over every emitted
+    context file so the consumer's parser and the emitter cannot drift.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m auto_bug_fix.external_context",
+        description=(
+            "Validate an external-resolver-context file: it must carry "
+            "recognized sections and a usable, complete findings list."
+        ),
+    )
+    parser.add_argument("path", help="Markdown file to validate")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate the file (the default; accepted for explicitness)",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="emit a machine-readable report"
+    )
+    args = parser.parse_args(argv)
+
+    expanded = os.path.expanduser(os.path.expandvars(args.path))
+    if not os.path.isfile(expanded):
+        print(f"error: file not found: {args.path}", file=sys.stderr)
+        return 1
+
+    ctx = load_external_context(args.path)
+    problems = _check_problems(ctx)
+    report = {
+        "path": ctx.source_path or expanded,
+        "ok": not problems,
+        "active": ctx.active,
+        "format": ctx.metadata.get("format", ""),
+        "findings_status": ctx.findings_status,
+        "findings": len(ctx.findings),
+        "resolved_files": len(ctx.resolved_files),
+        "sections": sorted(ctx.found_sections),
+        "parse_errors": list(ctx.parse_errors),
+        "problems": problems,
+    }
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        status = "OK" if report["ok"] else "INVALID"
+        print(f"{report['path']}: {status}")
+        print(f"  format: {report['format'] or '(unversioned)'}")
+        print(
+            f"  findings: {report['findings']} "
+            f"({report['findings_status']}), "
+            f"resolved files: {report['resolved_files']}"
+        )
+        for problem in problems:
+            print(f"  - {problem}")
+    return 0 if report["ok"] else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
