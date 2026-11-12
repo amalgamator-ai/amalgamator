@@ -25,6 +25,8 @@ Intro commentary that is passed through verbatim.
 - resolver: synthmerge 0.3.15
 - endpoint: Turnstile DeepSeek V4 Flash
 - conflicts: 26 across 11 files
+- checker: check-backport.py
+- findings-count: 2
 
 ## Suspect findings
 Findings from the deterministic checks.
@@ -107,8 +109,11 @@ class TestLoadExternalContext:
             "unique-patch-marker-attr" in ctx.resolved_files["fs/xfs/libxfs/xfs_attr.c"]
         )
 
-    def test_findings_only_file(self):
-        path = _write_md("## Suspect findings\n\n- a.c:1: bad symbol\n")
+    def test_findings_only_file_with_declared_count(self):
+        path = _write_md(
+            "## Metadata\n- checker: check-backport.py\n- findings-count: 1\n\n"
+            "## Suspect findings\n\n- a.c:1: bad symbol\n"
+        )
         try:
             ctx = load_external_context(path)
         finally:
@@ -116,6 +121,7 @@ class TestLoadExternalContext:
         assert ctx.active
         assert ctx.findings == ["a.c:1: bad symbol"]
         assert ctx.resolved_files == {}
+        assert ctx.findings_status == "parsed"
 
     def test_unparseable_file_is_inactive_not_raising(self):
         path = _write_md("# nothing recognizable\njust prose\n")
@@ -462,6 +468,42 @@ class TestSectionRenderers:
             os.unlink(path)
         assert ctx.findings_status == "unavailable"
         assert any("without findings-count" in e for e in ctx.parse_errors)
+
+    def test_findings_without_declared_count_are_unavailable(self):
+        path = _write_md("## Suspect findings\n\n- a.c:1: bad symbol\n")
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert ctx.active
+        assert ctx.findings == ["a.c:1: bad symbol"]
+        assert ctx.findings_status == "unavailable"
+        assert any("without findings-count" in e for e in ctx.parse_errors)
+        assert "none reported" not in ctx.render_resolution_section()
+
+    def test_duplicate_findings_sections_make_result_unavailable(self):
+        path = _write_md(
+            "## Metadata\n- checker: check-backport.py\n- findings-count: 1\n\n"
+            "## Suspect findings\n"
+            "- a.c:1: first block finding\n\n"
+            "## Suspect findings\n"
+            "- b.c:1: second block finding\n\n"
+            "## Resolved files\n\n"
+            "### a.c\n"
+            "```diff\n"
+            "+prior\n"
+            "```\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        assert ctx.findings_status == "unavailable"
+        assert ctx.findings == ["b.c:1: second block finding"]
+        assert any("duplicate recognized section" in e for e in ctx.parse_errors)
+        resolution = ctx.render_resolution_section()
+        assert "NO TRUSTED REGIONS" in resolution
+        assert "NOT named in the SUSPECT FINDINGS" not in resolution
 
     def test_unavailable_findings_disable_verbatim_trust(self):
         path = _write_md(

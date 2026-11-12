@@ -190,6 +190,7 @@ def test_verification_and_review_sites_inject_sections(tmp_path, monkeypatch):
     monkeypatch.setattr(rbf, "_is_followup_target", lambda *a, **k: False)
     monkeypatch.setattr(rbf, "render_evidence", lambda *a, **k: "evidence")
     monkeypatch.setattr(rbf, "_safe_git_diff", lambda *a, **k: "diff")
+    monkeypatch.setattr(rbf, "_strip_committed_build_output", lambda *a, **k: True)
     prompts = _capture_prompts(monkeypatch)
 
     result = rbf._finalize_resolution(

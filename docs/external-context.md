@@ -76,11 +76,12 @@ Rules that bit us, now part of the contract:
   `## Suspect findings` — a `- (none)` placeholder would parse as a
   phantom finding and mislead every downstream phase.
 - **`findings-count` proves the list is complete.** The emitter writes the
-  declared count in Metadata. A count that does not match the parsed
-  top-level bullets, an invalid count, or `checker:` provenance with no
-  count makes the check result **unavailable**, not a clean zero-findings
-  pass. Indented bullets under a finding are detail, not additional
-  findings.
+  declared count in Metadata. A missing count (including hand-authored
+  findings), a count that does not match the parsed top-level bullets, an
+  invalid count, a duplicated recognized section, or `checker:` provenance
+  with no count makes the check result **unavailable**, not a clean
+  zero-findings pass. Indented bullets under a finding are detail, not
+  additional findings.
 - **Findings are copied verbatim, with their tags.** The emitter prefixes
   every bullet with `[severity][class][evidence/confidence]` and never
   paraphrases or softens the text. The tags are the contract:

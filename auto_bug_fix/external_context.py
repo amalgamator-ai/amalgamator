@@ -21,9 +21,10 @@ injected into selected pipeline prompts:
   verified, including the regions marked trusted.
 
 A findings list is only usable when its declared ``findings-count`` matches
-the number of parsed bullets; a mismatch, an invalid count, or ``checker:``
-provenance without a count makes the check result unavailable rather than a
-clean zero-findings pass.
+the number of parsed bullets.  A missing count (including hand-authored
+findings), a mismatch, an invalid count, a duplicated recognized section, or
+``checker:`` provenance without a count makes the check result unavailable
+rather than a clean zero-findings pass.
 
 The Markdown format is intentionally simple and human-writable::
 
@@ -541,25 +542,29 @@ class ExternalContext:
         return "\n\n".join(chunks) + "\n\n"
 
 
-def _split_sections(raw: str) -> tuple[dict[str, str], list[str]]:
+def _split_sections(raw: str) -> tuple[dict[str, str], list[str], set[str]]:
     """Split the Markdown into its top-level ``##`` sections.
 
     Headings inside fenced blocks (e.g. a resolved file that itself contains
     Markdown headings) are content, not section boundaries.  Duplicate
-    section names are reported because the later one silently wins.
+    section names are reported and returned; callers must treat the
+    duplicated section as ambiguous rather than silently keeping the later
+    block.
     """
     sections: dict[str, str] = {}
     errors: list[str] = []
+    duplicates: set[str] = set()
     headings = list(_iter_headings(raw, 2))
     for i, (title, _, content_start) in enumerate(headings):
         end = headings[i + 1][1] if i + 1 < len(headings) else len(raw)
         key = title.lower()
         if key in sections:
+            duplicates.add(key)
             errors.append(
                 f"duplicate '## {title}' section — later content overrides earlier"
             )
         sections[key] = raw[content_start:end].strip()
-    return sections, errors
+    return sections, errors, duplicates
 
 
 def _parse_metadata(section: str) -> tuple[dict[str, str], list[str]]:
@@ -682,9 +687,10 @@ def load_external_context(path: str | None) -> ExternalContext:
     if not raw.strip():
         return ctx
 
-    sections, section_errors = _split_sections(raw)
+    sections, section_errors, duplicate_sections = _split_sections(raw)
     ctx.parse_errors.extend(section_errors)
     known_sections = {"metadata", "suspect findings", "resolved files"}
+    ambiguous_sections = duplicate_sections & known_sections
     ctx.found_sections = set(sections) & known_sections
     unknown = set(sections) - known_sections
     if unknown:
@@ -705,6 +711,13 @@ def load_external_context(path: str | None) -> ExternalContext:
         problem: str | None = None
         if finding_errors:
             problem = "; ".join(finding_errors) + " — check result unavailable"
+        elif ambiguous_sections:
+            problem = (
+                "duplicate recognized section(s) make the check result "
+                "ambiguous: "
+                + ", ".join(sorted(ambiguous_sections))
+                + " — check result unavailable"
+            )
         else:
             declared_count = ctx.metadata.get("findings-count")
             checker = ctx.metadata.get("checker")
@@ -734,7 +747,12 @@ def load_external_context(path: str | None) -> ExternalContext:
                     "cannot confirm the findings list is complete; check "
                     "result unavailable"
                 )
-            elif not ctx.findings:
+            elif ctx.findings:
+                problem = (
+                    "findings present without findings-count — cannot "
+                    "confirm the list is complete; check result unavailable"
+                )
+            else:
                 problem = (
                     "findings section present but no findings and no check "
                     "provenance — check result unavailable"
