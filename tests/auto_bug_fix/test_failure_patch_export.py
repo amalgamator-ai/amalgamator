@@ -536,9 +536,9 @@ class TestIsTestPath:
         ],
     )
     def test_recognised_as_test(self, path):
-        from auto_bug_fix.run_bug_fix import _is_test_path
+        from auto_bug_fix.run_bug_fix import _looks_like_test_path
 
-        assert _is_test_path(path) is True
+        assert _looks_like_test_path(path) is True
 
     @pytest.mark.parametrize(
         "path",
@@ -552,9 +552,9 @@ class TestIsTestPath:
         ],
     )
     def test_not_a_test(self, path):
-        from auto_bug_fix.run_bug_fix import _is_test_path
+        from auto_bug_fix.run_bug_fix import _looks_like_test_path
 
-        assert _is_test_path(path) is False
+        assert _looks_like_test_path(path) is False
 
 
 class TestCommitBoundaries:

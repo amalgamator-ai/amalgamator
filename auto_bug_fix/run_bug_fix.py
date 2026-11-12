@@ -5698,7 +5698,7 @@ def _export_candidate_patch_bytes(config: BugFixConfig) -> bytes:
     return patch_bytes
 
 
-def _is_test_path(path: str) -> bool:
+def _looks_like_test_path(path: str) -> bool:
     """Conservative heuristic: does a changed file look like a test file?
 
     Used only on the failure path to keep a ``PipelineStop`` (e.g. "fix
@@ -6682,7 +6682,7 @@ def _emit_candidate_patch_on_failure(
                     "Failure path: could not determine the changed files "
                     "(git diff failed) — emitting without test-only suppression"
                 )
-            elif changed and all(_is_test_path(f) for f in changed):
+            elif changed and all(_looks_like_test_path(f) for f in changed):
                 log.info(
                     "Failure path: only test files changed since the frozen "
                     "baseline — not emitting a candidate patch"

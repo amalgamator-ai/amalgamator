@@ -753,3 +753,39 @@ def test_fix_content_applied_counts_src_testing_as_production(tmp_path):
     _git(rp, "commit", "-m", "already carries the fix")
 
     assert _fix_content_applied(rp, base_head, fix) is True
+
+
+def test_declared_regression_pair_counts_as_tests(tmp_path):
+    """PostgreSQL-style sql/expected pairs have no test naming pattern."""
+    from auto_bug_fix.run_bug_fix import _validate_fused_pre_red
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rp = str(repo)
+    _git(rp, "init", "-b", "main")
+    _git(rp, "config", "user.name", "t")
+    _git(rp, "config", "user.email", "t@t")
+    (repo / "base.c").write_text("int x = 1;\n")
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "base")
+    base = _sha(rp)
+    (repo / "base.c").write_text("int x = 2;\n")
+    sql = repo / "contrib" / "x" / "sql" / "a.sql"
+    sql.parent.mkdir(parents=True)
+    sql.write_text("select 1;\n")
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "fix")
+    fix = _sha(rp)
+    _git(rp, "branch", "target", base)
+    _git(rp, "checkout", "-q", "target")
+    base_head = _sha(rp)
+    sql.parent.mkdir(parents=True, exist_ok=True)
+    sql.write_text("select 1;\n")
+    _git(rp, "add", "-f", "contrib/x/sql/a.sql")
+    _git(rp, "commit", "-m", "test-port: TEST-1")
+
+    config = _config(rp, fix)
+    assert any(
+        "non-test paths" in p for p in _validate_fused_pre_red(config, base_head)
+    )
+    assert _validate_fused_pre_red(config, base_head, {"contrib/x/sql/a.sql"}) == []
