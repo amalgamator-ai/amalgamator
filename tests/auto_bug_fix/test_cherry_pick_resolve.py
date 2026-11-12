@@ -668,6 +668,7 @@ def test_fused_resolution_falls_back_when_conflicts_remain(mock_claude, tmp_path
         nonlocal fused_calls
         if "Backport Resolution Agent" in prompts[0]:
             fused_calls += 1
+            state.dossier.add("Fused attempt", "discarded", "test")
             return []  # deliberately resolve nothing
         path.write_text(
             diverged.replace("    int c = 99;", "    int c = 30; /* fixed */")
@@ -689,6 +690,8 @@ def test_fused_resolution_falls_back_when_conflicts_remain(mock_claude, tmp_path
     assert result == "resolved"
     assert fused_calls == 1
     assert state.fused_resolution_ran is False
+    # Evidence from the discarded attempt must not claim work that was redone.
+    assert not any(i.source == "Phase 2+3a fused session" for i in state.dossier.items)
     # The legacy loop had to finish the job and its reviews still ran.
     prompts = [call.args[1][0] for call in mock_claude.call_args_list]
     assert any("Narrow Resolution Agent" in p for p in prompts)

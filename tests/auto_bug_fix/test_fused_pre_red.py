@@ -450,6 +450,28 @@ def test_strip_session_scratch_drops_test_output_keeps_fix_files(tmp_path):
     assert (Path(rp) / "expected.diffs").exists()
 
 
+def test_strip_session_scratch_drops_nested_caches(tmp_path):
+    """Python/JS tools nest their caches below the package directory."""
+    from auto_bug_fix.run_bug_fix import _strip_session_scratch
+
+    rp, _fix = _repo(tmp_path)
+    base = _sha(rp)
+    for rel in ("pkg/__pycache__/mod.pyc", "web/.nyc_output/out.json"):
+        path = Path(rp) / rel
+        path.parent.mkdir(parents=True)
+        path.write_text("cache\n")
+    (Path(rp) / "fix.c").write_text("int fixed;\n")
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "session")
+
+    dropped = _strip_session_scratch(rp, base)
+
+    assert dropped is not None
+    assert set(dropped) == {"pkg/__pycache__/mod.pyc", "web/.nyc_output/out.json"}
+    assert not (Path(rp) / "pkg" / "__pycache__" / "mod.pyc").exists()
+    assert (Path(rp) / "fix.c").exists()
+
+
 def _scratch_commit(rp):
     (Path(rp) / ".gocache").mkdir()
     (Path(rp) / ".gocache" / "x").write_text("cache\n")

@@ -146,3 +146,72 @@ def test_scratch_excludes_are_removed_on_cleanup(git_repo, tmp_path):
     assert ".agent-home/" not in after_cleanup
     assert "user-ignore" in after_cleanup
     assert "__pycache__/" in after_cleanup
+
+
+def test_scratch_excludes_survive_another_live_worktree(git_repo, tmp_path):
+    """Cleaning one worktree must not drop patterns a sibling still relies on."""
+    from pathlib import Path
+
+    from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=git_repo, capture_output=True, text=True
+    ).stdout.strip()
+    exclude = Path(git_repo) / ".git" / "info" / "exclude"
+    wt1, wt2 = str(tmp_path / "wt1"), str(tmp_path / "wt2")
+    create_fresh_worktree(git_repo, wt1, head)
+    create_fresh_worktree(git_repo, wt2, head)
+
+    cleanup_worktree(git_repo, wt1)
+    assert ".gocache/" in exclude.read_text()
+
+    cleanup_worktree(git_repo, wt2)
+    assert ".gocache/" not in exclude.read_text()
+
+
+def test_dead_worktree_marker_is_pruned_and_adopted(git_repo, tmp_path):
+    """A crashed run leaves excludes behind; the next worktree must own them."""
+    import shutil
+    from pathlib import Path
+
+    from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=git_repo, capture_output=True, text=True
+    ).stdout.strip()
+    exclude = Path(git_repo) / ".git" / "info" / "exclude"
+    wt1, wt2 = str(tmp_path / "wt1"), str(tmp_path / "wt2")
+    create_fresh_worktree(git_repo, wt1, head)
+    marker1 = (
+        Path(git_repo) / ".git" / "worktrees" / "wt1" / "amalgamator-scratch-excludes"
+    )
+    assert marker1.exists()
+
+    shutil.rmtree(wt1)  # crashed run: no cleanup
+    create_fresh_worktree(git_repo, wt2, head)
+    assert not marker1.exists()
+
+    cleanup_worktree(git_repo, wt2)
+    assert ".gocache/" not in exclude.read_text()
+
+
+def test_cleanup_removes_read_only_build_cache(git_repo, tmp_path):
+    """Go module caches leave 0555 dirs that plain rmtree cannot delete."""
+    import os
+    from pathlib import Path
+
+    from auto_bug_fix.worktree import cleanup_worktree, create_fresh_worktree
+
+    wt = str(tmp_path / "wt")
+    create_fresh_worktree(git_repo, wt, "main")
+    cache = Path(wt) / "cache" / "mod"
+    cache.mkdir(parents=True)
+    (cache / "file").write_text("x")
+    os.chmod(cache, 0o555)
+
+    cleanup_worktree(git_repo, wt)
+
+    assert not os.path.isdir(wt)
+    # The same path can be reused immediately.
+    create_fresh_worktree(git_repo, wt, "main")
+    assert os.path.isdir(wt)

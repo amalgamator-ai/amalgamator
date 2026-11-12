@@ -297,7 +297,7 @@ _CONFLICT_PREFIXES = ("UU ", "AA ", "DU ", "UD ", "DD ", "AU ", "UA ")
 _MARKER_START_RE = re.compile(r"^<{7}( |\r?$)", re.MULTILINE)
 _MARKER_END_RE = re.compile(r"^>{7}( |\r?$)", re.MULTILINE)
 
-_DANGEROUS_SHELL_PATTERNS = (";", "&&", "||", "|", "`", "$(", "${", ">", "<", "\n")
+_DANGEROUS_SHELL_PATTERNS = (";", "&&", "&", "||", "|", "`", "$(", "${", ">", "<", "\n")
 # An ``export NAME=...`` segment may carry shell expansions in its value (paths
 # like ``$(dirname "$PWD")/.gocache`` are common in project verification
 # commands). Only these are rejected inside such a segment; the command that
@@ -391,7 +391,9 @@ def _strip_shell_comment(cmd: str) -> str:
     for index, ch in enumerate(cmd):
         if escaped:
             escaped = False
-            previous = ch
+            # An escaped space is data, not a token boundary: `#` after it is
+            # not a comment.
+            previous = ""
             continue
         if ch == "\\" and not single:
             escaped = True
@@ -1028,13 +1030,16 @@ def identify_test_files(seed_files: list[str]) -> list[str]:
 
 
 def _is_test_path(path: str) -> bool:
-    """True when a changed path is a test file (or lives in a test tree)."""
+    """True when a changed path is a test file or test fixture/golden output."""
     lower = path.lower()
     return (
         bool(identify_test_files([path]))
         or lower.startswith(("test/", "tests/"))
-        or "/test/" in lower
-        or "/tests/" in lower
+        or any(
+            part in lower
+            for part in ("/test/", "/tests/", "/expected/", "/fixtures/", "/golden/")
+        )
+        or "testdata/" in lower
     )
 
 
@@ -1107,8 +1112,8 @@ def _restore_protected_refs(config: BugFixConfig, state: PipelineState) -> None:
     repo = config.repo_path
     moved = []
     for ref, sha in state.protected_refs.items():
-        current = _run_git(repo, ["rev-parse", ref])
-        if current.success and current.stdout.strip() != sha:
+        current = _run_git(repo, ["rev-parse", "--verify", ref])
+        if not current.success or current.stdout.strip() != sha:
             moved.append((ref, sha))
     if not moved:
         return
@@ -1137,13 +1142,15 @@ def _session_commit_files(repo: str, base_head: str, prefix: str) -> list[str]:
     return files
 
 
-def _fix_content_applied(repo: str, commit: str) -> bool:
-    """True when HEAD already carries the fix's production bytes.
+def _fix_content_applied(repo: str, base_head: str, commit: str) -> bool:
+    """True when HEAD already carries the fix's production changes.
 
     Ancestry alone misses a cherry-picked fix (a copy, not an ancestor) that
     the session re-committed under an allowed prefix; that state makes RED
     unable to reproduce the bug. Test-only paths are excluded because the test
-    port legitimately matches the fix there.
+    port legitimately matches the fix there. Exact blob equality catches the
+    verbatim copy; a large overlap of the fix's changed lines catches one that
+    was lightly adapted.
     """
     changed = [fix_path for _status, _base, fix_path in _changed_paths(repo, commit)]
     production = [p for p in changed if p not in set(identify_test_files(changed))]
@@ -1151,7 +1158,19 @@ def _fix_content_applied(repo: str, commit: str) -> bool:
         return False
     head_oids = _blob_oids(repo, [f"HEAD:{p}" for p in production])
     fix_oids = _blob_oids(repo, [f"{commit}:{p}" for p in production])
-    return head_oids == fix_oids
+    if head_oids == fix_oids:
+        return True
+    fix_range = (
+        f"{commit}^1..{commit}"
+        if is_merge_commit(repo, commit)
+        else f"{commit}^..{commit}"
+    )
+    fix_lines = _changed_payload_lines(repo, [fix_range, "--", *production])
+    if not fix_lines:
+        return False
+    head_lines = _changed_payload_lines(repo, [f"{base_head}..HEAD", "--", *production])
+    overlap = len(fix_lines & head_lines) / len(fix_lines)
+    return overlap >= 0.5
 
 
 def _validate_fused_pre_red(config: BugFixConfig, base_head: str) -> list[str]:
@@ -1165,7 +1184,7 @@ def _validate_fused_pre_red(config: BugFixConfig, base_head: str) -> list[str]:
     problems: list[str] = []
     if git_is_ancestor(repo, commit, "HEAD"):
         problems.append("the main fix is already applied")
-    elif _fix_content_applied(repo, commit):
+    elif _fix_content_applied(repo, base_head, commit):
         problems.append("the fix's production changes are already applied")
     subjects = _git_lines(repo, "log", "--format=%s", f"{base_head}..HEAD")
     stray = [s for s in subjects if not s.startswith(_PRE_RED_COMMIT_PREFIXES)]
@@ -1519,16 +1538,19 @@ def _run_fused_pre_red(
     triage["prerequisites"] = _dicts(result.get("prerequisites"))
     state.triage_assessment = triage
     planned = _planned_test_files(state)
+    # Even if triage skips every planned path, the seed's test files still
+    # require a ported test: skipping cannot remove the floor entirely.
+    expected = planned or identify_test_files(state.seed)
     changed = set(git_diff_name_only_range(repo, base_head, "HEAD"))
     ported = [
         f
         for f in dict.fromkeys(tests_ported + [p for p in planned if p in changed])
         if f in changed
     ]
-    if planned and not any(_is_test_path(f) for f in ported):
+    if expected and not any(_is_test_path(f) for f in ported):
         log.warning(
             "Fused pre-RED: no regression test was ported (planned %s) — falling back",
-            ", ".join(planned[:5]),
+            ", ".join(expected[:5]),
         )
         _discard_fused_session(repo, base_head)
         return None
@@ -2574,10 +2596,21 @@ _TEST_OUTPUT_PATTERNS = (
 _TEST_OUTPUT_DIRS = ("htmlcov/", ".nyc_output/", "test-results/")
 
 
+def _in_dir(path: str, dirs: tuple[str, ...]) -> bool:
+    """True when a directory component of *path* is one of *dirs*.
+
+    Build caches land at the worktree root, but Python and JS tools also nest
+    them (``pkg/__pycache__``, ``web/.pytest_cache``), so match components
+    rather than only the leading path.
+    """
+    names = {d.rstrip("/") for d in dirs}
+    return any(part in names for part in path.split("/")[:-1])
+
+
 def _is_test_output(repo: str, ref: str, path: str) -> bool:
     """True for test-run output absent from *ref* (never part of a backport)."""
     name = os.path.basename(path)
-    if not path.startswith(_TEST_OUTPUT_DIRS) and not any(
+    if not _in_dir(path, _TEST_OUTPUT_DIRS) and not any(
         fnmatch(name, pattern) for pattern in _TEST_OUTPUT_PATTERNS
     ):
         return False
@@ -2602,7 +2635,7 @@ def _strip_session_scratch(
     changed = git_diff_name_only_range(repo, base_head, "HEAD")
 
     def is_droppable(path: str) -> bool:
-        if path.startswith(_SCRATCH_PREFIXES) or path in _PIPELINE_ARTIFACTS:
+        if _in_dir(path, _SCRATCH_PREFIXES) or path in _PIPELINE_ARTIFACTS:
             return True
         if path in keep:
             return False
@@ -3118,6 +3151,14 @@ def _run_fused_resolution(
     use the per-chunk resolver.
     """
     repo = config.repo_path
+    # Entries added during a failed attempt must not claim work the fallback
+    # discarded.
+    dossier_mark = len(state.dossier.items) if state.dossier else None
+
+    def reject_attempt() -> None:
+        if dossier_mark is not None and state.dossier is not None:
+            del state.dossier.items[dossier_mark:]
+
     report_path = os.path.join(
         _fused_artifact_dir(tracker), FUSED_RESOLUTION_REPORT_FILE
     )
@@ -3162,10 +3203,12 @@ def _run_fused_resolution(
     remaining = _conflicted_files(git_status_porcelain(repo))
     if remaining:
         log.warning("%s: fused session left %d conflicts", label, len(remaining))
+        reject_attempt()
         return None
     if git_rev_parse(repo, "HEAD") == base_head:
         if not _non_artifact_dirt(repo):
             log.warning("%s: fused session changed nothing", label)
+            reject_attempt()
             return None
         git_commit(
             repo,
@@ -3174,6 +3217,7 @@ def _run_fused_resolution(
         )
         if git_rev_parse(repo, "HEAD") == base_head:
             log.warning("%s: fused changes could not be committed", label)
+            reject_attempt()
             return None
     if _non_artifact_dirt(repo):
         # Leftover edits would affect the verified build but miss the
@@ -3188,10 +3232,12 @@ def _run_fused_resolution(
             label,
             len(markers),
         )
+        reject_attempt()
         return None
     stripped = _strip_session_scratch(repo, base_head, keep=set(state.seed))
     if stripped is None:
         log.warning("%s: could not strip session scratch cleanly — falling back", label)
+        reject_attempt()
         return None
     if stripped and state.dossier:
         state.dossier.add(
@@ -3206,6 +3252,7 @@ def _run_fused_resolution(
         )
         if tracker:
             tracker.record_gate("semantic_equivalence", "fused_unmatched")
+        reject_attempt()
         if state.dossier:
             state.dossier.add(
                 "Fused semantic check",
@@ -3225,6 +3272,7 @@ def _run_fused_resolution(
                 label,
                 len(markers),
             )
+            reject_attempt()
             return None
     if state.dossier:
         state.dossier.add(
