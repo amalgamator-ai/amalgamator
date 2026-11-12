@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import logging
 import os
@@ -950,12 +951,19 @@ def _fix_diff_for_prompt(config: BugFixConfig, commit: str) -> str:
 
 
 def _run_fused_session(
-    config: BugFixConfig, claude_config: ClaudeConfig, prompt: str, tracker
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    prompt: str,
+    tracker,
 ) -> None:
-    """Run one fused agent session with the phase's model configuration."""
-    asyncio.run(
-        claude_run(_phase_config(claude_config, config), [prompt], tracker=tracker)
-    )
+    """Run one fused agent session; always restore refs it may have moved."""
+    try:
+        asyncio.run(
+            claude_run(_phase_config(claude_config, config), [prompt], tracker=tracker)
+        )
+    finally:
+        _restore_protected_refs(config, state)
 
 
 def _fused_artifact_dir(tracker) -> str:
@@ -1421,10 +1429,7 @@ def _run_fused_pre_red(
     log.info(
         "Phase 0.5+0.5b+0.5c — fused pre-RED session (%d seed files)", len(state.seed)
     )
-    try:
-        _run_fused_session(config, claude_config, prompt.prompt(), tracker)
-    finally:
-        _restore_protected_refs(config, state)
+    _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
 
     result = _read_fused_result(result_path)
     triage = result.get("triage")
@@ -1514,7 +1519,6 @@ def _run_fused_pre_red(
         )
 
     state.ported_test_files = tests_ported
-    state.triage_assessment = triage
     priority = triage.get("priority_files")
     state.priority_files = (
         priority if isinstance(priority, list) else state.allowed_modules
@@ -1978,16 +1982,14 @@ def _commit_recovery_edits(config: BugFixConfig, phase_label: str) -> bool:
 def _fused_check_commands(state: PipelineState) -> list[str]:
     """Lint and verification commands the fused session must run itself."""
     assessment = state.triage_assessment or {}
-    commands: list[str] = []
+    commands: dict[str, None] = {}
     for key in ("lint_commands", "verification_commands"):
         value = assessment.get(key)
-        # A triage that emits a bare string must yield one command, not its
-        # characters.
-        entries = [value] if isinstance(value, str) else _strings(value)
-        for cmd in entries:
-            if cmd.strip() and cmd not in commands:
-                commands.append(cmd)
-    return commands[:10]
+        # A bare string is one command, not one command per character.
+        for cmd in [value] if isinstance(value, str) else _strings(value):
+            if cmd.strip():
+                commands.setdefault(cmd)
+    return list(commands)[:10]
 
 
 # Formatting checks that fail only on whitespace, with their in-place fixer.
@@ -3120,10 +3122,7 @@ def _run_fused_resolution(
     )
     if tracker:
         tracker.record_gate("resolution_mode", "fused")
-    try:
-        _run_fused_session(config, claude_config, prompt.prompt(), tracker)
-    finally:
-        _restore_protected_refs(config, state)
+    _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
     _add_fused_report_to_dossier(state, report_path)
 
     remaining = _conflicted_files(git_status_porcelain(repo))
@@ -4835,43 +4834,30 @@ class TargetResult:
     resolution_mode: str = ""
 
 
-def _read_tracker_modes(target_run_dir: str, issue_id: str) -> dict[str, str]:
-    """The pre-RED and resolution modes recorded as tracker gates."""
-    import glob
-
-    pattern = os.path.join(target_run_dir, f"{issue_id}_*.json")
-    matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+def _read_tracker_info(
+    target_run_dir: str, issue_id: str
+) -> tuple[float, str, dict[str, str]]:
+    """Cost, path and recorded modes from the target's tracker JSON."""
+    matches = sorted(
+        glob.glob(os.path.join(target_run_dir, f"{issue_id}_*.json")),
+        key=os.path.getmtime,
+        reverse=True,
+    )
     modes = {"pre_red_mode": "", "resolution_mode": ""}
     if not matches:
-        return modes
+        return 0.0, "", modes
+    tracker_path = matches[0]
     try:
-        with open(matches[0]) as f:
+        with open(tracker_path) as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
-        return modes
+        return 0.0, tracker_path, modes
     for phase in data.get("phases", []):
         gates = phase.get("gate_decisions") or {}
         for key in modes:
             if gates.get(key):
                 modes[key] = str(gates[key])
-    return modes
-
-
-def _read_tracker_cost(target_run_dir: str, issue_id: str) -> tuple[float, str]:
-    """Read cost and path from the tracker JSON written by run_pipeline's finally block."""
-    import glob
-
-    pattern = os.path.join(target_run_dir, f"{issue_id}_*.json")
-    matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-    if not matches:
-        return 0.0, ""
-    tracker_path = matches[0]
-    try:
-        with open(tracker_path) as f:
-            data = json.load(f)
-        return data.get("total_cost_usd", 0.0), tracker_path
-    except (json.JSONDecodeError, OSError):
-        return 0.0, tracker_path
+    return data.get("total_cost_usd", 0.0), tracker_path, modes
 
 
 def _write_summary(
@@ -5051,8 +5037,8 @@ def run_targets(
                 except Exception as e:
                     log.warning("Failed to write dossier: %s", e)
 
-            # --- Cost retrieval (unified, both paths) ---
-            cost_usd, tracker_json = _read_tracker_cost(
+            # --- Cost and mode retrieval (unified, both paths) ---
+            cost_usd, tracker_json, modes = _read_tracker_info(
                 target_run_dir, target_config.issue_id
             )
             tracker_rel = (
@@ -5067,12 +5053,13 @@ def run_targets(
                     dossier_path = os.path.join(sanitized, DOSSIER_FILE)
 
             duration = round(time.time() - target_start, 1)
-            modes = _read_tracker_modes(target_run_dir, target_config.issue_id)
             pre_red_mode = modes["pre_red_mode"] or (
-                "fused" if target_config.fused_pre_red else "legacy"
+                "legacy" if not target_config.fused_pre_red else ""
             )
+            # No gate means no fused session ran (e.g. a clean cherry-pick);
+            # do not label that as fused.
             resolution_mode = modes["resolution_mode"] or (
-                "fused" if target_config.fused_resolution else "legacy"
+                "legacy" if not target_config.fused_resolution else ""
             )
             results.append(
                 TargetResult(
