@@ -298,6 +298,20 @@ _MARKER_START_RE = re.compile(r"^<{7}( |\r?$)", re.MULTILINE)
 _MARKER_END_RE = re.compile(r"^>{7}( |\r?$)", re.MULTILINE)
 
 _DANGEROUS_SHELL_PATTERNS = (";", "&&", "&", "||", "|", "`", "$(", "${", ">", "<", "\n")
+# Bash's ANSI-C/locale quoting changes how quotes and backslashes parse
+# (`$'a\'b'` closes the quote at `\'`), which the single/double scanners do
+# not model. No project command needs it, so reject it outright.
+_ANSI_C_QUOTING = ("$'", '$"')
+# Wrappers that turn their quoted argument back into shell syntax. Quoted text
+# is otherwise argument data; these re-enable arbitrary composition.
+_SHELL_WRAPPER_RE = re.compile(
+    r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"(?:env\s+(?:-\S+\s+)*|command\s+)?"
+    r"(?:bash|sh|dash|ksh|zsh)\s+-[A-Za-z]*c(?:\s|$)"
+)
+_SHELL_EVAL_RE = re.compile(
+    r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:eval|exec)(?:\s|$)"
+)
 # An ``export NAME=...`` segment may carry shell expansions in its value (paths
 # like ``$(dirname "$PWD")/.gocache`` are common in project verification
 # commands). Only these are rejected inside such a segment; the command that
@@ -420,6 +434,8 @@ def _validate_shell_command(cmd: str) -> bool:
     """
     if not isinstance(cmd, str):
         return False
+    if any(q in cmd for q in _ANSI_C_QUOTING):
+        return False
     # A comment strip must not hide a second line: the caller runs the original
     # string. A single trailing newline is harmless; an inner one is a second
     # command.
@@ -439,6 +455,8 @@ def _validate_shell_command(cmd: str) -> bool:
         if not _export_substitution_ok(segment):
             return False
     if not final.strip():
+        return False
+    if _SHELL_WRAPPER_RE.match(final) or _SHELL_EVAL_RE.match(final):
         return False
     # Quoted spans are argument text, not shell syntax — but command
     # substitution inside them still executes.
@@ -997,6 +1015,11 @@ def _strings(value: object) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
+def _triage_commands(value: object) -> list[str]:
+    """A triage command field; a bare string is one command, not characters."""
+    return [value] if isinstance(value, str) else _strings(value)
+
+
 def _dicts(value: object) -> list[dict]:
     """The object entries of a JSON value (a non-list yields ``[]``)."""
     if not isinstance(value, list):
@@ -1043,6 +1066,27 @@ def _is_test_path(path: str) -> bool:
     )
 
 
+_TEST_DIR_PARTS = frozenset(
+    {"test", "tests", "testdata", "expected", "fixtures", "golden"}
+)
+
+
+def _is_test_only_path(path: str) -> bool:
+    """Unambiguous test path: a test directory or a test-file name.
+
+    ``identify_test_files`` matches ``testing/`` anywhere, which would treat
+    production packages such as ``src/testing/helpers.go`` as test files.
+    """
+    parts = path.lower().split("/")
+    name = parts[-1]
+    return (
+        any(part in _TEST_DIR_PARTS for part in parts[:-1])
+        or name.startswith(("test_", "spec_"))
+        or "_test." in name
+        or "_spec." in name
+    )
+
+
 def _matches_any(path: str, patterns: list[str]) -> bool:
     """Glob or directory-prefix match, for triage's ``files_to_skip``."""
     for pattern in patterns:
@@ -1085,10 +1129,17 @@ def _read_report(path: str, limit: int = 20_000) -> str:
     return text[:limit] + ("\n[TRUNCATED]" if len(text) > limit else "")
 
 
-def _discard_fused_session(repo: str, base_head: str) -> None:
+def _discard_fused_session(repo: str, base_head: str) -> bool:
     """Drop a session's commits and edits so the caller can fall back."""
-    git_reset_hard(repo, base_head)
-    _run_git(repo, ["clean", "-fd"])
+    reset = git_reset_hard(repo, base_head)
+    clean = _run_git(repo, ["clean", "-fd"])
+    if not reset.success or not clean.success:
+        log.warning(
+            "Could not discard fused session cleanly: %s",
+            (reset.stderr or clean.stderr).strip()[:300],
+        )
+        return False
+    return True
 
 
 def _protected_refs(repo: str, refs: tuple[str, ...]) -> dict[str, str]:
@@ -1126,18 +1177,24 @@ def _restore_protected_refs(config: BugFixConfig, state: PipelineState) -> None:
         _run_git(repo, ["update-ref", ref, sha])
 
 
+# The prompt only asks for prereq:/test-port:; fused-pre-red: is the pipeline's
+# own leftovers commit, kept in this list so it is not reported as stray.
 _PRE_RED_COMMIT_PREFIXES = ("prereq:", "test-port:", "fused-pre-red:")
 
 
-def _session_commit_files(repo: str, base_head: str, prefix: str) -> list[str]:
-    """Files changed by the session's commits whose subject starts with *prefix*."""
+def _session_test_files(repo: str, base_head: str) -> list[str]:
+    """Test paths the session's ``test-port:`` commits add or modify.
+
+    Deletions are excluded: removing a test must not satisfy the ported-test
+    floor, and a rename counts at its destination.
+    """
     files: list[str] = []
     for line in _git_lines(repo, "log", "--format=%H%x09%s", f"{base_head}..HEAD"):
         sha, _, subject = line.partition("\t")
-        if not subject.startswith(prefix):
+        if not subject.startswith("test-port:"):
             continue
-        for path in git_diff_name_only_range(repo, f"{sha}^", sha):
-            if path not in files:
+        for status, _old, path in _changed_paths(repo, sha):
+            if status[0] in "AMCR" and path not in files:
                 files.append(path)
     return files
 
@@ -1153,7 +1210,7 @@ def _fix_content_applied(repo: str, base_head: str, commit: str) -> bool:
     was lightly adapted.
     """
     changed = [fix_path for _status, _base, fix_path in _changed_paths(repo, commit)]
-    production = [p for p in changed if p not in set(identify_test_files(changed))]
+    production = [p for p in changed if not _is_test_only_path(p)]
     if not production:
         return False
     head_oids = _blob_oids(repo, [f"HEAD:{p}" for p in production])
@@ -1205,6 +1262,73 @@ def _validate_fused_pre_red(config: BugFixConfig, base_head: str) -> list[str]:
             and not git_is_ancestor(repo, parts[1], f"{commit}^1")
         ):
             problems.append(f"ported fix ancestor {parts[1][:12]} ({subject[:60]})")
+    # A prefix is a claim; check what each session commit actually changed.
+    # Oldest first so the leftovers commit can be judged against the paths the
+    # test-port and prerequisite commits already claimed.
+    test_port: set[str] = set()
+    prereq_paths: set[str] = set()
+
+    def non_debris(path: str) -> bool:
+        return not _is_strippable(repo, base_head, path)
+
+    for line in _git_lines(
+        repo, "log", "--reverse", "--format=%H%x09%s", f"{base_head}..HEAD"
+    ):
+        sha, _, subject = line.partition("\t")
+        paths = _changed_paths(repo, sha)
+        if subject.startswith("test-port:"):
+            bad = sorted(
+                {p for _s, b, p in paths if non_debris(p) and not _is_test_only_path(p)}
+                | {
+                    b
+                    for _s, b, _p in paths
+                    if non_debris(b) and not _is_test_only_path(b)
+                }
+            )
+            if bad:
+                problems.append(
+                    "test-port commit changed non-test paths: " + ", ".join(bad[:5])
+                )
+            test_port |= {p for _s, _b, p in paths}
+        elif subject.startswith("prereq:"):
+            parts = subject.split()
+            readable = (
+                len(parts) >= 2
+                and len(parts[1]) >= 7
+                and all(c in "0123456789abcdef" for c in parts[1])
+            )
+            allowed: set[str] = set()
+            if readable:
+                for _s, base, path in _changed_paths(repo, parts[1]):
+                    allowed |= {base, path}
+            # Added files are adaptations of the ported prereq; modified files
+            # must belong to the prereq's own diff.
+            bad = sorted(
+                p
+                for s, _b, p in paths
+                if s[0] == "M" and non_debris(p) and p not in allowed
+            )
+            if readable and bad:
+                problems.append(
+                    f"prereq {parts[1][:12]} changed paths outside its diff: "
+                    + ", ".join(bad[:5])
+                )
+            prereq_paths |= {p for _s, _b, p in paths} | {b for _s, b, _p in paths}
+        elif subject.startswith("fused-pre-red:"):
+            allowed = test_port | prereq_paths
+            bad = sorted(
+                {
+                    p
+                    for _s, _b, p in paths
+                    if non_debris(p) and not _is_test_only_path(p)
+                }
+                - allowed
+            )
+            if bad:
+                problems.append(
+                    "leftovers commit changed unclaimed production paths: "
+                    + ", ".join(bad[:5])
+                )
     return problems
 
 
@@ -1412,7 +1536,11 @@ def _pre_red_facts(repo: str, target_ref: str, commit: str) -> tuple[str, bool]:
         lines,
         "present in the base but missing on the target (same-name hints list "
         "possible moves; compare the API):",
-        [item for item in states if item.state == "absent" and item.status != "A"],
+        [
+            item
+            for item in states
+            if item.state == "absent" and item.status not in ("A", "D")
+        ],
     )
     _render_facts_section(
         lines,
@@ -1425,7 +1553,7 @@ def _pre_red_facts(repo: str, target_ref: str, commit: str) -> tuple[str, bool]:
         [item for item in states if item.state == "diverged"],
     )
     needs_build = any(
-        item.state == "absent" and item.status != "A" and not item.moves
+        item.state == "absent" and item.status not in ("A", "D") and not item.moves
         for item in states
     )
     return "\n".join(lines), needs_build
@@ -1445,6 +1573,12 @@ def _run_fused_pre_red(
     repo = config.repo_path
     commit = config.source_fix_commit
     base_head = git_rev_parse(repo, "HEAD")
+    dossier_mark = len(state.dossier.items) if state.dossier else None
+
+    def reject_attempt() -> None:
+        if dossier_mark is not None and state.dossier is not None:
+            del state.dossier.items[dossier_mark:]
+
     output_dir = _fused_artifact_dir(tracker)
     result_path = os.path.join(output_dir, FUSED_PRE_RED_RESULT_FILE)
     report_path = os.path.join(output_dir, FUSED_PRE_RED_REPORT_FILE)
@@ -1465,12 +1599,20 @@ def _run_fused_pre_red(
         facts=facts,
         skip_build=not needs_build,
     )
-    if tracker:
-        tracker.record_gate("pre_red_mode", "fused")
     log.info(
         "Phase 0.5+0.5b+0.5c — fused pre-RED session (%d seed files)", len(state.seed)
     )
-    _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
+    try:
+        _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
+    except Exception as e:
+        # Any session failure must fall back to the separate phases, not abort
+        # the target with a dirty worktree and a "fused" gate.
+        log.warning("Fused pre-RED session failed (%s) — falling back", e)
+        _discard_fused_session(repo, base_head)
+        reject_attempt()
+        return None
+    if tracker:
+        tracker.record_gate("pre_red_mode", "fused")
 
     result = _read_fused_result(result_path)
     triage = result.get("triage")
@@ -1484,6 +1626,7 @@ def _run_fused_pre_red(
             result_path,
         )
         _discard_fused_session(repo, base_head)
+        reject_attempt()
         return None
 
     # Session artifacts must not be committed; leftover edits are the session's
@@ -1508,12 +1651,13 @@ def _run_fused_pre_red(
             "Fused pre-RED session rejected (%s) — falling back", "; ".join(problems)
         )
         _discard_fused_session(repo, base_head)
+        reject_attempt()
         return None
 
     # Attribute tests before the strip: squashing the session's commits would
     # otherwise lose the test-port subjects and silently fall back to the
     # session's self-reported list.
-    tests_ported = _session_commit_files(repo, base_head, "test-port:") or _strings(
+    tests_ported = _session_test_files(repo, base_head) or _strings(
         result.get("tests_ported")
     )
     # The leftovers commit is `git add -A`, so anything force-added here would
@@ -1522,6 +1666,7 @@ def _run_fused_pre_red(
     if stripped is None:
         log.warning("Fused pre-RED: could not strip session scratch — falling back")
         _discard_fused_session(repo, base_head)
+        reject_attempt()
         return None
     if stripped:
         dropped = set(stripped)
@@ -1553,6 +1698,7 @@ def _run_fused_pre_red(
             ", ".join(expected[:5]),
         )
         _discard_fused_session(repo, base_head)
+        reject_attempt()
         return None
     uncovered = [p for p in planned if p not in set(ported)]
     if uncovered:
@@ -1679,14 +1825,14 @@ def phase_1_baseline_and_red(
     # Step 3: Extended verification baseline (lint + optionally triage-discovered tests)
     lint_cmds = [
         c
-        for c in state.triage_assessment.get("lint_commands", [])
+        for c in _triage_commands(state.triage_assessment.get("lint_commands"))
         if _validate_shell_command(c)
     ]
     if config.lint_command and config.lint_command not in lint_cmds:
         lint_cmds.insert(0, config.lint_command)
     verification_cmds = list(lint_cmds)
     if config.auto_discover_tests:
-        for c in state.triage_assessment.get("verification_commands", []):
+        for c in _triage_commands(state.triage_assessment.get("verification_commands")):
             if _validate_shell_command(c):
                 verification_cmds.append(c)
     state.baseline_verification = []
@@ -1817,7 +1963,7 @@ def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
     else:
         triage_lints = [
             c
-            for c in state.triage_assessment.get("lint_commands", [])
+            for c in _triage_commands(state.triage_assessment.get("lint_commands"))
             if _validate_shell_command(c)
         ]
         cmd = triage_lints[0] if triage_lints else ""
@@ -2040,9 +2186,7 @@ def _fused_check_commands(state: PipelineState) -> list[str]:
     assessment = state.triage_assessment or {}
     commands: dict[str, None] = {}
     for key in ("lint_commands", "verification_commands"):
-        value = assessment.get(key)
-        # A bare string is one command, not one command per character.
-        for cmd in [value] if isinstance(value, str) else _strings(value):
+        for cmd in _triage_commands(assessment.get(key)):
             if cmd.strip():
                 commands.setdefault(cmd)
     return list(commands)[:10]
@@ -2617,6 +2761,15 @@ def _is_test_output(repo: str, ref: str, path: str) -> bool:
     return not git_cat_file_exists(repo, ref, path)
 
 
+def _is_strippable(repo: str, ref: str, path: str) -> bool:
+    """Build scratch or test output the session strip removes."""
+    if _in_dir(path, _SCRATCH_PREFIXES) or path in _PIPELINE_ARTIFACTS:
+        # Build scratch is untracked by definition; a tracked path that happens
+        # to use a scratch-looking directory is real content.
+        return not git_cat_file_exists(repo, ref, path)
+    return _is_test_output(repo, ref, path)
+
+
 def _strip_session_scratch(
     repo: str, base_head: str, keep: set[str] | None = None
 ) -> list[str] | None:
@@ -2635,11 +2788,7 @@ def _strip_session_scratch(
     changed = git_diff_name_only_range(repo, base_head, "HEAD")
 
     def is_droppable(path: str) -> bool:
-        if _in_dir(path, _SCRATCH_PREFIXES) or path in _PIPELINE_ARTIFACTS:
-            return True
-        if path in keep:
-            return False
-        return _is_test_output(repo, base_head, path)
+        return path not in keep and _is_strippable(repo, base_head, path)
 
     dropped = [f for f in changed if is_droppable(f)]
     if not dropped:
@@ -3178,6 +3327,13 @@ def _run_fused_resolution(
     _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
     _add_fused_report_to_dossier(state, report_path)
 
+    # Every later gate compares trees, so a session that reset to another
+    # commit would pass them while silently dropping base_head's commits.
+    if not git_is_ancestor(repo, base_head, "HEAD"):
+        log.warning("%s: fused session rewrote history — falling back", label)
+        reject_attempt()
+        return None
+
     remaining = _conflicted_files(git_status_porcelain(repo))
     if remaining:
         log.warning("%s: fused session left %d conflicts", label, len(remaining))
@@ -3243,6 +3399,12 @@ def _run_fused_resolution(
         _run_triage_blind_review(
             config, _phase_config(claude_config, config), state, tracker, base_head
         )
+        if not git_is_ancestor(repo, base_head, "HEAD") or (
+            git_rev_parse(repo, "HEAD") == base_head
+        ):
+            log.warning("%s: blind review rewrote history — falling back", label)
+            reject_attempt()
+            return None
         markers = _committed_conflict_markers(repo, base_head)
         if markers:
             log.warning(
@@ -4659,12 +4821,12 @@ def _run_pipeline_phases(
     phase4_lint = _resolve_lint_command(config, state)
     lint_cmds = [
         c
-        for c in state.triage_assessment.get("lint_commands", [])
+        for c in _triage_commands(state.triage_assessment.get("lint_commands"))
         if _validate_shell_command(c) and c != phase4_lint
     ]
     verification_cmds = list(lint_cmds)
     if config.auto_discover_tests:
-        for c in state.triage_assessment.get("verification_commands", []):
+        for c in _triage_commands(state.triage_assessment.get("verification_commands")):
             if _validate_shell_command(c):
                 verification_cmds.append(c)
 
@@ -5153,8 +5315,10 @@ def run_targets(
                 evidence.append("fused resolution, self-reviewed")
             elif resolution_mode == "fused_fallback":
                 evidence.append("fused fallback → per-chunk resolver")
-            if pre_red_mode in ("fused", "fused_fallback"):
+            if pre_red_mode == "fused":
                 evidence.append("fused pre-RED")
+            elif pre_red_mode == "fused_fallback":
+                evidence.append("fused pre-RED fallback")
             suffix = f" ({', '.join(evidence)})" if evidence else ""
             print(
                 f"FINISHED target {spec.branch}: outcome={outcome}{suffix}, "

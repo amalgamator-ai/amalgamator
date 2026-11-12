@@ -335,11 +335,12 @@ priority list above.
 {triage_assessment}
 </triage_assessment>
 
-Pay close attention to the `prerequisites` entries — those marked `portable: false`
-or `carried_by_fix: true` indicate API differences between upstream and the target
-branch. Adapt call sites to match the target branch's existing API rather than
-copying the upstream form verbatim, and check any listed new types for symbols that
-are named or structured differently on the target.
+Pay close attention to the `prerequisites` entries — `portable: false`,
+`carried_by_fix: true` (fused output), and `prerequisite_details` — they indicate
+API differences between upstream and the target branch. Adapt call sites to match
+the target branch's existing API rather than copying the upstream form verbatim,
+and check any listed new types for symbols that are named or structured differently
+on the target.
 """
 
     _adaptation_section: ClassVar[str] = """
@@ -907,7 +908,8 @@ Use these facts instead of searching the tree:
 ## Result file
 
 Write {result_path} with exactly this JSON structure (no prose around it). An empty
-list or an honest `unknown` is better than an invented value.
+list or an honest `unknown` is better than an invented value. Include `build` only
+if you ran the build; omit it otherwise.
 
 <result_json>
 {schema}
@@ -965,9 +967,9 @@ list or an honest `unknown` is better than an invented value.
     def prompt(self) -> str:
         if self.skip_build:
             build_instruction = (
-                "Skip the build: no path the fix touches is a missing package. "
-                "Phase 1\n   runs the build and the test; do not run build or test "
-                "commands here."
+                "Skip the build only if no path the fix touches is a missing\n"
+                "   package and every import the fix adds already resolves on the\n"
+                "   target; otherwise run it. Phase 1 runs the full build and test."
             )
         else:
             build_instruction = (

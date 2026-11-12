@@ -648,3 +648,108 @@ def test_compact_fix_overview_has_fetch_instructions(tmp_path):
     assert "git show" in overview
     assert "base.c" in overview
     assert len(overview) < 5000
+
+
+def test_validate_fused_pre_red_checks_commit_paths(tmp_path):
+    """A prefix is not evidence: test-port and leftovers commits are path-checked."""
+    from auto_bug_fix.run_bug_fix import _validate_fused_pre_red
+
+    rp, fix = _repo(tmp_path)
+    config = _config(rp, fix)
+    base = _sha(rp)
+
+    Path(rp, "base.c").write_text("int x = 3;\n")
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "test-port: TEST-1")
+    problems = _validate_fused_pre_red(config, base)
+    assert any("test-port commit changed non-test paths" in p for p in problems)
+
+    _git(rp, "reset", "--hard", base)
+    Path(rp, "tests").mkdir()
+    Path(rp, "tests", "app_test.c").write_text("t\n")
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "test-port: TEST-1")
+    assert _validate_fused_pre_red(config, base) == []
+
+    _git(rp, "reset", "--hard", base)
+    Path(rp, "base.c").write_text("int x = 4;\n")
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "fused-pre-red: leftovers")
+    assert any(
+        "leftovers commit changed unclaimed production paths" in p
+        for p in _validate_fused_pre_red(config, base)
+    )
+
+
+def test_session_test_files_ignores_deletion(tmp_path):
+    """Deleting a test must not satisfy the ported-test floor."""
+    from auto_bug_fix.run_bug_fix import _session_test_files
+
+    rp, _fix = _repo(tmp_path)
+    test_file = Path(rp, "tests", "app_test.c")
+    test_file.parent.mkdir()
+    test_file.write_text("t\n")
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "seed test")
+    base = _sha(rp)
+    test_file.unlink()
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "test-port: TEST-1")
+
+    assert _session_test_files(rp, base) == []
+
+
+def test_strip_keeps_tracked_scratch_named_file(tmp_path):
+    """A tracked file under .gocache/ is content, not build debris."""
+    from auto_bug_fix.run_bug_fix import _strip_session_scratch
+
+    rp, _fix = _repo(tmp_path)
+    cache = Path(rp, ".gocache", "x")
+    cache.parent.mkdir()
+    cache.write_text("old\n")
+    _git(rp, "add", "-f", ".gocache/x")
+    _git(rp, "commit", "-m", "tracked cache")
+    base = _sha(rp)
+    cache.write_text("old\nnew\n")
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "session")
+
+    assert _strip_session_scratch(rp, base) == []
+    status = subprocess.run(
+        ["git", "diff", "--name-status", base, "HEAD"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert status.startswith("M")
+
+
+def test_fix_content_applied_counts_src_testing_as_production(tmp_path):
+    """A production package named testing/ must not be treated as tests."""
+    from auto_bug_fix.run_bug_fix import _fix_content_applied
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rp = str(repo)
+    _git(rp, "init", "-b", "main")
+    _git(rp, "config", "user.name", "t")
+    _git(rp, "config", "user.email", "t@t")
+    helper = repo / "src" / "testing" / "helpers.go"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("v1\n")
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "base")
+    base = _sha(rp)
+    helper.write_text("v2\n")
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "fix")
+    fix = _sha(rp)
+    _git(rp, "branch", "target", base)
+    _git(rp, "checkout", "-q", "target")
+    base_head = _sha(rp)
+    helper.write_text("v2\n")
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "already carries the fix")
+
+    assert _fix_content_applied(rp, base_head, fix) is True

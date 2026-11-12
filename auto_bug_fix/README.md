@@ -77,8 +77,9 @@ before RED**. Deterministic gates keep the session honest: the fix must be
 absent, commits may only be `prereq:`/`test-port:`, a ported fix-ancestor
 prerequisite is rejected, the ported-test list is read back from the commits,
 and session artifacts or build scratch never reach those commits. Phase 0.5.1
-validation and Phase 1 baseline/RED still run; a session that fails a gate is
-discarded and the three separate phases run instead.
+validation (legacy triage output only; fused entries carry `carried_by_fix`
+instead of `portable`) and Phase 1 baseline/RED still run; a session that fails
+a gate is discarded and the three separate phases run instead.
 
 ### Fused resolution (one agent session)
 
@@ -124,7 +125,8 @@ One further `advanced:` option reduces fused-session cost:
   and changed-file list instead of the full diff; the agent fetches exact
   per-file bytes with `git show <fix> -- <file>`. This cuts per-iteration
   context on large fixes; `tool_read_cap` / `tool_bash_cap` (characters) cap
-  individual tool results so one large file cannot dominate the window.
+  individual tool results so one large file cannot dominate the window
+  (LiteLLM models only; the Claude SDK path ignores these caps).
 
 The fused pre-RED session writes `pre_red_result.json` and its report to the
 run artifact directory, never the worktree; any in-repo copy left by a session

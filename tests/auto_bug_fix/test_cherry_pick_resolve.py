@@ -698,6 +698,54 @@ def test_fused_resolution_falls_back_when_conflicts_remain(mock_claude, tmp_path
     assert any("Post-Resolution Verification Agent" in p for p in prompts)
 
 
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_fused_resolution_rejects_history_rewrite(mock_claude, tmp_path):
+    """A session that resets to another commit must not pass the tree gates."""
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    config.fused_resolution = True
+    state = _make_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    tracker = Tracker(
+        issue_id="TEST-1", config_dict={}, model="test-model", output_dir=str(run_dir)
+    )
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        if "Backport Resolution Agent" in prompts[0]:
+            _git(rp, "reset", "--hard", fix_sha)
+            return []
+        path.write_text(
+            diverged.replace("    int c = 99;", "    int c = 30; /* fixed */")
+        )
+        _git(rp, "add", "-A")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config,
+        _make_claude_config(rp),
+        state,
+        tracker,
+        commit=fix_sha,
+        label="test port",
+    )
+
+    assert result == "resolved"
+    assert state.fused_resolution_ran is False
+    # The fallback starts from the original base, not the rewritten commit.
+    assert (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", fix_sha, "HEAD"],
+            cwd=rp,
+            capture_output=True,
+        ).returncode
+        != 0
+    )
+
+
 @patch("auto_bug_fix.run_bug_fix.cherry_pick_and_resolve")
 def test_prerequisite_chain_disables_fused_resolution(mock_cp, tmp_path):
     """Prerequisite ports must not inherit the main fix's fused session."""

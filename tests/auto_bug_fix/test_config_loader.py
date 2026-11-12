@@ -698,6 +698,18 @@ def test_fused_pre_red_flag_defaults_off_and_parses():
     assert cfg.fused_pre_red is True
 
 
+def test_tool_caps_accept_numeric_strings_and_warn_on_garbage(caplog):
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"tool_read_cap": "12000", "tool_bash_cap": 8000})
+    )
+    assert cfg.tool_read_cap == 12000
+    assert cfg.tool_bash_cap == 8000
+
+    cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({"tool_read_cap": "big"}))
+    assert cfg.tool_read_cap is None
+    assert "not a positive integer" in caplog.text
+
+
 def test_fused_optimization_flags_parse():
     cfg, _, _ = parse_bug_fix_config(
         _cfg_with_advanced(

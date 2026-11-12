@@ -63,8 +63,9 @@ class BugFixConfig:
     evidence_checks: bool = True  # token audit + substitution mining + follow-up scan
     post_resolution_check: bool = True  # Phase 3a.1 verification agent
     blind_review: bool = True  # Phase 3a.2 triage-blind review agent
-    # Collapse conflict resolution, regeneration, 3a.1, and 3a.2 into one agent
-    # session. The deterministic post-passes and Phase 4 verification still run.
+    # Collapse conflict resolution, build/test, regeneration, and Phase 3b into
+    # one agent session. 3a.2 still runs as a separate blind review; the
+    # deterministic 3a.1 post-passes are skipped. Phase 4 verification runs.
     fused_resolution: bool = False
     # Collapse semantic triage, prerequisite porting, and test port into one
     # pre-RED agent session with deterministic evidence and post-validation.

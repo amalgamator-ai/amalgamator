@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -117,11 +118,32 @@ def advanced_str(advanced: dict[str, Any], key: str, default: str) -> str:
 
 
 def advanced_int(advanced: dict[str, Any], key: str) -> int | None:
-    """Read a positive number from the ``advanced:`` section (else ``None``)."""
-    raw = advanced.get(key)
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
-        return int(raw)
-    return None
+    """Read a positive integer from ``advanced:``, warning on unusable values.
+
+    Accepts numbers and numeric strings (``20000`` and ``"20000"`` alike); a
+    bad value warns instead of silently disabling the cap it configures.
+    """
+    if key not in advanced:
+        return None
+    raw = advanced[key]
+    value: int | None = None
+    if isinstance(raw, bool):
+        pass
+    elif isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, float) and raw.is_integer():
+        value = int(raw)
+    elif isinstance(raw, str):
+        with contextlib.suppress(ValueError):
+            value = int(raw.strip())
+    if value is None or value <= 0:
+        log.warning(
+            "advanced.%s=%r is not a positive integer — disabling that cap",
+            key,
+            raw,
+        )
+        return None
+    return value
 
 
 def load_config_file(config_path: str) -> dict[str, Any]:

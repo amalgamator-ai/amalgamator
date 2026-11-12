@@ -35,8 +35,9 @@ model: m1                      # profile id from models.yaml (or a bare model na
 #   post_resolution_check: true   # Phase 3a.1 verification agent
 #   blind_review: true            # Phase 3a.2 triage-blind review agent
 #   fused_resolution: false       # one agent session for conflict resolution,
-#                                 # build/test, regeneration, and both reviews
-#                                 # (replaces the per-chunk resolver + 3a.1/3a.2/3b)
+#                                 # build/test, regeneration and Phase 3b;
+#                                 # 3a.2 still runs separately, 3a.1 post-passes
+#                                 # are skipped
 #   fused_pre_red: false          # one pre-RED session for semantic triage,
 #                                 # prerequisite ports, and test port
 #   partial_success_skip_ratio: 0.5  # non-bugfix ports: fraction of the fix's files
