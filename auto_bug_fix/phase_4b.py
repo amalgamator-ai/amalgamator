@@ -85,6 +85,7 @@ IMPORTANT: The checkout under <build_dir> already contains <target_branch> with 
         - Recompile using <build_command> (incremental).
         - Rerun <test_command>.
 - Count each complete build+test attempt as one retry. Repeat until clean or <max_build_test_retries> is exhausted.
+- Keep the checkout clean: your code fixes are committed automatically, but build/test output is not allowed in the repository. Run <build_command> and <test_command> from <build_dir>; generated artifacts, unpacked sources, or other files your commands create that are not part of the fix must not be left in the checkout when you write the result file — remove them (or confine them to <build_dir> if it lives outside the checkout).
 - If retries are exhausted:
     - Write the final build/test output and a summary of all attempted fixes to <output_dir>/{output_failure_file}.
     - Stop. Do not attempt further fixes.
