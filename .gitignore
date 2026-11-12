@@ -14,3 +14,7 @@ llm/auto_analyze/results/
 llm/auto_code_gen/results/
 llm/auto_profile/results/
 logs/
+
+# terminal-capture session logs (large; never commit)
+/*_dev.txt
+/*_dev_*.txt
