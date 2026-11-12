@@ -2601,6 +2601,10 @@ def _strip_session_scratch(
         log.warning("Could not re-commit without scratch: %s", commit.stderr[:300])
         return None
     for path in dropped:
+        # Only remove files that do not exist on the target; a tracked file
+        # under a scratch-looking name must keep its working-tree copy.
+        if git_cat_file_exists(repo, base_head, path):
+            continue
         try:
             os.remove(os.path.join(repo, path))
         except OSError:
