@@ -76,10 +76,15 @@ Producers should validate every emitted file with the consumer's own parser
 before handing it over:
 
 ```bash
-python -m auto_bug_fix.external_context --check path/to/context.md
+python -m auto_bug_fix.external_context --check --require-format path/to/context.md
 # exit 0 = usable; 2 = unusable/structurally invalid; 1 = missing file
 # add --json for a machine-readable report
 ```
+
+`--check` alone accepts an unversioned (v0) file, because the consumer must
+keep supporting existing and hand-written contexts. `--require-format` is a
+producer-side policy: an emitter's CI uses it to ensure every artifact
+declares its contract, so the version gate never silently disengages.
 
 This is the executable half of the contract: a format change that the
 consumer would silently distrust fails the producer's CI instead.

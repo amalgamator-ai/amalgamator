@@ -741,6 +741,11 @@ def load_external_context(path: str | None) -> ExternalContext:
 
     format_problem = _format_problem(ctx.metadata)
     if format_problem:
+        # Record once, with the consequence attached: the findings-status
+        # branch below reuses this exact string instead of appending a
+        # near-duplicate, and _check_problems can recognize that the
+        # unavailable status already has a specific explanation.
+        format_problem = f"{format_problem} — check result unavailable"
         ctx.parse_errors.append(format_problem)
 
     if "suspect findings" in sections:
@@ -761,7 +766,10 @@ def load_external_context(path: str | None) -> ExternalContext:
                 + " — check result unavailable"
             )
         elif format_problem:
-            problem = format_problem + " — check result unavailable"
+            # Already recorded when Metadata was parsed; setting it here
+            # only marks the findings result unavailable.  Appending again
+            # would print the same problem twice in producer CI output.
+            problem = format_problem
         else:
             declared_count = ctx.metadata.get("findings-count")
             checker = ctx.metadata.get("checker")
@@ -803,7 +811,7 @@ def load_external_context(path: str | None) -> ExternalContext:
                 )
         if problem is None:
             ctx.findings_status = "parsed"
-        else:
+        elif problem not in ctx.parse_errors:
             ctx.parse_errors.append(problem)
     else:
         ctx.parse_errors.append(
@@ -828,18 +836,32 @@ def load_external_context(path: str | None) -> ExternalContext:
     return ctx
 
 
-def _check_problems(ctx: ExternalContext) -> list[str]:
+def _check_problems(ctx: ExternalContext, *, require_format: bool = False) -> list[str]:
     """Return the reasons a producer-side check should reject *ctx*.
 
     Unknown sections are explicitly allowed by the contract (they are
     ignored, not injected), so that notice alone does not fail the check.
     Every other parse issue is a producer bug: the consumer would silently
     drop content or distrust the whole file.
+
+    ``require_format`` is a producer-only policy: absent markers remain
+    valid for the consumer (legacy v0), but an emitter's CI can require
+    every artifact to declare its contract.
     """
     problems: list[str] = []
-    if not ctx.active:
+    if require_format and not ctx.metadata.get("format"):
+        problems.append(
+            f"missing format marker — expected external-context/{SUPPORTED_FORMAT_MAJOR}"
+        )
+    if not ctx.active and not any(
+        "no recognizable sections" in err for err in ctx.parse_errors
+    ):
         problems.append("no recognized sections — the consumer would ignore this file")
-    if ctx.findings_status != "parsed":
+    if ctx.findings_status != "parsed" and not any(
+        "unavailable" in err for err in ctx.parse_errors
+    ):
+        # Every unavailable-status path records a specific reason; only
+        # synthesize the generic message when it did not.
         problems.append(
             "check result unavailable — the consumer would not trust any file"
         )
@@ -871,6 +893,14 @@ def main(argv: list[str] | None = None) -> int:
         help="validate the file (the default; accepted for explicitness)",
     )
     parser.add_argument(
+        "--require-format",
+        action="store_true",
+        help=(
+            "reject files without a format marker (producer CI policy; "
+            "the consumer still accepts unversioned v0 files)"
+        ),
+    )
+    parser.add_argument(
         "--json", action="store_true", help="emit a machine-readable report"
     )
     args = parser.parse_args(argv)
@@ -881,7 +911,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     ctx = load_external_context(args.path)
-    problems = _check_problems(ctx)
+    problems = _check_problems(ctx, require_format=args.require_format)
     report = {
         "path": ctx.source_path or expanded,
         "ok": not problems,

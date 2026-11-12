@@ -801,6 +801,41 @@ class TestValidatorCLI:
         assert "INVALID" in out
         assert "does not match" in out
 
+    def test_unsupported_major_reports_one_problem(self, capsys):
+        path = _write_md(
+            "## Metadata\n- format: external-context/2\n"
+            "- checker: check-backport.py\n- findings-count: 0\n\n"
+            "## Suspect findings\n"
+        )
+        try:
+            assert external_context_main([path]) == 2
+        finally:
+            os.unlink(path)
+        out = capsys.readouterr().out
+        assert out.count("unsupported external-context format") == 1
+        assert "check result unavailable — the consumer" not in out
+
+    def test_require_format_rejects_unversioned_file(self, capsys):
+        path = _write_md(
+            "## Metadata\n- checker: check-backport.py\n- findings-count: 0\n\n"
+            "## Suspect findings\n"
+        )
+        try:
+            assert external_context_main(["--check", path]) == 0
+            capsys.readouterr()
+            assert external_context_main(["--check", "--require-format", path]) == 2
+        finally:
+            os.unlink(path)
+        assert "missing format marker" in capsys.readouterr().out
+
+    def test_require_format_accepts_versioned_file(self, capsys):
+        path = _write_md(VALID_MD)
+        try:
+            assert external_context_main(["--check", "--require-format", path]) == 0
+        finally:
+            os.unlink(path)
+        assert "OK" in capsys.readouterr().out
+
     def test_unknown_section_warning_is_not_fatal(self, capsys):
         path = _write_md(
             "## Metadata\n- format: external-context/1\n"
@@ -822,4 +857,4 @@ class TestValidatorCLI:
             assert external_context_main([path]) == 2
         finally:
             os.unlink(path)
-        assert "no recognized sections" in capsys.readouterr().out
+        assert "no recognizable sections" in capsys.readouterr().out
