@@ -1027,6 +1027,27 @@ def identify_test_files(seed_files: list[str]) -> list[str]:
     return test_files
 
 
+def _is_test_path(path: str) -> bool:
+    """True when a changed path is a test file (or lives in a test tree)."""
+    lower = path.lower()
+    return (
+        bool(identify_test_files([path]))
+        or lower.startswith(("test/", "tests/"))
+        or "/test/" in lower
+        or "/tests/" in lower
+    )
+
+
+def _matches_any(path: str, patterns: list[str]) -> bool:
+    """Glob or directory-prefix match, for triage's ``files_to_skip``."""
+    for pattern in patterns:
+        if path == pattern or fnmatch(path, pattern):
+            return True
+        if pattern.endswith(("/", "**")) and path.startswith(pattern.rstrip("*")):
+            return True
+    return False
+
+
 def _planned_test_files(state: PipelineState) -> list[str]:
     """Test files to port: triage's judgement unioned with the seed floor.
 
@@ -1036,7 +1057,7 @@ def _planned_test_files(state: PipelineState) -> list[str]:
     """
     seed = list(state.seed)
     seed_set = set(seed)
-    files_to_skip = set(_strings(state.triage_assessment.get("files_to_skip")))
+    files_to_skip = _strings(state.triage_assessment.get("files_to_skip"))
     triage_tests = _strings(state.triage_assessment.get("test_files"))
     unexpected = [f for f in triage_tests if f not in seed_set]
     if unexpected:
@@ -1045,7 +1066,7 @@ def _planned_test_files(state: PipelineState) -> list[str]:
             ", ".join(unexpected[:5]),
         )
     merged = dict.fromkeys(triage_tests + identify_test_files(seed))
-    return [f for f in merged if f in seed_set and f not in files_to_skip]
+    return [f for f in merged if f in seed_set and not _matches_any(f, files_to_skip)]
 
 
 def _read_report(path: str, limit: int = 20_000) -> str:
@@ -1497,15 +1518,28 @@ def _run_fused_pre_red(
     triage["test_files"] = _strings(result.get("test_files"))
     triage["prerequisites"] = _dicts(result.get("prerequisites"))
     state.triage_assessment = triage
-    ported = set(tests_ported)
-    missing_tests = [f for f in _planned_test_files(state) if f not in ported]
-    if missing_tests:
+    planned = _planned_test_files(state)
+    changed = set(git_diff_name_only_range(repo, base_head, "HEAD"))
+    ported = [
+        f
+        for f in dict.fromkeys(tests_ported + [p for p in planned if p in changed])
+        if f in changed
+    ]
+    if planned and not any(_is_test_path(f) for f in ported):
         log.warning(
-            "Fused pre-RED: expected test files were not ported (%s) — falling back",
-            ", ".join(missing_tests[:5]),
+            "Fused pre-RED: no regression test was ported (planned %s) — falling back",
+            ", ".join(planned[:5]),
         )
         _discard_fused_session(repo, base_head)
         return None
+    uncovered = [p for p in planned if p not in set(ported)]
+    if uncovered:
+        # Adapted/renamed tests are legitimate; removal of the port is not.
+        log.warning(
+            "Fused pre-RED: planned tests were adapted or renamed: %s",
+            ", ".join(uncovered[:5]),
+        )
+    tests_ported = ported
     failed = [
         str(p.get("symbol", "?"))
         for p in triage["prerequisites"]

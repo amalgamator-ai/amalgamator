@@ -2147,6 +2147,13 @@ def test_planned_test_files_applies_files_to_skip():
     assert _planned_test_files(state) == ["tests/test_main.py"]
 
 
+def test_planned_test_files_honours_skip_globs():
+    state = PipelineState()
+    state.seed = ["vendor/x/y_test.go", "pkg/a_test.go", "src/a.go"]
+    state.triage_assessment = {"test_files": [], "files_to_skip": ["vendor/**"]}
+    assert _planned_test_files(state) == ["pkg/a_test.go"]
+
+
 def test_formatter_repair_reverts_edits_outside_the_backport(tmp_path):
     from auto_bug_fix.run_bug_fix import _revert_formatter_collateral
 

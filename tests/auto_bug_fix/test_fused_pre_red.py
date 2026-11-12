@@ -226,6 +226,29 @@ def test_fused_pre_red_requires_planned_tests(mock_claude, tmp_path):
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_fused_pre_red_accepts_adapted_test_paths(mock_claude, tmp_path):
+    """A test ported under a target-specific name still satisfies the floor."""
+    rp, fix = _repo(tmp_path)
+    state = _state()
+    run_dir, tracker = _tracker(tmp_path)
+
+    async def fake(claude_config, prompts, tracker=None):
+        adapted = Path(rp) / "tests" / "test_adapted.py"
+        adapted.parent.mkdir()
+        adapted.write_text("def test_x():\n    pass\n")
+        _git(rp, "add", "-A")
+        _git(rp, "commit", "-m", "test-port: TEST-1")
+        _write_result(run_dir, tests_ported=["tests/test_adapted.py"])
+        return []
+
+    mock_claude.side_effect = fake
+    result = _run_fused_pre_red(_config(rp, fix), _claude(rp), state, tracker)
+
+    assert result is not None
+    assert state.ported_test_files == ["tests/test_adapted.py"]
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
 def test_fused_pre_red_falls_back_without_result(mock_claude, tmp_path):
     rp, fix = _repo(tmp_path)
     state = _state()
