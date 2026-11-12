@@ -3098,38 +3098,16 @@ _FUSED_RESOLUTION_SCOPE = (
 )
 
 
-def _fused_resolution_unmatched(
-    config: BugFixConfig, state: PipelineState, commit: str, base_head: str
-) -> bool:
+def _fused_resolution_unmatched(config: BugFixConfig) -> bool:
     """True when the fused result cannot be tied to the fix's changes.
 
-    Range-diff pairing is forced (the pipeline's commits would otherwise read
-    as unmatched), so the relatedness check supplies the verdict: a session
-    that resolved nothing relevant must go through the per-chunk resolver.
+    Line-level overlap is the only reliable signal: a merge-based fix spans many
+    commits while the backport is squashed into one, so range-diff reports
+    unmatched rows however faithful the port is. A session that changed nothing
+    relevant shares none of the fix's lines and still goes to the per-chunk
+    resolver.
     """
-    repo = config.repo_path
-    fix_range = (
-        f"{commit}^1..{commit}"
-        if is_merge_commit(repo, commit)
-        else f"{commit}^..{commit}"
-    )
-    # Squash for the comparison: a session may leave several commits, and
-    # range-diff would report each extra one as unmatched.
-    cached_squash = state.squashed_backport_range
-    try:
-        backport_range = _squashed_backport_range(config, state)
-        if backport_range is None:
-            backport_range = f"{base_head}..HEAD"
-        rd_output = run_range_diff(repo, fix_range, backport_range, creation_factor=999)
-    except Exception as e:
-        log.warning("Fused semantic check failed, keeping the result: %s", e)
-        return False
-    finally:
-        # Phase 4.5 must squash the final tree, not this intermediate one.
-        state.squashed_backport_range = cached_squash
-    if parse_equivalence(rd_output) == "unmatched":
-        return True
-    return not _shares_content_with_fix(config, state)
+    return not _shares_content_with_fix(config)
 
 
 def _run_fused_resolution(
@@ -3246,7 +3224,7 @@ def _run_fused_resolution(
             + (f"\n... and {len(stripped) - 50} more" if len(stripped) > 50 else ""),
             "Phase 2+3a fused session",
         )
-    if _fused_resolution_unmatched(config, state, commit, base_head):
+    if _fused_resolution_unmatched(config):
         log.warning(
             "%s: fused result shares too little with the fix — falling back", label
         )
@@ -4047,11 +4025,12 @@ def _changed_payload_lines(repo: str, diff_args: list[str]) -> set[tuple[str, st
     return lines
 
 
-def _shares_content_with_fix(config: BugFixConfig, state: PipelineState) -> bool:
+def _shares_content_with_fix(config: BugFixConfig) -> bool:
     """Does the backport change any of the same lines the upstream fix changed?
 
-    Used only to recover the "unmatched" verdict that forcing range-diff's
-    pairing destroys. File-set overlap is not enough: a backport that touches
+    It is the relatedness signal for the fused result — a multi-commit merge
+    fix defeats range-diff pairing — and recovers the "unmatched" verdict that
+    forced pairing destroys in Phase 4.5. File-set overlap is not enough: a backport that touches
     the right file but changes something else entirely in it — a reworded
     comment beside the untouched bug — shares a filename while sharing no
     content, and would pass a filename test.
@@ -4151,7 +4130,7 @@ def phase_4_5_semantic_equivalence(
     if (
         equivalence != "unmatched"
         and creation_factor is not None
-        and not _shares_content_with_fix(config, state)
+        and not _shares_content_with_fix(config)
     ):
         log.warning(
             "Phase 4.5: range-diff paired the commits, but the backport "

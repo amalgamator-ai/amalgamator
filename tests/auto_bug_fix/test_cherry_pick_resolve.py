@@ -778,17 +778,67 @@ def test_fused_semantic_check_accepts_a_related_result(tmp_path):
 
     diverged = BASE.replace("    int c = 3;", "    int c = 99;")
     rp, fix_sha, path = _build_repo(tmp_path, diverged)
-    base_head = _sha(rp)
     path.write_text(diverged.replace("    int c = 99;", "    int c = 30; /* fixed */"))
     _git(rp, "add", "-A")
     _git(rp, "commit", "-m", "backport")
 
-    assert (
-        _fused_resolution_unmatched(
-            _make_config(rp, fix_sha), _make_state(), fix_sha, base_head
+    assert _fused_resolution_unmatched(_make_config(rp, fix_sha)) is False
+
+
+def test_fused_semantic_check_accepts_multi_commit_merge_fix(tmp_path):
+    """A merge fix spans several commits; the squashed backport still passes."""
+    from auto_bug_fix.run_bug_fix import _fused_resolution_unmatched
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rp = str(repo)
+    _git(rp, "init", "-b", "main")
+    _git(rp, "config", "user.name", "t")
+    _git(rp, "config", "user.email", "t@t")
+
+    (repo / "base.c").write_text(BASE)
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "base")
+    base_sha = _sha(rp)
+
+    _git(rp, "checkout", "-q", "-b", "fix")
+    (repo / "base.c").write_text(BASE.replace("    int c = 3;", "    int c = 30;"))
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "fix c")
+    (repo / "base.c").write_text(
+        BASE.replace("    int c = 3;", "    int c = 30;").replace(
+            "    int d = 4;", "    int d = 40;"
         )
-        is False
     )
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "fix d")
+    _git(rp, "checkout", "-q", "main")
+    _git(rp, "merge", "--no-ff", "-m", "merge fixes", "fix")
+    fix_sha = _sha(rp)
+    fix_commits = subprocess.run(
+        ["git", "rev-list", "--count", f"{fix_sha}^1..{fix_sha}"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert int(fix_commits) > 1
+
+    _git(rp, "branch", "target", base_sha)
+    _git(rp, "checkout", "-q", "target")
+    (repo / "base.c").write_text(BASE.replace("    int c = 3;", "    int c = 99;"))
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "target divergence")
+    _git(rp, "checkout", "-q", "--detach", "target")
+    (repo / "base.c").write_text(
+        BASE.replace("    int c = 3;", "    int c = 30;").replace(
+            "    int d = 4;", "    int d = 40;"
+        )
+    )
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "single squashed backport")
+
+    assert _fused_resolution_unmatched(_make_config(rp, fix_sha)) is False
 
 
 def test_fused_semantic_check_rejects_an_unrelated_result(tmp_path):
@@ -796,17 +846,11 @@ def test_fused_semantic_check_rejects_an_unrelated_result(tmp_path):
 
     diverged = BASE.replace("    int c = 3;", "    int c = 99;")
     rp, fix_sha, path = _build_repo(tmp_path, diverged)
-    base_head = _sha(rp)
     path.write_text(diverged.replace("    int d = 4;", "    int d = 40;"))
     _git(rp, "add", "-A")
     _git(rp, "commit", "-m", "unrelated rewrite")
 
-    assert (
-        _fused_resolution_unmatched(
-            _make_config(rp, fix_sha), _make_state(), fix_sha, base_head
-        )
-        is True
-    )
+    assert _fused_resolution_unmatched(_make_config(rp, fix_sha)) is True
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")
@@ -905,13 +949,13 @@ def test_fused_semantic_check_fails_open_with_warning(tmp_path, caplog, monkeypa
     diverged = BASE.replace("    int c = 3;", "    int c = 99;")
     rp, fix_sha, _ = _build_repo(tmp_path, diverged)
     monkeypatch.setattr(
-        rbf, "run_range_diff", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
+        rbf,
+        "_changed_payload_lines",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")),
     )
 
     with caplog.at_level(logging.WARNING):
-        result = rbf._fused_resolution_unmatched(
-            _make_config(rp, fix_sha), _make_state(), fix_sha, _sha(rp)
-        )
+        result = rbf._fused_resolution_unmatched(_make_config(rp, fix_sha))
 
     assert result is False
-    assert "Fused semantic check failed" in caplog.text
+    assert "Relatedness check failed" in caplog.text

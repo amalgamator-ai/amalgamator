@@ -1859,7 +1859,7 @@ def test_relatedness_needs_more_than_one_shared_line(tmp_path):
     _git_4b(tmp_path, "commit", "-m", "unrelated")
     config.source_fix_commit = fix_sha
     config.target_branch = base_sha
-    assert _shares_content_with_fix(config, state) is False
+    assert _shares_content_with_fix(config) is False
 
 
 def test_relatedness_ignores_opposite_polarity(tmp_path):
