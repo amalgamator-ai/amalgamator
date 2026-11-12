@@ -898,9 +898,10 @@ def phase_0_5c_test_port(
     claude_config: ClaudeConfig,
     state: PipelineState,
     tracker,
+    test_files: list[str] | None = None,
 ) -> list[str]:
     """Port the test files the triage and seed discovery identified."""
-    test_files = _planned_test_files(state)
+    test_files = test_files if test_files is not None else _planned_test_files(state)
     if not test_files:
         log.info("Phase 0.5c: no test files in the fix — skipping test port")
         return []
@@ -1496,9 +1497,8 @@ def _run_fused_pre_red(
     triage["test_files"] = _strings(result.get("test_files"))
     triage["prerequisites"] = _dicts(result.get("prerequisites"))
     state.triage_assessment = triage
-    missing_tests = [
-        f for f in _planned_test_files(state) if f not in set(tests_ported)
-    ]
+    ported = set(tests_ported)
+    missing_tests = [f for f in _planned_test_files(state) if f not in ported]
     if missing_tests:
         log.warning(
             "Fused pre-RED: expected test files were not ported (%s) — falling back",
@@ -3184,6 +3184,14 @@ def _run_fused_resolution(
         _run_triage_blind_review(
             config, _phase_config(claude_config, config), state, tracker, base_head
         )
+        markers = _committed_conflict_markers(repo, base_head)
+        if markers:
+            log.warning(
+                "%s: blind review committed conflict markers in %d files",
+                label,
+                len(markers),
+            )
+            return None
     if state.dossier:
         state.dossier.add(
             "Fused resolution",
@@ -4268,7 +4276,11 @@ def _run_pipeline_phases(
         if test_files_in_commit and not fused_pre_red_ok:
             with tracker.phase("Phase 0.5c — Test port"):
                 ported_tests = phase_0_5c_test_port(
-                    config, claude_config, state, tracker
+                    config,
+                    claude_config,
+                    state,
+                    tracker,
+                    test_files=test_files_in_commit,
                 )
                 state.dossier.add(
                     "Test port",
