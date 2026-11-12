@@ -1277,7 +1277,11 @@ def _fix_content_applied(repo: str, base_head: str, commit: str) -> bool:
     return overlap >= 0.5
 
 
-def _validate_fused_pre_red(config: BugFixConfig, base_head: str) -> list[str]:
+def _validate_fused_pre_red(
+    config: BugFixConfig,
+    base_head: str,
+    declared_tests: set[str] | None = None,
+) -> list[str]:
     """Objections that make a pre-RED session unusable (empty means accept).
 
     The prompt states these rules; checking them keeps a session that ignored
@@ -1314,9 +1318,15 @@ def _validate_fused_pre_red(config: BugFixConfig, base_head: str) -> list[str]:
     # test-port and prerequisite commits already claimed.
     test_port: set[str] = set()
     prereq_paths: set[str] = set()
+    tests = (declared_tests or set()) & {
+        path for _s, _b, path in _changed_paths(repo, commit)
+    }
 
     def non_debris(path: str) -> bool:
         return not _is_strippable(repo, base_head, path)
+
+    def test_path(path: str) -> bool:
+        return _is_test_only_path(path) or path in tests
 
     for line in _git_lines(
         repo, "log", "--reverse", "--format=%H%x09%s", f"{base_head}..HEAD"
@@ -1325,12 +1335,8 @@ def _validate_fused_pre_red(config: BugFixConfig, base_head: str) -> list[str]:
         paths = _changed_paths(repo, sha)
         if subject.startswith("test-port:"):
             bad = sorted(
-                {p for _s, b, p in paths if non_debris(p) and not _is_test_only_path(p)}
-                | {
-                    b
-                    for _s, b, _p in paths
-                    if non_debris(b) and not _is_test_only_path(b)
-                }
+                {p for _s, b, p in paths if non_debris(p) and not test_path(p)}
+                | {b for _s, b, _p in paths if non_debris(b) and not test_path(b)}
             )
             if bad:
                 problems.append(
@@ -1364,11 +1370,7 @@ def _validate_fused_pre_red(config: BugFixConfig, base_head: str) -> list[str]:
         elif subject.startswith("fused-pre-red:"):
             allowed = test_port | prereq_paths
             bad = sorted(
-                {
-                    p
-                    for _s, _b, p in paths
-                    if non_debris(p) and not _is_test_only_path(p)
-                }
+                {p for _s, _b, p in paths if non_debris(p) and not test_path(p)}
                 - allowed
             )
             if bad:
@@ -1692,8 +1694,12 @@ def _run_fused_pre_red(
             f"fused-pre-red: commit remaining pre-RED changes for {config.issue_id}",
         )
     # Validate after the leftovers commit: uncommitted production edits must
-    # not slip past the "fix already applied" checks.
-    problems = _validate_fused_pre_red(config, base_head)
+    # not slip past the "fix already applied" checks. The session's declared
+    # tests count as test paths even when naming patterns do not (SQL pairs).
+    declared_tests = set(_strings(result.get("test_files"))) | set(
+        identify_test_files(state.seed)
+    )
+    problems = _validate_fused_pre_red(config, base_head, declared_tests)
     if problems:
         log.warning(
             "Fused pre-RED session rejected (%s) — falling back", "; ".join(problems)
