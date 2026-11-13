@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.config_loader import (
     ConfigError,
     _sanitize_ref,
@@ -20,6 +21,7 @@ from auto_bug_fix.config_loader import (
     parse_targets,
     validate_config,
 )
+from auto_bug_fix.run_bug_fix import _phase_config
 
 
 def test_load_yaml_config():
@@ -263,6 +265,79 @@ def test_parse_claude_config_xml_tool_fallback_opt_in():
 
 def test_parse_claude_config_xml_tool_fallback_must_be_bool():
     config = {"claude": {"xml_tool_fallback": "yes"}}
+    with pytest.raises(ConfigError):
+        parse_claude_config(config, "/tmp/output")
+
+
+def test_parse_claude_config_effort_and_thinking():
+    config = {
+        "claude": {
+            "effort": "high",
+            "thinking": {"type": "adaptive"},
+        },
+    }
+    claude_config = parse_claude_config(config, "/tmp/output")
+    assert claude_config.effort == "high"
+    assert claude_config.thinking == {"type": "adaptive"}
+
+
+def test_phase_config_inherits_thinking_and_effort():
+    config = {
+        "claude": {
+            "effort": "high",
+            "thinking": {"type": "enabled", "budget_tokens": 32000},
+        },
+    }
+    claude_config = parse_claude_config(config, "/tmp/output")
+    bug_fix_config = BugFixConfig(
+        repo_path="/tmp/repo",
+        build_dir="/tmp/repo",
+        source_branch="origin/main",
+        target_branch="abc123",
+        source_fix_commit="abc123",
+        bug_description="test",
+        issue_id="TEST-1",
+    )
+
+    phase_config = _phase_config(claude_config, bug_fix_config)
+
+    assert phase_config.thinking == {"type": "enabled", "budget_tokens": 32000}
+    assert phase_config.effort == "high"
+
+
+def test_phase_config_thinking_override_wins():
+    config = {
+        "claude": {
+            "effort": "high",
+            "thinking": {"type": "enabled", "budget_tokens": 32000},
+        },
+    }
+    claude_config = parse_claude_config(config, "/tmp/output")
+    bug_fix_config = BugFixConfig(
+        repo_path="/tmp/repo",
+        build_dir="/tmp/repo",
+        source_branch="origin/main",
+        target_branch="abc123",
+        source_fix_commit="abc123",
+        bug_description="test",
+        issue_id="TEST-1",
+    )
+
+    phase_config = _phase_config(
+        claude_config, bug_fix_config, thinking={"type": "disabled"}
+    )
+
+    assert phase_config.thinking == {"type": "disabled"}
+
+
+def test_parse_claude_config_invalid_effort():
+    config = {"claude": {"effort": "turbo"}}
+    with pytest.raises(ConfigError):
+        parse_claude_config(config, "/tmp/output")
+
+
+def test_parse_claude_config_thinking_must_be_mapping():
+    config = {"claude": {"thinking": "adaptive"}}
     with pytest.raises(ConfigError):
         parse_claude_config(config, "/tmp/output")
 

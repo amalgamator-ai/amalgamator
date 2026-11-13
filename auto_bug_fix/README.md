@@ -411,8 +411,10 @@ credentials.
 | `api_base`, `api_key`, `api_key_file`, `model_params` | Unset | Legacy inline model settings; see the selection rules above |
 | `claude.allowed_tools` | `[Read, Write, Bash]` | Tools available to the agents |
 | `claude.perm_mode` | `acceptEdits` | Agent permission mode |
+| `claude.effort` | `max` | Claude Agent SDK effort level: `low`, `medium`, `high`, `xhigh`, or `max`. Ignored by the LiteLLM runner; use `model_params.reasoning_effort` there |
+| `claude.thinking` | `None` | Claude Agent SDK thinking config, e.g. `{"type": "adaptive"}`, `{"type": "enabled", "budget_tokens": N}`, or `{"type": "disabled"}`. When unset, the SDK defaults to `{"type": "adaptive"}`. Ignored by the LiteLLM runner |
 | `claude.xml_tool_fallback` | `false` | Provider compatibility mode: accept a message whose entire content is Claude-style XML tool blocks when the endpoint emits them as text instead of structured `tool_calls`. Malformed blocks are reported back as errors; nothing from them executes. Off by default — quoted examples stay text |
-| `external_context_file` | Unset | Hybrid mode: path (relative to the case file) to a prior resolver's context Markdown — deterministic scan findings and trusted per-file resolutions, injected as scoped sections into the triage, resolution, verification, and review prompts. Absent = standard pipeline. Produced by [`adapter/`](../adapter/README.md) (`check-backport.py`); see `docs/external-context.md`. |
+| `external_context_file` | Unset | Hybrid mode: path (relative to the case file) to a prior resolver's context Markdown — deterministic scan findings and trusted per-file resolutions, injected as scoped sections into the triage, resolution, verification, and review prompts. Absent = standard pipeline. Produced by the separate [amalgamator-hybrid](https://github.com/amalgamator-ai/amalgamator-hybrid) adapter (`check-backport.py`) or written by hand from the [template](../docs/external-context-template.md); validate it with `python -m auto_bug_fix.external_context --check <file>`; see `docs/external-context.md`. |
 
 Repository paths support `~` and environment-variable expansion. Use absolute
 repository/workdir paths to make cases independent of the invocation directory;

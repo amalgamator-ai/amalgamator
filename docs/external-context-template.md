@@ -13,6 +13,12 @@ with none of the three sections is treated as no context. If a resolved
 file's content itself contains a fenced block, wrap it in a longer outer
 fence (four backticks around a block containing three).
 
+Validate a filled-in file with the consumer's parser before using it:
+
+```bash
+python -m auto_bug_fix.external_context --check <this-file>.md
+```
+
 Rules (see `docs/external-context.md` for the full contract):
 
 - Findings are copied **verbatim** from the deterministic checker
@@ -47,6 +53,7 @@ Rules (see `docs/external-context.md` for the full contract):
 # External Resolver Context
 
 ## Metadata
+- format: external-context/1
 - resolver: synthmerge
 - endpoint: Turnstile DeepSeek V4 Flash
 - command: synthmerge -c /path/to/config.yaml --cache /path/to/cache --vibe --continue

@@ -1,8 +1,9 @@
 # Copyright (c) 2026 Red Hat, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the external resolver context (hybrid synthmerge→amalgamator)."""
+"""Tests for the external resolver context (hybrid backport pipeline)."""
 
+import json
 import os
 import tempfile
 
@@ -15,13 +16,20 @@ from auto_bug_fix.bug_fix_prompts import (
     TriageBlindReviewPrompt,
 )
 from auto_bug_fix.config_loader import ConfigError, parse_bug_fix_config
-from auto_bug_fix.external_context import ExternalContext, load_external_context
+from auto_bug_fix.external_context import (
+    ExternalContext,
+    load_external_context,
+)
+from auto_bug_fix.external_context import (
+    main as external_context_main,
+)
 
 VALID_MD = """# External Resolver Context
 
 Intro commentary that is passed through verbatim.
 
 ## Metadata
+- format: external-context/1
 - resolver: synthmerge 0.3.15
 - endpoint: Turnstile DeepSeek V4 Flash
 - conflicts: 26 across 11 files
@@ -688,3 +696,165 @@ class TestConfigLoader:
         cfg = dict(BASE_CONFIG, external_context_file=None)
         with pytest.raises(ConfigError, match="non-empty path"):
             parse_bug_fix_config(cfg, config_dir="/tmp")
+
+
+class TestFormatVersion:
+    def _ctx(self, metadata_lines, extra=""):
+        path = _write_md(
+            "## Metadata\n" + metadata_lines + "\n\n## Suspect findings\n" + extra
+        )
+        try:
+            return load_external_context(path)
+        finally:
+            os.unlink(path)
+
+    def test_v1_format_marker_is_accepted(self):
+        ctx = self._ctx(
+            "- format: external-context/1\n"
+            "- checker: check-backport.py\n"
+            "- findings-count: 1\n",
+            "- a.c:1: bad symbol\n",
+        )
+        assert ctx.findings_status == "parsed"
+        assert not any("format" in e for e in ctx.parse_errors)
+
+    def test_minor_version_is_accepted(self):
+        ctx = self._ctx(
+            "- format: external-context/1.4\n"
+            "- checker: check-backport.py\n"
+            "- findings-count: 0\n"
+        )
+        assert ctx.findings_status == "parsed"
+
+    def test_absent_format_is_accepted_for_backward_compatibility(self):
+        ctx = self._ctx("- checker: check-backport.py\n- findings-count: 0\n")
+        assert ctx.findings_status == "parsed"
+        assert not any("format" in e for e in ctx.parse_errors)
+
+    def test_unsupported_major_is_unavailable_not_trusted(self):
+        ctx = self._ctx(
+            "- format: external-context/2\n"
+            "- checker: check-backport.py\n"
+            "- findings-count: 0\n"
+        )
+        assert ctx.findings_status == "unavailable"
+        assert any("unsupported external-context format" in e for e in ctx.parse_errors)
+        assert "NO TRUSTED REGIONS" in ctx.render_resolution_section()
+
+    def test_malformed_format_is_unavailable(self):
+        ctx = self._ctx(
+            "- format: v1\n- checker: check-backport.py\n- findings-count: 0\n"
+        )
+        assert ctx.findings_status == "unavailable"
+        assert any("unrecognized format" in e for e in ctx.parse_errors)
+
+    def test_format_problem_disables_verbatim_trust(self):
+        path = _write_md(
+            "## Metadata\n- format: external-context/9\n"
+            "- checker: check-backport.py\n- findings-count: 1\n\n"
+            "## Suspect findings\n- a.c:1: bad\n\n"
+            "## Resolved files\n\n### a.c\n```diff\n+prior\n```\n"
+        )
+        try:
+            ctx = load_external_context(path)
+        finally:
+            os.unlink(path)
+        resolution = ctx.render_resolution_section()
+        assert "NO TRUSTED REGIONS" in resolution
+        assert "UNVERIFIED" in resolution
+
+
+class TestValidatorCLI:
+    def test_valid_file_exits_zero(self, capsys):
+        path = _write_md(VALID_MD)
+        try:
+            assert external_context_main(["--check", path]) == 0
+        finally:
+            os.unlink(path)
+        out = capsys.readouterr().out
+        assert "OK" in out
+        assert "external-context/1" in out
+
+    def test_valid_file_json_report(self, capsys):
+        path = _write_md(VALID_MD)
+        try:
+            assert external_context_main([path, "--json"]) == 0
+        finally:
+            os.unlink(path)
+        report = json.loads(capsys.readouterr().out)
+        assert report["ok"] is True
+        assert report["format"] == "external-context/1"
+        assert report["findings"] == 2
+        assert report["findings_status"] == "parsed"
+
+    def test_unusable_findings_exit_two(self, capsys):
+        path = _write_md(
+            "## Metadata\n- format: external-context/1\n"
+            "- checker: check-backport.py\n- findings-count: 3\n\n"
+            "## Suspect findings\n- a.c:1: only one\n"
+        )
+        try:
+            assert external_context_main([path]) == 2
+        finally:
+            os.unlink(path)
+        out = capsys.readouterr().out
+        assert "INVALID" in out
+        assert "does not match" in out
+
+    def test_unsupported_major_reports_one_problem(self, capsys):
+        path = _write_md(
+            "## Metadata\n- format: external-context/2\n"
+            "- checker: check-backport.py\n- findings-count: 0\n\n"
+            "## Suspect findings\n"
+        )
+        try:
+            assert external_context_main([path]) == 2
+        finally:
+            os.unlink(path)
+        out = capsys.readouterr().out
+        assert out.count("unsupported external-context format") == 1
+        assert "check result unavailable — the consumer" not in out
+
+    def test_require_format_rejects_unversioned_file(self, capsys):
+        path = _write_md(
+            "## Metadata\n- checker: check-backport.py\n- findings-count: 0\n\n"
+            "## Suspect findings\n"
+        )
+        try:
+            assert external_context_main(["--check", path]) == 0
+            capsys.readouterr()
+            assert external_context_main(["--check", "--require-format", path]) == 2
+        finally:
+            os.unlink(path)
+        assert "missing format marker" in capsys.readouterr().out
+
+    def test_require_format_accepts_versioned_file(self, capsys):
+        path = _write_md(VALID_MD)
+        try:
+            assert external_context_main(["--check", "--require-format", path]) == 0
+        finally:
+            os.unlink(path)
+        assert "OK" in capsys.readouterr().out
+
+    def test_unknown_section_warning_is_not_fatal(self, capsys):
+        path = _write_md(
+            "## Metadata\n- format: external-context/1\n"
+            "- checker: check-backport.py\n- findings-count: 0\n\n"
+            "## Suspect findings\n\n## Human notes\nfree-form\n"
+        )
+        try:
+            assert external_context_main([path]) == 0
+        finally:
+            os.unlink(path)
+
+    def test_missing_file_exits_one(self, capsys):
+        assert external_context_main(["/nonexistent/context.md"]) == 1
+        assert "file not found" in capsys.readouterr().err
+
+    def test_inactive_file_is_invalid(self, capsys):
+        path = _write_md("# nothing recognizable\njust prose\n")
+        try:
+            assert external_context_main([path]) == 2
+        finally:
+            os.unlink(path)
+        assert "no recognizable sections" in capsys.readouterr().out

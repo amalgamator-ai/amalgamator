@@ -104,7 +104,7 @@ def _phase_config(
         context_length=claude_config.context_length,
         tool_read_cap=config.tool_read_cap,
         tool_bash_cap=config.tool_bash_cap,
-        thinking=thinking,
+        thinking=thinking if thinking is not None else claude_config.thinking,
         effort=effort or claude_config.effort,
         profile=effective_profile,
         xml_tool_fallback=claude_config.xml_tool_fallback,
