@@ -66,6 +66,46 @@ Each is individually toggleable under `advanced:` so runs can ablate them.
 | Post-resolution check | `post_resolution_check` | Phase 3a.1 — a verification agent reviews the resolution against the evidence report and fixes violations of the three-way discipline. |
 | Blind review | `blind_review` | Phase 3a.2 — an independent agent reviews the ported diff without seeing the triage, catching anchoring errors. |
 
+### Fused pre-RED (one agent session)
+
+`advanced.fused_pre_red: true` replaces Phases 0.5, 0.5b and 0.5c with one
+session. The prompt carries the fix diff, changed files, build/test commands,
+deterministic patch facts (commits carried by the patch; each touched path's
+target state: `absent`, `same`, `diverged`) and the rules for scoping commits,
+porting the fix's tests and proving prerequisites external. It writes
+`pre_red_result.json` and a report outside the worktree, then stops before RED.
+Gates: the fix must be absent, only `prereq:`/`test-port:` commits are allowed,
+fix-ancestor prerequisites are rejected, ported tests are read from commits,
+and artifacts/build scratch never reach them. Phase 0.5.1 validation (legacy
+triage only) and Phase 1 baseline/RED still run; a failed session is discarded
+and the separate phases run instead.
+
+### Fused resolution (one agent session)
+
+`advanced.fused_resolution: true` replaces the per-chunk resolver, 3a.1 and
+Phase 3b with one session that resolves conflicts, completes and adapts the
+backport, builds/tests, runs regeneration and commits. The triage-blind review
+(3a.2, default on) still runs on the clean diff. Cherry-pick strategies and
+`files_to_skip` reverts run first; afterwards the pipeline requires a commit
+with no conflicts or markers, folds leftovers in and strips scratch. A
+line-relatedness check rejects a result sharing nothing with the fix and falls
+back to the per-chunk resolver. Phase 4, 4.5 and 5 still run.
+
+Not run in fused mode: the per-chunk retry loop, substitution/rename/snap-back
+post-passes, token/provenance/dead-config audits, 3a.1, and Phase 3b's rollback
+point. Regeneration is in-session without timeout/rollback, so a bad codegen is
+caught only by the build or Phase 4.1. Prerequisite ports use the same commit
+and Phase 4 gates but not the per-chunk audits. Prefer the default mode when
+those nets matter more than cost; the dossier records the evidence scope and
+`summary.json` carries `resolution_mode`.
+
+### Fused prompt and resolution optimizations
+
+- `fused_compact_prompts: true` — fused prompts use the fix's `--stat` and file
+  list; the agent fetches bytes with `git show <fix> -- <file>`. `tool_read_cap`
+  / `tool_bash_cap` (characters) cap individual results (LiteLLM only; the
+  Claude SDK path ignores them).
+
 ### Build output at commit boundaries
 
 Every agent-authored commit, and `candidate.patch` cut from it, must carry the

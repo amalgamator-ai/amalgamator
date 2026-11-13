@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -114,6 +115,35 @@ def advanced_str(advanced: dict[str, Any], key: str, default: str) -> str:
         )
         return default
     return raw.strip()
+
+
+def advanced_int(advanced: dict[str, Any], key: str) -> int | None:
+    """Read a positive integer from ``advanced:``, warning on unusable values.
+
+    Accepts numbers and numeric strings (``20000`` and ``"20000"`` alike); a
+    bad value warns instead of silently disabling the cap it configures.
+    """
+    if key not in advanced:
+        return None
+    raw = advanced[key]
+    value: int | None = None
+    if isinstance(raw, bool):
+        pass
+    elif isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, float) and raw.is_integer():
+        value = int(raw)
+    elif isinstance(raw, str):
+        with contextlib.suppress(ValueError):
+            value = int(raw.strip())
+    if value is None or value <= 0:
+        log.warning(
+            "advanced.%s=%r is not a positive integer — disabling that cap",
+            key,
+            raw,
+        )
+        return None
+    return value
 
 
 def load_config_file(config_path: str) -> dict[str, Any]:
@@ -396,6 +426,11 @@ def parse_bug_fix_config(
         evidence_checks=bool(advanced.get("evidence_checks", True)),
         post_resolution_check=bool(advanced.get("post_resolution_check", True)),
         blind_review=bool(advanced.get("blind_review", True)),
+        fused_resolution=bool(advanced.get("fused_resolution", False)),
+        fused_pre_red=bool(advanced.get("fused_pre_red", False)),
+        fused_compact_prompts=bool(advanced.get("fused_compact_prompts", False)),
+        tool_read_cap=advanced_int(advanced, "tool_read_cap"),
+        tool_bash_cap=advanced_int(advanced, "tool_bash_cap"),
         partial_success_skip_ratio=advanced_float(
             advanced, "partial_success_skip_ratio", 0.5, minimum=0.0, maximum=1.0
         ),

@@ -410,6 +410,8 @@ def _run_extended_verification_pipeline(
     *,
     recovery_fixes: bool,
     recovery_raises: bool = False,
+    verification_commands: list[str] | None = None,
+    baseline_failures: list[str] | None = None,
 ):
     """Drive only the Phase 4.1 branch of _run_pipeline_phases.
 
@@ -431,12 +433,16 @@ def _run_extended_verification_pipeline(
         assessment = {
             "commit_type": "bugfix",
             # One check fails; the other passes and must not be escalated.
-            "verification_commands": ["test -f fixed.txt", "true"],
+            "verification_commands": verification_commands
+            or ["test -f fixed.txt", "true"],
         }
         state.triage_assessment = assessment
         return assessment
 
     def fake_baseline(config, claude_config, state):
+        state.baseline_verification = [
+            {"cmd": cmd, "exit_code": 1} for cmd in baseline_failures or []
+        ]
         return None
 
     def fake_cherry_pick(config, claude_config, state, tracker, **kwargs):
@@ -541,3 +547,27 @@ def test_extended_verification_recovery_raises_forwards_only_failed_commands(
 
     labels = [item.label for item in dossier.items]
     assert "Extended verification failed: test -f fixed.txt" in labels
+
+
+def test_formatter_repair_skipped_for_baseline_failures(tmp_path, monkeypatch):
+    """A checker that already failed on the clean target must not be repaired."""
+    calls = {"repair": 0}
+    real = run_bug_fix._repair_known_formatter_failures
+
+    def spy(*args, **kwargs):
+        calls["repair"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(run_bug_fix, "_repair_known_formatter_failures", spy)
+    _, _, calls_4, dossier, _ = _run_extended_verification_pipeline(
+        tmp_path,
+        monkeypatch,
+        recovery_fixes=False,
+        verification_commands=["hack/verify-gofmt.sh"],
+        baseline_failures=["hack/verify-gofmt.sh"],
+    )
+
+    assert calls["repair"] == 0
+    assert calls_4["4a"] == 0
+    labels = [item.label for item in dossier.items]
+    assert not any("formatter repair" in label.lower() for label in labels)

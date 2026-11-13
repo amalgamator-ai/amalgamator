@@ -5,13 +5,20 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.claude_utils import BugFixClaudeConfig
 from auto_bug_fix.dossier import Dossier
-from auto_bug_fix.run_bug_fix import PipelineState, cherry_pick_and_resolve
+from auto_bug_fix.run_bug_fix import (
+    PipelineState,
+    cherry_pick_and_resolve,
+    port_prerequisite_chain,
+)
+from auto_bug_fix.tracker import Tracker
 
 BASE = """\
 void foo(void)
@@ -580,3 +587,423 @@ def test_evidence_false_blind_review_true_still_runs_3a2(mock_claude, tmp_path):
     assert result == "resolved"
     prompts = [call.args[1][0] for call in mock_claude.call_args_list]
     assert any("Independent Review Agent" in p for p in prompts)
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(mock_claude, tmp_path):
+    """Fused mode resolves in one session; 3a.1 is skipped, 3a.2 still runs."""
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    config.fused_resolution = True
+    config.build_command = "true"
+    config.test_command = "true"
+    state = _make_state()
+    state.triage_assessment = {
+        "regeneration_commands": [],
+        "files_to_skip": [],
+        "lint_commands": ["hack/verify-gofmt.sh"],
+    }
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    tracker = Tracker(
+        issue_id="TEST-1", config_dict={}, model="test-model", output_dir=str(run_dir)
+    )
+
+    seen_prompts: list[str] = []
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        seen_prompts.append(prompts[0])
+        path.write_text(
+            diverged.replace("    int c = 99;", "    int c = 30; /* fixed */")
+        )
+        _git(rp, "add", "-A")
+        _git(rp, "commit", "-m", "backport")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config,
+        _make_claude_config(rp),
+        state,
+        tracker,
+        commit=fix_sha,
+        label="test port",
+    )
+
+    assert result == "resolved"
+    assert len(seen_prompts) == 2  # resolution session + triage-blind review
+    prompt = seen_prompts[0]
+    assert "Backport Resolution Agent" in prompt
+    assert "A. RESOLVE" in prompt and "F. COMMIT" in prompt
+    assert "true" in prompt  # build/test commands are embedded
+    assert "hack/verify-gofmt.sh" in prompt  # triage-declared checks are listed
+    assert "in-place mode" in prompt  # and the prompt asks for the fixer
+    assert "Stay on the detached HEAD" in prompt  # never move the target branch
+    assert "fused_resolution_report.md" in prompt
+    assert not any("Post-Resolution Verification Agent" in p for p in seen_prompts)
+    # The independent read survives fused mode: 3a.2 runs on the clean diff.
+    assert any("Independent Review Agent" in p for p in seen_prompts)
+    assert state.fused_resolution_ran is True
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_fused_resolution_falls_back_when_conflicts_remain(mock_claude, tmp_path):
+    """A fused session that leaves conflicts hands the work to the old loop."""
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    config.fused_resolution = True
+    state = _make_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    tracker = Tracker(
+        issue_id="TEST-1", config_dict={}, model="test-model", output_dir=str(run_dir)
+    )
+
+    fused_calls = 0
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        nonlocal fused_calls
+        if "Backport Resolution Agent" in prompts[0]:
+            fused_calls += 1
+            state.dossier.add("Fused attempt", "discarded", "test")
+            return []  # deliberately resolve nothing
+        path.write_text(
+            diverged.replace("    int c = 99;", "    int c = 30; /* fixed */")
+        )
+        _git(rp, "add", "-A")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config,
+        _make_claude_config(rp),
+        state,
+        tracker,
+        commit=fix_sha,
+        label="test port",
+    )
+
+    assert result == "resolved"
+    assert fused_calls == 1
+    assert state.fused_resolution_ran is False
+    # Evidence from the discarded attempt must not claim work that was redone.
+    assert not any(i.source == "Phase 2+3a fused session" for i in state.dossier.items)
+    # The legacy loop had to finish the job and its reviews still ran.
+    prompts = [call.args[1][0] for call in mock_claude.call_args_list]
+    assert any("Narrow Resolution Agent" in p for p in prompts)
+    assert any("Post-Resolution Verification Agent" in p for p in prompts)
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_fused_resolution_rejects_history_rewrite(mock_claude, tmp_path):
+    """A session that resets to another commit must not pass the tree gates."""
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    config.fused_resolution = True
+    state = _make_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    tracker = Tracker(
+        issue_id="TEST-1", config_dict={}, model="test-model", output_dir=str(run_dir)
+    )
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        if "Backport Resolution Agent" in prompts[0]:
+            _git(rp, "reset", "--hard", fix_sha)
+            return []
+        path.write_text(
+            diverged.replace("    int c = 99;", "    int c = 30; /* fixed */")
+        )
+        _git(rp, "add", "-A")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config,
+        _make_claude_config(rp),
+        state,
+        tracker,
+        commit=fix_sha,
+        label="test port",
+    )
+
+    assert result == "resolved"
+    assert state.fused_resolution_ran is False
+    # The fallback starts from the original base, not the rewritten commit.
+    assert (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", fix_sha, "HEAD"],
+            cwd=rp,
+            capture_output=True,
+        ).returncode
+        != 0
+    )
+
+
+@patch("auto_bug_fix.run_bug_fix.cherry_pick_and_resolve")
+def test_prerequisite_chain_disables_fused_resolution(mock_cp, tmp_path):
+    """Prerequisite ports must not inherit the main fix's fused session."""
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, _ = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    config.fused_resolution = True
+    config.fused_pre_red = False
+    state = _make_state()
+    state.triage_assessment = {
+        "prerequisites": [
+            {"symbol": "s", "portable": True, "introduced_by": fix_sha},
+        ]
+    }
+    seen: list[bool] = []
+
+    def fake(config, *args, **kwargs):
+        seen.append(config.fused_resolution)
+        return "resolved"
+
+    mock_cp.side_effect = fake
+    port_prerequisite_chain(config, _make_claude_config(rp), state, None)
+
+    assert seen == [False]
+    assert config.fused_resolution is True
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_fused_commit_scratch_is_stripped(mock_claude, tmp_path):
+    """Build caches force-added by the session never reach the candidate."""
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    config.fused_resolution = True
+    config.blind_review = False  # keep the test on the session's own commit
+    state = _make_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    tracker = Tracker(
+        issue_id="TEST-1", config_dict={}, model="test-model", output_dir=str(run_dir)
+    )
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        path.write_text(
+            diverged.replace("    int c = 99;", "    int c = 30; /* fixed */")
+        )
+        cache = Path(rp) / ".gocache" / "x"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text("cache")
+        _git(rp, "add", "-A")
+        _git(rp, "commit", "-m", "fused backport")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config,
+        _make_claude_config(rp),
+        state,
+        tracker,
+        commit=fix_sha,
+        label="test port",
+    )
+
+    assert result == "resolved"
+    files = subprocess.run(
+        ["git", "diff", "--name-only", "HEAD^", "HEAD"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert "base.c" in files
+    assert not any(f.startswith(".gocache") for f in files)
+
+
+def test_fused_semantic_check_accepts_a_related_result(tmp_path):
+    from auto_bug_fix.run_bug_fix import _fused_resolution_unmatched
+
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    path.write_text(diverged.replace("    int c = 99;", "    int c = 30; /* fixed */"))
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "backport")
+
+    assert _fused_resolution_unmatched(_make_config(rp, fix_sha)) is False
+
+
+def test_fused_semantic_check_accepts_multi_commit_merge_fix(tmp_path):
+    """A merge fix spans several commits; the squashed backport still passes."""
+    from auto_bug_fix.run_bug_fix import _fused_resolution_unmatched
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rp = str(repo)
+    _git(rp, "init", "-b", "main")
+    _git(rp, "config", "user.name", "t")
+    _git(rp, "config", "user.email", "t@t")
+
+    (repo / "base.c").write_text(BASE)
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "base")
+    base_sha = _sha(rp)
+
+    _git(rp, "checkout", "-q", "-b", "fix")
+    (repo / "base.c").write_text(BASE.replace("    int c = 3;", "    int c = 30;"))
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "fix c")
+    (repo / "base.c").write_text(
+        BASE.replace("    int c = 3;", "    int c = 30;").replace(
+            "    int d = 4;", "    int d = 40;"
+        )
+    )
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "fix d")
+    _git(rp, "checkout", "-q", "main")
+    _git(rp, "merge", "--no-ff", "-m", "merge fixes", "fix")
+    fix_sha = _sha(rp)
+    fix_commits = subprocess.run(
+        ["git", "rev-list", "--count", f"{fix_sha}^1..{fix_sha}"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert int(fix_commits) > 1
+
+    _git(rp, "branch", "target", base_sha)
+    _git(rp, "checkout", "-q", "target")
+    (repo / "base.c").write_text(BASE.replace("    int c = 3;", "    int c = 99;"))
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "target divergence")
+    _git(rp, "checkout", "-q", "--detach", "target")
+    (repo / "base.c").write_text(
+        BASE.replace("    int c = 3;", "    int c = 30;").replace(
+            "    int d = 4;", "    int d = 40;"
+        )
+    )
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "single squashed backport")
+
+    assert _fused_resolution_unmatched(_make_config(rp, fix_sha)) is False
+
+
+def test_fused_semantic_check_rejects_an_unrelated_result(tmp_path):
+    from auto_bug_fix.run_bug_fix import _fused_resolution_unmatched
+
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    path.write_text(diverged.replace("    int d = 4;", "    int d = 40;"))
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "unrelated rewrite")
+
+    assert _fused_resolution_unmatched(_make_config(rp, fix_sha)) is True
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_mechanical_resolution_runs_before_the_fused_session(
+    mock_claude, tmp_path, monkeypatch
+):
+    from auto_bug_fix import run_bug_fix as rbf
+
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    config.fused_resolution = True
+    config.mechanical_resolution = True
+    config.blind_review = False
+    state = _make_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    tracker = Tracker(
+        issue_id="TEST-1", config_dict={}, model="test-model", output_dir=str(run_dir)
+    )
+    events: list[str] = []
+
+    def fake_mechanical(repo, commit, files):
+        events.append("mechanical")
+        return {}
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        events.append("claude")
+        path.write_text(
+            diverged.replace("    int c = 99;", "    int c = 30; /* fixed */")
+        )
+        _git(rp, "add", "-A")
+        _git(rp, "commit", "-m", "backport")
+        return []
+
+    monkeypatch.setattr(rbf, "resolve_mechanically", fake_mechanical)
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config,
+        _make_claude_config(rp),
+        state,
+        tracker,
+        commit=fix_sha,
+        label="test port",
+    )
+
+    assert result == "resolved"
+    assert events[0] == "mechanical"
+    assert "claude" in events
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_fused_fallback_cleans_untracked_session_files(mock_claude, tmp_path):
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    config.fused_resolution = True
+    config.blind_review = False
+    state = _make_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    tracker = Tracker(
+        issue_id="TEST-1", config_dict={}, model="test-model", output_dir=str(run_dir)
+    )
+    calls = {"n": 0}
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Failed fused session: new untracked file, conflicts untouched.
+            (Path(rp) / "stray.txt").write_text("scratch\n")
+            return []
+        path.write_text(diverged.replace("    int c = 99;", "    int c = 30;"))
+        _git(rp, "add", "base.c")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    result = cherry_pick_and_resolve(
+        config,
+        _make_claude_config(rp),
+        state,
+        tracker,
+        commit=fix_sha,
+        label="test port",
+    )
+
+    assert result == "resolved"
+    assert not (Path(rp) / "stray.txt").exists()
+
+
+def test_fused_semantic_check_fails_open_with_warning(tmp_path, caplog, monkeypatch):
+    from auto_bug_fix import run_bug_fix as rbf
+
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, _ = _build_repo(tmp_path, diverged)
+    monkeypatch.setattr(
+        rbf,
+        "_changed_payload_lines",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = rbf._fused_resolution_unmatched(_make_config(rp, fix_sha))
+
+    assert result is False
+    assert "Relatedness check failed" in caplog.text

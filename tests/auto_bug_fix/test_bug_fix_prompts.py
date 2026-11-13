@@ -206,3 +206,44 @@ def test_triage_blind_review_prompt_baseline_ref_fallback():
     )
     text = prompt.prompt()
     assert "git grep '<symbol>' origin/release-1.0" in text
+
+
+def test_fused_prompts_carry_external_context():
+    from auto_bug_fix.bug_fix_prompts import (
+        FusedPreRedPrompt,
+        FusedResolutionPrompt,
+    )
+
+    pre = FusedPreRedPrompt(
+        context="<context>c</context>",
+        fix_diff="d",
+        source_branch="main",
+        target_branch="rel",
+        fix_commit="abc",
+        base_head="base",
+        build_command="make",
+        test_command="make test",
+        seed_files=[],
+        result_path="result.json",
+        report_path="report.md",
+        external_context_section="<external>PRE</external>",
+    )
+    assert "<external>PRE</external>" in pre.prompt()
+
+    res = FusedResolutionPrompt(
+        context="<context>c</context>",
+        fix_diff="d",
+        fix_commit="abc",
+        conflicted_files=[],
+        triage_assessment="",
+        build_command="make",
+        test_command="make test",
+        check_commands=[],
+        regeneration_commands=[],
+        files_to_skip=[],
+        baseline_ref="base",
+        target_branch="rel",
+        report_path="report.md",
+        external_context_section="<external>RES</external>",
+    )
+    assert "<external>RES</external>" in res.prompt()
