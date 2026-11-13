@@ -2259,43 +2259,34 @@ def test_formatter_repair_ignores_non_formatter_failure(tmp_path):
     assert _repair_known_formatter_failures(config, [failure], state) == [failure]
 
 
-def test_planned_test_files_keeps_deterministic_floor():
-    """An empty triage list must not disable the test port in legacy mode."""
-    state = PipelineState()
-    state.seed = ["src/main.py", "tests/test_main.py", "src/utils.py"]
-    state.triage_assessment = {"test_files": [], "files_to_skip": []}
-    assert _planned_test_files(state) == ["tests/test_main.py"]
+def test_planned_test_files_floor_union_and_skips():
+    def planned(seed, **assessment):
+        state = PipelineState()
+        state.seed = seed
+        state.triage_assessment = assessment
+        return _planned_test_files(state)
 
-
-def test_planned_test_files_unions_triage_and_patterns():
-    state = PipelineState()
-    state.seed = ["golden/expected.out", "tests/test_main.py", "src/x.c"]
-    # Triage can name a seed file the naming patterns miss...
-    state.triage_assessment = {"test_files": ["golden/expected.out"]}
-    assert _planned_test_files(state) == [
+    # The naming-pattern floor survives an empty triage list.
+    seed = ["src/main.py", "tests/test_main.py", "src/utils.py"]
+    assert planned(seed, test_files=[], files_to_skip=[]) == ["tests/test_main.py"]
+    # Triage can add a seed file the patterns miss, but cannot widen the port.
+    seed = ["golden/expected.out", "tests/test_main.py", "src/x.c"]
+    assert planned(seed, test_files=["golden/expected.out"]) == [
         "golden/expected.out",
         "tests/test_main.py",
     ]
-    # ...but it cannot widen the port beyond files the fix touches.
-    state.triage_assessment = {"test_files": ["other/test_extra.py"]}
-    assert _planned_test_files(state) == ["tests/test_main.py"]
-
-
-def test_planned_test_files_applies_files_to_skip():
-    state = PipelineState()
-    state.seed = ["tests/test_main.py", "tests/test_slow.py"]
-    state.triage_assessment = {
-        "test_files": [],
-        "files_to_skip": ["tests/test_slow.py"],
-    }
-    assert _planned_test_files(state) == ["tests/test_main.py"]
-
-
-def test_planned_test_files_honours_skip_globs():
-    state = PipelineState()
-    state.seed = ["vendor/x/y_test.go", "pkg/a_test.go", "src/a.go"]
-    state.triage_assessment = {"test_files": [], "files_to_skip": ["vendor/**"]}
-    assert _planned_test_files(state) == ["pkg/a_test.go"]
+    assert planned(seed, test_files=["other/test_extra.py"]) == ["tests/test_main.py"]
+    # files_to_skip wins, including directory globs.
+    assert planned(
+        ["tests/test_main.py", "tests/test_slow.py"],
+        test_files=[],
+        files_to_skip=["tests/test_slow.py"],
+    ) == ["tests/test_main.py"]
+    assert planned(
+        ["vendor/x/y_test.go", "pkg/a_test.go", "src/a.go"],
+        test_files=[],
+        files_to_skip=["vendor/**"],
+    ) == ["pkg/a_test.go"]
 
 
 def test_formatter_repair_reverts_edits_outside_the_backport(tmp_path):

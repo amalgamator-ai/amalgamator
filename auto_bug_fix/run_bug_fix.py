@@ -1081,7 +1081,6 @@ _TEST_PATTERNS = (
     "test_",
     "tests/",
     "/test/",
-    "testing/",
     "spec/",
     "_spec.",
     "testdata/",
@@ -1110,27 +1109,6 @@ def _is_test_path(path: str) -> bool:
             for part in ("/test/", "/tests/", "/expected/", "/fixtures/", "/golden/")
         )
         or "testdata/" in lower
-    )
-
-
-_TEST_DIR_PARTS = frozenset(
-    {"test", "tests", "testdata", "expected", "fixtures", "golden"}
-)
-
-
-def _is_test_only_path(path: str) -> bool:
-    """Unambiguous test path: a test directory or a test-file name.
-
-    ``identify_test_files`` matches ``testing/`` anywhere, which would treat
-    production packages such as ``src/testing/helpers.go`` as test files.
-    """
-    parts = path.lower().split("/")
-    name = parts[-1]
-    return (
-        any(part in _TEST_DIR_PARTS for part in parts[:-1])
-        or name.startswith(("test_", "spec_"))
-        or "_test." in name
-        or "_spec." in name
     )
 
 
@@ -1257,7 +1235,7 @@ def _fix_content_applied(repo: str, base_head: str, commit: str) -> bool:
     was lightly adapted.
     """
     changed = [fix_path for _status, _base, fix_path in _changed_paths(repo, commit)]
-    production = [p for p in changed if not _is_test_only_path(p)]
+    production = [p for p in changed if not _is_test_path(p)]
     if not production:
         return False
     head_oids = _blob_oids(repo, [f"HEAD:{p}" for p in production])
@@ -1319,59 +1297,63 @@ def _validate_fused_pre_red(
     test_port: set[str] = set()
     prereq_paths: set[str] = set()
     tests = (declared_tests or set()) & {
-        path for _s, _b, path in _changed_paths(repo, commit)
+        p for _s, _b, p in _changed_paths(repo, commit)
     }
 
-    def non_debris(path: str) -> bool:
+    def ok(path: str) -> bool:
         return not _is_strippable(repo, base_head, path)
 
-    def test_path(path: str) -> bool:
-        return _is_test_only_path(path) or path in tests
+    def is_test(path: str) -> bool:
+        return _is_test_path(path) or path in tests
+
+    def prereq_sha(subject: str) -> str | None:
+        parts = subject.split()
+        if (
+            len(parts) > 1
+            and len(parts[1]) >= 7
+            and set(parts[1]) <= set("0123456789abcdef")
+        ):
+            return parts[1]
+        return None
 
     for line in _git_lines(
         repo, "log", "--reverse", "--format=%H%x09%s", f"{base_head}..HEAD"
     ):
         sha, _, subject = line.partition("\t")
         paths = _changed_paths(repo, sha)
+        sides = {b for _s, b, _p in paths} | {p for _s, _b, p in paths}
         if subject.startswith("test-port:"):
-            bad = sorted(
-                {p for _s, b, p in paths if non_debris(p) and not test_path(p)}
-                | {b for _s, b, _p in paths if non_debris(b) and not test_path(b)}
-            )
+            bad = sorted(p for p in sides if ok(p) and not is_test(p))
             if bad:
                 problems.append(
                     "test-port commit changed non-test paths: " + ", ".join(bad[:5])
                 )
-            test_port |= {p for _s, _b, p in paths}
+            test_port |= sides
         elif subject.startswith("prereq:"):
-            parts = subject.split()
-            readable = (
-                len(parts) >= 2
-                and len(parts[1]) >= 7
-                and all(c in "0123456789abcdef" for c in parts[1])
-            )
+            prereq = prereq_sha(subject)
             allowed: set[str] = set()
-            if readable:
-                for _s, base, path in _changed_paths(repo, parts[1]):
+            if prereq:
+                for _s, base, path in _changed_paths(repo, prereq):
                     allowed |= {base, path}
             # Added files are adaptations of the ported prereq; modified files
             # must belong to the prereq's own diff.
             bad = sorted(
-                p
-                for s, _b, p in paths
-                if s[0] == "M" and non_debris(p) and p not in allowed
+                p for s, _b, p in paths if s[0] == "M" and ok(p) and p not in allowed
             )
-            if readable and bad:
+            if prereq and bad:
                 problems.append(
-                    f"prereq {parts[1][:12]} changed paths outside its diff: "
+                    f"prereq {prereq[:12]} changed paths outside its diff: "
                     + ", ".join(bad[:5])
                 )
-            prereq_paths |= {p for _s, _b, p in paths} | {b for _s, b, _p in paths}
+            prereq_paths |= sides
         elif subject.startswith("fused-pre-red:"):
-            allowed = test_port | prereq_paths
             bad = sorted(
-                {p for _s, _b, p in paths if non_debris(p) and not test_path(p)}
-                - allowed
+                p
+                for p in sides
+                if ok(p)
+                and not is_test(p)
+                and p not in test_port
+                and p not in prereq_paths
             )
             if bad:
                 problems.append(
@@ -4252,35 +4234,17 @@ def _apply_cherry_pick(
 
     conflict_summary_parts = []
     if files_to_skip:
-        # Reset ALL skip files to target version — both conflicting and cleanly-applied
-        all_changed = _git_lines(config.repo_path, "diff", "--name-only", "HEAD")
-        skip_applied_clean = [
-            f for f in all_changed if f in files_to_skip and f not in uu_files
-        ]
-        if skip_applied_clean:
-            log.info(
-                "%s: reverting %d skip files that applied cleanly",
-                label,
-                len(skip_applied_clean),
-            )
-            for f in skip_applied_clean:
+        # Reset ALL skip files to the target version, conflicting or not.
+        changed = _git_lines(config.repo_path, "diff", "--name-only", "HEAD")
+        skipped = [f for f in changed if f in files_to_skip]
+        if skipped:
+            log.info("%s: reverting %d files_to_skip files", label, len(skipped))
+            for f in skipped:
                 _run_git(config.repo_path, ["checkout", "HEAD", "--", f])
-
-        auto_resolved = [f for f in uu_files if f in files_to_skip]
-        if auto_resolved:
-            log.info(
-                "%s: reverting %d conflicting skip files to target version",
-                label,
-                len(auto_resolved),
-            )
-            for f in auto_resolved:
-                _run_git(config.repo_path, ["checkout", "HEAD", "--", f])
-                _run_git(config.repo_path, ["add", "--", f])
-
-        total_skipped = len(skip_applied_clean) + len(auto_resolved)
-        if total_skipped:
+                if f in uu_files:
+                    _run_git(config.repo_path, ["add", "--", f])
             conflict_summary_parts.append(
-                f"Reverted {total_skipped} files to target version (files_to_skip)"
+                f"Reverted {len(skipped)} files to target version (files_to_skip)"
             )
             uu_files = [f for f in uu_files if f not in files_to_skip]
 

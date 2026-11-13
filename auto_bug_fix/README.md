@@ -68,72 +68,44 @@ Each is individually toggleable under `advanced:` so runs can ablate them.
 
 ### Fused pre-RED (one agent session)
 
-`advanced.fused_pre_red: true` replaces Phases 0.5, 0.5b, and 0.5c with one
-session. Its prompt carries the fix diff, the changed-file list, the build/test
-commands, deterministic patch facts (the commits the patch carries and each
-touched path's target state: `absent`, `same`, `diverged`), and the rules for
-scoping the commit, porting only the fix's tests, and porting only prerequisites
-it can prove are external (with `git merge-base --is-ancestor` against the fix
-and its first parent). It writes
-`pre_red_result.json` and a report to the run artifact directory, then **stops
-before RED**. Deterministic gates keep the session honest: the fix must be
-absent, commits may only be `prereq:`/`test-port:`, a ported fix-ancestor
-prerequisite is rejected, the ported-test list is read back from the commits,
-and session artifacts or build scratch never reach those commits. Phase 0.5.1
-validation (legacy triage output only; fused entries carry `carried_by_fix`
-instead of `portable`) and Phase 1 baseline/RED still run; a session that fails
-a gate is discarded and the three separate phases run instead.
+`advanced.fused_pre_red: true` replaces Phases 0.5, 0.5b and 0.5c with one
+session. The prompt carries the fix diff, changed files, build/test commands,
+deterministic patch facts (commits carried by the patch; each touched path's
+target state: `absent`, `same`, `diverged`) and the rules for scoping commits,
+porting the fix's tests and proving prerequisites external. It writes
+`pre_red_result.json` and a report outside the worktree, then stops before RED.
+Gates: the fix must be absent, only `prereq:`/`test-port:` commits are allowed,
+fix-ancestor prerequisites are rejected, ported tests are read from commits,
+and artifacts/build scratch never reach them. Phase 0.5.1 validation (legacy
+triage only) and Phase 1 baseline/RED still run; a failed session is discarded
+and the separate phases run instead.
 
 ### Fused resolution (one agent session)
 
-`advanced.fused_resolution: true` replaces the per-chunk conflict resolver,
-Phase 3a.1, and Phase 3b regeneration with a **single agent session**: one
-prompt resolves every conflict, completes the backport, builds and tests, runs
-regeneration commands, performs the post-resolution pass and commits. The
-triage-blind review (`blind_review`, default on) still runs afterwards, from
-the same clean diff, restoring the independent read of the result. It is
-intended for large fixes whose backport is not a mechanical cherry-pick, where
-repeated context loading and per-chunk prompts dominate the cost.
+`advanced.fused_resolution: true` replaces the per-chunk resolver, 3a.1 and
+Phase 3b with one session that resolves conflicts, completes and adapts the
+backport, builds/tests, runs regeneration and commits. The triage-blind review
+(3a.2, default on) still runs on the clean diff. Cherry-pick strategies and
+`files_to_skip` reverts run first; afterwards the pipeline requires a commit
+with no conflicts or markers, folds leftovers in and strips scratch. A
+line-relatedness check rejects a result sharing nothing with the fix and falls
+back to the per-chunk resolver. Phase 4, 4.5 and 5 still run.
 
-The deterministic setup and gates are unchanged: cherry-pick strategies and
-`files_to_skip` reverts still run before the session; after it, the pipeline
-requires a commit, no remaining conflicts or conflict markers, folds leftover
-edits into that commit, and strips build scratch (a strip failure falls back).
-A range-diff relatedness check rejects a result that shares nothing with the
-fix, and such a result falls back to the per-chunk resolver like any other
-gate failure. Phase 4 verification, Phase 4.5 range-diff, and Phase 5
-completeness still run.
-
-What fused resolution does **not** run: the per-chunk resolver and its retry
-loop, the substitution-mining / rename-restoration / snap-back post-passes, the
-token / line-provenance / dead-config audits, the evidence-fed verification
-agent (3a.1), and Phase 3b's HEAD-capture rollback point. Regeneration commands
-run in-session without a timeout or rollback, so a codegen that half-writes
-files and exits 0 is caught only if it breaks the build or Phase 4.1 checks.
-The dossier records this evidence scope, `summary.json` carries
-`resolution_mode`, and the outcome line says `success (fused resolution,
-self-reviewed)`.
-
-Prerequisite ports in fused pre-RED are bounded to the prompt's candidate list
-and are not passed through the per-chunk resolver, post-passes, or audits; they
-are checked by the same commit-prefix, carried-prerequisite and Phase 4 gates.
-Keep `fused_resolution` off when those nets matter more than cost, and compare
-against the default mode before enabling it by default.
+Not run in fused mode: the per-chunk retry loop, substitution/rename/snap-back
+post-passes, token/provenance/dead-config audits, 3a.1, and Phase 3b's rollback
+point. Regeneration is in-session without timeout/rollback, so a bad codegen is
+caught only by the build or Phase 4.1. Prerequisite ports use the same commit
+and Phase 4 gates but not the per-chunk audits. Prefer the default mode when
+those nets matter more than cost; the dossier records the evidence scope and
+`summary.json` carries `resolution_mode`.
 
 ### Fused prompt and resolution optimizations
 
-One further `advanced:` option reduces fused-session cost:
+- `fused_compact_prompts: true` — fused prompts use the fix's `--stat` and file
+  list; the agent fetches bytes with `git show <fix> -- <file>`. `tool_read_cap`
+  / `tool_bash_cap` (characters) cap individual results (LiteLLM only; the
+  Claude SDK path ignores them).
 
-- `fused_compact_prompts: true` — the fused prompts carry the fix's `--stat`
-  and changed-file list instead of the full diff; the agent fetches exact
-  per-file bytes with `git show <fix> -- <file>`. This cuts per-iteration
-  context on large fixes; `tool_read_cap` / `tool_bash_cap` (characters) cap
-  individual tool results so one large file cannot dominate the window
-  (LiteLLM models only; the Claude SDK path ignores these caps).
-
-The fused pre-RED session writes `pre_red_result.json` and its report to the
-run artifact directory, never the worktree; any in-repo copy left by a session
-is removed before the pipeline commits the session's test edits.
 ### Build output at commit boundaries
 
 Every agent-authored commit, and `candidate.patch` cut from it, must carry the

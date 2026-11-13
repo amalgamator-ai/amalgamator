@@ -47,16 +47,6 @@ def _exclude_path(worktree_path: str) -> Path | None:
     return _rev_parse_path(worktree_path, "--git-path", "info/exclude")
 
 
-def _git_dir_path(worktree_path: str) -> Path | None:
-    """This worktree's own git directory (``.git/worktrees/<name>`` when linked)."""
-    return _rev_parse_path(worktree_path, "--git-dir")
-
-
-def _common_git_dir_path(worktree_path: str) -> Path | None:
-    """The shared git directory; worktree markers live under its ``worktrees/``."""
-    return _rev_parse_path(worktree_path, "--git-common-dir")
-
-
 def _other_marker_claims(
     worktree_path: str, own_marker: Path | None
 ) -> tuple[set[str], set[str]]:
@@ -65,7 +55,7 @@ def _other_marker_claims(
     Markers of dead worktrees are pruned; their patterns are returned so the
     caller can adopt them instead of leaking them into the shared file.
     """
-    common = _common_git_dir_path(worktree_path)
+    common = _rev_parse_path(worktree_path, "--git-common-dir")
     claims: set[str] = set()
     orphans: set[str] = set()
     if common is None or not (common / "worktrees").is_dir():
@@ -102,7 +92,7 @@ def _add_scratch_excludes(worktree_path: str, adopted: set[str] | None = None) -
     from a crashed run's marker before ``worktree prune`` deleted it.
     """
     exclude = _exclude_path(worktree_path)
-    git_dir = _git_dir_path(worktree_path)
+    git_dir = _rev_parse_path(worktree_path, "--git-dir")
     if exclude is None or git_dir is None:
         return
     marker = git_dir / _ADDED_EXCLUDES_MARKER
@@ -113,10 +103,8 @@ def _add_scratch_excludes(worktree_path: str, adopted: set[str] | None = None) -
         # Pre-existing patterns are ours to remove only when another amalgamator
         # worktree added them; otherwise they belong to the user.
         claims, orphans = _other_marker_claims(worktree_path, marker)
-        inherited = (adopted or set()) | orphans
-        shared = [
-            p for p in _SCRATCH_EXCLUDES if p in lines and p in claims | inherited
-        ]
+        owned = (adopted or set()) | orphans | claims
+        shared = [p for p in _SCRATCH_EXCLUDES if p in lines and p in owned]
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("".join(f"{p}\n" for p in missing + shared), encoding="utf-8")
         if not missing:
@@ -132,7 +120,7 @@ def _add_scratch_excludes(worktree_path: str, adopted: set[str] | None = None) -
 
 def _remove_scratch_excludes(worktree_path: str) -> None:
     """Remove the patterns ``_add_scratch_excludes`` added for this worktree."""
-    git_dir = _git_dir_path(worktree_path)
+    git_dir = _rev_parse_path(worktree_path, "--git-dir")
     exclude = _exclude_path(worktree_path)
     if git_dir is None or exclude is None:
         return
