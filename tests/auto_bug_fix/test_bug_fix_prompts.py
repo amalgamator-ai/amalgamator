@@ -181,6 +181,21 @@ def test_test_port_prompt_uses_diff_command_for_merges():
     assert "git show merge_abc --" not in text
 
 
+def test_triage_blind_review_prompt_batches_checks():
+    from auto_bug_fix.bug_fix_prompts import TriageBlindReviewPrompt
+
+    prompt = TriageBlindReviewPrompt(
+        context="c",
+        fix_diff="d",
+        current_diff="x",
+        target_branch="rel",
+        baseline_ref="base",
+    )
+    text = prompt.prompt()
+    assert "Batch independent `git grep` calls" in text
+    assert "~40" in text
+
+
 def test_triage_blind_review_prompt_baseline_ref():
     prompt = TriageBlindReviewPrompt(
         context="<context>test</context>",

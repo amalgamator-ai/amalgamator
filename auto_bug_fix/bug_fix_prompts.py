@@ -602,6 +602,8 @@ as available.
 
 ## Rules
 - Only fix genuine errors — symbols wrongly removed or wrongly adapted
+- Batch independent `git grep` calls in one turn; aim to finish within ~40
+  tool calls. Do not repeat a search that already answered the question.
 - Do not reformat, restyle, or improve code
 - Every edit must be backed by a `git grep` result you ran
 - Stage changes with `git add` if you make any fixes
