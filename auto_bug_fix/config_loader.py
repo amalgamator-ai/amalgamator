@@ -431,6 +431,10 @@ def parse_claude_config(
       (temperature, top_p, reasoning_effort, …).
     * ``api_key:`` / ``api_key_file:`` — explicit API key or path to a
       key file (``~`` expansion supported).
+    * ``claude.effort:`` — Claude Agent SDK effort level (low, medium, high,
+      xhigh, max; default max).
+    * ``claude.thinking:`` — Claude Agent SDK thinking config, e.g.
+      ``{"type": "adaptive"}`` or ``{"type": "enabled", "budget_tokens": N}``.
     """
     claude = config.get("claude", {})
     if not isinstance(claude, dict):
@@ -440,6 +444,14 @@ def parse_claude_config(
     xml_tool_fallback = claude.get("xml_tool_fallback", False)
     if not isinstance(xml_tool_fallback, bool):
         raise ConfigError("claude.xml_tool_fallback must be a boolean")
+
+    effort = claude.get("effort", "max")
+    if effort not in ("low", "medium", "high", "xhigh", "max"):
+        raise ConfigError("claude.effort must be one of low, medium, high, xhigh, max")
+
+    thinking = claude.get("thinking")
+    if thinking is not None and not isinstance(thinking, dict):
+        raise ConfigError("claude.thinking must be a mapping")
 
     # Deprecated: set module-level state in llm_client for callers that
     # haven't adopted profiles yet. Named selections never seed legacy globals.
@@ -461,6 +473,8 @@ def parse_claude_config(
         perm_mode=claude.get("perm_mode", "acceptEdits"),
         cwd=output_dir,
         profile=profile,
+        effort=effort,
+        thinking=thinking,
         xml_tool_fallback=xml_tool_fallback,
     )
 
