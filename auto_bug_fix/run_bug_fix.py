@@ -98,7 +98,7 @@ def _phase_config(
         cwd=config.repo_path,
         command_timeout=claude_config.command_timeout,
         context_length=claude_config.context_length,
-        thinking=thinking,
+        thinking=thinking if thinking is not None else claude_config.thinking,
         effort=effort or claude_config.effort,
         profile=effective_profile,
         xml_tool_fallback=claude_config.xml_tool_fallback,

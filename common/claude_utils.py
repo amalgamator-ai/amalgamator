@@ -181,7 +181,7 @@ def print_claude_config(config: ClaudeConfig) -> None:
     is_claude = is_claude_model(config.model)
 
     # Fields only relevant to Claude — suppress for other models.
-    _claude_only = {"thinking", "max_thinking_tokens"}
+    _claude_only = {"effort", "thinking", "max_thinking_tokens"}
 
     print(f"{class_name}:")
     for f in fields(config):
