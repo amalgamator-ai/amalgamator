@@ -337,9 +337,9 @@ _ANSI_C_QUOTING = ("$'", '$"')
 # Wrappers that turn their quoted argument back into shell syntax. Quoted text
 # is otherwise argument data; these re-enable arbitrary composition.
 _SHELL_WRAPPER_RE = re.compile(
-    r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
-    r"(?:env\s+(?:-\S+\s+)*|command\s+)?"
-    r"(?:bash|sh|dash|ksh|zsh)\s+-[A-Za-z]*c(?:\s|$)"
+    r"(?<![\w./-])(?:[\w./-]*/)?"
+    r"(?:bash|sh|dash|ksh|zsh|python[\d.]*|perl|ruby|node)"
+    r"\b[^\s;|&]*\s+-[A-Za-z]*[ce](?:\s|$)"
 )
 _SHELL_EVAL_RE = re.compile(
     r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:eval|exec)(?:\s|$)"
@@ -488,13 +488,14 @@ def _validate_shell_command(cmd: str) -> bool:
             return False
     if not final.strip():
         return False
-    if _SHELL_WRAPPER_RE.match(final) or _SHELL_EVAL_RE.match(final):
+    outside_final = _outside_quotes(final)
+    if _SHELL_WRAPPER_RE.search(outside_final) or _SHELL_EVAL_RE.match(outside_final):
         return False
     # Quoted spans are argument text, not shell syntax — but command
     # substitution inside them still executes.
     if any(p in final for p in ("`", "$(", "${")):
         return False
-    return not any(p in _outside_quotes(final) for p in _DANGEROUS_SHELL_PATTERNS)
+    return not any(p in outside_final for p in _DANGEROUS_SHELL_PATTERNS)
 
 
 def _conflicted_files(status_lines: list[str]) -> list[str]:
@@ -1081,6 +1082,7 @@ _TEST_PATTERNS = (
     "test_",
     "tests/",
     "/test/",
+    "testing/",
     "spec/",
     "_spec.",
     "testdata/",
@@ -1096,6 +1098,29 @@ def identify_test_files(seed_files: list[str]) -> list[str]:
         if any(p in lower for p in _TEST_PATTERNS) or basename.startswith("test_"):
             test_files.append(f)
     return test_files
+
+
+_TEST_DIR_PARTS = frozenset(
+    {"test", "tests", "testdata", "expected", "fixtures", "golden"}
+)
+
+
+def _is_test_only_path(path: str) -> bool:
+    """Unambiguous test path; unlike ``_is_test_path``, ``testing/`` is not
+    enough (``src/testing/helpers.go`` is a production package)."""
+    parts = path.lower().split("/")
+    name = parts[-1]
+    return (
+        any(part in _TEST_DIR_PARTS for part in parts[:-1])
+        or name.startswith(("test_", "spec_"))
+        or "_test." in name
+        or "_spec." in name
+    )
+
+
+def _is_declared_test(path: str) -> bool:
+    """A test path we accept from a session's own ``test_files`` list."""
+    return _is_test_path(path) or (path.endswith(".sql") and "/sql/" in path)
 
 
 def _is_test_path(path: str) -> bool:
@@ -1235,7 +1260,7 @@ def _fix_content_applied(repo: str, base_head: str, commit: str) -> bool:
     was lightly adapted.
     """
     changed = [fix_path for _status, _base, fix_path in _changed_paths(repo, commit)]
-    production = [p for p in changed if not _is_test_path(p)]
+    production = [p for p in changed if not _is_test_only_path(p)]
     if not production:
         return False
     head_oids = _blob_oids(repo, [f"HEAD:{p}" for p in production])
@@ -1296,15 +1321,18 @@ def _validate_fused_pre_red(
     # test-port and prerequisite commits already claimed.
     test_port: set[str] = set()
     prereq_paths: set[str] = set()
-    tests = (declared_tests or set()) & {
-        p for _s, _b, p in _changed_paths(repo, commit)
+    tests = {
+        p
+        for p in (declared_tests or set())
+        & {p for _s, _b, p in _changed_paths(repo, commit)}
+        if _is_declared_test(p)
     }
 
     def ok(path: str) -> bool:
         return not _is_strippable(repo, base_head, path)
 
     def is_test(path: str) -> bool:
-        return _is_test_path(path) or path in tests
+        return _is_test_only_path(path) or path in tests
 
     def prereq_sha(subject: str) -> str | None:
         parts = subject.split()
@@ -1335,10 +1363,10 @@ def _validate_fused_pre_red(
             if prereq:
                 for _s, base, path in _changed_paths(repo, prereq):
                     allowed |= {base, path}
-            # Added files are adaptations of the ported prereq; modified files
-            # must belong to the prereq's own diff.
+            # Added files are adaptations of the ported prereq; modified or
+            # deleted files must belong to the prereq's own diff.
             bad = sorted(
-                p for s, _b, p in paths if s[0] == "M" and ok(p) and p not in allowed
+                p for s, _b, p in paths if s[0] in "MD" and ok(p) and p not in allowed
             )
             if prereq and bad:
                 problems.append(
@@ -1724,7 +1752,11 @@ def _run_fused_pre_red(
     # Even if triage skips every planned path, the seed's test files still
     # require a ported test: skipping cannot remove the floor entirely.
     expected = planned or identify_test_files(state.seed)
-    changed = set(git_diff_name_only_range(repo, base_head, "HEAD"))
+    # A planned path only counts when it still exists at HEAD: deleting the
+    # regression test must not satisfy the floor.
+    changed = set(
+        _git_lines(repo, "diff", "--name-only", "--diff-filter=d", base_head, "HEAD")
+    )
     ported = [
         f
         for f in dict.fromkeys(tests_ported + [p for p in planned if p in changed])

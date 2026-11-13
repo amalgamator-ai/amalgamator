@@ -117,9 +117,11 @@ def _write_result(run_dir: Path, **overrides) -> dict:
     return result
 
 
-def _run_session(tmp_path, action=None, write_result=True, **result):
+def _run_session(tmp_path, action=None, write_result=True, setup=None, **result):
     """Run one fused pre-RED session; *action* edits the repo first."""
     rp, fix = _repo(tmp_path)
+    if setup:
+        setup(rp, fix)
     state = _state()
     run_dir, tracker = _tracker(tmp_path)
 
@@ -249,6 +251,22 @@ def test_fused_pre_red_floor_and_adaptation(tmp_path):
     assert outcome is not None
     assert state.ported_test_files == ["tests/test_adapted.py"]
 
+    deleted = tmp_path / "deleted"
+    deleted.mkdir()
+
+    def setup(rp, _fix):
+        (Path(rp) / "base_test.c").write_text("int t;\n")
+        _git(rp, "add", "-A")
+        _git(rp, "commit", "-m", "target test")
+
+    def del_act(rp, _fix):
+        (Path(rp) / "base_test.c").unlink()
+        _git(rp, "add", "-A")
+        _git(rp, "commit", "-m", "test-port: TEST-1")
+
+    outcome, *_ = _run_session(deleted, del_act, setup=setup, tests_ported=[])
+    assert outcome is None
+
 
 def test_fused_pre_red_falls_back_without_result(tmp_path):
     def act(rp, _fix):
@@ -309,6 +327,14 @@ def test_fused_pre_red_allows_mainline_prereq_rejects_carried_one(tmp_path):
     _git(rp, "commit", "-m", f"prereq: {side} side")
     problems = _validate_fused_pre_red(config, base)
     assert any(side[:12] in p for p in problems)
+
+    # A prereq commit may not delete production outside the prereq's diff.
+    _git(rp, "reset", "--hard", base)
+    (Path(rp) / "base.c").unlink()
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", f"prereq: {mainline} delete")
+    problems = _validate_fused_pre_red(config, base)
+    assert any("outside its diff" in p for p in problems)
 
 
 def test_restore_protected_refs_undoes_branch_move(tmp_path):
