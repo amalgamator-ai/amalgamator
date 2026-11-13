@@ -1070,7 +1070,8 @@ B. COMPLETE the backport. Port anything the fix needs that the cherry-pick did n
    requires. Do not port unrelated upstream work or features the fix does not need.
 
 C. BUILD and TEST. Run `{build_command}` and `{test_command}`; fix every regression
-   the port caused. Do not weaken, delete, or skip the ported tests.
+   the port caused. Do not weaken, delete, or skip the ported tests. A check that
+   already passed does not need to run again.
 
 D. CHECKS and REGENERATION. Run the project checks and fix what they flag:
 {check_commands}
@@ -1088,9 +1089,12 @@ F. COMMIT and RECORD. Confirm no conflict markers remain (`git grep -n '<<<<<<<'
    Stage only source changes and commit once with a descriptive message; no
    build scratch, caches, or test-run output (logs, `.diffs`, regression or
    coverage files). Write {report_path} (outside the repository) with one section
-   per task and the final build/test/check results. Then stop.
+   per task and the final build/test/check results. Then stop; no further
+   verification passes after the report.
 
 ## Rules
+- Batch independent tool calls in one turn and combine related reads and checks
+  into one command; aim to finish within ~120 tool calls.
 - Files to skip (do not port): {files_to_skip}
 - Stay on the detached HEAD; never check out, reset or commit on {target_branch}.
 - Do not edit files outside the fix's scope; do not revert the fix; no network.

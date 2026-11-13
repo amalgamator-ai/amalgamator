@@ -431,6 +431,8 @@ def parse_bug_fix_config(
         fused_compact_prompts=bool(advanced.get("fused_compact_prompts", False)),
         tool_read_cap=advanced_int(advanced, "tool_read_cap"),
         tool_bash_cap=advanced_int(advanced, "tool_bash_cap"),
+        context_prune_tokens=advanced_int(advanced, "context_prune_tokens"),
+        context_keep_tokens=advanced_int(advanced, "context_keep_tokens"),
         partial_success_skip_ratio=advanced_float(
             advanced, "partial_success_skip_ratio", 0.5, minimum=0.0, maximum=1.0
         ),

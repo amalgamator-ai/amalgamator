@@ -77,6 +77,8 @@ class BugFixConfig:
     # Tool output caps for the agent loop (None = context-derived defaults).
     tool_read_cap: int | None = None
     tool_bash_cap: int | None = None
+    context_prune_tokens: int | None = None
+    context_keep_tokens: int | None = None
     # Non-bugfix ports only: fraction of the fix's files that may be dropped
     # (skipped and never regenerated) before the outcome is downgraded from
     # success to partial_success.

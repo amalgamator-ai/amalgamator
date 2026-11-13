@@ -116,6 +116,11 @@ class ClaudeConfig:
     # context-length-derived defaults.
     tool_read_cap: int | None = None
     tool_bash_cap: int | None = None
+    # Deterministic history elision: above this many tokens, stale tool output
+    # and old reasoning are replaced with short markers, keeping the most
+    # recent ``context_keep_tokens`` verbatim. None = built-in defaults.
+    context_prune_tokens: int | None = None
+    context_keep_tokens: int | None = None
 
     def __post_init__(self):
         if self.profile:

@@ -246,4 +246,8 @@ def test_fused_prompts_carry_external_context():
         report_path="report.md",
         external_context_section="<external>RES</external>",
     )
-    assert "<external>RES</external>" in res.prompt()
+    text = res.prompt()
+    assert "<external>RES</external>" in text
+    assert "Batch independent tool calls" in text
+    assert "~120 tool calls" in text
+    assert "no further\n   verification passes" in text

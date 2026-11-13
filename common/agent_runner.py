@@ -81,6 +81,14 @@ DEFAULT_BASH_TIMEOUT = 600
 DEFAULT_CONTEXT_LENGTH = 128_000
 COMPACTION_THRESHOLD_PCT = 0.80
 KEEP_RECENT_TOKENS = 40_000
+# Deterministic history elision. Large-context models otherwise accumulate
+# every tool result for the whole session; each later turn resends them, so a
+# long session pays a quadratic token bill. Above this budget, stale tool
+# output and old assistant reasoning become short markers; the recent tail
+# (the part the model still needs to act on) stays verbatim.
+PRUNE_CONTEXT_TOKENS = 120_000
+PRUNE_KEEP_RECENT_TOKENS = 60_000
+_ELIDED_ASSISTANT_CHARS = 400
 
 
 # ── Tool definitions (OpenAI function-calling schema) ────────────────────────
@@ -353,6 +361,56 @@ def _find_pair_boundary(messages: list[dict], idx: int) -> int:
         idx -= 1
 
     return idx
+
+
+def _elide_stale_history(
+    model: str,
+    messages: list[dict],
+    keep_recent_tokens: int = PRUNE_KEEP_RECENT_TOKENS,
+) -> tuple[list[dict], int]:
+    """Replace stale tool output and old reasoning with short markers.
+
+    Preserves the head (system + original task) and the most recent
+    *keep_recent_tokens*. Messages are shortened, never dropped, so assistant
+    ``tool_calls`` stay paired with their results and the request remains
+    valid. Returns the new list and the number of messages shortened.
+    """
+    tail_start = len(messages)
+    tail_tokens = 0
+    while tail_start > 2:
+        candidate = tail_start - 1
+        msg_tokens = _estimate_tokens(model, [messages[candidate]])
+        if tail_tokens + msg_tokens > keep_recent_tokens:
+            break
+        tail_tokens += msg_tokens
+        tail_start = candidate
+    tail_start = _find_pair_boundary(messages, tail_start)
+    if tail_start <= 2:
+        return messages, 0
+
+    result = list(messages)
+    elided = 0
+    for idx in range(2, tail_start):
+        msg = result[idx]
+        content = msg.get("content") or ""
+        if not content or content.startswith(
+            ("[earlier tool output elided:", "[earlier tool results elided:")
+        ):
+            continue
+        if content.endswith("[... elided]"):
+            continue
+        role = msg.get("role")
+        if role == "tool":
+            marker = f"[earlier tool output elided: {len(content)} chars]"
+        elif role == "user" and content.lstrip().startswith("<tool_results>"):
+            marker = f"[earlier tool results elided: {len(content)} chars]"
+        elif len(content) > _ELIDED_ASSISTANT_CHARS:
+            marker = content[:_ELIDED_ASSISTANT_CHARS] + "\n[... elided]"
+        else:
+            continue
+        result[idx] = {**msg, "content": marker}
+        elided += 1
+    return (result, elided) if elided else (messages, 0)
 
 
 def _compact_messages(
@@ -822,6 +880,8 @@ class LiteLLMAgentRunner(AgentRunner):
                 xml_tool_fallback=getattr(config, "xml_tool_fallback", False),
                 tool_read_cap=getattr(config, "tool_read_cap", None),
                 tool_bash_cap=getattr(config, "tool_bash_cap", None),
+                context_prune_tokens=getattr(config, "context_prune_tokens", None),
+                context_keep_tokens=getattr(config, "context_keep_tokens", None),
             )
             timing.name = step.name
 
@@ -860,6 +920,8 @@ class LiteLLMAgentRunner(AgentRunner):
         xml_tool_fallback: bool = False,
         tool_read_cap: int | None = None,
         tool_bash_cap: int | None = None,
+        context_prune_tokens: int | None = None,
+        context_keep_tokens: int | None = None,
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
 
@@ -886,6 +948,16 @@ class LiteLLMAgentRunner(AgentRunner):
             read_cap = tool_read_cap
         if tool_bash_cap is not None:
             bash_cap = tool_bash_cap
+        prune_budget = (
+            context_prune_tokens
+            if context_prune_tokens is not None
+            else PRUNE_CONTEXT_TOKENS
+        )
+        keep_tokens = (
+            context_keep_tokens
+            if context_keep_tokens is not None
+            else PRUNE_KEEP_RECENT_TOKENS
+        )
         log.info(
             "Context window: limit=%d, budget=%d (%.0f%%), "
             "tool caps read=%d bash=%d",
@@ -927,6 +999,24 @@ class LiteLLMAgentRunner(AgentRunner):
 
             # ── Tier 2: pre-call budget check ────────────────────────────
             est_tokens = _estimate_tokens(model, messages)
+            log.info("Agent iteration %d: context ~%d tokens", iteration, est_tokens)
+            if est_tokens > min(ctx_budget, prune_budget):
+                messages, elided = _elide_stale_history(
+                    model, messages, keep_recent_tokens=keep_tokens
+                )
+                if elided:
+                    est_tokens = _estimate_tokens(model, messages)
+                    log.info(
+                        "Context prune: elided %d stale messages, now ~%d tokens "
+                        "(budget %d)",
+                        elided,
+                        est_tokens,
+                        prune_budget,
+                    )
+                    print(
+                        f"{Fore.MAGENTA}[Context prune: {elided} stale messages "
+                        f"elided → ~{est_tokens:,} tokens]{Style.RESET_ALL}"
+                    )
             if est_tokens > ctx_budget:
                 compaction_count += 1
                 log.warning(
