@@ -596,6 +596,7 @@ def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(mock_claude, tm
     rp, fix_sha, path = _build_repo(tmp_path, diverged)
     config = _make_config(rp, fix_sha)
     config.fused_resolution = True
+    config.fused_compact_prompts = True
     config.build_command = "true"
     config.test_command = "true"
     state = _make_state()
@@ -643,8 +644,11 @@ def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(mock_claude, tm
     assert "Stay on the detached HEAD" in prompt  # never move the target branch
     assert "fused_resolution_report.md" in prompt
     assert not any("Post-Resolution Verification Agent" in p for p in seen_prompts)
-    # The independent read survives fused mode: 3a.2 runs on the clean diff.
-    assert any("Independent Review Agent" in p for p in seen_prompts)
+    # The independent read survives fused mode: 3a.2 runs on the clean diff,
+    # and it carries the compact fix overview instead of the full diff.
+    review = [p for p in seen_prompts if "Independent Review Agent" in p]
+    assert review
+    assert "The full diff is omitted to save context" in review[0]
     assert state.fused_resolution_ran is True
 
 

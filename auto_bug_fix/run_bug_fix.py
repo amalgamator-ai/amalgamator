@@ -5177,7 +5177,9 @@ def _run_triage_blind_review(
     log.info("Phase 3a.2 — triage-blind independent review")
     prompt = TriageBlindReviewPrompt(
         context=create_context_str(claude_config_resolve, config),
-        fix_diff=_compute_fix_diff(config, config.source_fix_commit),
+        # The full fix diff is resent on every review turn; with compact
+        # prompts the reviewer fetches exact per-file bytes with `git show`.
+        fix_diff=_fix_diff_for_prompt(config, config.source_fix_commit),
         current_diff=blind_diff,
         target_branch=config.target_branch,
         baseline_ref=base_head,
