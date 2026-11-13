@@ -338,8 +338,8 @@ _ANSI_C_QUOTING = ("$'", '$"')
 # is otherwise argument data; these re-enable arbitrary composition.
 _SHELL_WRAPPER_RE = re.compile(
     r"(?<![\w./-])(?:[\w./-]*/)?"
-    r"(?:bash|sh|dash|ksh|zsh|python[\d.]*|perl|ruby|node)"
-    r"\b[^\s;|&]*\s+-[A-Za-z]*[ce](?:\s|$)"
+    r"(?:bash|sh|dash|ash|ksh|zsh|python[\d.]*|perl|ruby|node)"
+    r"\b[^;|&]*?\s+-[A-Za-z]*[ce](?:\s|$)"
 )
 _SHELL_EVAL_RE = re.compile(
     r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:eval|exec)(?:\s|$)"

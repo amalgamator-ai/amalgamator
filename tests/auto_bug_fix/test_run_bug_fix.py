@@ -2180,6 +2180,18 @@ def test_validate_shell_command_rejects_ansi_c_and_wrappers():
     assert _validate_shell_command("/bin/bash -c 'rm -rf /tmp/x'") is False
     assert _validate_shell_command("python3 -c 'print(1)'") is False
     assert _validate_shell_command("perl -e 'print 1'") is False
+    # A flag between the interpreter and -c/-e does not hide the wrapper.
+    for cmd in (
+        "bash --norc -c 'rm -rf /tmp/x'",
+        "sh -x -c 'id'",
+        "python3 -B -c 'import os'",
+        "python3.12 -I -c 'print(1)'",
+        "perl -W -e 'print 1'",
+        "ruby -w -e 'system'",
+        "node --no-warnings -e 'process.exit()'",
+        "busybox ash -c 'id'",
+    ):
+        assert _validate_shell_command(cmd) is False, cmd
     # Ordinary invocations of the same interpreters still parse.
     assert _validate_shell_command("bash -n script.sh") is True
     assert _validate_shell_command("sh ./configure") is True
