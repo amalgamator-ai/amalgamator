@@ -105,6 +105,10 @@ those nets matter more than cost; the dossier records the evidence scope and
   list; the agent fetches bytes with `git show <fix> -- <file>`. `tool_read_cap`
   / `tool_bash_cap` (characters) cap individual results (LiteLLM only; the
   Claude SDK path ignores them).
+- `context_prune_tokens` / `context_keep_tokens` — above the first budget,
+  stale tool output and old reasoning become short markers while the latest
+  `context_keep_tokens` stay verbatim (defaults 120k/60k, LiteLLM only). The
+  review session is capped at 80 iterations with `max_iterations`.
 
 ### Build output at commit boundaries
 
