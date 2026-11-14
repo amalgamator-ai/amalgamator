@@ -1247,7 +1247,7 @@ class LiteLLMAgentRunner(AgentRunner):
                     }
                 )
         else:
-            log.warning("Agent hit max iterations (%d)", MAX_AGENT_ITERATIONS)
+            log.warning("Agent hit max iterations (%d)", iteration_limit)
 
         if compaction_count:
             log.info(
