@@ -121,6 +121,8 @@ class ClaudeConfig:
     # recent ``context_keep_tokens`` verbatim. None = built-in defaults.
     context_prune_tokens: int | None = None
     context_keep_tokens: int | None = None
+    # Hard ceiling for one LiteLLM agent session; None = the runner default.
+    max_iterations: int | None = None
 
     def __post_init__(self):
         if self.profile:

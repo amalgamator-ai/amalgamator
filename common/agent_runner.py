@@ -882,6 +882,7 @@ class LiteLLMAgentRunner(AgentRunner):
                 tool_bash_cap=getattr(config, "tool_bash_cap", None),
                 context_prune_tokens=getattr(config, "context_prune_tokens", None),
                 context_keep_tokens=getattr(config, "context_keep_tokens", None),
+                max_iterations=getattr(config, "max_iterations", None),
             )
             timing.name = step.name
 
@@ -922,6 +923,7 @@ class LiteLLMAgentRunner(AgentRunner):
         tool_bash_cap: int | None = None,
         context_prune_tokens: int | None = None,
         context_keep_tokens: int | None = None,
+        max_iterations: int | None = None,
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
 
@@ -988,12 +990,13 @@ class LiteLLMAgentRunner(AgentRunner):
         recent_xml_sigs: list[str] = []
         compaction_count = 0
 
-        while iteration < MAX_AGENT_ITERATIONS:
+        iteration_limit = max_iterations or MAX_AGENT_ITERATIONS
+        while iteration < iteration_limit:
             iteration += 1
             log.info(
                 "Agent iteration %d/%d (model=%s)",
                 iteration,
-                MAX_AGENT_ITERATIONS,
+                iteration_limit,
                 model,
             )
 

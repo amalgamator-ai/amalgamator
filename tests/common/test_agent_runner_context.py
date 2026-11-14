@@ -95,3 +95,55 @@ def test_xml_tool_results_are_elided():
 
     assert count >= 1
     assert elided_msgs[2]["content"].startswith("[earlier tool results elided:")
+
+
+def test_max_iterations_stops_the_loop(monkeypatch):
+    import asyncio
+
+    from common import agent_runner
+    from common.agent_runner import LiteLLMAgentRunner
+
+    class _Fn:
+        name = "bash"
+        arguments = '{"command": "true"}'
+
+    class _Call:
+        id = "call_1"
+        function = _Fn()
+
+    class _Message:
+        content = ""
+        tool_calls = [_Call()]
+
+    class _Response:
+        usage = None
+
+        def __init__(self):
+            self.choices = [type("C", (), {"message": _Message()})()]
+
+    calls = []
+
+    def fake_completion(**_kwargs):
+        calls.append(1)
+        return _Response()
+
+    monkeypatch.setattr(
+        agent_runner, "_litellm_completion_with_streaming", fake_completion
+    )
+    monkeypatch.setattr(agent_runner, "_execute_tool", lambda *_a, **_k: "ok")
+    monkeypatch.setattr(agent_runner, "_estimate_tokens", lambda *_a, **_k: 0)
+    monkeypatch.setattr("common.llm_client.build_request_kwargs", lambda *_a, **_k: {})
+
+    asyncio.run(
+        LiteLLMAgentRunner()._agent_loop(
+            model="openai/test-model",
+            system_prompt="s",
+            user_prompt="u",
+            cwd=".",
+            allowed_tools=["Bash"],
+            context_length=128000,
+            max_iterations=3,
+        )
+    )
+
+    assert len(calls) == 3

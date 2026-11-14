@@ -5187,10 +5187,12 @@ def _run_triage_blind_review(
         baseline_ref=base_head,
         external_context_section=_external_context_section(config, "review"),
     )
+    # Review is bounded: it verifies and corrects, it does not re-resolve.
+    review_config = replace(claude_config_resolve, max_iterations=80)
     try:
         asyncio.run(
             claude_run(
-                claude_config_resolve,
+                review_config,
                 [prompt.prompt()],
                 tracker=tracker,
             )
