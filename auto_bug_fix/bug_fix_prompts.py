@@ -700,6 +700,10 @@ If the errors require types, interfaces, or features that don't exist on the tar
 and cannot be adapted without changing the fix's intent, write to stdout:
   CANNOT_FIX: <explanation of what's missing and why>
 Do NOT attempt partial workarounds — either the fix compiles cleanly or it doesn't.
+
+## Efficiency
+- Batch independent checks in one turn; do not re-run a check that already
+  passed. Aim to finish within ~60 tool calls.
 """
 
     def prompt(self) -> str:
@@ -822,6 +826,11 @@ Write a JSON file to `{output_file}` with this structure:
 
 If verdict is "vulnerable", the replacement test file MUST exist and MUST fail when run with \
 the test command. Verify this before writing the JSON.
+
+## Efficiency
+- Batch independent reads and test runs in one turn; aim to finish within ~40
+  tool calls. Once the verdict is decided and any replacement test is confirmed
+  failing, write the JSON and stop.
 """
 
     def prompt(self) -> str:

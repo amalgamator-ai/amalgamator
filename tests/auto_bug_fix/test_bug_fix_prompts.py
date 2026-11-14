@@ -136,6 +136,21 @@ def test_build_error_recovery_prompt_shows_iteration():
     text = prompt.prompt()
     assert "2/3" in text
     assert "undefined reference" in text
+    assert "~60 tool calls" in text
+
+
+def test_red_triage_prompt_bounds_the_investigation():
+    from auto_bug_fix.bug_fix_prompts import RedTriagePrompt
+
+    prompt = RedTriagePrompt(
+        context="<context>c</context>",
+        bug_description="d",
+        test_output="PASS",
+        ported_test_files=["t.c"],
+        triage_assessment="{}",
+    )
+    text = prompt.prompt()
+    assert "~40\n  tool calls" in text
 
 
 def test_semantic_triage_prompt_contains_files():
