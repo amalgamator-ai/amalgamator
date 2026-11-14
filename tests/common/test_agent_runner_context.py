@@ -163,7 +163,7 @@ def test_wrapup_message_is_injected_once(monkeypatch):
         @property
         def arguments(self):
             counter["n"] += 1
-            return '{"command": "true %d"}' % counter["n"]
+            return f'{{"command": "true {counter["n"]}"}}'
 
     class _Call:
         id = "call_1"
@@ -226,7 +226,7 @@ def test_idle_repository_triggers_wrapup(monkeypatch):
         @property
         def arguments(self):
             counter["n"] += 1
-            return '{"command": "true %d"}' % counter["n"]
+            return f'{{"command": "true {counter["n"]}"}}'
 
     class _Call:
         id = "call_1"
