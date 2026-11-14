@@ -139,6 +139,15 @@ def test_testing_directory_stays_a_test_tree():
     assert _is_test_only_path("src/testing/helpers.go") is False
 
 
+def test_glibc_tst_prefixed_tests_are_recognised():
+    from auto_bug_fix.run_bug_fix import _is_declared_test, _is_test_only_path
+
+    path = "malloc/tst-malloc-too-large.c"
+    assert identify_test_files([path]) == [path]
+    assert _is_test_only_path(path) is True
+    assert _is_declared_test(path) is True
+
+
 def test_identify_test_files_no_false_positives():
     files = ["latest/foo.c", "contest.md", "lib/attestation.go", "pkg/protesting.h"]
     result = identify_test_files(files)

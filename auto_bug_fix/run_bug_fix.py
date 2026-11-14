@@ -1097,7 +1097,9 @@ def identify_test_files(seed_files: list[str]) -> list[str]:
     for f in seed_files:
         lower = f.lower()
         basename = lower.rsplit("/", 1)[-1]
-        if any(p in lower for p in _TEST_PATTERNS) or basename.startswith("test_"):
+        if any(p in lower for p in _TEST_PATTERNS) or basename.startswith(
+            ("test_", "tst_", "tst-")
+        ):
             test_files.append(f)
     return test_files
 
@@ -1114,7 +1116,7 @@ def _is_test_only_path(path: str) -> bool:
     name = parts[-1]
     return (
         any(part in _TEST_DIR_PARTS for part in parts[:-1])
-        or name.startswith(("test_", "spec_"))
+        or name.startswith(("test_", "tst_", "tst-", "spec_"))
         or "_test." in name
         or "_spec." in name
     )
