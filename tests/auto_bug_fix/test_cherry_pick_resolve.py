@@ -649,6 +649,7 @@ def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(mock_claude, tm
     review = [p for p in seen_prompts if "Independent Review Agent" in p]
     assert review
     assert "The full diff is omitted to save context" in review[0]
+    assert "The full applied diff is omitted to save context" in review[0]
     assert state.fused_resolution_ran is True
 
 

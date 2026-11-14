@@ -123,6 +123,9 @@ class ClaudeConfig:
     context_keep_tokens: int | None = None
     # Hard ceiling for one LiteLLM agent session; None = the runner default.
     max_iterations: int | None = None
+    # At this iteration, tell the model to stop verifying and finish.
+    wrapup_at: int | None = None
+    wrapup_message: str = ""
 
     def __post_init__(self):
         if self.profile:

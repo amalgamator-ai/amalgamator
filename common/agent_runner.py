@@ -883,6 +883,8 @@ class LiteLLMAgentRunner(AgentRunner):
                 context_prune_tokens=getattr(config, "context_prune_tokens", None),
                 context_keep_tokens=getattr(config, "context_keep_tokens", None),
                 max_iterations=getattr(config, "max_iterations", None),
+                wrapup_at=getattr(config, "wrapup_at", None),
+                wrapup_message=getattr(config, "wrapup_message", ""),
             )
             timing.name = step.name
 
@@ -924,6 +926,8 @@ class LiteLLMAgentRunner(AgentRunner):
         context_prune_tokens: int | None = None,
         context_keep_tokens: int | None = None,
         max_iterations: int | None = None,
+        wrapup_at: int | None = None,
+        wrapup_message: str = "",
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
 
@@ -991,8 +995,24 @@ class LiteLLMAgentRunner(AgentRunner):
         compaction_count = 0
 
         iteration_limit = max_iterations or MAX_AGENT_ITERATIONS
+        wrapped_up = False
         while iteration < iteration_limit:
             iteration += 1
+            if wrapup_at and iteration >= wrapup_at and not wrapped_up:
+                wrapped_up = True
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": wrapup_message
+                        or (
+                            "You have used many turns. Stop exploring and "
+                            "re-verifying: make only essential edits, run the "
+                            "build and test once, commit, write the report, and "
+                            "finish."
+                        ),
+                    }
+                )
+                log.warning("Agent wrap-up requested at iteration %d", iteration)
             log.info(
                 "Agent iteration %d/%d (model=%s)",
                 iteration,

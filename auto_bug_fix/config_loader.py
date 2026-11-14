@@ -433,6 +433,11 @@ def parse_bug_fix_config(
         tool_bash_cap=advanced_int(advanced, "tool_bash_cap"),
         context_prune_tokens=advanced_int(advanced, "context_prune_tokens"),
         context_keep_tokens=advanced_int(advanced, "context_keep_tokens"),
+        resolution_max_iterations=advanced_int(advanced, "resolution_max_iterations")
+        or 200,
+        resolution_wrapup_at=advanced_int(advanced, "resolution_wrapup_at") or 120,
+        review_max_iterations=advanced_int(advanced, "review_max_iterations") or 40,
+        review_wrapup_at=advanced_int(advanced, "review_wrapup_at") or 30,
         partial_success_skip_ratio=advanced_float(
             advanced, "partial_success_skip_ratio", 0.5, minimum=0.0, maximum=1.0
         ),

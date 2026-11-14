@@ -79,6 +79,11 @@ class BugFixConfig:
     tool_bash_cap: int | None = None
     context_prune_tokens: int | None = None
     context_keep_tokens: int | None = None
+    # Turn budgets for the fused resolution session and the 3a.2 review.
+    resolution_max_iterations: int = 200
+    resolution_wrapup_at: int = 120
+    review_max_iterations: int = 40
+    review_wrapup_at: int = 30
     # Non-bugfix ports only: fraction of the fix's files that may be dropped
     # (skipped and never regenerated) before the outcome is downgraded from
     # success to partial_success.

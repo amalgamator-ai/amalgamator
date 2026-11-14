@@ -766,6 +766,22 @@ def _compute_fix_diff(
     return fix_diff
 
 
+def _compact_diff_overview(config: BugFixConfig, base_head: str) -> str:
+    """Stat + file list for the applied diff, with fetch instructions."""
+    rev = [base_head, "HEAD"]
+    stat = "\n".join(_git_lines(config.repo_path, "diff", "--stat", *rev)).strip()
+    files = "\n".join(
+        f"  - {path}"
+        for path in _git_lines(config.repo_path, "diff", "--name-only", *rev)
+    )
+    return (
+        f"{stat}\n\n"
+        "The full applied diff is omitted to save context. For exact bytes, run:\n"
+        f"  git diff {base_head} -- <file>\n\n"
+        f"Changed files:\n{files}"
+    )
+
+
 def _compact_fix_overview(config: BugFixConfig, commit: str) -> str:
     """Stat + file list + fetch instructions instead of the full fix diff.
 
@@ -1027,12 +1043,22 @@ def _run_fused_session(
     state: PipelineState,
     prompt: str,
     tracker,
+    *,
+    max_iterations: int | None = None,
+    wrapup_at: int | None = None,
+    wrapup_message: str = "",
 ) -> None:
     """Run one fused agent session; always restore refs it may have moved."""
-    try:
-        asyncio.run(
-            claude_run(_phase_config(claude_config, config), [prompt], tracker=tracker)
+    session_config = _phase_config(claude_config, config)
+    if max_iterations is not None or wrapup_at is not None:
+        session_config = replace(
+            session_config,
+            max_iterations=max_iterations,
+            wrapup_at=wrapup_at,
+            wrapup_message=wrapup_message,
         )
+    try:
+        asyncio.run(claude_run(session_config, [prompt], tracker=tracker))
     finally:
         _restore_protected_refs(config, state)
 
@@ -4644,7 +4670,21 @@ def _run_fused_resolution(
     )
     if tracker:
         tracker.record_gate("resolution_mode", "fused")
-    _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
+    _run_fused_session(
+        config,
+        claude_config,
+        state,
+        prompt.prompt(),
+        tracker,
+        max_iterations=config.resolution_max_iterations,
+        wrapup_at=config.resolution_wrapup_at,
+        wrapup_message=(
+            "You have used many turns. Stop exploring and re-verifying. Make "
+            "only essential edits, run the build and test once, commit, write "
+            f"{report_path}, and finish. Do not re-run a check that already "
+            "passed."
+        ),
+    )
     _add_fused_report_to_dossier(state, report_path)
 
     # Every later gate compares trees, so a session that reset to another
@@ -5176,19 +5216,32 @@ def _run_triage_blind_review(
     blind_diff = _safe_git_diff(repo, base_head)
     if not blind_diff.strip():
         return
+    current_diff = (
+        _compact_diff_overview(config, base_head)
+        if config.fused_compact_prompts
+        else blind_diff
+    )
     log.info("Phase 3a.2 — triage-blind independent review")
     prompt = TriageBlindReviewPrompt(
         context=create_context_str(claude_config_resolve, config),
         # The full fix diff is resent on every review turn; with compact
         # prompts the reviewer fetches exact per-file bytes with `git show`.
         fix_diff=_fix_diff_for_prompt(config, config.source_fix_commit),
-        current_diff=blind_diff,
+        current_diff=current_diff,
         target_branch=config.target_branch,
         baseline_ref=base_head,
         external_context_section=_external_context_section(config, "review"),
     )
     # Review is bounded: it verifies and corrects, it does not re-resolve.
-    review_config = replace(claude_config_resolve, max_iterations=80)
+    review_config = replace(
+        claude_config_resolve,
+        max_iterations=config.review_max_iterations,
+        wrapup_at=config.review_wrapup_at,
+        wrapup_message=(
+            "You have used many review turns. Stop searching: apply only the "
+            "corrections you have already justified, stage them, and finish."
+        ),
+    )
     try:
         asyncio.run(
             claude_run(
