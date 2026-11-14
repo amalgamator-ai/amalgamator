@@ -210,3 +210,65 @@ def test_wrapup_message_is_injected_once(monkeypatch):
     last = [m for m in requests[-1] if m.get("content") == "finish now"]
     assert first == []
     assert len(last) == 1
+
+
+def test_idle_repository_triggers_wrapup(monkeypatch):
+    import asyncio
+
+    from common import agent_runner
+    from common.agent_runner import LiteLLMAgentRunner
+
+    counter = {"n": 0}
+
+    class _Fn:
+        name = "bash"
+
+        @property
+        def arguments(self):
+            counter["n"] += 1
+            return '{"command": "true %d"}' % counter["n"]
+
+    class _Call:
+        id = "call_1"
+        function = _Fn()
+
+    class _Message:
+        content = ""
+        tool_calls = [_Call()]
+
+    class _Response:
+        usage = None
+
+        def __init__(self):
+            self.choices = [type("C", (), {"message": _Message()})()]
+
+    requests = []
+
+    def fake_completion(**kwargs):
+        requests.append(list(kwargs.get("messages", [])))
+        return _Response()
+
+    monkeypatch.setattr(
+        agent_runner, "_litellm_completion_with_streaming", fake_completion
+    )
+    monkeypatch.setattr(agent_runner, "_execute_tool", lambda *_a, **_k: "ok")
+    monkeypatch.setattr(agent_runner, "_estimate_tokens", lambda *_a, **_k: 0)
+    monkeypatch.setattr(agent_runner, "_repo_state", lambda _cwd: "unchanged")
+    monkeypatch.setattr("common.llm_client.build_request_kwargs", lambda *_a, **_k: {})
+
+    asyncio.run(
+        LiteLLMAgentRunner()._agent_loop(
+            model="openai/test-model",
+            system_prompt="s",
+            user_prompt="u",
+            cwd=".",
+            allowed_tools=["Bash"],
+            context_length=128000,
+            max_iterations=6,
+            idle_turns=2,
+            wrapup_message="idle wrap",
+        )
+    )
+
+    last = [m for m in requests[-1] if m.get("content") == "idle wrap"]
+    assert len(last) == 1

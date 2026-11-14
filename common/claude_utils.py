@@ -126,6 +126,8 @@ class ClaudeConfig:
     # At this iteration, tell the model to stop verifying and finish.
     wrapup_at: int | None = None
     wrapup_message: str = ""
+    # Wrap up when the repository tree has been unchanged for this many turns.
+    idle_turns: int | None = None
 
     def __post_init__(self):
         if self.profile:

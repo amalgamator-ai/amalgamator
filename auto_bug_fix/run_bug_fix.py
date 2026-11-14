@@ -1047,15 +1047,17 @@ def _run_fused_session(
     max_iterations: int | None = None,
     wrapup_at: int | None = None,
     wrapup_message: str = "",
+    idle_turns: int | None = None,
 ) -> None:
     """Run one fused agent session; always restore refs it may have moved."""
     session_config = _phase_config(claude_config, config)
-    if max_iterations is not None or wrapup_at is not None:
+    if max_iterations is not None or wrapup_at is not None or idle_turns is not None:
         session_config = replace(
             session_config,
             max_iterations=max_iterations,
             wrapup_at=wrapup_at,
             wrapup_message=wrapup_message,
+            idle_turns=idle_turns,
         )
     try:
         asyncio.run(claude_run(session_config, [prompt], tracker=tracker))
@@ -4678,6 +4680,7 @@ def _run_fused_resolution(
         tracker,
         max_iterations=config.resolution_max_iterations,
         wrapup_at=config.resolution_wrapup_at,
+        idle_turns=config.resolution_idle_turns,
         wrapup_message=(
             "You have used many turns. Stop exploring and re-verifying. Make "
             "only essential edits, run the build and test once, commit, write "
@@ -5237,6 +5240,7 @@ def _run_triage_blind_review(
         claude_config_resolve,
         max_iterations=config.review_max_iterations,
         wrapup_at=config.review_wrapup_at,
+        idle_turns=config.review_idle_turns,
         wrapup_message=(
             "You have used many review turns. Stop searching: apply only the "
             "corrections you have already justified, stage them, and finish."

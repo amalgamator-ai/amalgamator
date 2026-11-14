@@ -796,8 +796,10 @@ def test_fused_optimization_flags_parse():
                 "context_keep_tokens": "60000",
                 "resolution_max_iterations": 160,
                 "resolution_wrapup_at": "90",
+                "resolution_idle_turns": 40,
                 "review_max_iterations": 30,
                 "review_wrapup_at": 20,
+                "review_idle_turns": 15,
             }
         )
     )
@@ -808,13 +810,17 @@ def test_fused_optimization_flags_parse():
     assert cfg.context_keep_tokens == 60000
     assert cfg.resolution_max_iterations == 160
     assert cfg.resolution_wrapup_at == 90
+    assert cfg.resolution_idle_turns == 40
     assert cfg.review_max_iterations == 30
     assert cfg.review_wrapup_at == 20
+    assert cfg.review_idle_turns == 15
     cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
     assert cfg.fused_compact_prompts is False
     assert cfg.tool_read_cap is None and cfg.tool_bash_cap is None
     assert cfg.context_prune_tokens is None and cfg.context_keep_tokens is None
     assert cfg.resolution_max_iterations == 200
-    assert cfg.resolution_wrapup_at == 120
+    assert cfg.resolution_wrapup_at is None
+    assert cfg.resolution_idle_turns == 50
     assert cfg.review_max_iterations == 40
     assert cfg.review_wrapup_at == 30
+    assert cfg.review_idle_turns == 20

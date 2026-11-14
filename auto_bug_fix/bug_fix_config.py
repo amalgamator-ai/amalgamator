@@ -81,9 +81,11 @@ class BugFixConfig:
     context_keep_tokens: int | None = None
     # Turn budgets for the fused resolution session and the 3a.2 review.
     resolution_max_iterations: int = 200
-    resolution_wrapup_at: int = 120
+    resolution_wrapup_at: int | None = None
+    resolution_idle_turns: int = 50
     review_max_iterations: int = 40
     review_wrapup_at: int = 30
+    review_idle_turns: int = 20
     # Non-bugfix ports only: fraction of the fix's files that may be dropped
     # (skipped and never regenerated) before the outcome is downgraded from
     # success to partial_success.

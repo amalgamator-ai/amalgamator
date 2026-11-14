@@ -326,6 +326,28 @@ def _tool_output_caps(context_length: int) -> tuple[int, int]:
     return 10_000, 8_000
 
 
+def _repo_state(cwd: str) -> str | None:
+    """HEAD plus porcelain status, to detect read-only (idle) turns."""
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+        return head + status
+    except Exception:
+        return None
+
+
 def _estimate_tokens(model: str, messages: list[dict]) -> int:
     """Fast local token estimate via LiteLLM (tiktoken fallback)."""
     try:
@@ -885,6 +907,7 @@ class LiteLLMAgentRunner(AgentRunner):
                 max_iterations=getattr(config, "max_iterations", None),
                 wrapup_at=getattr(config, "wrapup_at", None),
                 wrapup_message=getattr(config, "wrapup_message", ""),
+                idle_turns=getattr(config, "idle_turns", None),
             )
             timing.name = step.name
 
@@ -928,6 +951,7 @@ class LiteLLMAgentRunner(AgentRunner):
         max_iterations: int | None = None,
         wrapup_at: int | None = None,
         wrapup_message: str = "",
+        idle_turns: int | None = None,
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
 
@@ -996,6 +1020,8 @@ class LiteLLMAgentRunner(AgentRunner):
 
         iteration_limit = max_iterations or MAX_AGENT_ITERATIONS
         wrapped_up = False
+        last_state: str | None = None
+        idle_count = 0
         while iteration < iteration_limit:
             iteration += 1
             if wrapup_at and iteration >= wrapup_at and not wrapped_up:
@@ -1266,6 +1292,30 @@ class LiteLLMAgentRunner(AgentRunner):
                         "content": result,
                     }
                 )
+            if idle_turns:
+                state = _repo_state(cwd)
+                if state is not None and state == last_state:
+                    idle_count += 1
+                else:
+                    idle_count = 0
+                last_state = state
+                if idle_count >= idle_turns and not wrapped_up:
+                    wrapped_up = True
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": wrapup_message
+                            or (
+                                "The repository has not changed for many "
+                                "turns. Stop verifying: apply only corrections "
+                                "you have already justified, commit, write the "
+                                "report, and finish."
+                            ),
+                        }
+                    )
+                    log.warning(
+                        "Agent idle for %d turns — wrap-up requested", idle_count
+                    )
         else:
             log.warning("Agent hit max iterations (%d)", iteration_limit)
 
