@@ -681,3 +681,27 @@ def test_declared_regression_pair_counts_as_tests(tmp_path):
         "non-test paths" in p for p in _validate_fused_pre_red(config, base_head)
     )
     assert _validate_fused_pre_red(config, base_head, {"contrib/x/sql/a.sql"}) == []
+
+
+def test_fused_pre_red_retries_once_when_result_missing(tmp_path):
+    """A flaked first session is retried before the legacy fallback."""
+    rp, fix = _repo(tmp_path)
+    state = _state()
+    run_dir, tracker = _tracker(tmp_path)
+    calls = []
+
+    async def fake(claude_config, prompts, tracker=None):
+        calls.append(1)
+        if len(calls) == 2:
+            (Path(rp) / "base_test.c").write_text("int t;\n")
+            _git(rp, "add", "-A")
+            _git(rp, "commit", "-m", "test-port: TEST-1")
+            _write_result(run_dir)
+        return []
+
+    with patch("auto_bug_fix.run_bug_fix.claude_run", side_effect=fake):
+        outcome = _run_fused_pre_red(_config(rp, fix), _claude(rp), state, tracker)
+
+    assert len(calls) == 2
+    assert outcome is not None
+    assert outcome["commit_type"] == "bug-fix"

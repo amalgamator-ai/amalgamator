@@ -1694,32 +1694,47 @@ def _run_fused_pre_red(
     log.info(
         "Phase 0.5+0.5b+0.5c — fused pre-RED session (%d seed files)", len(state.seed)
     )
-    try:
-        _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
-    except Exception as e:
-        # Any session failure must fall back to the separate phases, not abort
-        # the target with a dirty worktree and a "fused" gate.
-        log.warning("Fused pre-RED session failed (%s) — falling back", e)
-        _discard_fused_session(repo, base_head)
-        reject_attempt()
-        return None
-    if tracker:
-        tracker.record_gate("pre_red_mode", "fused")
 
-    result = _read_fused_result(result_path)
-    triage = result.get("triage")
-    if not isinstance(triage, dict) or not triage:
-        # A session may write the result into the worktree despite the path.
-        result = _read_fused_result(os.path.join(repo, FUSED_PRE_RED_RESULT_FILE))
+    def usable_result() -> dict:
+        result = _read_fused_result(result_path)
         triage = result.get("triage")
-    if not isinstance(triage, dict) or not triage:
+        if not isinstance(triage, dict) or not triage:
+            # A session may write the result into the worktree despite the path.
+            result = _read_fused_result(os.path.join(repo, FUSED_PRE_RED_RESULT_FILE))
+            triage = result.get("triage")
+        return result if isinstance(triage, dict) and triage else {}
+
+    result: dict = {}
+    # A session that dies or forgets its result file is a model flake; the
+    # legacy fallback it triggers can cost an hour, so retry once first.
+    for attempt in range(2):
+        Path(result_path).unlink(missing_ok=True)
+        Path(repo, FUSED_PRE_RED_RESULT_FILE).unlink(missing_ok=True)
+        try:
+            _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
+        except Exception as e:
+            # Any session failure must fall back to the separate phases, not
+            # abort the target with a dirty worktree and a "fused" gate.
+            log.warning("Fused pre-RED session failed (%s)", e)
+            _discard_fused_session(repo, base_head)
+            reject_attempt()
+            continue
+        result = usable_result()
+        if result:
+            break
         log.warning(
-            "Fused pre-RED: no usable triage result at %s — falling back",
+            "Fused pre-RED: no usable triage result at %s (attempt %d/2)",
             result_path,
+            attempt + 1,
         )
         _discard_fused_session(repo, base_head)
         reject_attempt()
+    if not result:
+        log.warning("Fused pre-RED session failed twice — falling back")
         return None
+    triage = result["triage"]
+    if tracker:
+        tracker.record_gate("pre_red_mode", "fused")
 
     # Session artifacts must not be committed; leftover edits are the session's
     # own changes and must reach the RED check as a commit.
