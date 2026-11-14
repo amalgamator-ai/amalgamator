@@ -818,9 +818,9 @@ def test_fused_optimization_flags_parse():
     assert cfg.fused_compact_prompts is False
     assert cfg.tool_read_cap is None and cfg.tool_bash_cap is None
     assert cfg.context_prune_tokens is None and cfg.context_keep_tokens is None
-    assert cfg.resolution_max_iterations == 200
+    assert cfg.resolution_max_iterations == 600
     assert cfg.resolution_wrapup_at is None
-    assert cfg.resolution_idle_turns == 50
+    assert cfg.resolution_idle_turns == 100
     assert cfg.review_max_iterations == 40
     assert cfg.review_wrapup_at == 30
     assert cfg.review_idle_turns == 20

@@ -434,9 +434,9 @@ def parse_bug_fix_config(
         context_prune_tokens=advanced_int(advanced, "context_prune_tokens"),
         context_keep_tokens=advanced_int(advanced, "context_keep_tokens"),
         resolution_max_iterations=advanced_int(advanced, "resolution_max_iterations")
-        or 200,
+        or 600,
         resolution_wrapup_at=advanced_int(advanced, "resolution_wrapup_at"),
-        resolution_idle_turns=advanced_int(advanced, "resolution_idle_turns") or 50,
+        resolution_idle_turns=advanced_int(advanced, "resolution_idle_turns") or 100,
         review_max_iterations=advanced_int(advanced, "review_max_iterations") or 40,
         review_wrapup_at=advanced_int(advanced, "review_wrapup_at") or 30,
         review_idle_turns=advanced_int(advanced, "review_idle_turns") or 20,

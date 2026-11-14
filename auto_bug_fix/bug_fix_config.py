@@ -80,9 +80,11 @@ class BugFixConfig:
     context_prune_tokens: int | None = None
     context_keep_tokens: int | None = None
     # Turn budgets for the fused resolution session and the 3a.2 review.
-    resolution_max_iterations: int = 200
+    # Runaway guard only: PHP 8.1's fused resolution legitimately needs ~540
+    # turns, and a lower cap leaves conflicts for the per-chunk fallback.
+    resolution_max_iterations: int = 600
     resolution_wrapup_at: int | None = None
-    resolution_idle_turns: int = 50
+    resolution_idle_turns: int = 100
     review_max_iterations: int = 40
     review_wrapup_at: int = 30
     review_idle_turns: int = 20
