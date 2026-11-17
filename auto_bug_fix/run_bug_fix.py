@@ -2239,10 +2239,23 @@ def _run_build_and_test(
         lint_exit, lint_stdout, lint_stderr = run_test_suite(
             lint_cmd, config.build_dir, timeout=config.command_timeout
         )
-        if lint_exit == TIMEOUT_EXIT_CODE:
+        lint_output = lint_stdout + lint_stderr
+        unavailable = lint_exit == 127 or "command not found" in lint_output
+        if unavailable:
+            # Triage-discovered lint commands are advisory. A tool that is not
+            # installed says nothing about the port, and must not send the run
+            # into Phase 4b to "fix" a build that is fine.
+            log.warning("Lint tool unavailable — skipping: %s", lint_cmd)
+            if state.dossier:
+                state.dossier.add(
+                    "Lint tool unavailable",
+                    lint_cmd,
+                    "Phase 4 verify",
+                )
+        elif lint_exit == TIMEOUT_EXIT_CODE:
             log.warning("Lint command timed out — treating as failure: %s", lint_cmd)
             return False, build_stdout, build_stderr, lint_stdout, lint_stderr
-        if lint_exit != 0:
+        elif lint_exit != 0:
             baseline_lint_failed = any(
                 e["cmd"] == lint_cmd and e["exit_code"] != 0
                 for e in state.baseline_verification
