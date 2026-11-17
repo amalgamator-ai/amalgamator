@@ -4,6 +4,7 @@
 """Tests for the shared Claude Agent SDK glue and its per-package personas."""
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 
@@ -135,6 +136,30 @@ def stub_sdk(monkeypatch):
     monkeypatch.setattr(cu, "ClaudeAgentOptions", _options)
     monkeypatch.setattr(cu, "ClaudeSDKClient", _StubClient)
     return captured
+
+
+def test_max_iterations_reaches_the_sdk_turn_limit(stub_sdk):
+    import common.claude_utils as cu
+
+    cfg = ClaudeConfig(**{**BASE_KWARGS, "max_iterations": 40})
+    options = cast(Any, cu.build_claude_options(cfg))
+    assert options["max_turns"] == 40
+
+
+def test_litellm_only_knobs_warn_on_the_sdk_path(stub_sdk, monkeypatch):
+    import common.claude_utils as cu
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        cu.log, "warning", lambda msg, *args: warnings.append(str(msg) % args)
+    )
+    cfg = ClaudeConfig(**{**BASE_KWARGS, "wrapup_at": 5})
+
+    async def _run():
+        await claude_run(cfg, [PipelineStep(name="cb", prompt={"fn": lambda: None})])
+
+    asyncio.run(_run())
+    assert any("ignores wrapup_at" in w for w in warnings)
 
 
 class TestNonLLMSteps:
