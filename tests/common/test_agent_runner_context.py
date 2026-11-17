@@ -272,3 +272,77 @@ def test_idle_repository_triggers_wrapup(monkeypatch):
 
     last = [m for m in requests[-1] if m.get("content") == "idle wrap"]
     assert len(last) == 1
+
+
+def test_effective_elision_clamps_keep_for_small_contexts():
+    from common.agent_runner import _effective_elision
+
+    # 80 K budget: keep cannot exceed 40 K, or elision would never trigger.
+    assert _effective_elision(80_000, 500_000, 60_000) == (80_000, 40_000)
+    # 1 M model with the default 120 K trigger keeps the full 60 K.
+    assert _effective_elision(800_000, 120_000, 60_000) == (120_000, 60_000)
+    # Tiny contexts floor the keep window at 4 K.
+    assert _effective_elision(6_000, 120_000, 60_000) == (6_000, 4_000)
+    # An explicit trigger above the budget is clamped to the budget.
+    assert _effective_elision(80_000, 150_000, 60_000) == (80_000, 40_000)
+
+
+def test_repo_state_ignores_untracked_and_tracks_dirty(tmp_path):
+    import subprocess
+
+    from common.agent_runner import _repo_state
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "t"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "t@t"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (repo / "f.c").write_text("int x;\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True
+    )
+
+    clean = _repo_state(str(repo))
+    assert clean == _repo_state(str(repo))
+    # Untracked build scratch must not reset the idle counter.
+    (repo / "scratch.o").write_text("x")
+    assert _repo_state(str(repo)) == clean
+    # A tracked edit does.
+    (repo / "f.c").write_text("int y;\n")
+    dirty = _repo_state(str(repo))
+    assert dirty != clean
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "change"], cwd=repo, check=True, capture_output=True
+    )
+    assert _repo_state(str(repo)) != dirty
+
+
+def test_prune_then_compact_in_one_turn(monkeypatch):
+    from common import agent_runner
+    from common.agent_runner import _compact_messages, _elide_stale_history
+
+    messages = _conversation(pairs=40)
+    elided, count = _elide_stale_history(
+        "test-model", messages, keep_recent_tokens=2000
+    )
+    assert count > 0
+    monkeypatch.setattr(agent_runner, "_summarize_stale", lambda *a, **k: None)
+
+    compacted = _compact_messages(
+        "test-model", elided, context_length=2_000, keep_recent_tokens=1500
+    )
+
+    assert compacted[0] == messages[0]
+    assert compacted[1] == messages[1]
+    assert compacted is not elided
