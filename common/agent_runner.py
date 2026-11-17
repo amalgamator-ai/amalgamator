@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -45,9 +46,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-MAX_AGENT_ITERATIONS = (
-    9999  # Effectively unlimited — agent stops when it has no more tool calls
-)
+MAX_AGENT_ITERATIONS = int(
+    os.environ.get("AMALGAMATOR_MAX_AGENT_ITERATIONS", "9999")
+)  # Effectively unlimited by default — the agent stops when it has no more
+# tool calls. A model that does not converge (retrying failing tools forever)
+# is bounded from outside rather than silently burning tokens.
 
 # An assistant turn with neither text nor tool calls is a failed turn, not a
 # decision to stop: the model can return one spuriously mid-session. Retry it
