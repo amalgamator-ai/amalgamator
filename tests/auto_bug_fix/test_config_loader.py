@@ -785,6 +785,15 @@ def test_tool_caps_accept_numeric_strings_and_warn_on_garbage(caplog):
     assert "not a positive integer" in caplog.text
 
 
+def test_zero_budget_values_disable_instead_of_defaulting(caplog):
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"review_wrapup_at": 0, "review_idle_turns": 0})
+    )
+    assert cfg.review_wrapup_at is None
+    assert cfg.review_idle_turns is None
+    assert "not a positive integer" in caplog.text
+
+
 def test_fused_optimization_flags_parse():
     cfg, _, _ = parse_bug_fix_config(
         _cfg_with_advanced(
@@ -823,4 +832,4 @@ def test_fused_optimization_flags_parse():
     assert cfg.resolution_idle_turns == 100
     assert cfg.review_max_iterations == 40
     assert cfg.review_wrapup_at == 30
-    assert cfg.review_idle_turns == 20
+    assert cfg.review_idle_turns is None

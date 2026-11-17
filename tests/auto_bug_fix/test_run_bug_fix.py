@@ -2626,3 +2626,47 @@ def test_discard_verification_dirt_spares_the_configured_build_dir(tmp_path):
     assert (tmp_path / "build").is_dir()
     # Dirt outside the build dir is still discarded.
     assert (tmp_path / "src.c").read_text() == "int a = 1;\n"
+
+
+def test_compact_diff_overview_describes_the_worktree(tmp_path):
+    import subprocess
+
+    from auto_bug_fix.run_bug_fix import _compact_diff_overview, _worktree_changed
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    (repo / "f.c").write_text("int x;\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    (repo / "f.c").write_text("int x;\nint y;\n")
+
+    config = _make_config(repo_path=str(repo))
+    assert _worktree_changed(config, base) is True
+    text = _compact_diff_overview(config, base)
+    assert "omitted" in text and "f.c" in text
+    subprocess.run(["git", "checkout", base, "--", "."], cwd=repo, check=True)
+    assert _worktree_changed(config, base) is False
+
+
+def test_transient_session_error_classification():
+    from auto_bug_fix.run_bug_fix import _transient_session_error
+
+    assert _transient_session_error(TimeoutError("timed out"))
+    assert _transient_session_error(Exception("503 Service Unavailable"))
+    assert _transient_session_error(Exception("connection reset by peer"))
+    assert not _transient_session_error(Exception("invalid api key"))
+    assert not _transient_session_error(Exception("unknown model"))
+
+
+def test_glibc_bug_prefixed_tests_are_recognised():
+    from auto_bug_fix.run_bug_fix import _is_test_only_path
+
+    path = "stdlib/bug-1234.c"
+    assert identify_test_files([path]) == [path]
+    assert _is_test_only_path(path) is True

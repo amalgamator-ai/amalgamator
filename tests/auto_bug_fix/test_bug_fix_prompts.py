@@ -150,7 +150,7 @@ def test_red_triage_prompt_bounds_the_investigation():
         triage_assessment="{}",
     )
     text = prompt.prompt()
-    assert "~40\n  tool calls" in text
+    assert "~40 tool calls" in " ".join(text.split())
 
 
 def test_semantic_triage_prompt_contains_files():
@@ -207,8 +207,9 @@ def test_triage_blind_review_prompt_batches_checks():
         baseline_ref="base",
     )
     text = prompt.prompt()
-    assert "Batch independent `git grep` calls" in text
-    assert "~40" in text
+    flat = " ".join(text.split())
+    assert "Batch independent `git grep` calls" in flat
+    assert "~40 tool calls" in flat
 
 
 def test_triage_blind_review_prompt_baseline_ref():
@@ -277,7 +278,8 @@ def test_fused_prompts_carry_external_context():
         external_context_section="<external>RES</external>",
     )
     text = res.prompt()
+    flat = " ".join(text.split())
     assert "<external>RES</external>" in text
-    assert "Batch independent tool calls" in text
-    assert "~120 tool calls" in text
-    assert "no further\n   verification passes" in text
+    assert "Batch independent tool calls" in flat
+    assert "~120 tool calls" in flat
+    assert "no further verification passes" in flat

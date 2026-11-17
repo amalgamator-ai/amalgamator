@@ -131,6 +131,8 @@ async def _run_llm(claude_config, prompts, tracker=None):
             raw_dur = st.get("duration")
             dur = float(raw_dur) if raw_dur is not None else 0
             sdk_cost = st.get("cost_usd")
+            if st.get("truncated"):
+                tracker.record_gate("agent_truncated", st.get("name", "query"))
             record = tracker.record_query(
                 prompt_name=st.get("name", "query"),
                 start_time=cursor,
@@ -766,9 +768,23 @@ def _compute_fix_diff(
     return fix_diff
 
 
+def _worktree_changed(config: BugFixConfig, base_head: str) -> bool:
+    """True when the working tree differs from *base_head*."""
+    result = subprocess.run(
+        ["git", "diff", "--quiet", base_head],
+        cwd=config.repo_path,
+        capture_output=True,
+    )
+    return result.returncode == 1
+
+
 def _compact_diff_overview(config: BugFixConfig, base_head: str) -> str:
-    """Stat + file list for the applied diff, with fetch instructions."""
-    rev = [base_head, "HEAD"]
+    """Stat + file list for the applied diff, with fetch instructions.
+
+    Diffs the working tree (like the documented ``git diff <base> -- file``),
+    not HEAD, so the overview and the bytes the reviewer fetches agree.
+    """
+    rev = [base_head]
     stat = "\n".join(_git_lines(config.repo_path, "diff", "--stat", *rev)).strip()
     files = "\n".join(
         f"  - {path}"
@@ -1125,8 +1141,9 @@ def identify_test_files(seed_files: list[str]) -> list[str]:
     for f in seed_files:
         lower = f.lower()
         basename = lower.rsplit("/", 1)[-1]
+        # glibc keeps tests beside the code: tst-*.c, tst-*.sh, bug-*.c.
         if any(p in lower for p in _TEST_PATTERNS) or basename.startswith(
-            ("test_", "tst_", "tst-")
+            ("test_", "tst_", "tst-", "bug-")
         ):
             test_files.append(f)
     return test_files
@@ -1144,7 +1161,7 @@ def _is_test_only_path(path: str) -> bool:
     name = parts[-1]
     return (
         any(part in _TEST_DIR_PARTS for part in parts[:-1])
-        or name.startswith(("test_", "tst_", "tst-", "spec_"))
+        or name.startswith(("test_", "tst_", "tst-", "bug-", "spec_"))
         or "_test." in name
         or "_spec." in name
     )
@@ -1650,6 +1667,30 @@ def _pre_red_facts(repo: str, target_ref: str, commit: str) -> tuple[str, bool]:
     return "\n".join(lines), needs_build
 
 
+_TRANSIENT_SESSION_MARKERS = (
+    "timeout",
+    "timed out",
+    "connection",
+    "rate limit",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "overloaded",
+    "temporarily",
+    "unexpected eof",
+    "reset by peer",
+    "truncated",
+)
+
+
+def _transient_session_error(error: Exception) -> bool:
+    """True for provider/transport failures a second attempt can survive."""
+    text = str(error).lower()
+    return any(marker in text for marker in _TRANSIENT_SESSION_MARKERS)
+
+
 def _run_fused_pre_red(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -1704,33 +1745,59 @@ def _run_fused_pre_red(
             triage = result.get("triage")
         return result if isinstance(triage, dict) and triage else {}
 
+    attempts = max(1, config.pre_red_attempts or 1)
+
+    def record_retry(reason: str) -> None:
+        if tracker:
+            tracker.record_gate("pre_red_retry", reason)
+        if state.dossier:
+            state.dossier.add("Fused pre-RED retry", reason, "Phase 0.5 fused pre-RED")
+
     result: dict = {}
     # A session that dies or forgets its result file is a model flake; the
-    # legacy fallback it triggers can cost an hour, so retry once first.
-    for attempt in range(2):
+    # legacy fallback it triggers can cost an hour, so retry it first.
+    for attempt in range(attempts):
         Path(result_path).unlink(missing_ok=True)
         Path(repo, FUSED_PRE_RED_RESULT_FILE).unlink(missing_ok=True)
         try:
             _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
         except Exception as e:
-            # Any session failure must fall back to the separate phases, not
-            # abort the target with a dirty worktree and a "fused" gate.
-            log.warning("Fused pre-RED session failed (%s)", e)
             _discard_fused_session(repo, base_head)
             reject_attempt()
-            continue
+            retry = attempt + 1 < attempts and _transient_session_error(e)
+            if retry:
+                log.warning(
+                    "Fused pre-RED session failed transiently (%s); retrying "
+                    "(attempt %d/%d)",
+                    e,
+                    attempt + 2,
+                    attempts,
+                )
+                record_retry(f"session error: {e}")
+                continue
+            # Deterministic failures would fail again; go straight to fallback.
+            log.warning("Fused pre-RED session failed (%s)", e)
+            return None
         result = usable_result()
         if result:
             break
-        log.warning(
-            "Fused pre-RED: no usable triage result at %s (attempt %d/2)",
-            result_path,
-            attempt + 1,
-        )
         _discard_fused_session(repo, base_head)
         reject_attempt()
-    if not result:
-        log.warning("Fused pre-RED session failed twice — falling back")
+        if attempt + 1 < attempts:
+            log.warning(
+                "Fused pre-RED: no usable triage result at %s; retrying "
+                "(attempt %d/%d)",
+                result_path,
+                attempt + 2,
+                attempts,
+            )
+            record_retry("no usable triage result")
+            continue
+        log.warning(
+            "Fused pre-RED: no usable triage result after %d attempt(s) — "
+            "falling back",
+            attempts,
+        )
         return None
     triage = result["triage"]
     if tracker:
@@ -5231,20 +5298,17 @@ def _run_triage_blind_review(
     the check that catches anchoring errors.
     """
     repo = config.repo_path
-    blind_diff = _safe_git_diff(repo, base_head)
-    if not blind_diff.strip():
+    if not _worktree_changed(config, base_head):
         return
-    current_diff = (
-        _compact_diff_overview(config, base_head)
-        if config.fused_compact_prompts
-        else blind_diff
-    )
+    # The overview is unconditional: the review is cheap to compact, and the
+    # prompt tells the reviewer how to fetch exact bytes.
+    current_diff = _compact_diff_overview(config, base_head)
     log.info("Phase 3a.2 — triage-blind independent review")
     prompt = TriageBlindReviewPrompt(
         context=create_context_str(claude_config_resolve, config),
-        # The full fix diff is resent on every review turn; with compact
-        # prompts the reviewer fetches exact per-file bytes with `git show`.
-        fix_diff=_fix_diff_for_prompt(config, config.source_fix_commit),
+        # The full fix diff is resent on every review turn; the reviewer
+        # fetches exact per-file bytes with `git show`.
+        fix_diff=_compact_fix_overview(config, config.source_fix_commit),
         current_diff=current_diff,
         target_branch=config.target_branch,
         baseline_ref=base_head,

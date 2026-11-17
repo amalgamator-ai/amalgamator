@@ -107,13 +107,17 @@ those nets matter more than cost; the dossier records the evidence scope and
   Claude SDK path ignores them).
 - `context_prune_tokens` / `context_keep_tokens` — above the first budget,
   stale tool output and old reasoning become short markers while the latest
-  `context_keep_tokens` stay verbatim (defaults 120k/60k, LiteLLM only).
-- `resolution_max_iterations` (600) is a runaway guard; `resolution_idle_turns`
-  (100) asks the model to wrap up only after that many turns with an unchanged
-  tree, so resolution is not cut mid-work. The review is bounded much harder:
-  `review_max_iterations` (40), `review_wrapup_at` (30) and
-  `review_idle_turns` (20), and it carries a stat overview of the applied diff
-  rather than the full text.
+  `context_keep_tokens` stay verbatim (defaults 120k/60k, LiteLLM only). The
+  keep window is clamped to half the trigger budget so it cannot defeat
+  elision on small-context models.
+- `resolution_max_iterations` (600) is a runaway guard (LiteLLM only; the
+  Claude SDK maps it to `max_turns`); `resolution_idle_turns` (100) asks the
+  model to wrap up only after that many turns with an unchanged tree, so
+  resolution is not cut mid-work (LiteLLM only). The review is bounded much
+  harder: `review_max_iterations` (40), `review_wrapup_at` (30) and an optional
+  `review_idle_turns` (off by default — 3a.2 is read-only, so turn bounds are
+  the review budget). The review always carries a stat overview of the fix and
+  the applied diff rather than the full text.
 
 ### Build output at commit boundaries
 

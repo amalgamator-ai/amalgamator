@@ -117,7 +117,9 @@ def _write_result(run_dir: Path, **overrides) -> dict:
     return result
 
 
-def _run_session(tmp_path, action=None, write_result=True, setup=None, **result):
+def _run_session(
+    tmp_path, action=None, write_result=True, setup=None, calls=None, **result
+):
     """Run one fused pre-RED session; *action* edits the repo first."""
     rp, fix = _repo(tmp_path)
     if setup:
@@ -126,6 +128,8 @@ def _run_session(tmp_path, action=None, write_result=True, setup=None, **result)
     run_dir, tracker = _tracker(tmp_path)
 
     async def fake(claude_config, prompts, tracker=None):
+        if calls is not None:
+            calls.append(1)
         if action:
             action(rp, fix)
         if write_result:
@@ -274,7 +278,9 @@ def test_fused_pre_red_falls_back_without_result(tmp_path):
         _git(rp, "add", "-A")
         _git(rp, "commit", "-m", "prereq: oops")
 
-    outcome, rp, *_ = _run_session(tmp_path, act, write_result=False)
+    calls: list[int] = []
+    outcome, rp, *_ = _run_session(tmp_path, act, write_result=False, calls=calls)
+    assert len(calls) == 2  # one retry before the legacy fallback
     target = subprocess.run(
         ["git", "rev-parse", "target"], cwd=rp, capture_output=True, text=True
     ).stdout.strip()

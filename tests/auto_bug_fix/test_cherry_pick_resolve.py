@@ -10,6 +10,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.claude_utils import BugFixClaudeConfig
 from auto_bug_fix.dossier import Dossier
@@ -589,14 +591,17 @@ def test_evidence_false_blind_review_true_still_runs_3a2(mock_claude, tmp_path):
     assert any("Independent Review Agent" in p for p in prompts)
 
 
+@pytest.mark.parametrize("compact", [True, False])
 @patch("auto_bug_fix.run_bug_fix.claude_run")
-def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(mock_claude, tmp_path):
+def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(
+    mock_claude, tmp_path, compact
+):
     """Fused mode resolves in one session; 3a.1 is skipped, 3a.2 still runs."""
     diverged = BASE.replace("    int c = 3;", "    int c = 99;")
     rp, fix_sha, path = _build_repo(tmp_path, diverged)
     config = _make_config(rp, fix_sha)
     config.fused_resolution = True
-    config.fused_compact_prompts = True
+    config.fused_compact_prompts = compact
     config.build_command = "true"
     config.test_command = "true"
     state = _make_state()
