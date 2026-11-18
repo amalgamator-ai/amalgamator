@@ -10,6 +10,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.claude_utils import BugFixClaudeConfig
 from auto_bug_fix.dossier import Dossier
@@ -589,13 +591,17 @@ def test_evidence_false_blind_review_true_still_runs_3a2(mock_claude, tmp_path):
     assert any("Independent Review Agent" in p for p in prompts)
 
 
+@pytest.mark.parametrize("compact", [True, False])
 @patch("auto_bug_fix.run_bug_fix.claude_run")
-def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(mock_claude, tmp_path):
+def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(
+    mock_claude, tmp_path, compact
+):
     """Fused mode resolves in one session; 3a.1 is skipped, 3a.2 still runs."""
     diverged = BASE.replace("    int c = 3;", "    int c = 99;")
     rp, fix_sha, path = _build_repo(tmp_path, diverged)
     config = _make_config(rp, fix_sha)
     config.fused_resolution = True
+    config.fused_compact_prompts = compact
     config.build_command = "true"
     config.test_command = "true"
     state = _make_state()
@@ -614,23 +620,28 @@ def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(mock_claude, tm
 
     async def fake_claude_run(claude_config, prompts, tracker=None):
         seen_prompts.append(prompts[0])
-        path.write_text(
-            diverged.replace("    int c = 99;", "    int c = 30; /* fixed */")
-        )
-        _git(rp, "add", "-A")
-        _git(rp, "commit", "-m", "backport")
+        resolved = diverged.replace("    int c = 99;", "    int c = 30; /* fixed */")
+        if path.read_text() != resolved:
+            path.write_text(resolved)
+            _git(rp, "add", "-A")
+            _git(rp, "commit", "-m", "backport")
         return []
 
     mock_claude.side_effect = fake_claude_run
 
-    result = cherry_pick_and_resolve(
-        config,
-        _make_claude_config(rp),
-        state,
-        tracker,
-        commit=fix_sha,
-        label="test port",
-    )
+    with tracker.phase("test"):
+        result = cherry_pick_and_resolve(
+            config,
+            _make_claude_config(rp),
+            state,
+            tracker,
+            commit=fix_sha,
+            label="test port",
+        )
+
+    gates = tracker._run.phases[-1].gate_decisions
+    assert gates["blind_review"] == "ran"
+    assert gates["blind_review_corrections"] == "none"
 
     assert result == "resolved"
     assert len(seen_prompts) == 2  # resolution session + triage-blind review
@@ -643,9 +654,47 @@ def test_fused_resolution_uses_one_prompt_and_keeps_blind_review(mock_claude, tm
     assert "Stay on the detached HEAD" in prompt  # never move the target branch
     assert "fused_resolution_report.md" in prompt
     assert not any("Post-Resolution Verification Agent" in p for p in seen_prompts)
-    # The independent read survives fused mode: 3a.2 runs on the clean diff.
-    assert any("Independent Review Agent" in p for p in seen_prompts)
+    # The independent read survives fused mode: 3a.2 runs on the clean diff,
+    # and it carries the compact fix overview instead of the full diff.
+    review = [p for p in seen_prompts if "Independent Review Agent" in p]
+    assert review
+    assert "The full diff is omitted to save context" in review[0]
+    assert "The full applied diff is omitted to save context" in review[0]
     assert state.fused_resolution_ran is True
+
+
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_blind_review_records_committed_corrections(mock_claude, tmp_path):
+    from auto_bug_fix.run_bug_fix import _run_triage_blind_review
+
+    rp, fix_sha, path = _build_repo(
+        tmp_path, BASE.replace("    int c = 3;", "    int c = 99;")
+    )
+    config = _make_config(rp, fix_sha)
+    state = _make_state()
+    base_head = _sha(rp)
+    path.write_text(BASE.replace("    int c = 3;", "    int c = 30; /* fixed */"))
+    _git(rp, "add", "-A")
+    _git(rp, "commit", "-m", "resolution")
+    tracker = Tracker(
+        issue_id="TEST-1", config_dict={}, model="test-model", output_dir=str(tmp_path)
+    )
+
+    async def fake_review(claude_config, prompts, tracker=None):
+        path.write_text(path.read_text() + "/* review correction */\n")
+        return []
+
+    mock_claude.side_effect = fake_review
+
+    with tracker.phase("test"):
+        _run_triage_blind_review(
+            config, _make_claude_config(rp), state, tracker, base_head
+        )
+
+    gates = tracker._run.phases[-1].gate_decisions
+    assert gates["blind_review"] == "ran"
+    assert gates["blind_review_corrections"] == "1 files"
+    assert _sha(rp) != base_head
 
 
 @patch("auto_bug_fix.run_bug_fix.claude_run")

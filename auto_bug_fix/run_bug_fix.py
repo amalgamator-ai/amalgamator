@@ -104,6 +104,8 @@ def _phase_config(
         context_length=claude_config.context_length,
         tool_read_cap=config.tool_read_cap,
         tool_bash_cap=config.tool_bash_cap,
+        context_prune_tokens=config.context_prune_tokens,
+        context_keep_tokens=config.context_keep_tokens,
         thinking=thinking if thinking is not None else claude_config.thinking,
         effort=effort or claude_config.effort,
         profile=effective_profile,
@@ -129,6 +131,8 @@ async def _run_llm(claude_config, prompts, tracker=None):
             raw_dur = st.get("duration")
             dur = float(raw_dur) if raw_dur is not None else 0
             sdk_cost = st.get("cost_usd")
+            if st.get("truncated"):
+                tracker.record_gate("agent_truncated", st.get("name", "query"))
             record = tracker.record_query(
                 prompt_name=st.get("name", "query"),
                 start_time=cursor,
@@ -764,6 +768,36 @@ def _compute_fix_diff(
     return fix_diff
 
 
+def _worktree_changed(config: BugFixConfig, base_head: str) -> bool:
+    """True when the working tree differs from *base_head*."""
+    result = subprocess.run(
+        ["git", "diff", "--quiet", base_head],
+        cwd=config.repo_path,
+        capture_output=True,
+    )
+    return result.returncode == 1
+
+
+def _compact_diff_overview(config: BugFixConfig, base_head: str) -> str:
+    """Stat + file list for the applied diff, with fetch instructions.
+
+    Diffs the working tree (like the documented ``git diff <base> -- file``),
+    not HEAD, so the overview and the bytes the reviewer fetches agree.
+    """
+    rev = [base_head]
+    stat = "\n".join(_git_lines(config.repo_path, "diff", "--stat", *rev)).strip()
+    files = "\n".join(
+        f"  - {path}"
+        for path in _git_lines(config.repo_path, "diff", "--name-only", *rev)
+    )
+    return (
+        f"{stat}\n\n"
+        "The full applied diff is omitted to save context. For exact bytes, run:\n"
+        f"  git diff {base_head} -- <file>\n\n"
+        f"Changed files:\n{files}"
+    )
+
+
 def _compact_fix_overview(config: BugFixConfig, commit: str) -> str:
     """Stat + file list + fetch instructions instead of the full fix diff.
 
@@ -1025,12 +1059,24 @@ def _run_fused_session(
     state: PipelineState,
     prompt: str,
     tracker,
+    *,
+    max_iterations: int | None = None,
+    wrapup_at: int | None = None,
+    wrapup_message: str = "",
+    idle_turns: int | None = None,
 ) -> None:
     """Run one fused agent session; always restore refs it may have moved."""
-    try:
-        asyncio.run(
-            claude_run(_phase_config(claude_config, config), [prompt], tracker=tracker)
+    session_config = _phase_config(claude_config, config)
+    if max_iterations is not None or wrapup_at is not None or idle_turns is not None:
+        session_config = replace(
+            session_config,
+            max_iterations=max_iterations,
+            wrapup_at=wrapup_at,
+            wrapup_message=wrapup_message,
+            idle_turns=idle_turns,
         )
+    try:
+        asyncio.run(claude_run(session_config, [prompt], tracker=tracker))
     finally:
         _restore_protected_refs(config, state)
 
@@ -1095,7 +1141,10 @@ def identify_test_files(seed_files: list[str]) -> list[str]:
     for f in seed_files:
         lower = f.lower()
         basename = lower.rsplit("/", 1)[-1]
-        if any(p in lower for p in _TEST_PATTERNS) or basename.startswith("test_"):
+        # glibc keeps tests beside the code: tst-*.c, tst-*.sh, bug-*.c.
+        if any(p in lower for p in _TEST_PATTERNS) or basename.startswith(
+            ("test_", "tst_", "tst-", "bug-")
+        ):
             test_files.append(f)
     return test_files
 
@@ -1112,7 +1161,7 @@ def _is_test_only_path(path: str) -> bool:
     name = parts[-1]
     return (
         any(part in _TEST_DIR_PARTS for part in parts[:-1])
-        or name.startswith(("test_", "spec_"))
+        or name.startswith(("test_", "tst_", "tst-", "bug-", "spec_"))
         or "_test." in name
         or "_spec." in name
     )
@@ -1618,6 +1667,30 @@ def _pre_red_facts(repo: str, target_ref: str, commit: str) -> tuple[str, bool]:
     return "\n".join(lines), needs_build
 
 
+_TRANSIENT_SESSION_MARKERS = (
+    "timeout",
+    "timed out",
+    "connection",
+    "rate limit",
+    "overloaded",
+    "temporarily",
+    "unexpected eof",
+    "reset by peer",
+    "truncated",
+)
+# Status codes must stand alone: a context-overflow message reporting 500000
+# tokens must not be mistaken for a retryable 5xx.
+_TRANSIENT_STATUS_RE = re.compile(r"\b(?:429|5\d\d)\b")
+
+
+def _transient_session_error(error: Exception) -> bool:
+    """True for provider/transport failures a second attempt can survive."""
+    text = str(error).lower()
+    if any(marker in text for marker in _TRANSIENT_SESSION_MARKERS):
+        return True
+    return bool(_TRANSIENT_STATUS_RE.search(text))
+
+
 def _run_fused_pre_red(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -1662,32 +1735,73 @@ def _run_fused_pre_red(
     log.info(
         "Phase 0.5+0.5b+0.5c — fused pre-RED session (%d seed files)", len(state.seed)
     )
-    try:
-        _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
-    except Exception as e:
-        # Any session failure must fall back to the separate phases, not abort
-        # the target with a dirty worktree and a "fused" gate.
-        log.warning("Fused pre-RED session failed (%s) — falling back", e)
+
+    def usable_result() -> dict:
+        result = _read_fused_result(result_path)
+        triage = result.get("triage")
+        if not isinstance(triage, dict) or not triage:
+            # A session may write the result into the worktree despite the path.
+            result = _read_fused_result(os.path.join(repo, FUSED_PRE_RED_RESULT_FILE))
+            triage = result.get("triage")
+        return result if isinstance(triage, dict) and triage else {}
+
+    attempts = max(1, config.pre_red_attempts or 1)
+
+    def record_retry(reason: str) -> None:
+        if tracker:
+            tracker.record_gate("pre_red_retry", reason)
+        if state.dossier:
+            state.dossier.add("Fused pre-RED retry", reason, "Phase 0.5 fused pre-RED")
+
+    result: dict = {}
+    # A session that dies or forgets its result file is a model flake; the
+    # legacy fallback it triggers can cost an hour, so retry it first.
+    for attempt in range(attempts):
+        Path(result_path).unlink(missing_ok=True)
+        Path(repo, FUSED_PRE_RED_RESULT_FILE).unlink(missing_ok=True)
+        try:
+            _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
+        except Exception as e:
+            _discard_fused_session(repo, base_head)
+            reject_attempt()
+            retry = attempt + 1 < attempts and _transient_session_error(e)
+            if retry:
+                log.warning(
+                    "Fused pre-RED session failed transiently (%s); retrying "
+                    "(attempt %d/%d)",
+                    e,
+                    attempt + 2,
+                    attempts,
+                )
+                record_retry(f"session error: {e}")
+                continue
+            # Deterministic failures would fail again; go straight to fallback.
+            log.warning("Fused pre-RED session failed (%s)", e)
+            return None
+        result = usable_result()
+        if result:
+            break
         _discard_fused_session(repo, base_head)
         reject_attempt()
+        if attempt + 1 < attempts:
+            log.warning(
+                "Fused pre-RED: no usable triage result at %s; retrying "
+                "(attempt %d/%d)",
+                result_path,
+                attempt + 2,
+                attempts,
+            )
+            record_retry("no usable triage result")
+            continue
+        log.warning(
+            "Fused pre-RED: no usable triage result after %d attempt(s) — "
+            "falling back",
+            attempts,
+        )
         return None
+    triage = result["triage"]
     if tracker:
         tracker.record_gate("pre_red_mode", "fused")
-
-    result = _read_fused_result(result_path)
-    triage = result.get("triage")
-    if not isinstance(triage, dict) or not triage:
-        # A session may write the result into the worktree despite the path.
-        result = _read_fused_result(os.path.join(repo, FUSED_PRE_RED_RESULT_FILE))
-        triage = result.get("triage")
-    if not isinstance(triage, dict) or not triage:
-        log.warning(
-            "Fused pre-RED: no usable triage result at %s — falling back",
-            result_path,
-        )
-        _discard_fused_session(repo, base_head)
-        reject_attempt()
-        return None
 
     # Session artifacts must not be committed; leftover edits are the session's
     # own changes and must reach the RED check as a commit.
@@ -4640,7 +4754,22 @@ def _run_fused_resolution(
     )
     if tracker:
         tracker.record_gate("resolution_mode", "fused")
-    _run_fused_session(config, claude_config, state, prompt.prompt(), tracker)
+    _run_fused_session(
+        config,
+        claude_config,
+        state,
+        prompt.prompt(),
+        tracker,
+        max_iterations=config.resolution_max_iterations,
+        wrapup_at=config.resolution_wrapup_at,
+        idle_turns=config.resolution_idle_turns,
+        wrapup_message=(
+            "You have used many turns. Stop exploring and re-verifying. Make "
+            "only essential edits, run the build and test once, commit, write "
+            f"{report_path}, and finish. Do not re-run a check that already "
+            "passed."
+        ),
+    )
     _add_fused_report_to_dossier(state, report_path)
 
     # Every later gate compares trees, so a session that reset to another
@@ -5169,39 +5298,73 @@ def _run_triage_blind_review(
     the check that catches anchoring errors.
     """
     repo = config.repo_path
-    blind_diff = _safe_git_diff(repo, base_head)
-    if not blind_diff.strip():
+    if not _worktree_changed(config, base_head):
+        if tracker is not None:
+            tracker.record_gate("blind_review", "skipped (no changes)")
         return
+    head_before = git_rev_parse(repo, "HEAD")
+    # The overview is unconditional: the review is cheap to compact, and the
+    # prompt tells the reviewer how to fetch exact bytes.
+    current_diff = _compact_diff_overview(config, base_head)
     log.info("Phase 3a.2 — triage-blind independent review")
     prompt = TriageBlindReviewPrompt(
         context=create_context_str(claude_config_resolve, config),
-        fix_diff=_compute_fix_diff(config, config.source_fix_commit),
-        current_diff=blind_diff,
+        # The full fix diff is resent on every review turn; the reviewer
+        # fetches exact per-file bytes with `git show`.
+        fix_diff=_compact_fix_overview(config, config.source_fix_commit),
+        current_diff=current_diff,
         target_branch=config.target_branch,
         baseline_ref=base_head,
         external_context_section=_external_context_section(config, "review"),
     )
+    # Review is bounded: it verifies and corrects, it does not re-resolve.
+    review_config = replace(
+        claude_config_resolve,
+        max_iterations=config.review_max_iterations,
+        wrapup_at=config.review_wrapup_at,
+        idle_turns=config.review_idle_turns,
+        wrapup_message=(
+            "You have used many review turns. Stop searching: apply only the "
+            "corrections you have already justified, stage them, and finish."
+        ),
+    )
     try:
         asyncio.run(
             claude_run(
-                claude_config_resolve,
+                review_config,
                 [prompt.prompt()],
                 tracker=tracker,
             )
         )
     except Exception:
         log.warning("Phase 3a.2 — blind review failed, continuing")
+        if tracker is not None:
+            tracker.record_gate("blind_review", "failed")
         return
     finally:
         _restore_protected_refs(config, state)
-    if not git_status_porcelain(repo):
-        return
-    subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
-    git_commit(
-        repo,
-        "fixup: independent review corrections (Phase 3a.2)",
-        trailers=_COAUTHOR_TRAILERS,
+    dirty = bool(git_status_porcelain(repo))
+    if dirty:
+        subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
+        git_commit(
+            repo,
+            "fixup: independent review corrections (Phase 3a.2)",
+            trailers=_COAUTHOR_TRAILERS,
+        )
+    head_after = git_rev_parse(repo, "HEAD")
+    corrected = (
+        git_diff_name_only_range(repo, head_before, head_after)
+        if head_after != head_before
+        else []
     )
+    if tracker is not None:
+        tracker.record_gate("blind_review", "ran")
+        tracker.record_gate(
+            "blind_review_corrections",
+            f"{len(corrected)} files" if corrected else "none",
+        )
+    if not dirty and not corrected:
+        return
     log.info("Phase 3a.2 — blind review committed corrections")
     if state.dossier:
         state.dossier.add(

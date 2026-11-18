@@ -785,6 +785,33 @@ def test_tool_caps_accept_numeric_strings_and_warn_on_garbage(caplog):
     assert "not a positive integer" in caplog.text
 
 
+def test_zero_budget_values_disable_instead_of_defaulting(caplog):
+    cfg, _, _ = parse_bug_fix_config(
+        _cfg_with_advanced({"review_wrapup_at": 0, "review_idle_turns": 0})
+    )
+    assert cfg.review_wrapup_at is None
+    assert cfg.review_idle_turns is None
+    assert "not a positive integer" in caplog.text
+
+
+def test_budget_relationship_warnings(caplog):
+    parse_bug_fix_config(
+        _cfg_with_advanced(
+            {
+                "resolution_max_iterations": 50,
+                "resolution_wrapup_at": 60,
+                "review_max_iterations": 10,
+                "review_wrapup_at": 20,
+                "context_prune_tokens": 100000,
+                "context_keep_tokens": 100000,
+            }
+        )
+    )
+    assert "resolution_wrapup_at > resolution_max_iterations" in caplog.text
+    assert "review_wrapup_at > review_max_iterations" in caplog.text
+    assert "context_keep_tokens >= context_prune_tokens" in caplog.text
+
+
 def test_fused_optimization_flags_parse():
     cfg, _, _ = parse_bug_fix_config(
         _cfg_with_advanced(
@@ -792,12 +819,35 @@ def test_fused_optimization_flags_parse():
                 "fused_compact_prompts": True,
                 "tool_read_cap": 12000,
                 "tool_bash_cap": 8000,
+                "context_prune_tokens": 150000,
+                "context_keep_tokens": "60000",
+                "resolution_max_iterations": 160,
+                "resolution_wrapup_at": "90",
+                "resolution_idle_turns": 40,
+                "review_max_iterations": 30,
+                "review_wrapup_at": 20,
+                "review_idle_turns": 15,
             }
         )
     )
     assert cfg.fused_compact_prompts is True
     assert cfg.tool_read_cap == 12000
     assert cfg.tool_bash_cap == 8000
+    assert cfg.context_prune_tokens == 150000
+    assert cfg.context_keep_tokens == 60000
+    assert cfg.resolution_max_iterations == 160
+    assert cfg.resolution_wrapup_at == 90
+    assert cfg.resolution_idle_turns == 40
+    assert cfg.review_max_iterations == 30
+    assert cfg.review_wrapup_at == 20
+    assert cfg.review_idle_turns == 15
     cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
     assert cfg.fused_compact_prompts is False
     assert cfg.tool_read_cap is None and cfg.tool_bash_cap is None
+    assert cfg.context_prune_tokens is None and cfg.context_keep_tokens is None
+    assert cfg.resolution_max_iterations == 600
+    assert cfg.resolution_wrapup_at is None
+    assert cfg.resolution_idle_turns == 100
+    assert cfg.review_max_iterations == 60
+    assert cfg.review_wrapup_at == 45
+    assert cfg.review_idle_turns is None

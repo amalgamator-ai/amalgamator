@@ -602,6 +602,8 @@ as available.
 
 ## Rules
 - Only fix genuine errors — symbols wrongly removed or wrongly adapted
+- Batch independent `git grep` calls in one turn; aim to finish within ~40
+  tool calls. Do not repeat a search that already answered the question.
 - Do not reformat, restyle, or improve code
 - Every edit must be backed by a `git grep` result you ran
 - Stage changes with `git add` if you make any fixes
@@ -698,6 +700,10 @@ If the errors require types, interfaces, or features that don't exist on the tar
 and cannot be adapted without changing the fix's intent, write to stdout:
   CANNOT_FIX: <explanation of what's missing and why>
 Do NOT attempt partial workarounds — either the fix compiles cleanly or it doesn't.
+
+## Efficiency
+- Batch independent checks in one turn; do not re-run a check that already
+  passed. Aim to finish within ~60 tool calls.
 """
 
     def prompt(self) -> str:
@@ -820,6 +826,11 @@ Write a JSON file to `{output_file}` with this structure:
 
 If verdict is "vulnerable", the replacement test file MUST exist and MUST fail when run with \
 the test command. Verify this before writing the JSON.
+
+## Efficiency
+- Batch independent reads and test runs in one turn; aim to finish within ~40
+  tool calls. Once the verdict is decided and any replacement test is confirmed
+  failing, write the JSON and stop.
 """
 
     def prompt(self) -> str:
@@ -1070,7 +1081,8 @@ B. COMPLETE the backport. Port anything the fix needs that the cherry-pick did n
    requires. Do not port unrelated upstream work or features the fix does not need.
 
 C. BUILD and TEST. Run `{build_command}` and `{test_command}`; fix every regression
-   the port caused. Do not weaken, delete, or skip the ported tests.
+   the port caused. Do not weaken, delete, or skip the ported tests. A check that
+   already passed does not need to run again.
 
 D. CHECKS and REGENERATION. Run the project checks and fix what they flag:
 {check_commands}
@@ -1088,9 +1100,12 @@ F. COMMIT and RECORD. Confirm no conflict markers remain (`git grep -n '<<<<<<<'
    Stage only source changes and commit once with a descriptive message; no
    build scratch, caches, or test-run output (logs, `.diffs`, regression or
    coverage files). Write {report_path} (outside the repository) with one section
-   per task and the final build/test/check results. Then stop.
+   per task and the final build/test/check results. Then stop; no further
+   verification passes after the report.
 
 ## Rules
+- Batch independent tool calls in one turn and combine related reads and checks
+  into one command; aim to finish within ~120 tool calls.
 - Files to skip (do not port): {files_to_skip}
 - Stay on the detached HEAD; never check out, reset or commit on {target_branch}.
 - Do not edit files outside the fix's scope; do not revert the fix; no network.

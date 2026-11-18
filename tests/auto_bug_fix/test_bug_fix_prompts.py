@@ -136,6 +136,21 @@ def test_build_error_recovery_prompt_shows_iteration():
     text = prompt.prompt()
     assert "2/3" in text
     assert "undefined reference" in text
+    assert "~60 tool calls" in text
+
+
+def test_red_triage_prompt_bounds_the_investigation():
+    from auto_bug_fix.bug_fix_prompts import RedTriagePrompt
+
+    prompt = RedTriagePrompt(
+        context="<context>c</context>",
+        bug_description="d",
+        test_output="PASS",
+        ported_test_files=["t.c"],
+        triage_assessment="{}",
+    )
+    text = prompt.prompt()
+    assert "~40 tool calls" in " ".join(text.split())
 
 
 def test_semantic_triage_prompt_contains_files():
@@ -179,6 +194,22 @@ def test_test_port_prompt_uses_diff_command_for_merges():
     text = prompt.prompt()
     assert "git diff merge_abc^1..merge_abc --" in text
     assert "git show merge_abc --" not in text
+
+
+def test_triage_blind_review_prompt_batches_checks():
+    from auto_bug_fix.bug_fix_prompts import TriageBlindReviewPrompt
+
+    prompt = TriageBlindReviewPrompt(
+        context="c",
+        fix_diff="d",
+        current_diff="x",
+        target_branch="rel",
+        baseline_ref="base",
+    )
+    text = prompt.prompt()
+    flat = " ".join(text.split())
+    assert "Batch independent `git grep` calls" in flat
+    assert "~40 tool calls" in flat
 
 
 def test_triage_blind_review_prompt_baseline_ref():
@@ -246,4 +277,9 @@ def test_fused_prompts_carry_external_context():
         report_path="report.md",
         external_context_section="<external>RES</external>",
     )
-    assert "<external>RES</external>" in res.prompt()
+    text = res.prompt()
+    flat = " ".join(text.split())
+    assert "<external>RES</external>" in text
+    assert "Batch independent tool calls" in flat
+    assert "~120 tool calls" in flat
+    assert "no further verification passes" in flat

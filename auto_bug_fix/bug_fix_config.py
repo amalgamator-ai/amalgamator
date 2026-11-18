@@ -13,6 +13,12 @@ if TYPE_CHECKING:
     from common.model_registry import ModelProfile
 
 
+DEFAULT_RESOLUTION_MAX_ITERATIONS = 600
+DEFAULT_RESOLUTION_IDLE_TURNS = 100
+DEFAULT_REVIEW_MAX_ITERATIONS = 60
+DEFAULT_REVIEW_WRAPUP_AT = 45
+
+
 @dataclass
 class BugFixConfig:
     # Repository
@@ -77,6 +83,21 @@ class BugFixConfig:
     # Tool output caps for the agent loop (None = context-derived defaults).
     tool_read_cap: int | None = None
     tool_bash_cap: int | None = None
+    context_prune_tokens: int | None = None
+    context_keep_tokens: int | None = None
+    # Turn budgets for the fused resolution session and the 3a.2 review.
+    # Runaway guard only: PHP 8.1's fused resolution legitimately needs ~540
+    # turns, and a lower cap leaves conflicts for the per-chunk fallback.
+    # One fused retry covers model flakes; more doubles deterministic cost.
+    pre_red_attempts: int | None = 2
+    resolution_max_iterations: int | None = DEFAULT_RESOLUTION_MAX_ITERATIONS
+    resolution_wrapup_at: int | None = None
+    resolution_idle_turns: int | None = DEFAULT_RESOLUTION_IDLE_TURNS
+    # 3a.2 is read-only by design, so idle tracking there would be the real
+    # budget; it relies on max_iterations/wrapup_at instead. Opt in if wanted.
+    review_max_iterations: int | None = DEFAULT_REVIEW_MAX_ITERATIONS
+    review_wrapup_at: int | None = DEFAULT_REVIEW_WRAPUP_AT
+    review_idle_turns: int | None = None
     # Non-bugfix ports only: fraction of the fix's files that may be dropped
     # (skipped and never regenerated) before the outcome is downgraded from
     # success to partial_success.

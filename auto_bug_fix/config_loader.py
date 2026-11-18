@@ -17,7 +17,13 @@ from typing import Any
 
 import yaml
 
-from auto_bug_fix.bug_fix_config import BugFixConfig
+from auto_bug_fix.bug_fix_config import (
+    DEFAULT_RESOLUTION_IDLE_TURNS,
+    DEFAULT_RESOLUTION_MAX_ITERATIONS,
+    DEFAULT_REVIEW_MAX_ITERATIONS,
+    DEFAULT_REVIEW_WRAPUP_AT,
+    BugFixConfig,
+)
 from auto_bug_fix.claude_utils import BugFixClaudeConfig, ClaudeConfig
 from common.model_registry import ModelProfile, ModelRegistry, build_legacy_profile
 from common.model_registry import resolve_api_key as _resolve_api_key
@@ -144,6 +150,13 @@ def advanced_int(advanced: dict[str, Any], key: str) -> int | None:
         )
         return None
     return value
+
+
+def advanced_int_or(advanced: dict[str, Any], key: str, default: int | None):
+    """Read a positive integer; absent keeps *default*, 0/invalid disables."""
+    if key not in advanced:
+        return default
+    return advanced_int(advanced, key)
 
 
 def load_config_file(config_path: str) -> dict[str, Any]:
@@ -431,6 +444,23 @@ def parse_bug_fix_config(
         fused_compact_prompts=bool(advanced.get("fused_compact_prompts", False)),
         tool_read_cap=advanced_int(advanced, "tool_read_cap"),
         tool_bash_cap=advanced_int(advanced, "tool_bash_cap"),
+        context_prune_tokens=advanced_int(advanced, "context_prune_tokens"),
+        context_keep_tokens=advanced_int(advanced, "context_keep_tokens"),
+        pre_red_attempts=advanced_int_or(advanced, "pre_red_attempts", 2),
+        resolution_max_iterations=advanced_int_or(
+            advanced, "resolution_max_iterations", DEFAULT_RESOLUTION_MAX_ITERATIONS
+        ),
+        resolution_wrapup_at=advanced_int(advanced, "resolution_wrapup_at"),
+        resolution_idle_turns=advanced_int_or(
+            advanced, "resolution_idle_turns", DEFAULT_RESOLUTION_IDLE_TURNS
+        ),
+        review_max_iterations=advanced_int_or(
+            advanced, "review_max_iterations", DEFAULT_REVIEW_MAX_ITERATIONS
+        ),
+        review_wrapup_at=advanced_int_or(
+            advanced, "review_wrapup_at", DEFAULT_REVIEW_WRAPUP_AT
+        ),
+        review_idle_turns=advanced_int(advanced, "review_idle_turns"),
         partial_success_skip_ratio=advanced_float(
             advanced, "partial_success_skip_ratio", 0.5, minimum=0.0, maximum=1.0
         ),
@@ -440,6 +470,34 @@ def parse_bug_fix_config(
         fix_upstream_ref=fix_upstream_ref,
         external_context_file=external_context_file,
     )
+
+    if (
+        bug_fix_config.resolution_wrapup_at
+        and bug_fix_config.resolution_max_iterations
+        and bug_fix_config.resolution_wrapup_at
+        > bug_fix_config.resolution_max_iterations
+    ):
+        log.warning(
+            "advanced.resolution_wrapup_at > resolution_max_iterations; "
+            "the hard cap wins"
+        )
+    if (
+        bug_fix_config.review_wrapup_at
+        and bug_fix_config.review_max_iterations
+        and bug_fix_config.review_wrapup_at > bug_fix_config.review_max_iterations
+    ):
+        log.warning(
+            "advanced.review_wrapup_at > review_max_iterations; the hard cap wins"
+        )
+    if (
+        bug_fix_config.context_keep_tokens
+        and bug_fix_config.context_prune_tokens
+        and bug_fix_config.context_keep_tokens >= bug_fix_config.context_prune_tokens
+    ):
+        log.warning(
+            "advanced.context_keep_tokens >= context_prune_tokens; "
+            "the keep window is clamped at runtime"
+        )
 
     return bug_fix_config, workdir, source_path
 

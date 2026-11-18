@@ -13,6 +13,7 @@ here only.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -23,6 +24,8 @@ from colorama import Fore, Style
 
 if TYPE_CHECKING:
     from common.model_registry import ModelProfile
+
+log = logging.getLogger(__name__)
 
 
 def make_anthropic_client():
@@ -116,6 +119,18 @@ class ClaudeConfig:
     # context-length-derived defaults.
     tool_read_cap: int | None = None
     tool_bash_cap: int | None = None
+    # Deterministic history elision: above this many tokens, stale tool output
+    # and old reasoning are replaced with short markers, keeping the most
+    # recent ``context_keep_tokens`` verbatim. None = built-in defaults.
+    context_prune_tokens: int | None = None
+    context_keep_tokens: int | None = None
+    # Hard ceiling for one LiteLLM agent session; None = the runner default.
+    max_iterations: int | None = None
+    # At this iteration, tell the model to stop verifying and finish.
+    wrapup_at: int | None = None
+    wrapup_message: str = ""
+    # Wrap up when the repository tree has been unchanged for this many turns.
+    idle_turns: int | None = None
 
     def __post_init__(self):
         if self.profile:
@@ -293,7 +308,7 @@ def build_claude_options(config: ClaudeConfig):
         "ANTHROPIC_MODEL": config.model,
         "MAX_THINKING_TOKENS": str(config.max_thinking_tokens),
     }
-    extra = {}
+    extra: dict[str, object] = {}
     profile = config.profile
     if profile and (profile.api_key or profile.api_base):
         backends = (
@@ -326,6 +341,9 @@ def build_claude_options(config: ClaudeConfig):
             env["ANTHROPIC_BASE_URL"] = profile.api_base
         # Explicit direct transport must not be rerouted by user/project settings.
         extra["setting_sources"] = []
+    if config.max_iterations:
+        # The SDK exposes the hard turn ceiling as ``max_turns``.
+        extra["max_turns"] = config.max_iterations
     return ClaudeAgentOptions(
         system_prompt=config.system_prompt,
         allowed_tools=config.allowed_tools,
@@ -370,6 +388,17 @@ async def claude_run(
             "Install it or run inside the Claude Code environment."
         )
     assert claude_config.cwd is not None, "claude_config must have CWD set"
+    ignored = [
+        name
+        for name in ("wrapup_at", "idle_turns", "context_prune_tokens")
+        if getattr(claude_config, name, None)
+    ]
+    if ignored:
+        log.warning(
+            "Claude SDK path ignores %s (LiteLLM tool loop only); "
+            "max_iterations still maps to max_turns",
+            ", ".join(ignored),
+        )
 
     # Support legacy callers that pass raw strings/dicts
     wrapped_steps = []
