@@ -848,6 +848,6 @@ def test_fused_optimization_flags_parse():
     assert cfg.resolution_max_iterations == 600
     assert cfg.resolution_wrapup_at is None
     assert cfg.resolution_idle_turns == 100
-    assert cfg.review_max_iterations == 40
-    assert cfg.review_wrapup_at == 30
+    assert cfg.review_max_iterations == 60
+    assert cfg.review_wrapup_at == 45
     assert cfg.review_idle_turns is None

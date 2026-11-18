@@ -5299,7 +5299,10 @@ def _run_triage_blind_review(
     """
     repo = config.repo_path
     if not _worktree_changed(config, base_head):
+        if tracker is not None:
+            tracker.record_gate("blind_review", "skipped (no changes)")
         return
+    head_before = git_rev_parse(repo, "HEAD")
     # The overview is unconditional: the review is cheap to compact, and the
     # prompt tells the reviewer how to fetch exact bytes.
     current_diff = _compact_diff_overview(config, base_head)
@@ -5335,17 +5338,33 @@ def _run_triage_blind_review(
         )
     except Exception:
         log.warning("Phase 3a.2 — blind review failed, continuing")
+        if tracker is not None:
+            tracker.record_gate("blind_review", "failed")
         return
     finally:
         _restore_protected_refs(config, state)
-    if not git_status_porcelain(repo):
-        return
-    subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
-    git_commit(
-        repo,
-        "fixup: independent review corrections (Phase 3a.2)",
-        trailers=_COAUTHOR_TRAILERS,
+    dirty = bool(git_status_porcelain(repo))
+    if dirty:
+        subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
+        git_commit(
+            repo,
+            "fixup: independent review corrections (Phase 3a.2)",
+            trailers=_COAUTHOR_TRAILERS,
+        )
+    head_after = git_rev_parse(repo, "HEAD")
+    corrected = (
+        git_diff_name_only_range(repo, head_before, head_after)
+        if head_after != head_before
+        else []
     )
+    if tracker is not None:
+        tracker.record_gate("blind_review", "ran")
+        tracker.record_gate(
+            "blind_review_corrections",
+            f"{len(corrected)} files" if corrected else "none",
+        )
+    if not dirty and not corrected:
+        return
     log.info("Phase 3a.2 — blind review committed corrections")
     if state.dossier:
         state.dossier.add(

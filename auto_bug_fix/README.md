@@ -114,10 +114,13 @@ those nets matter more than cost; the dossier records the evidence scope and
   Claude SDK maps it to `max_turns`); `resolution_idle_turns` (100) asks the
   model to wrap up only after that many turns with an unchanged tree, so
   resolution is not cut mid-work (LiteLLM only). The review is bounded much
-  harder: `review_max_iterations` (40), `review_wrapup_at` (30) and an optional
+  harder: `review_max_iterations` (60), `review_wrapup_at` (45) and an optional
   `review_idle_turns` (off by default — 3a.2 is read-only, so turn bounds are
-  the review budget). The review always carries a stat overview of the fix and
-  the applied diff rather than the full text.
+  the review budget). The cap leaves headroom for a productive review: across
+  the ten benchmark cases 3a.2 ran seven times (skipped when the cherry-pick
+  was clean), needed 9–23 turns when it found nothing, and 34 turns on the one
+  case where it corrected the port. The review always carries a stat overview
+  of the fix and the applied diff rather than the full text.
 
 ### Build output at commit boundaries
 
