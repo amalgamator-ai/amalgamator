@@ -2660,8 +2660,12 @@ def test_transient_session_error_classification():
     assert _transient_session_error(TimeoutError("timed out"))
     assert _transient_session_error(Exception("503 Service Unavailable"))
     assert _transient_session_error(Exception("connection reset by peer"))
+    assert _transient_session_error(Exception("HTTP 429 rate limited"))
     assert not _transient_session_error(Exception("invalid api key"))
     assert not _transient_session_error(Exception("unknown model"))
+    assert not _transient_session_error(
+        Exception("context length 500000 exceeds the model limit")
+    )
 
 
 def test_glibc_bug_prefixed_tests_are_recognised():

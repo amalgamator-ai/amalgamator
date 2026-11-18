@@ -482,6 +482,14 @@ def parse_bug_fix_config(
             "the hard cap wins"
         )
     if (
+        bug_fix_config.review_wrapup_at
+        and bug_fix_config.review_max_iterations
+        and bug_fix_config.review_wrapup_at > bug_fix_config.review_max_iterations
+    ):
+        log.warning(
+            "advanced.review_wrapup_at > review_max_iterations; the hard cap wins"
+        )
+    if (
         bug_fix_config.context_keep_tokens
         and bug_fix_config.context_prune_tokens
         and bug_fix_config.context_keep_tokens >= bug_fix_config.context_prune_tokens

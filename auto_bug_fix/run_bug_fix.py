@@ -1672,23 +1672,23 @@ _TRANSIENT_SESSION_MARKERS = (
     "timed out",
     "connection",
     "rate limit",
-    "429",
-    "500",
-    "502",
-    "503",
-    "504",
     "overloaded",
     "temporarily",
     "unexpected eof",
     "reset by peer",
     "truncated",
 )
+# Status codes must stand alone: a context-overflow message reporting 500000
+# tokens must not be mistaken for a retryable 5xx.
+_TRANSIENT_STATUS_RE = re.compile(r"\b(?:429|5\d\d)\b")
 
 
 def _transient_session_error(error: Exception) -> bool:
     """True for provider/transport failures a second attempt can survive."""
     text = str(error).lower()
-    return any(marker in text for marker in _TRANSIENT_SESSION_MARKERS)
+    if any(marker in text for marker in _TRANSIENT_SESSION_MARKERS):
+        return True
+    return bool(_TRANSIENT_STATUS_RE.search(text))
 
 
 def _run_fused_pre_red(

@@ -794,6 +794,24 @@ def test_zero_budget_values_disable_instead_of_defaulting(caplog):
     assert "not a positive integer" in caplog.text
 
 
+def test_budget_relationship_warnings(caplog):
+    parse_bug_fix_config(
+        _cfg_with_advanced(
+            {
+                "resolution_max_iterations": 50,
+                "resolution_wrapup_at": 60,
+                "review_max_iterations": 10,
+                "review_wrapup_at": 20,
+                "context_prune_tokens": 100000,
+                "context_keep_tokens": 100000,
+            }
+        )
+    )
+    assert "resolution_wrapup_at > resolution_max_iterations" in caplog.text
+    assert "review_wrapup_at > review_max_iterations" in caplog.text
+    assert "context_keep_tokens >= context_prune_tokens" in caplog.text
+
+
 def test_fused_optimization_flags_parse():
     cfg, _, _ = parse_bug_fix_config(
         _cfg_with_advanced(
