@@ -121,7 +121,7 @@ class Tracker:
         """Initialize a new pipeline run tracker."""
         self._profile = profile  # Runtime-only; never part of PipelineRun.
         self._model = profile.model if profile else model
-        self._output_dir = output_dir
+        self._output_dir = os.path.abspath(output_dir)
         self._current_phase: PhaseRecord | None = None
         self._run = PipelineRun(
             run_id=str(uuid.uuid4()),
