@@ -12,6 +12,13 @@ from auto_bug_fix.run_bug_fix import (
     PipelineState,
     _ensure_series_clusters,
 )
+from common.claude_utils import ClaudeConfig
+
+
+def _claude():
+    return ClaudeConfig(
+        model="test", allowed_tools=[], perm_mode="acceptEdits", cwd=None
+    )
 
 
 class _Tracker:
@@ -50,7 +57,7 @@ def test_existing_partition_is_left_alone(tmp_path, monkeypatch):
         lambda *a, **k: called.append(True),
     )
 
-    assert _ensure_series_clusters(_config(tmp_path), None, state, tracker)
+    assert _ensure_series_clusters(_config(tmp_path), _claude(), state, tracker)
     assert called == []
 
 
@@ -79,7 +86,7 @@ def test_missing_partition_is_requested_and_merged(tmp_path, monkeypatch):
 
     monkeypatch.setattr("auto_bug_fix.run_bug_fix.claude_run", fake_run)
 
-    assert _ensure_series_clusters(_config(tmp_path), None, state, tracker)
+    assert _ensure_series_clusters(_config(tmp_path), _claude(), state, tracker)
     assert state.triage_assessment["clusters"] == [
         {"id": "all", "commits": ["a" * 40, "b" * 40]}
     ]
@@ -100,7 +107,7 @@ def test_failed_recovery_records_the_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr("auto_bug_fix.run_bug_fix._phase_config", lambda *a, **k: None)
     monkeypatch.setattr("auto_bug_fix.run_bug_fix.claude_run", lambda *a, **k: [])
 
-    assert not _ensure_series_clusters(_config(tmp_path), None, state, tracker)
+    assert not _ensure_series_clusters(_config(tmp_path), _claude(), state, tracker)
     assert tracker.gates["clusters"] == "fallback"
 
 
@@ -116,5 +123,5 @@ def test_single_commit_mode_needs_no_partition(tmp_path):
     )
     tracker = _Tracker(tmp_path)
 
-    assert _ensure_series_clusters(config, None, PipelineState(), tracker)
+    assert _ensure_series_clusters(config, _claude(), PipelineState(), tracker)
     assert tracker.gates == {}

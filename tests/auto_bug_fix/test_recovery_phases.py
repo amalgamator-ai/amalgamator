@@ -439,7 +439,7 @@ def _run_extended_verification_pipeline(
         state.triage_assessment = assessment
         return assessment
 
-    def fake_baseline(config, claude_config, state):
+    def fake_baseline(config, claude_config, state, **kwargs):
         state.baseline_verification = [
             {"cmd": cmd, "exit_code": 1} for cmd in baseline_failures or []
         ]

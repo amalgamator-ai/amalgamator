@@ -177,12 +177,15 @@ from auto_bug_fix.bug_fix_prompts import (
     SEMANTIC_TRIAGE_FILE,
     TEST_PORT_MANIFEST_FILE,
     BuildErrorRecoveryPrompt,
+    ClusterPlanPrompt,
+    ClusterPlanRepairPrompt,
     FusedPreRedPrompt,
     FusedResolutionPrompt,
     NarrowResolutionAgentPrompt,
     PostResolutionCheckPrompt,
     RedTriagePrompt,
     SemanticTriagePrompt,
+    SeriesClustersPrompt,
     TestPortAgentPrompt,
     TriageBlindReviewPrompt,
     create_context_str,
@@ -243,6 +246,12 @@ from auto_bug_fix.phase_4b import (
     gen_RunAndFixPrompt,
 )
 from auto_bug_fix.range_diff import parse_equivalence, run_range_diff
+from auto_bug_fix.series_clusters import (
+    ClusterCaps,
+    batch_groups,
+    build_partition,
+    parse_cluster_plan,
+)
 from auto_bug_fix.signature import capture_output
 from auto_bug_fix.snapback import (
     _git_blob,
@@ -530,6 +539,10 @@ class PipelineState:
     dossier: Dossier = field(default_factory=Dossier)
     triage_assessment: dict = field(default_factory=dict)
     priority_files: list[str] = field(default_factory=list)
+    clusters: list = field(default_factory=list)
+    cluster_plans: dict = field(default_factory=dict)
+    current_cluster: str = ""
+    dropped_commits: list = field(default_factory=list)
     verify_failures: list = field(default_factory=list)
     baseline_build_exit: int = 0
     baseline_test_exit: int = 0
@@ -959,6 +972,8 @@ def phase_0_5_semantic_triage(
         target_branch=config.target_branch,
         seed_files=state.seed,
         external_context_section=_external_context_section(config, "triage"),
+        series_section=_series_prompt_section(config),
+        series_mode=bool(config.source_fix_commits),
         discover_lint=not config.lint_command,
         discover_verification=config.auto_discover_tests,
     )
@@ -998,6 +1013,480 @@ def phase_0_5_semantic_triage(
     return assessment
 
 
+# Path components that never carry code a backport needs. Skipping them keeps
+# CI config, fuzz harnesses and documentation out of the candidate patch.
+_SERIES_SKIP_PATH_PARTS = frozenset({".github", "doc", "docs", "fuzz", "fuzzing"})
+# Release-note files: upstream bookkeeping that conflicts on every branch.
+_SERIES_SKIP_BASENAMES = frozenset({"changes", "changelog", "history", "news"})
+
+
+def _series_prompt_section(config: BugFixConfig) -> str:
+    """The ordered commit list handed to triage in commit-series mode.
+
+    Without it the model sees only the merged diffstat and cannot propose
+    cluster boundaries. Empty for single-commit porting.
+    """
+    if not config.source_fix_commits:
+        return ""
+    lines = []
+    for index, sha in enumerate(config.source_fix_commits, start=1):
+        subject = _run_git(config.repo_path, ["log", "-1", "--format=%h %s", sha])
+        stat = _run_git(
+            config.repo_path,
+            ["diff-tree", "--no-commit-id", "--shortstat", "-r", sha],
+        )
+        label = subject.stdout.strip() or sha[:12]
+        size = stat.stdout.strip() or "empty"
+        lines.append(f"  {index}. {label}  [{size}]")
+    return (
+        "\nThis fix is an **ordered commit series**, applied one commit at a time\n"
+        "in exactly this order:\n"
+        + "\n".join(lines)
+        + "\n\nThe merged diff below is the sum of these commits; use it to analyse\n"
+        "the fix, and the list above to cluster it.\n"
+    )
+
+
+def _series_changed_files(config: BugFixConfig) -> list[str]:
+    """Every file touched by the commit series, sorted."""
+    changed: dict[str, None] = {}
+    for sha in config.source_fix_commits or [config.source_fix_commit]:
+        files = _git_lines(
+            config.repo_path, "diff-tree", "--no-commit-id", "--name-only", "-r", sha
+        )
+        for path in files:
+            changed.setdefault(path)
+    return sorted(changed)
+
+
+def _series_skip_files(config: BugFixConfig) -> list[str]:
+    """Files in the series that series mode will not port.
+
+    ``files_to_skip`` is the one triage product with a real effect on a
+    series run: it is reverted after each cherry-pick. Without the triage
+    session the set is derived from path shape alone, so it is deliberately
+    conservative — only components that carry no code and release notes.
+    """
+    skip = []
+    for path in _series_changed_files(config):
+        parts = path.lower().split("/")
+        in_bookkeeping_dir = any(part in _SERIES_SKIP_PATH_PARTS for part in parts[:-1])
+        if in_bookkeeping_dir or parts[-1] in _SERIES_SKIP_BASENAMES:
+            skip.append(path)
+    return skip
+
+
+def _cluster_journal(state: PipelineState) -> str:
+    """Prior clusters' binding decisions, rendered for the next plan."""
+    lines = []
+    for cluster_id, plan in state.cluster_plans.items():
+        for action in plan.get("actions") or []:
+            detail = (
+                action.get("use_instead")
+                or action.get("where")
+                or action.get("note")
+                or ""
+            )
+            lines.append(
+                f"- {cluster_id}: {action.get('symbol')} -> {action.get('action')}"
+                + (f" ({detail})" if detail else "")
+            )
+    return "\n".join(lines)
+
+
+def _generate_cluster_plan(
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+    cluster,
+) -> dict | None:
+    """Plan one cluster against the current tree. Series mode only."""
+    if not config.source_fix_commits:
+        return None
+    if cluster.mode == "mechanical":
+        plan = {
+            "cluster": cluster.id,
+            "mode": "mechanical",
+            "actions": [],
+            "risks": [],
+            "note": (
+                "Mechanical cluster: apply the commits; adapt call sites to the "
+                "target API when a signature differs."
+            ),
+        }
+        state.cluster_plans[cluster.id] = plan
+        return plan
+
+    plan_name = f"cluster_plan_{cluster.id}.json"
+    output_file = os.path.abspath(os.path.join(tracker.output_dir, plan_name))
+    repo_copy = os.path.join(config.repo_path, plan_name)
+    repo_copy_runs = os.path.join(config.repo_path, "runs", plan_name)
+    commits = []
+    for sha in cluster.commits:
+        info = _run_git(
+            config.repo_path, ["log", "-1", "--format=%h %s", sha]
+        ).stdout.strip()
+        commits.append(f"  - {info or sha}")
+    stat = _run_git(
+        config.repo_path,
+        ["diff", "--stat", f"{cluster.commits[0]}^", cluster.commits[-1]],
+    ).stdout.strip()
+    triage_keys = (
+        "commit_type",
+        "prerequisite_details",
+        "prerequisites",
+        "files_to_skip",
+        "public_interface_files",
+        "priority_files",
+        "reasoning",
+    )
+    triage = {
+        key: value
+        for key, value in (state.triage_assessment or {}).items()
+        if key in triage_keys
+    }
+
+    for attempt in (1, 2):
+        plan_base = git_rev_parse(config.repo_path, "HEAD")
+        prompt = ClusterPlanPrompt(
+            context=create_context_str(claude_config, config),
+            cluster_id=cluster.id,
+            intent=cluster.intent,
+            commits="\n".join(commits),
+            cluster_stat=stat or "(empty)",
+            triage_json=json.dumps(triage, indent=2),
+            journal=_cluster_journal(state),
+            output_file=output_file,
+        )
+        try:
+            asyncio.run(
+                claude_run(
+                    _phase_config(claude_config, config),
+                    [prompt.prompt()],
+                    tracker=tracker,
+                )
+            )
+        except Exception as e:  # noqa: BLE001 - a failed plan is not fatal
+            log.warning("Cluster %s: plan session failed: %s", cluster.id, e)
+        for candidate in (repo_copy_runs, repo_copy):
+            if os.path.exists(output_file):
+                break
+            if os.path.exists(candidate):
+                os.makedirs(os.path.dirname(output_file), exist_ok=True)
+                shutil.move(candidate, output_file)
+                log.info(
+                    "Cluster %s: plan was written inside the checkout — moved it out",
+                    cluster.id,
+                )
+                break
+        if git_status_porcelain(config.repo_path):
+            log.warning(
+                "Cluster %s: plan session left the tree dirty — discarding its edits",
+                cluster.id,
+            )
+            _discard_fused_session(config.repo_path, plan_base)
+        raw = None
+        if os.path.exists(output_file):
+            try:
+                with open(output_file) as handle:
+                    raw = json.load(handle)
+            except (OSError, json.JSONDecodeError) as e:
+                log.warning("Cluster %s: unreadable plan: %s", cluster.id, e)
+        plan, errors = parse_cluster_plan(raw)
+        if plan:
+            unsafe = [
+                action.symbol
+                for action in plan.actions
+                if not _validate_shell_command(action.verify)
+            ]
+            if unsafe:
+                errors = [f"unsafe verify command for {symbol}" for symbol in unsafe]
+        if plan and not errors:
+            payload = {
+                "cluster": plan.cluster,
+                "mode": "semantic",
+                "actions": [action.__dict__ for action in plan.actions],
+                "risks": plan.risks,
+            }
+            state.cluster_plans[cluster.id] = payload
+            if tracker:
+                tracker.record_gate(f"cluster_plan_{cluster.id}", "ok")
+            return payload
+        log.warning(
+            "Cluster %s: plan attempt %d rejected: %s",
+            cluster.id,
+            attempt,
+            "; ".join(errors[:3]) or "no plan written",
+        )
+
+    if tracker:
+        tracker.record_gate(f"cluster_plan_{cluster.id}", "failed")
+    return None
+
+
+def _repair_cluster_plan(
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+    cluster,
+    plan: dict,
+    failures: list[str],
+) -> list[str]:
+    """One bounded session to execute plan actions the cluster missed.
+
+    Plans can require edits outside the conflict set (an export added to every
+    interface manifest), which a conflict resolver never sees. This pass exists
+    for exactly that gap; it is bounded to one attempt and only the failing
+    checks are in scope.
+    """
+    base_head = git_rev_parse(config.repo_path, "HEAD")
+    prompt = ClusterPlanRepairPrompt(
+        context=create_context_str(claude_config, config),
+        cluster_id=cluster.id,
+        plan_json=json.dumps(plan, indent=2),
+        failures="\n".join(f"- {failure}" for failure in failures),
+    )
+    try:
+        asyncio.run(
+            claude_run(
+                _phase_config(claude_config, config),
+                [prompt.prompt()],
+                tracker=tracker,
+            )
+        )
+    except Exception as e:  # noqa: BLE001 - report the verify result instead
+        log.warning("Cluster %s: repair session failed: %s", cluster.id, e)
+
+    if git_status_porcelain(config.repo_path):
+        _stage_or_escalate(config, state, f"cluster {cluster.id} repair")
+        git_commit(config.repo_path, f"fixup: cluster {cluster.id} plan actions")
+        _strip_or_escalate(config, state, base_head, f"cluster {cluster.id} repair")
+        if state.dossier:
+            state.dossier.add(
+                f"Cluster {cluster.id}: plan repair committed",
+                "\n".join(failures[:10]),
+                "Phase 2.5 (cluster plan)",
+            )
+    return _verify_cluster_plan(config, plan)
+
+
+def _verify_cluster_plan(config: BugFixConfig, plan: dict) -> list[str]:
+    """Run every plan verify command; return the failures."""
+    failures: list[str] = []
+    for action in plan.get("actions") or []:
+        command = (action.get("verify") or "").strip()
+        if not command or not _validate_shell_command(command):
+            continue
+        exit_code, output = capture_output(
+            [command], config.repo_path, timeout=config.command_timeout
+        )
+        if exit_code != 0:
+            failures.append(
+                f"{action.get('symbol')} ({action.get('action')}): "
+                f"{command} -> {output[-300:]}"
+            )
+    return failures
+
+
+def _commit_only_touches_skipped(
+    repo_path: str, sha: str, skip_patterns: list[str]
+) -> bool:
+    """True when every path a commit touches is excluded by the skip policy."""
+    if not skip_patterns:
+        return False
+    paths = _git_lines(
+        repo_path, "diff-tree", "--no-commit-id", "--name-only", "-r", sha
+    )
+    return bool(paths) and all(_matches_any(path, skip_patterns) for path in paths)
+
+
+def _ensure_series_clusters(
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+) -> bool:
+    """Series mode needs a partition; ask for one if triage omitted it.
+
+    A triage session that stops early can return clusters=[] while still being
+    valid JSON. Silently falling back to one cluster per commit disables
+    batching for the whole run, so the partition is requested once on its own.
+    """
+    if not config.source_fix_commits:
+        return True
+    assessment = state.triage_assessment or {}
+    if assessment.get("clusters"):
+        return True
+
+    output_file = os.path.abspath(
+        os.path.join(tracker.output_dir, "series_clusters.json")
+    )
+    log.warning("Phase 0.5: triage returned no clusters - requesting the partition")
+    prompt = SeriesClustersPrompt(
+        context=create_context_str(claude_config, config),
+        series_section=_series_prompt_section(config),
+        output_file=output_file,
+    )
+    try:
+        asyncio.run(
+            claude_run(
+                _phase_config(claude_config, config),
+                [prompt.prompt()],
+                tracker=tracker,
+            )
+        )
+    except Exception as e:  # noqa: BLE001 - fallback is explicit below
+        log.warning("Series partition session failed: %s", e)
+
+    raw = None
+    if os.path.exists(output_file):
+        try:
+            with open(output_file) as handle:
+                raw = json.load(handle)
+        except (OSError, json.JSONDecodeError) as e:
+            log.warning("Unreadable series partition: %s", e)
+
+    if isinstance(raw, dict) and raw.get("clusters"):
+        assessment["clusters"] = raw["clusters"]
+        if raw.get("dropped"):
+            assessment["dropped"] = raw["dropped"]
+        if raw.get("public_interface_files"):
+            assessment["public_interface_files"] = raw["public_interface_files"]
+        state.triage_assessment = assessment
+        if tracker:
+            tracker.record_gate("clusters", "recovered")
+        log.info(
+            "Phase 0.5: partition recovered (%d cluster(s))",
+            len(raw["clusters"]),
+        )
+        return True
+
+    if tracker:
+        tracker.record_gate("clusters", "fallback")
+    log.warning("Phase 0.5: no partition - falling back to one cluster per commit")
+    return False
+
+
+def _prepare_series_clusters(
+    config: BugFixConfig, state: PipelineState, tracker=None
+) -> list:
+    """Build the cluster partition from the merged triage assessment.
+
+    A dropped proposal is honoured only when the commit touches nothing but
+    skipped paths; anything else is kept and becomes its own cluster. Any
+    invariant violation falls back to one cluster per commit inside
+    ``build_partition``.
+    """
+    series = config.source_fix_commits
+    if not series:
+        return []
+    assessment = state.triage_assessment or {}
+    skip_patterns = sorted(assessment.get("files_to_skip") or [])
+
+    safe_dropped: list[dict] = []
+    for item in assessment.get("dropped") or []:
+        raw = str((item or {}).get("commit") or "")
+        match = next(
+            (
+                sha
+                for sha in series
+                if sha == raw or sha.startswith(raw) or raw.startswith(sha)
+            ),
+            None,
+        )
+        if match and _commit_only_touches_skipped(
+            config.repo_path, match, skip_patterns
+        ):
+            safe_dropped.append({**item, "commit": match})
+
+    partition = build_partition(
+        assessment.get("clusters") or [],
+        series,
+        config.repo_path,
+        caps=ClusterCaps(
+            max_net_lines=config.cluster_max_net_lines,
+            max_files=config.cluster_max_files,
+            max_commits=config.cluster_max_commits,
+        ),
+        public_interface_files=assessment.get("public_interface_files") or [],
+        dropped=safe_dropped,
+        base_ref=git_rev_parse(config.repo_path, "HEAD"),
+    )
+    state.clusters = partition.clusters
+    state.dropped_commits = partition.dropped
+    if partition.fell_back and tracker:
+        tracker.record_gate("clusters", "fallback")
+    for reason in partition.rejected:
+        log.warning("Cluster partition rejected: %s", reason)
+    for split in partition.splits:
+        log.info("Cluster split: %s", split)
+    return partition.clusters
+
+
+def _merge_series_assessment(deterministic: dict, llm: dict) -> dict:
+    """Merge the LLM triage on top of the deterministic series assessment.
+
+    The deterministic keys are a floor: a failed or partial triage session must
+    not leave the run without ``files_to_skip`` or ``test_files``. Skip sets are
+    unioned because both sources carry real exclusions; every other key is the
+    model's to set when it produced one.
+    """
+    merged = dict(deterministic)
+    for key, value in (llm or {}).items():
+        if key == "files_to_skip":
+            union = list(merged.get(key) or [])
+            for item in value or []:
+                if item not in union:
+                    union.append(item)
+            merged[key] = union
+        elif value not in (None, "", [], {}):
+            merged[key] = value
+    return merged
+
+
+def _series_triage_assessment(config: BugFixConfig, state: PipelineState) -> dict:
+    """Deterministic floor for Phase 0.5 in commit-series mode.
+
+    Each commit in a series is analyzed again at its own cherry-pick, so the
+    per-commit semantic pass cannot pay for itself. The later phases still
+    read a few triage keys, and every one of them is derivable from git:
+
+    - ``files_to_skip`` — reverted after each cherry-pick (Phase 2+3a)
+    - ``test_files`` — unioned with ``identify_test_files(seed)`` for the
+      test port, which alone already covers the fix's test files
+    - ``priority_files`` — the allowlist, used by Phase 3a resolution
+    - ``prerequisites`` — never ported in series mode
+    """
+    test_files = identify_test_files(state.seed)
+    skip = _series_skip_files(config)
+    log.info(
+        "Phase 0.5: deterministic commit-series assessment "
+        "(%d test file(s), %d file(s) to skip) — merged under the triage result",
+        len(test_files),
+        len(skip),
+    )
+    return {
+        "mode": "commit_series_deterministic",
+        "commit_type": "feature",
+        "estimated_difficulty": "unknown",
+        "recommendation": "series_mode",
+        "files_to_skip": skip,
+        "test_files": test_files,
+        "priority_files": list(state.allowed_modules),
+        "prerequisites": [],
+        "lint_commands": [],
+        "verification_commands": [],
+        "regeneration_commands": [],
+        "reasoning": (
+            "Commit-series mode ports upstream commits one by one and "
+            "re-analyzes each one at its own cherry-pick, so the semantic "
+            "triage session is replaced by a deterministic assessment."
+        ),
+    }
+
+
 def phase_0_5c_test_port(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -1031,6 +1520,7 @@ def phase_0_5c_test_port(
         test_files=test_files,
         output_manifest_file=manifest_abs,
         diff_command=diff_command,
+        run_verification=not bool(config.source_fix_commits),
     )
 
     claude_config_test = _phase_config(claude_config, config)
@@ -1955,6 +2445,7 @@ def phase_1_baseline_and_red(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
     state: PipelineState,
+    skip_tests: bool = False,
 ) -> None:
     """Capture comprehensive baseline on the clean target branch before any changes.
 
@@ -1989,7 +2480,12 @@ def phase_1_baseline_and_red(
             log.info("Baseline build: skipped (no build command)")
 
         # Step 2: Test baseline (existing logic)
-        if config.test_command:
+        if config.test_command and skip_tests:
+            log.info(
+                "Baseline test: skipped (commit-series mode; tests run after "
+                "the final commit is ported)"
+            )
+        elif config.test_command:
             red_exit, red_output = capture_output(
                 [config.test_command],
                 config.build_dir,
@@ -2025,8 +2521,8 @@ def phase_1_baseline_and_red(
         ]
         if config.lint_command and config.lint_command not in lint_cmds:
             lint_cmds.insert(0, config.lint_command)
-        verification_cmds = list(lint_cmds)
-        if config.auto_discover_tests:
+        verification_cmds = [] if skip_tests else list(lint_cmds)
+        if config.auto_discover_tests and not skip_tests:
             for c in _triage_commands(
                 state.triage_assessment.get("verification_commands")
             ):
@@ -4358,12 +4854,92 @@ class _CherryPickStrategy(TypedDict):
     name: str
 
 
+def _matching_skip_files(paths: list[str], skip_patterns: list[str]) -> list[str]:
+    """Paths matched by the skip patterns (glob or directory prefix)."""
+    return [path for path in paths if _matches_any(path, skip_patterns)]
+
+
+def _prune_skipped_from_commit(
+    repo_path: str,
+    base_ref: str,
+    skip_patterns: list[str],
+) -> tuple[list[str], bool]:
+    """Rewrite the commit at HEAD without the skip-listed files it touched.
+
+    Series mode only — the caller gates on ``config.source_fix_commits``. A
+    skipped path that exists at ``base_ref`` is restored to the target version;
+    a path the commit introduced is deleted, because reverting cannot remove
+    something the target never had.
+
+    Returns ``(pruned_paths, emptied)``. ``emptied`` means nothing but skipped
+    files moved, so the commit was dropped and HEAD returned to ``base_ref``.
+    """
+    if not skip_patterns:
+        return [], False
+    changed = git_diff_name_only_range(repo_path, base_ref, "HEAD")
+    matched = _matching_skip_files(changed, skip_patterns)
+    if not matched:
+        return [], False
+
+    for path in matched:
+        if git_cat_file_exists(repo_path, base_ref, path):
+            _run_git(repo_path, ["checkout", base_ref, "--", path])
+        else:
+            _run_git(repo_path, ["rm", "-f", "--ignore-unmatch", "--", path])
+
+    untouched = _run_git(repo_path, ["diff", "--cached", "--quiet", base_ref])
+    if untouched.success:
+        _run_git(repo_path, ["reset", "--hard", base_ref])
+        return matched, True
+
+    amended = _run_git(repo_path, ["commit", "--amend", "--no-edit", "--no-verify"])
+    if not amended.success:
+        log.warning(
+            "Could not rewrite the commit without skipped files: %s",
+            amended.stderr[:300],
+        )
+    return matched, False
+
+
+def _prune_skipped_after_pick(
+    config: BugFixConfig,
+    state: PipelineState,
+    label: str,
+    base_ref: str,
+) -> bool:
+    """Apply the skip set to a clean cherry-pick in commit-series mode.
+
+    Returns True when the commit was dropped because only skipped files moved.
+    """
+    if not config.source_fix_commits:
+        return False
+    patterns = sorted(state.triage_assessment.get("files_to_skip") or [])
+    if not patterns:
+        return False
+    pruned, emptied = _prune_skipped_from_commit(config.repo_path, base_ref, patterns)
+    if not pruned:
+        return False
+    log.info(
+        "%s: %d skip-listed file(s) never enter the series commit", label, len(pruned)
+    )
+    if state.dossier:
+        state.dossier.add(
+            f"{label}: skipped files pruned from the commit",
+            "\n".join(pruned[:50]),
+            "Phase 2+3a (commit series)",
+        )
+    if emptied:
+        log.info("%s: commit became empty after pruning — dropped", label)
+    return emptied
+
+
 def _apply_cherry_pick(
     config: BugFixConfig,
     state: PipelineState,
     commit: str,
     label: str,
     files_to_skip: set[str],
+    drop_empty: bool = False,
 ) -> tuple[str, list[str], list[str]]:
     """Apply a cherry-pick with strategy fallback and revert skip-only files.
 
@@ -4386,6 +4962,7 @@ def _apply_cherry_pick(
             commit,
             strategy=strat["strategy"],
             strategy_option=strat["strategy_option"],
+            drop_empty=drop_empty,
         )
         status = git_status_porcelain(config.repo_path)
         uu_files = _conflicted_files(status)
@@ -4403,6 +4980,7 @@ def _apply_cherry_pick(
             log.info("%s: clean cherry-pick (strategy: %s)", label, strat["name"])
             if state.dossier:
                 state.dossier.add_strategy(strat["name"], "clean")
+            _prune_skipped_after_pick(config, state, label, entry_head)
             return "clean", [], []
 
         if uu_files:
@@ -4440,14 +5018,38 @@ def _apply_cherry_pick(
         commit,
         strategy=strat["strategy"],
         strategy_option=strat["strategy_option"],
+        drop_empty=drop_empty,
     )
     uu_files = _conflicted_files(git_status_porcelain(config.repo_path))
     if not uu_files:
         log.info("%s: clean cherry-pick on retry (strategy: %s)", label, strat["name"])
+        _prune_skipped_after_pick(config, state, label, entry_head)
         return "clean", [], []
 
     conflict_summary_parts = []
-    if files_to_skip:
+    if files_to_skip and config.source_fix_commits:
+        # Series mode: match skip patterns as globs and delete files the target
+        # never had. Reverting alone leaves upstream-only files (fuzzers, CI
+        # config) in the series commit.
+        patterns = sorted(files_to_skip)
+        changed = _git_lines(config.repo_path, "diff", "--name-only", "HEAD")
+        skipped = _matching_skip_files(changed, patterns)
+        if skipped:
+            log.info("%s: reverting %d files_to_skip files", label, len(skipped))
+            for f in skipped:
+                if git_cat_file_exists(config.repo_path, entry_head, f):
+                    _run_git(config.repo_path, ["checkout", entry_head, "--", f])
+                    if f in uu_files:
+                        _run_git(config.repo_path, ["add", "--", f])
+                else:
+                    _run_git(
+                        config.repo_path, ["rm", "-f", "--ignore-unmatch", "--", f]
+                    )
+            conflict_summary_parts.append(
+                f"Reverted {len(skipped)} files to target version (files_to_skip)"
+            )
+            uu_files = [f for f in uu_files if not _matches_any(f, patterns)]
+    elif files_to_skip:
         # Reset ALL skip files to the target version, conflicting or not.
         changed = _git_lines(config.repo_path, "diff", "--name-only", "HEAD")
         skipped = [f for f in changed if f in files_to_skip]
@@ -4519,6 +5121,180 @@ def _resolve_conflicts_mechanically(
     return remaining
 
 
+def cherry_pick_batch_and_resolve(
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+    commits: list[str],
+    label: str,
+    files_to_skip: list[str] | None = None,
+) -> str:
+    """Apply a run of commits as one diff and resolve its conflicts once.
+
+    Batching is justified only for commits whose predicted conflict set is
+    identical (see ``series_clusters.batch_groups``), so the combined conflict
+    is one shape repeated rather than several unrelated ones.
+    """
+    repo = config.repo_path
+    base_head = git_rev_parse(repo, "HEAD")
+    patch = _run_git(repo, ["diff", "--binary", f"{commits[0]}^", commits[-1]]).stdout
+    if not patch.strip():
+        log.info("%s: batch has no net change — dropped", label)
+        return "clean"
+
+    patch_file = os.path.abspath(
+        os.path.join(tracker.output_dir, f"batch_{commits[0][:8]}.patch")
+    )
+    with open(patch_file, "w") as handle:
+        handle.write(patch)
+    applied = _run_git(repo, ["apply", "--3way", "--whitespace=nowarn", patch_file])
+    uu_files = _conflicted_files(git_status_porcelain(repo))
+
+    if not uu_files and not applied.success:
+        raise PipelineEscalation(
+            f"{label}: batched apply failed: {applied.stderr[:300]}"
+        )
+
+    if uu_files:
+        log.info(
+            "%s: batched apply conflicts in %d file(s) — one resolution pass",
+            label,
+            len(uu_files),
+        )
+        context = create_context_str(claude_config, config)
+        remaining = list(uu_files)
+        for attempt in range(1, config.max_resolution_retries + 1):
+            note = ""
+            if attempt > 1:
+                note = (
+                    "Conflict markers are still present in: "
+                    + ", ".join(remaining[:10])
+                    + ". Resolve those markers only; do not redo the rest of the port."
+                )
+                log.warning(
+                    "%s: attempt %d/%d — %d file(s) still carry conflict markers",
+                    label,
+                    attempt,
+                    config.max_resolution_retries,
+                    len(remaining),
+                )
+            prompt = NarrowResolutionAgentPrompt(
+                fix_diff=patch,
+                conflicted_files=remaining,
+                context=context,
+                allowed_modules=state.priority_files or state.allowed_modules,
+                triage_assessment=(
+                    json.dumps(state.triage_assessment, indent=2)
+                    if state.triage_assessment
+                    else ""
+                ),
+                target_branch=config.target_branch,
+                baseline_ref=base_head,
+                followup_fixes=note,
+            )
+            asyncio.run(
+                claude_run(
+                    _phase_config(claude_config, config),
+                    [prompt.prompt()],
+                    tracker=tracker,
+                )
+            )
+            remaining = _batch_unresolved_paths(config, base_head)
+            if not remaining:
+                break
+        else:
+            raise PipelineEscalation(
+                f"{label}: conflict markers remain after "
+                f"{config.max_resolution_retries} attempts: " + ", ".join(remaining[:5])
+            )
+
+    _refuse_unresolved_batch(config, base_head, label)
+    _prune_batch_skipped(config, base_head, sorted(files_to_skip or []))
+    if not _git_lines(repo, "diff", "--name-only", base_head):
+        log.info("%s: batch became empty after pruning — dropped", label)
+        _run_git(repo, ["reset", "--hard", base_head])
+        return "clean"
+
+    if git_rev_parse(repo, "HEAD") == base_head:
+        _stage_or_escalate(config, state, f"batch ({label})")
+        body = "\n".join(f"  - {sha}" for sha in commits)
+        git_commit(
+            repo,
+            f"Port {label}\n\n[ batched upstream commits ]\n{body}",
+            trailers=_COAUTHOR_TRAILERS,
+        )
+    _strip_or_escalate(config, state, base_head, f"batch ({label})")
+    return "resolved" if uu_files else "clean"
+
+
+def _has_conflict_markers(path: str) -> bool:
+    """True when a file still carries merge markers (unreadable counts)."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if line.startswith("<<<<<<<") or line.startswith(">>>>>>>"):
+                    return True
+    except OSError:
+        return True
+    return False
+
+
+def _batch_unresolved_paths(config: BugFixConfig, base_head: str) -> list[str]:
+    """Paths in the batch that still carry conflict markers.
+
+    Clean paths left unmerged by a session that forgot to stage them are staged
+    here, because they are resolved work, not a failure.
+    """
+    repo = config.repo_path
+    unresolved = _conflicted_files(git_status_porcelain(repo))
+    stuck = [
+        path for path in unresolved if _has_conflict_markers(os.path.join(repo, path))
+    ]
+    clean = [path for path in unresolved if path not in stuck]
+    if clean:
+        staged = _run_git(repo, ["add", "--", *clean])
+        if staged.success:
+            log.info("staged %d resolved path(s) the session left unmerged", len(clean))
+        else:
+            stuck.extend(clean)
+
+    changed = _git_lines(repo, "diff", "--name-only", base_head)
+    for path in changed:
+        if path not in stuck and _has_conflict_markers(os.path.join(repo, path)):
+            stuck.append(path)
+    return sorted(set(stuck))
+
+
+def _refuse_unresolved_batch(config: BugFixConfig, base_head: str, label: str) -> None:
+    """Raise when the batch still carries conflict markers."""
+    remaining = _batch_unresolved_paths(config, base_head)
+    if remaining:
+        raise PipelineEscalation(
+            f"{label}: conflict markers remain in {', '.join(remaining[:5])}"
+        )
+
+
+def _prune_batch_skipped(
+    config: BugFixConfig, base_head: str, patterns: list[str]
+) -> None:
+    """Revert or delete skip-listed paths in an uncommitted batch."""
+    if not patterns:
+        return
+    repo = config.repo_path
+    changed = set(_git_lines(repo, "diff", "--name-only", base_head))
+    changed |= set(_git_lines(repo, "diff", "--name-only", "--cached", base_head))
+    changed |= set(_git_lines(repo, "ls-files", "--others", "--exclude-standard"))
+    for path in _matching_skip_files(sorted(changed), patterns):
+        if git_cat_file_exists(repo, base_head, path):
+            _run_git(repo, ["checkout", base_head, "--", path])
+            continue
+        _run_git(repo, ["rm", "-f", "--ignore-unmatch", "--", path])
+        target = os.path.join(repo, path)
+        if os.path.exists(target):
+            os.remove(target)
+
+
 def cherry_pick_and_resolve(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -4527,14 +5303,18 @@ def cherry_pick_and_resolve(
     commit: str,
     label: str,
     files_to_skip: list[str] | None = None,
+    drop_empty: bool = False,
 ) -> str:
     """Cherry-pick a single commit trying multiple strategies.
 
     Returns 'clean' or 'resolved', or raises when resolution is impossible.
+    ``drop_empty`` is for an ordered commit series: an upstream commit that
+    only touches files absent from the older target becomes empty and must
+    be dropped rather than aborting the whole series.
     """
     skip_set = set(files_to_skip or [])
     outcome, uu_files, conflict_summary_parts = _apply_cherry_pick(
-        config, state, commit, label, skip_set
+        config, state, commit, label, skip_set, drop_empty=drop_empty
     )
     if outcome != "conflicts":
         return outcome
@@ -4569,7 +5349,7 @@ def cherry_pick_and_resolve(
         # that would block the fresh cherry-pick.
         _discard_fused_session(config.repo_path, base_head)
         outcome, uu_files, conflict_summary_parts = _apply_cherry_pick(
-            config, state, commit, label, skip_set
+            config, state, commit, label, skip_set, drop_empty=drop_empty
         )
         if outcome != "conflicts":
             return outcome
@@ -5009,6 +5789,29 @@ def _finalize_resolution(
     # over what it committed. Take build output back out before anything
     # downstream reads the range as "the fix".
     _strip_or_escalate(config, state, base_head, f"Phase 3a ({label})")
+
+    # Series mode: a resolver may reintroduce upstream-only files (fuzzers, CI
+    # config) that the skip set already excluded. Prune them from the commit
+    # the same way a clean cherry-pick is pruned.
+    if config.source_fix_commits:
+        skip_patterns = sorted(state.triage_assessment.get("files_to_skip") or [])
+        if skip_patterns:
+            pruned, emptied = _prune_skipped_from_commit(repo, base_head, skip_patterns)
+            if pruned:
+                log.info(
+                    "%s: pruned %d skip-listed file(s) from the resolution commit",
+                    label,
+                    len(pruned),
+                )
+                if state.dossier:
+                    state.dossier.add(
+                        f"{label}: skipped files pruned from the resolution",
+                        "\n".join(pruned[:50]),
+                        "Phase 3a (commit series)",
+                    )
+            if emptied:
+                log.info("%s: resolution commit became empty — dropped", label)
+                return "resolved"
 
     changed_files = git_diff_name_only_range(repo, base_head, "HEAD")
 
@@ -7483,7 +8286,13 @@ def _run_pipeline_phases(
     with tracker.phase("Phase 0.5 — Semantic triage"):
         assessment: dict = {}
         fused_pre_red_ok = False
-        if config.fused_pre_red:
+        if config.fused_pre_red and config.source_fix_commits:
+            log.info(
+                "Phase 0.5: fused pre-RED session skipped in commit-series mode — "
+                "the series needs its own triage and per-cluster planning"
+            )
+            tracker.record_gate("pre_red_mode", "series_legacy")
+        if config.fused_pre_red and not config.source_fix_commits:
             assessment = _run_fused_pre_red(config, claude_config, state, tracker) or {}
             fused_pre_red_ok = bool(assessment)
             if not fused_pre_red_ok:
@@ -7493,9 +8302,21 @@ def _run_pipeline_phases(
                 )
                 tracker.record_gate("pre_red_mode", "fused_fallback")
         if not assessment:
+            deterministic = (
+                _series_triage_assessment(config, state)
+                if config.source_fix_commits
+                else {}
+            )
             assessment = phase_0_5_semantic_triage(
                 config, claude_config, state, tracker
             )
+            if deterministic:
+                assessment = _merge_series_assessment(deterministic, assessment)
+                state.triage_assessment = assessment
+                state.priority_files = (
+                    assessment.get("priority_files") or state.allowed_modules
+                )
+                _ensure_series_clusters(config, claude_config, state, tracker)
         state.dossier.add(
             "Semantic triage",
             json.dumps(assessment, indent=2) if assessment else "no assessment",
@@ -7550,7 +8371,7 @@ def _run_pipeline_phases(
         portable_prereqs = [
             p for p in prereqs if p.get("portable", False) and p.get("introduced_by")
         ]
-        if portable_prereqs and not fused_pre_red_ok:
+        if portable_prereqs and not fused_pre_red_ok and not config.source_fix_commits:
             with tracker.phase("Phase 0.5b — Prerequisite chain"):
                 ported = port_prerequisite_chain(config, claude_config, state, tracker)
                 state.dossier.add(
@@ -7559,6 +8380,26 @@ def _run_pipeline_phases(
                     "Phase 0.5b",
                 )
                 tracker.record_gate("prerequisites_ported", str(len(ported)))
+        elif portable_prereqs and config.source_fix_commits:
+            # Series mode ports the ordered upstream commits exactly as the
+            # source branch presents them. Porting triage-inferred
+            # prerequisites first would change that order and can pull in a
+            # large feature the series does not need on its own (e.g. the
+            # billion-laughs accounting on expat 2.2.5).
+            log.info(
+                "Phase 0.5b: skipping prerequisite chain in commit-series mode "
+                "(%d portable prerequisite(s) not ported)",
+                len(portable_prereqs),
+            )
+            state.dossier.add(
+                "Prerequisites skipped (commit-series mode)",
+                "\n".join(
+                    f"{p.get('symbol', 'unknown')}: {p.get('introduced_by', '')}"
+                    for p in portable_prereqs
+                ),
+                "Phase 0.5b",
+            )
+            tracker.record_gate("prerequisites_ported", "0 (series mode)")
 
         test_files_in_commit = _planned_test_files(state)
         if test_files_in_commit and not fused_pre_red_ok:
@@ -7590,10 +8431,21 @@ def _run_pipeline_phases(
                     )
 
         with tracker.phase("Phase 1 — Baseline + RED"):
-            phase_1_baseline_and_red(config, claude_config, state)
+            phase_1_baseline_and_red(
+                config,
+                claude_config,
+                state,
+                skip_tests=bool(config.source_fix_commits),
+            )
 
             baseline_summary = f"Build: {'PASSED' if state.baseline_build_exit == 0 else 'FAILED (exit ' + str(state.baseline_build_exit) + ')'}"
-            baseline_summary += f"\nTest ({config.test_command}): {'PASSED' if not state.baseline else str(len(state.baseline)) + ' pre-existing failures'}"
+            if config.source_fix_commits:
+                baseline_summary += (
+                    f"\nTest ({config.test_command}): skipped (commit-series mode; "
+                    "runs after the final commit)"
+                )
+            else:
+                baseline_summary += f"\nTest ({config.test_command}): {'PASSED' if not state.baseline else str(len(state.baseline)) + ' pre-existing failures'}"
             for entry in state.baseline_verification:
                 status = (
                     "PASSED"
@@ -7684,16 +8536,122 @@ def _run_pipeline_phases(
 
         with tracker.phase("Phase 2+3a — Cherry-pick and resolve"):
             files_to_skip = state.triage_assessment.get("files_to_skip", [])
-            cp_result = cherry_pick_and_resolve(
-                config,
-                claude_config,
-                state,
-                tracker,
-                commit=config.source_fix_commit,
-                label=f"main commit ({config.issue_id})",
-                files_to_skip=files_to_skip,
+            fix_commits = config.source_fix_commits or [config.source_fix_commit]
+            cp_results: list[str] = []
+            groups = _prepare_series_clusters(config, state, tracker)
+            if groups:
+                total = sum(len(cluster.commits) for cluster in groups)
+                seen = 0
+                for cluster in groups:
+                    plan = _generate_cluster_plan(
+                        config, claude_config, state, tracker, cluster
+                    )
+                    if plan:
+                        # The resolvers already receive triage_assessment
+                        # verbatim, so the plan travels with it.
+                        state.triage_assessment["cluster_plan"] = plan
+                    state.current_cluster = cluster.id
+                    batches = (
+                        batch_groups(cluster)
+                        if config.batch_conflicting_commits
+                        and cluster.predicted_conflicts
+                        else [[commit] for commit in cluster.commits]
+                    )
+                    for position, batch in enumerate(batches, start=1):
+                        seen += len(batch)
+                        if len(batch) == 1:
+                            commit = batch[0]
+                            label = (
+                                f"commit {seen}/{total} ({commit[:12]}) "
+                                f"[cluster {cluster.id} {position}/{len(batches)}]"
+                            )
+                            cp_results.append(
+                                cherry_pick_and_resolve(
+                                    config,
+                                    claude_config,
+                                    state,
+                                    tracker,
+                                    commit=commit,
+                                    label=label,
+                                    files_to_skip=files_to_skip,
+                                    drop_empty=total > 1,
+                                )
+                            )
+                        else:
+                            label = (
+                                f"commit {seen}/{total} "
+                                f"(batch of {len(batch)}: {batch[0][:8]}..{batch[-1][:8]}) "
+                                f"[cluster {cluster.id} {position}/{len(batches)}]"
+                            )
+                            cp_results.append(
+                                cherry_pick_batch_and_resolve(
+                                    config,
+                                    claude_config,
+                                    state,
+                                    tracker,
+                                    commits=batch,
+                                    label=label,
+                                    files_to_skip=files_to_skip,
+                                )
+                            )
+                        _restore_protected_refs(config, state)
+                    if plan:
+                        failures = _verify_cluster_plan(config, plan)
+                        if failures:
+                            log.warning(
+                                "Cluster %s: %d plan check(s) failed — one repair pass",
+                                cluster.id,
+                                len(failures),
+                            )
+                            failures = _repair_cluster_plan(
+                                config,
+                                claude_config,
+                                state,
+                                tracker,
+                                cluster,
+                                plan,
+                                failures,
+                            )
+                        if failures:
+                            raise PipelineEscalation(
+                                f"cluster {cluster.id}: plan verification failed: "
+                                + "; ".join(failures)
+                            )
+                        tracker.record_gate(f"cluster_{cluster.id}", "verified")
+                        state.dossier.add(
+                            f"Cluster {cluster.id}",
+                            json.dumps(plan, indent=2),
+                            "Phase 2.5 (cluster plan)",
+                        )
+                    state.triage_assessment.pop("cluster_plan", None)
+                if state.dropped_commits:
+                    tracker.record_gate(
+                        "clusters_dropped", str(len(state.dropped_commits))
+                    )
+            else:
+                for index, commit in enumerate(fix_commits, start=1):
+                    if len(fix_commits) == 1:
+                        label = f"main commit ({config.issue_id})"
+                    else:
+                        label = f"commit {index}/{len(fix_commits)} " f"({commit[:12]})"
+                    cp_results.append(
+                        cherry_pick_and_resolve(
+                            config,
+                            claude_config,
+                            state,
+                            tracker,
+                            commit=commit,
+                            label=label,
+                            files_to_skip=files_to_skip,
+                            drop_empty=len(fix_commits) > 1,
+                        )
+                    )
+                    _restore_protected_refs(config, state)
+            cp_result = (
+                "clean"
+                if all(result == "clean" for result in cp_results)
+                else "resolved"
             )
-            _restore_protected_refs(config, state)
             state.cherry_pick_path = cp_result
             state.dossier.cherry_pick_path = cp_result
             tracker.record_gate("cherry_pick", cp_result)
@@ -7722,6 +8680,14 @@ def _run_pipeline_phases(
         # A session may have moved a branch before failing; the recovery path
         # resets to the target branch, so restore the refs first.
         _restore_protected_refs(config, state)
+        if config.source_fix_commits:
+            # Series mode must not silently collapse back to the merge commit
+            # in _force_resolve_for_phase_4b: that would defeat the point of
+            # applying each upstream commit separately.
+            raise PipelineEscalation(
+                f"commit-series mode failed at {type(e).__name__}: {e}; "
+                "refusing to fall back to a merge-commit cherry-pick"
+            ) from e
         log.warning(
             "Cherry-pick resolution failed (%s: %s) — force-resolving and escalating to Phase 4b",
             type(e).__name__,
