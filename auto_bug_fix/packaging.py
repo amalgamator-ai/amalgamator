@@ -33,6 +33,20 @@ def is_packaging_path(path: str) -> bool:
     )
 
 
+def is_packaging_marker(path: str) -> bool:
+    """A top-level entry that identifies a packaging checkout.
+
+    A lone patch file can be a source fixture; a spec, debian/ or rpm/ is a
+    reliable packaging marker.
+    """
+    lower = path.lower()
+    return (
+        lower.endswith(".spec")
+        or lower in {"debian", "rpm"}
+        or lower in PACKAGING_NAMES
+    )
+
+
 def _clean_path(raw: str) -> str | None:
     path = raw.split("\t", 1)[0].strip()
     if len(path) > 1 and path[0] == path[-1] == '"':

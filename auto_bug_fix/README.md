@@ -111,7 +111,12 @@ the ported-test floor and production-edit checks run on the payload paths. The
 relatedness comparison also unwraps changed patch carriers before measuring
 line overlap. If every changed file is packaging, the source-tree audits and
 snapback are skipped (`evidence_scope=packaging`) and build/test plus review
-carry the evidence. Pre-RED and resolution record `pre_red_carrier` /
+carry the evidence. The fused pre-RED leftovers commit stages only tracked
+edits plus top-level test/packaging carriers when the build unpacked a source
+tarball; the extracted tree, RPM directory and build logs are never session
+work. `_strip_committed_build_output` likewise untracks those packaging build
+outputs from a fused commit, so Phase 4 does not need a build-error recovery
+just to remove them. Pre-RED and resolution record `pre_red_carrier` /
 `resolution_carrier`, and an unparsable carrier is an advisory warning, not a
 fallback.
 

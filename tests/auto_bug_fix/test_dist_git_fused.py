@@ -170,6 +170,18 @@ def _tracker(tmp_path):
     )
 
 
+def _write_build_tree(rp):
+    """What centpkg sources/prep/local leaves in the dist-git worktree."""
+    tests = Path(rp) / "libexpat-R_2_2_5" / "expat" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "runtests.c").write_text("int main(void) { return 0; }\n")
+    (tests / "runtests.log").write_text("PASS\n")
+    rpm_dir = Path(rp) / "aarch64"
+    rpm_dir.mkdir()
+    (rpm_dir / "expat-2.2.5-18.el8.aarch64.rpm").write_text("rpm\n")
+    (Path(rp) / ".build-2.2.5-18.el8.log").write_text("build log\n")
+
+
 def test_ymir_pre_red_accepts_spec_plus_tests_patch(tmp_path):
     rp, base, fix = _repo(tmp_path)
     run_dir, tracker = _tracker(tmp_path)
@@ -181,6 +193,7 @@ def test_ymir_pre_red_accepts_spec_plus_tests_patch(tmp_path):
         )
         _git(rp, "add", "-A")
         _git(rp, "commit", "-m", "test-port: expat-cve-2025-59375-c8s")
+        _write_build_tree(rp)
         _write_result(run_dir)
         return []
 
@@ -194,6 +207,16 @@ def test_ymir_pre_red_accepts_spec_plus_tests_patch(tmp_path):
         item.label == "Packaging-carried pre-RED change" for item in state.dossier.items
     )
     assert _validate_fused_pre_red(_config(rp, fix), base) == []
+    committed = subprocess.run(
+        ["git", "diff", "--name-only", base, "HEAD"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert not any(
+        path.startswith(("libexpat-R_2_2_5/", "aarch64/")) for path in committed
+    )
 
 
 def test_ymir_fused_resolution_accepts_a_patch_carried_fix(tmp_path):
@@ -215,6 +238,7 @@ def test_ymir_fused_resolution_accepts_a_patch_carried_fix(tmp_path):
             (Path(rp) / "expat.spec").write_text(
                 SPEC + "Patch21: expat-2.2.5-CVE-2025-59375.patch\n%patch21 -p1\n"
             )
+            _write_build_tree(rp)
             _git(rp, "add", "-A")
             _git(rp, "commit", "-m", "backport CVE-2025-59375")
         return []
@@ -247,3 +271,22 @@ def test_ymir_fused_resolution_accepts_a_patch_carried_fix(tmp_path):
     gates = tracker._run.phases[-1].gate_decisions
     assert gates.get("semantic_equivalence") != "fused_unmatched"
     assert gates.get("resolution_carrier") == "packaging"
+    changed = subprocess.run(
+        ["git", "diff", "--name-only", base, "HEAD"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert sorted(changed) == [
+        "expat-2.2.5-CVE-2025-59375.patch",
+        "expat.spec",
+    ]
+    log = subprocess.run(
+        ["git", "log", "--format=%s", f"{base}..HEAD"],
+        cwd=rp,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "untrack build output" in log

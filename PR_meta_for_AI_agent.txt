@@ -129,6 +129,11 @@ Key behavior by function:
       Records pre_red_reject with the exact problems on hard rejection.
       Records pre_red_carrier=packaging and a dossier entry when packaging
       carriers are present.
+      Leftovers staging is packaging-aware: if the session committed a spec or
+      left a packaging carrier, it runs `git add -u` and stages only untracked
+      top-level test/packaging files.  An extracted source tree, RPM directory
+      or build log is never staged, so a `fused-pre-red:` leftovers commit
+      cannot turn `libexpat-R_2_2_5/...` into "unclaimed production paths".
       Ported-test floor:
         - effective test paths from carriers count even though they do not
           exist as worktree paths;
@@ -137,6 +142,19 @@ Key behavior by function:
         - _is_declared_test counts SQL pairs;
         - planned-test "uncovered" and file-set warnings become INFO when a
           packaging carrier is present, because payload path names differ.
+
+  _packaging_build_output_paths
+      Returns added/untracked paths introduced by a packaging build: a new
+      top-level directory (extracted tarball, aarch64/), or a new root file
+      such as *.rpm / .build-*.log.  Only applies when the base tree carries a
+      spec/patch stack.  Root-level test files and top-level test dirs are kept.
+      Used by pre-RED leftovers staging and by _strip_committed_build_output.
+
+  _strip_committed_build_output
+      Also untracks packaging build outputs (kept on disk) from an agent
+      commit, with the usual "chore: untrack build output" commit.  This is
+      what prevents a fused resolution from leaving the extracted tree in the
+      patch and forcing a Phase 4a build-error recovery.
 
   _shares_content_with_fix / _fused_resolution_unmatched
       Uses _expanded_payload_lines for the backport side, so source lines
@@ -164,19 +182,24 @@ Regression tests that must stay green
 -------------------------------------
 tests/auto_bug_fix/test_dist_git_fused.py
   test_ymir_pre_red_accepts_spec_plus_tests_patch
-      The exact opus_ymir shape: spec + tests patch; fused pre-RED returns a
-      result, state.ported_test_files contains expat/tests/runtests.c, dossier
-      has the carrier entry, validator passes.
+      The exact opus_ymir shape: spec + tests patch, plus the untracked
+      libexpat-R_2_2_5/, aarch64/ and .build-*.log tree that centpkg prep/local
+      leaves behind.  Fused pre-RED must return a result, keep
+      state.ported_test_files == expat/tests/runtests.c, add the carrier
+      dossier entry, and commit no build-tree paths.
   test_ymir_fused_resolution_accepts_a_patch_carried_fix
-      The source fix is committed inside a .patch; relatedness becomes true,
-      _run_fused_resolution returns "resolved", 3a.2 runs, no per-chunk
-      resolver, gate is resolution_carrier=packaging (not fused_unmatched).
+      The source fix is committed inside a .patch, together with an untracked
+      packaging build tree swept into the same commit.  Relatedness becomes
+      true, _run_fused_resolution returns "resolved", 3a.2 runs, no per-chunk
+      resolver.  The final base..HEAD diff contains only expat.spec and the
+      patch, and a "chore: untrack build output" commit exists.
 
-  Both tests pass on this branch. I verified they FAIL when checked out at the
-  parent commit (4ec6ad4^) with:
-    "Fused pre-RED session rejected ..."
+  Both tests pass on this branch. I verified they FAIL on the commit before
+  the packaging fixes and again before the build-output fixes, with:
+    "Fused pre-RED session rejected ..." (build tree committed as leftovers)
     "fused result shares too little with the fix — falling back"
-  Keep that property: the tests must reproduce the original failure on old code.
+    final diff still containing .build-*.log/libexpat-R_2_2_5 paths
+  Keep that property: the tests must reproduce the original failures on old code.
 
 tests/auto_bug_fix/test_packaging.py
   Carrier parser, packaging classification, dist-git validation, production

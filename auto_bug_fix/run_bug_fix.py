@@ -239,6 +239,7 @@ from auto_bug_fix.mechanical import resolve_mechanically
 from auto_bug_fix.packaging import (
     carrier_paths,
     carrier_payload,
+    is_packaging_marker,
     is_packaging_path,
     is_patch_carrier,
 )
@@ -1567,6 +1568,51 @@ def _packaging_only(changed_files: list[str]) -> bool:
     )
 
 
+_TEST_TOP_DIRS = frozenset(
+    {"test", "tests", "testdata", "expected", "fixtures", "golden"}
+)
+
+
+def _repo_has_packaging(repo: str, ref: str) -> bool:
+    """True when the checked-in top level carries a spec or patch stack."""
+    return any(
+        is_packaging_marker(path)
+        for path in _git_lines(repo, "ls-tree", "--name-only", ref)
+    )
+
+
+def _untracked_paths(repo: str) -> list[str]:
+    """Untracked, non-ignored files, one path per entry (spaces are safe)."""
+    out = _run_git(repo, ["ls-files", "--others", "--exclude-standard", "-z"]).stdout
+    return [path for path in out.split("\0") if path]
+
+
+def _packaging_build_output_paths(
+    repo: str, base_ref: str, paths: Iterable[str]
+) -> set[str]:
+    """Paths introduced by a packaging build: extracted trees, RPMs, logs.
+
+    A source tarball unpacked by ``%prep`` and the RPM build tree are new
+    top-level content in a dist-git checkout.  Test files inside that extracted
+    tree are build input, not the session's test port; only a root-level test
+    file or a test directory that itself is top-level is kept.
+    """
+    top = set(_git_lines(repo, "ls-tree", "--name-only", base_ref))
+    if not any(is_packaging_marker(entry) for entry in top):
+        return set()
+    build_output: set[str] = set()
+    for path in paths:
+        top_dir = path.split("/", 1)[0]
+        if top_dir in top or is_packaging_path(path):
+            continue
+        if top_dir in _TEST_TOP_DIRS:
+            continue
+        if path == top_dir and _is_test_path(path):
+            continue
+        build_output.add(path)
+    return build_output
+
+
 def _path_states(repo: str, target_ref: str, commit: str) -> list[_FixPath]:
     """Classify every path the fix touches against the target branch.
 
@@ -1885,11 +1931,44 @@ def _run_fused_pre_red(
     ):
         Path(repo, name).unlink(missing_ok=True)
     if git_status_porcelain(repo):
-        _run_git(repo, ["add", "-A"])
-        git_commit(
-            repo,
-            f"fused-pre-red: commit remaining pre-RED changes for {config.issue_id}",
+        untracked = _untracked_paths(repo)
+        packaging = (
+            bool(_changed_packaging_paths(repo, f"{base_head}..HEAD"))
+            or any(is_packaging_path(path) for path in untracked)
+            or _repo_has_packaging(repo, base_head)
         )
+        if packaging:
+            # A dist-git build unpacks the source tarball into the repo.  That
+            # tree is build input, not session work: stage only tracked edits
+            # and top-level test/packaging carriers, so the leftovers commit
+            # does not turn the extracted tree into "production paths".
+            build_output = _packaging_build_output_paths(repo, base_head, untracked)
+            declared = set(_strings(result.get("test_files"))) | set(
+                identify_test_files(state.seed)
+            )
+            stage = [
+                path
+                for path in untracked
+                if path not in build_output
+                and (
+                    is_packaging_path(path)
+                    or _is_test_path(path)
+                    or _is_declared_test(path)
+                    or path in declared
+                )
+            ]
+            _run_git(repo, ["add", "-u"])
+            if stage and not _run_git_pathspec_batches(config, ["add", "--"], stage):
+                log.warning(
+                    "Fused pre-RED: could not stage leftover test/packaging files"
+                )
+        else:
+            _run_git(repo, ["add", "-A"])
+        if _run_git(repo, ["diff", "--cached", "--quiet"]).exit_code != 0:
+            git_commit(
+                repo,
+                f"fused-pre-red: commit remaining pre-RED changes for {config.issue_id}",
+            )
     # Validate after the leftovers commit: uncommitted production edits must
     # not slip past the "fix already applied" checks. The session's declared
     # tests count as test paths even when naming patterns do not (SQL pairs).
@@ -1928,8 +2007,8 @@ def _run_fused_pre_red(
     # session's self-reported list.
     session_tests = _session_test_files(repo, base_head)
     tests_ported = session_tests or _strings(result.get("tests_ported"))
-    # The leftovers commit is `git add -A`, so anything force-added here would
-    # reach the candidate patch; apply the same strip the resolver path uses.
+    # The leftovers commit can still carry force-added scratch; apply the same
+    # strip the resolver path uses.
     stripped = _strip_session_scratch(repo, base_head, keep=set(state.seed))
     if stripped is None:
         log.warning("Fused pre-RED: could not strip session scratch — falling back")
@@ -2945,6 +3024,10 @@ def _strip_committed_build_output(
             for path in candidates
             if digests.get(path) and committed.get(path) in digests[path]
         }
+        # A packaging build unpacks the source tarball and writes RPMs/logs
+        # into new top-level paths.  They are build output even though no
+        # learned/digest record exists for a session that ran the build itself.
+        removed |= _packaging_build_output_paths(config.repo_path, base_ref, paths)
         # An ignored path is only removed where the fence designates the
         # whole tree generated. Elsewhere the ignore rules cannot tell a
         # force-added source or fixture from an artifact.
