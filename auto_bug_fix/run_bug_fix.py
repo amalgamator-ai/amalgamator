@@ -2782,6 +2782,27 @@ def _run_build_and_test(
     return True, build_stdout, build_stderr, test_stdout, test_stderr, ""
 
 
+def _record_verify_failure(
+    state: PipelineState,
+    phase: str,
+    build_output: str,
+    test_output: str,
+    config: BugFixConfig,
+    lint_output: str = "",
+) -> None:
+    """Keep one failed verification so Phase 4b can start from the real error."""
+    state.verify_failures.append(
+        {
+            "phase": phase,
+            "build_output": build_output[-4000:],
+            "test_output": test_output[-4000:],
+            "lint_output": lint_output[-4000:],
+            "build_command": config.build_command,
+            "test_command": config.test_command,
+        }
+    )
+
+
 def phase_4_verify(
     config: BugFixConfig,
     state: PipelineState,
@@ -2806,15 +2827,13 @@ def phase_4_verify(
     # Phase 4b is the next step and has no other way to learn what failed:
     # keep the commands and their output so its prompt can start from the
     # real error instead of rediscovering it.
-    state.verify_failures.append(
-        {
-            "phase": "Phase 4 verify",
-            "build_output": (build_out + build_err)[-4000:],
-            "test_output": (test_out + test_err)[-4000:],
-            "lint_output": lint_out[-4000:],
-            "build_command": config.build_command,
-            "test_command": config.test_command,
-        }
+    _record_verify_failure(
+        state,
+        "Phase 4 verify",
+        build_out + build_err,
+        test_out + test_err,
+        config,
+        lint_output=lint_out,
     )
     raise PipelineEscalation("Phase 4 verify failed")
 
@@ -4270,6 +4289,16 @@ def phase_4a_build_recovery(
             build_errors = build_errors[:MAX_ERROR_CHARS] + "\n\n[TRUNCATED]"
         if len(test_errors) > MAX_ERROR_CHARS:
             test_errors = test_errors[:MAX_ERROR_CHARS] + "\n\n[TRUNCATED]"
+
+        # Recovery attempts fail differently from the verification that
+        # escalated the run; 4b needs their evidence too, under its own label.
+        _record_verify_failure(
+            state,
+            f"Phase 4a attempt {attempt}",
+            build_errors,
+            test_errors,
+            config,
+        )
 
         # Against the frozen baseline, not HEAD: every attempt now commits
         # the agent's edits at its own boundary and discards the rest, so a

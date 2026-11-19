@@ -278,6 +278,29 @@ def test_phase_4a_escalates_when_the_agent_makes_no_changes(tmp_path, monkeypatc
     assert len(calls) == 1
 
 
+def test_phase_4a_records_its_failure_for_phase_4b(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    _patch_claude_run(monkeypatch)
+    state = PipelineState()
+
+    with pytest.raises(PipelineEscalation, match="agent made no changes"):
+        phase_4a_build_recovery(
+            _config(
+                repo,
+                build_command="false",
+                test_command="true",
+                max_build_test_retries=1,
+            ),
+            _claude_config(repo),
+            state,
+            tracker=None,
+            fix_diff="",
+        )
+
+    assert [entry["phase"] for entry in state.verify_failures] == ["Phase 4a attempt 1"]
+    assert state.verify_failures[0]["build_command"] == "false"
+
+
 def test_phase_4a_commits_agent_recovery_edits(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     before = _sha(repo)
