@@ -43,7 +43,7 @@ flowchart TD
 | Phase | What it does |
 |---|---|
 | 0 — Triage | Deterministic gates: is the fix already on the target (patch-id, ancestry)? Scans the source branch for upstream follow-up fixes (`Fixes:` tags) to the commit being ported. |
-| 0.5 — Semantic triage | An agent assesses difficulty, prerequisite commits, files to skip (e.g. generated files), and regeneration commands. Its prerequisite claims are then validated deterministically against the target tree (0.5.1) and corrected if wrong. |
+| 0.5 — Semantic triage | An agent assesses difficulty, prerequisite commits, files to skip (e.g. generated files), and regeneration commands. Its prerequisite claims are then validated deterministically against the target tree (0.5.1) and corrected if wrong. **Commit-series mode replaces this agent with a deterministic assessment** — see [fix-commit-series](docs/fix-commit-series.md). |
 | 0.5b — Prerequisite chain | Ports prerequisite commits first when the triage found portable ones. |
 | 0.5c — Test port | If the fix commit contains test files, ports them before the fix so RED/GREEN checking is possible. |
 | 1 — Baseline + RED | Builds and tests the clean target branch to record pre-existing failures. The ported test is expected to FAIL (RED) before the fix is applied. |
@@ -410,6 +410,7 @@ credentials.
 | `branches.source` | Ref that has the fix (e.g. `origin/main`); defaults to `origin/main` in patch mode |
 | `branches.target` *or* `branches.targets` | Ref(s) that need the fix — exactly one of the two |
 | `fix.commit` *or* `fix.patch` | Exactly one: the source fix commit SHA, or a path to a patch file |
+| `fix.commits` | Optional ordered list of commit SHAs to cherry-pick one at a time. Requires `fix.commit` as the analysis anchor; mutually exclusive with `fix.patch`. Empty commits are dropped. Series mode also skips semantic triage, prerequisite porting, and test/lint runs until the last commit. |
 | `build` | Section must exist; all keys inside it are optional |
 
 ### Optional

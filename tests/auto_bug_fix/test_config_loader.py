@@ -164,6 +164,36 @@ def test_validate_config_fix_neither():
         validate_config(config)
 
 
+def test_validate_config_fix_commits_requires_commit():
+    config = _fix_cfg({"commits": ["abc123"]})
+    with pytest.raises(ConfigError, match="fix.commit is required with fix.commits"):
+        validate_config(config)
+
+
+def test_validate_config_fix_commits_xor_patch(tmp_path):
+    config = _fix_cfg(
+        {"commit": "abc123", "commits": ["abc123"], "patch": _write_patch(tmp_path)}
+    )
+    with pytest.raises(ConfigError, match="mutually exclusive"):
+        validate_config(config)
+
+
+def test_validate_config_fix_commits_must_be_non_empty_list():
+    config = _fix_cfg({"commit": "abc123", "commits": []})
+    with pytest.raises(ConfigError, match="non-empty list"):
+        validate_config(config)
+
+
+def test_parse_bug_fix_config_fix_commits():
+    config = _fix_cfg(
+        {"commit": "merge123", "commits": ["abc123", "def456"]},
+        branches={"source": "origin/main", "target": "v1.0"},
+    )
+    parsed, _, _ = parse_bug_fix_config(config)
+    assert parsed.source_fix_commit == "merge123"
+    assert parsed.source_fix_commits == ["abc123", "def456"]
+
+
 def test_validate_config_patch_mode_defaults_source(tmp_path):
     config = _fix_cfg({"patch": _write_patch(tmp_path)}, branches={"target": "v1.0"})
     validate_config(config)
