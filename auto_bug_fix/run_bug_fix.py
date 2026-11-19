@@ -1293,7 +1293,9 @@ def _session_test_files(repo: str, base_head: str) -> list[str]:
 
     Patch carriers are unwrapped: in a dist-git repo the test lives inside the
     patch payload, not at the patch's own path.  Deletions are excluded, and a
-    rename counts at its destination.
+    rename counts at its destination.  An unparsed carrier contributes no
+    test path, so the ported-test floor stays conservative even though
+    relatedness treats an unknown carrier as advisory.
     """
     files: list[str] = []
     for line in _git_lines(repo, "log", "--format=%H%x09%s", f"{base_head}..HEAD"):

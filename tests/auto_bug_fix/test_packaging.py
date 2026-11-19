@@ -83,6 +83,21 @@ def test_carrier_paths_and_payload():
     assert not any(line.startswith("+++") for _sign, line in payload)
 
 
+def test_carrier_payload_keeps_content_starting_with_diff_markers():
+    content = """\
+diff --git a/x.c b/x.c
+--- a/x.c
++++ b/x.c
+@@ -1,2 +1,1 @@
+---counter;
+-    old_counter;
++++i += 1;
+"""
+    payload = carrier_payload(content, 6)
+    assert ("+", "++i += 1;") in payload
+    assert ("-", "--counter;") in payload
+
+
 def test_packaging_path_classification():
     assert is_packaging_path("pkg.spec")
     assert is_packaging_path("debian/patches/fix.patch")

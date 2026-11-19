@@ -76,10 +76,22 @@ def carrier_paths(content: str) -> list[str]:
 
 
 def carrier_payload(content: str, min_line_len: int) -> set[tuple[str, str]]:
-    """The +/- payload lines of a unified diff, as (polarity, content)."""
+    """The +/- payload lines of a unified diff, as (polarity, content).
+
+    File headers (``+++``/``---``) are skipped by state, not by a prefix
+    check: inside a hunk, a source line whose content starts with ``+`` or
+    ``-`` is encoded as ``++...``/``--...`` and is real payload.
+    """
     payload: set[tuple[str, str]] = set()
+    in_hunk = False
     for raw in content.splitlines():
-        if raw.startswith(("+++", "---")) or not raw or raw[0] not in "+-":
+        if raw.startswith("diff --git "):
+            in_hunk = False
+            continue
+        if raw.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk or not raw or raw[0] not in "+-":
             continue
         text = " ".join(raw[1:].split())
         if len(text) >= min_line_len:
