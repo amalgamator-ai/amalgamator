@@ -47,6 +47,8 @@ class SemanticTriagePrompt:
     target_branch: str
     seed_files: list[str]
     external_context_section: str = ""
+    series_section: str = ""
+    series_mode: bool = False
     discover_lint: bool = True
     discover_verification: bool = True
 
@@ -63,6 +65,7 @@ The upstream fix diff (or stat + partial diff if too large):
 
 Files touched by the commit:
 {seed_files}
+{series_section}
 Source branch: {source_branch}
 Target branch: {target_branch}
 
@@ -90,7 +93,7 @@ Write a JSON file to `{output_file}` with this exact structure:
   "regeneration_commands": ["commands to regenerate the skipped files, e.g. make generate"],
   "lint_commands": ["project lint/vet command, e.g. go vet ./..., cargo clippy, ruff check ."],
   "verification_commands": ["additional test commands beyond basic build, e.g. go test ./staging/src/k8s.io/api/... -run TestRoundTrip"],
-  "estimated_difficulty": "EASY | MEDIUM | HARD | EXTREME",
+{series_schema}  "estimated_difficulty": "EASY | MEDIUM | HARD | EXTREME",
   "recommendation": "PROCEED | PROCEED_WITH_CAUTION | MANUAL_REVIEW",
   "priority_files": ["hand-written source files to check first during conflict resolution"],
   "reasoning": "brief explanation of the assessment"
@@ -111,12 +114,44 @@ Recommendation guidelines:
 
     def prompt(self) -> str:
         """Render the Phase 0.5 semantic triage prompt."""
-        capability_note = (
-            "Also record `introduced_by` (the commit that introduced it), because a\n"
-            "   portable prerequisite is ported before the fix. Do not list a commit that\n"
-            "   is already inside the fix: `git merge-base --is-ancestor <sha> <fix_commit>`\n"
-            "   returning 0 means it is part of the fix, not a prerequisite."
-        )
+        series_task = ""
+        series_schema = ""
+        if self.series_mode:
+            series_task = (
+                "10. **Cluster the commit series**: this fix is an ordered series applied one\n"
+                "   commit at a time. Group the commits into contiguous clusters, each handled\n"
+                "   as one unit with one intent: prerequisite refactors that only enable a\n"
+                "   later commit, the behaviour change itself, its tests. Never reorder a\n"
+                "   commit, and cover every commit exactly once. Put a commit in `dropped`\n"
+                "   only when it is unrelated to the fix (docs, CI, unrelated fuzz fixes) and\n"
+                "   say why. Cluster size is measured from git by the pipeline - do not guess\n"
+                "   line counts, and do not split a single commit.\n"
+            )
+            series_schema = (
+                '  "clusters": [\n'
+                '    {"id": "short-name",\n'
+                '     "commits": ["<sha prefix from the series above>", "..."],\n'
+                '     "intent": "one sentence: what this cluster does",\n'
+                '     "kind": "enabler | fix | test | docs | unrelated",\n'
+                '     "expected_conflict_files": ["paths likely to conflict"]}\n'
+                "  ],\n"
+                '  "dropped": [\n'
+                '    {"commit": "<sha prefix>", "reason": "why it does not belong"}\n'
+                "  ],\n"
+                '  "public_interface_files": ["headers or manifests that declare the public API"],\n'
+            )
+
+        if self.series_mode:
+            capability_note = (
+                "Prerequisites are NOT ported in this mode, so do not trace the commit\n"
+                "   that introduced a symbol (`git log -S`, `git show --stat`). Classify it\n"
+                "   only: can the target's existing API do the same job?"
+            )
+        else:
+            capability_note = (
+                "Also record `introduced_by` (the commit that introduced it), because a\n"
+                "   portable prerequisite is ported before the fix."
+            )
 
         lint_task = (
             "8. **Lint**: if the project has a lint or vet tool, record the single best\n"
@@ -155,6 +190,8 @@ Recommendation guidelines:
             + lint_task
             + "\n"
             + verification_task
+            + "\n"
+            + series_task
         )
 
         return self.prompt_template.format(
@@ -164,8 +201,191 @@ Recommendation guidelines:
             source_branch=self.source_branch,
             target_branch=self.target_branch,
             seed_files=_bullets(self.seed_files, ""),
+            series_section=self.series_section,
             task_list=task_list,
+            series_schema=series_schema,
             output_file=SEMANTIC_TRIAGE_FILE,
+        )
+
+
+@dataclass
+class SeriesClustersPrompt:
+    """Focused follow-up when triage omitted the cluster partition."""
+
+    context: str
+    series_section: str
+    output_file: str
+
+    prompt_template: ClassVar[str] = """\
+{context}
+You are the Series Partition Agent. A commit series is applied one commit at a
+time; the pipeline needs the commits grouped so it can plan and batch them.
+{series_section}
+## Your Task
+
+Group the commits above into contiguous clusters. Each cluster is one unit of
+work with one intent: prerequisite refactors that only enable a later commit,
+the behaviour change itself, its tests.
+
+Rules:
+- never reorder a commit, and cover every commit exactly once;
+- a clean commit does not need its own cluster, but it must still appear in one;
+- put a commit in `dropped` only when it is unrelated to the fix (docs, CI,
+  unrelated fuzz fixes) and say why;
+- cluster size is measured from git by the pipeline: do not guess line counts;
+- do not analyse the diff again - the commit list is the input.
+
+Write only this JSON to {output_file}:
+
+{{
+  "clusters": [
+    {{"id": "short-name",
+      "commits": ["<sha prefix from the list above>", "..."],
+      "intent": "one sentence",
+      "kind": "enabler | fix | test | docs | unrelated",
+      "expected_conflict_files": ["paths"]}}
+  ],
+  "dropped": [{{"commit": "<sha prefix>", "reason": "why"}}],
+  "public_interface_files": ["headers or manifests that declare the public API"]
+}}
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            series_section=self.series_section,
+            output_file=self.output_file,
+        )
+
+
+@dataclass
+class ClusterPlanPrompt:
+    """Lazy per-cluster plan for a commit series (Phase 2.5)."""
+
+    context: str
+    cluster_id: str
+    intent: str
+    commits: str
+    cluster_stat: str
+    triage_json: str
+    journal: str
+    output_file: str
+
+    prompt_template: ClassVar[str] = """\
+{context}
+You are the Cluster Plan Agent. A backport of an ordered commit series is split
+into clusters; you plan exactly one of them, against the tree as it is now.
+
+## Cluster {cluster_id}
+
+Intent: {intent}
+
+Commits, in the order they will be applied:
+{commits}
+
+Net diffstat of this cluster:
+{cluster_stat}
+
+Inspect the cluster with:
+    git diff <first-commit>^ <last-commit>
+    git log --oneline <first-commit>^..<last-commit>
+
+## What triage established for the whole series
+
+<triage>
+{triage_json}
+</triage>
+
+## Decisions already made in earlier clusters
+
+{journal}
+
+## Your Task
+
+Produce a binding plan for this cluster. For every symbol the fix depends on
+that the target does not provide, name the adaptation: translate it to the
+target's equivalent, synthesize it locally, export it where the target's
+interface manifests require it, adapt the call site, or skip the file.
+
+Rules:
+- one action per symbol; `action` is one of translate, synthesize, export,
+  adapt_call_site, skip;
+- every action MUST carry a `verify` shell command that exits 0 only when the
+  action has actually been performed; it must be a single command with no
+  pipes, redirection, or chaining (use one `grep -q` instead of a pipeline);
+  commands run from the repository root;
+- do not restate generic advice, do not add actions for symbols the target
+  already provides;
+- do not modify the repository, and do not run the build;
+- earlier clusters' decisions are binding: if this cluster contradicts one,
+  say so in `risks` instead of silently choosing the other.
+
+## Output
+
+Write only this JSON to {output_file}:
+
+{{
+  "cluster": "{cluster_id}",
+  "actions": [
+    {{"symbol": "XML_GE", "target_state": "undefined",
+      "action": "synthesize", "from": "XML_DTD",
+      "verify": "grep -q 'define XML_GE' lib/internal.h"}}
+  ],
+  "risks": ["what could still go wrong in this cluster"]
+}}
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            cluster_id=self.cluster_id,
+            intent=self.intent or "(none stated)",
+            commits=self.commits,
+            cluster_stat=self.cluster_stat,
+            triage_json=self.triage_json,
+            journal=self.journal or "(first cluster)",
+            output_file=self.output_file,
+        )
+
+
+@dataclass
+class ClusterPlanRepairPrompt:
+    """One bounded session to execute the plan actions a cluster missed."""
+
+    context: str
+    cluster_id: str
+    plan_json: str
+    failures: str
+
+    prompt_template: ClassVar[str] = """\
+{context}
+You are the Cluster Repair Agent. Cluster {cluster_id} has been applied, but its
+binding plan was not fully executed. Fix only what the failing checks require.
+
+## Binding plan for this cluster
+
+<plan>
+{plan_json}
+</plan>
+
+## Failing checks
+
+{failures}
+
+Rules:
+- change only what these checks require; do not refactor or reformat anything
+  else, and do not redo the port;
+- do not run the build or the test suite;
+- do not amend or rewrite existing commits: leave your edits in the working
+  tree, the pipeline stages and commits them as a fixup.
+"""
+
+    def prompt(self) -> str:
+        return self.prompt_template.format(
+            context=self.context,
+            cluster_id=self.cluster_id,
+            plan_json=self.plan_json,
+            failures=self.failures,
         )
 
 
@@ -177,6 +397,7 @@ class TestPortAgentPrompt:
     test_files: list[str]
     output_manifest_file: str
     diff_command: str
+    run_verification: bool = True
 
     prompt_template: ClassVar[str] = """\
 {context}
@@ -204,7 +425,7 @@ stubs, skip markers, or build tags if needed, but do not port the actual fix cod
 4. Do NOT change existing test logic — only add new tests or update test call-sites \
 to match the new function signatures from the fix.
 
-5. After porting, run the build command to verify the test files compile.
+5. {verification_rule}
 
 6. Write the absolute path of every modified test file to `{output_manifest_file}`, \
 one per line.
@@ -212,6 +433,15 @@ one per line.
 
     def prompt(self) -> str:
         """Render the Phase 0.5c test port prompt."""
+        verification_rule = (
+            "After porting, run the build command to verify the test files compile."
+            if self.run_verification
+            else (
+                "Do NOT run the build, test, or any verification command after "
+                "porting. The pipeline runs verification once, after the full "
+                "commit series has been applied."
+            )
+        )
         return self.prompt_template.format(
             context=self.context,
             source_fix_commit=self.source_fix_commit,
@@ -219,6 +449,7 @@ one per line.
             test_files="\n".join(f"  - {f}" for f in self.test_files),
             output_manifest_file=self.output_manifest_file,
             diff_command=self.diff_command,
+            verification_rule=verification_rule,
         )
 
 
