@@ -14,7 +14,10 @@ from auto_bug_fix.packaging import (
     is_packaging_path,
 )
 from auto_bug_fix.run_bug_fix import (
+    _is_test_top_dir,
+    _packaging_build_output_paths,
     _packaging_only,
+    _pre_red_packaging_mode,
     _session_test_files,
     _shares_content_with_fix,
     _validate_fused_pre_red,
@@ -106,6 +109,47 @@ def test_packaging_path_classification():
     assert _packaging_only(["pkg.spec", "fix.patch"])
     assert not _packaging_only(["pkg.spec", "src/foo.c"])
     assert not _packaging_only([])
+
+
+def test_source_repo_with_untracked_patch_is_not_packaging(tmp_path):
+    repo = tmp_path / "source"
+    repo.mkdir()
+    rp = str(repo)
+    _git(rp, "init", "-b", "main")
+    _git(rp, "config", "user.name", "t")
+    _git(rp, "config", "user.email", "t@t")
+    (repo / "base.c").write_text("int x = 1;\n")
+    _git(rp, "add", ".")
+    _git(rp, "commit", "-m", "base")
+    (repo / "notes.patch").write_text("just a fixture\n")
+    (repo / "new_source.c").write_text("int added;\n")
+    untracked = ["notes.patch", "new_source.c"]
+
+    assert _pre_red_packaging_mode(rp, _sha(rp), untracked) is False
+    assert _packaging_build_output_paths(rp, _sha(rp), untracked) == set()
+
+
+def test_packaging_build_output_keeps_top_level_carriers_and_tests(tmp_path):
+    rp, _fix = _repo(tmp_path)
+    paths = [
+        "pkg.spec",
+        "fix.patch",
+        "debian/patches/fix.patch",
+        "regression-tests/new_test.c",
+        "libexpat-R_2_2_5/tests/fixture.patch",
+        "libexpat-R_2_2_5/expat/tests/runtests.c",
+        "aarch64/expat.rpm",
+    ]
+
+    assert _pre_red_packaging_mode(rp, _sha(rp), paths) is True
+    assert _packaging_build_output_paths(rp, _sha(rp), paths) == {
+        "libexpat-R_2_2_5/tests/fixture.patch",
+        "libexpat-R_2_2_5/expat/tests/runtests.c",
+        "aarch64/expat.rpm",
+    }
+    assert _is_test_top_dir("regression-tests")
+    assert _is_test_top_dir("unittests")
+    assert not _is_test_top_dir("latest")
 
 
 def test_validate_fused_pre_red_accepts_spec_plus_test_patch(tmp_path):

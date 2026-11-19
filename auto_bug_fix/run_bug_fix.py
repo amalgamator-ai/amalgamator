@@ -1575,12 +1575,33 @@ _TEST_TOP_DIRS = frozenset(
 )
 
 
+def _is_test_top_dir(name: str) -> bool:
+    """Top-level directory names that hold tests, including derived names."""
+    lower = name.lower()
+    if lower in _TEST_TOP_DIRS:
+        return True
+    return any(
+        part in {"test", "tests", "testing"} or part.endswith("tests")
+        for part in re.split(r"[-_.]", lower)
+        if part
+    )
+
+
 def _repo_has_packaging(repo: str, ref: str) -> bool:
     """True when the checked-in top level carries a spec or patch stack."""
     return any(
         is_packaging_marker(path)
         for path in _git_lines(repo, "ls-tree", "--name-only", ref)
     )
+
+
+def _pre_red_packaging_mode(
+    repo: str, base_head: str, untracked: Iterable[str]
+) -> bool:
+    """A real packaging checkout, not a source repo with a stray patch file."""
+    if _repo_has_packaging(repo, base_head) or _repo_has_packaging(repo, "HEAD"):
+        return True
+    return any(is_packaging_marker(path.split("/", 1)[0]) for path in untracked)
 
 
 def _untracked_paths(repo: str) -> list[str]:
@@ -1605,9 +1626,11 @@ def _packaging_build_output_paths(
     build_output: set[str] = set()
     for path in paths:
         top_dir = path.split("/", 1)[0]
-        if top_dir in top or is_packaging_path(path):
+        if top_dir in top:
             continue
-        if top_dir in _TEST_TOP_DIRS:
+        if path == top_dir and is_packaging_path(path):
+            continue
+        if is_packaging_marker(top_dir) or _is_test_top_dir(top_dir):
             continue
         if path == top_dir and _is_test_path(path):
             continue
@@ -1934,11 +1957,7 @@ def _run_fused_pre_red(
         Path(repo, name).unlink(missing_ok=True)
     if git_status_porcelain(repo):
         untracked = _untracked_paths(repo)
-        packaging = (
-            bool(_changed_packaging_paths(repo, f"{base_head}..HEAD"))
-            or any(is_packaging_path(path) for path in untracked)
-            or _repo_has_packaging(repo, base_head)
-        )
+        packaging = _pre_red_packaging_mode(repo, base_head, untracked)
         if packaging:
             # A dist-git build unpacks the source tarball into the repo.  That
             # tree is build input, not session work: stage only tracked edits
