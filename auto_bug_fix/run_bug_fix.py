@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from fnmatch import fnmatch
@@ -236,6 +236,13 @@ from auto_bug_fix.git_tools import (
 )
 from auto_bug_fix.ingest import PATCH_TRAILER_KEY, IngestError, ingest_patch
 from auto_bug_fix.mechanical import resolve_mechanically
+from auto_bug_fix.packaging import (
+    carrier_paths,
+    carrier_payload,
+    is_packaging_marker,
+    is_packaging_path,
+    is_patch_carrier,
+)
 from auto_bug_fix.patch_id import backward_patch_id_check, forward_patch_id_check
 from auto_bug_fix.phase_4b import (
     RUN_AND_FIX_FAILURE_FILE,
@@ -1284,16 +1291,25 @@ _PRE_RED_COMMIT_PREFIXES = ("prereq:", "test-port:", "fused-pre-red:")
 def _session_test_files(repo: str, base_head: str) -> list[str]:
     """Test paths the session's ``test-port:`` commits add or modify.
 
-    Deletions are excluded: removing a test must not satisfy the ported-test
-    floor, and a rename counts at its destination.
+    Patch carriers are unwrapped: in a dist-git repo the test lives inside the
+    patch payload, not at the patch's own path.  Deletions are excluded, and a
+    rename counts at its destination.  An unparsed carrier contributes no
+    test path, so the ported-test floor stays conservative even though
+    relatedness treats an unknown carrier as advisory.
     """
     files: list[str] = []
     for line in _git_lines(repo, "log", "--format=%H%x09%s", f"{base_head}..HEAD"):
         sha, _, subject = line.partition("\t")
         if not subject.startswith("test-port:"):
             continue
-        for status, _old, path in _changed_paths(repo, sha):
-            if status[0] in "AMCR" and path not in files:
+        paths = [entry for entry in _changed_paths(repo, sha) if entry[0][0] in "AMCR"]
+        view = _effective_paths(
+            repo,
+            sha,
+            {base for _s, base, _p in paths} | {p for _s, _b, p in paths},
+        )
+        for path in view.source:
+            if (_is_test_path(path) or _is_declared_test(path)) and path not in files:
                 files.append(path)
     return files
 
@@ -1399,13 +1415,22 @@ def _validate_fused_pre_red(
         sha, _, subject = line.partition("\t")
         paths = _changed_paths(repo, sha)
         sides = {b for _s, b, _p in paths} | {p for _s, _b, p in paths}
+        view = _effective_paths(repo, sha, sides)
+        if view.unparsed:
+            # A patch format we do not understand is advisory: keep the work
+            # and let build/test/review judge it.  A parsed production path is
+            # still a hard rejection.
+            log.warning(
+                "Fused pre-RED: unparsed packaging carrier(s): %s",
+                ", ".join(sorted(view.unparsed)[:5]),
+            )
         if subject.startswith("test-port:"):
-            bad = sorted(p for p in sides if ok(p) and not is_test(p))
+            bad = sorted(p for p in view.source if ok(p) and not is_test(p))
             if bad:
                 problems.append(
                     "test-port commit changed non-test paths: " + ", ".join(bad[:5])
                 )
-            test_port |= sides
+            test_port |= view.source | view.packaging
         elif subject.startswith("prereq:"):
             prereq = prereq_sha(subject)
             allowed: set[str] = set()
@@ -1422,11 +1447,11 @@ def _validate_fused_pre_red(
                     f"prereq {prereq[:12]} changed paths outside its diff: "
                     + ", ".join(bad[:5])
                 )
-            prereq_paths |= sides
+            prereq_paths |= view.source | view.packaging
         elif subject.startswith("fused-pre-red:"):
             bad = sorted(
                 p
-                for p in sides
+                for p in view.source
                 if ok(p)
                 and not is_test(p)
                 and p not in test_port
@@ -1492,6 +1517,125 @@ def _changed_paths(repo: str, commit: str) -> list[tuple[str, str, str]]:
             break
         paths.append((status[0], base, fix_path))
     return paths
+
+
+@dataclass(frozen=True)
+class _EffectivePaths:
+    """Changed paths after unwrapping packaging patch carriers."""
+
+    source: frozenset[str]
+    packaging: frozenset[str]
+    unparsed: frozenset[str]
+
+
+def _effective_paths(repo: str, ref: str, paths: Iterable[str]) -> _EffectivePaths:
+    """Expand patch carriers in *paths* using their content at *ref*.
+
+    A carrier's payload is the effective change; a spec file only packages it.
+    An unparsable carrier is reported so callers can keep the work and warn,
+    rather than treating an unfamiliar patch format as production code.
+    """
+    source: set[str] = set()
+    packaging: set[str] = set()
+    unparsed: set[str] = set()
+    for path in paths:
+        if is_patch_carrier(path):
+            packaging.add(path)
+            content = _git_blob(repo, ref, path) or ""
+            touched = carrier_paths(content)
+            if touched:
+                source.update(touched)
+            else:
+                unparsed.add(path)
+        elif is_packaging_path(path):
+            packaging.add(path)
+        else:
+            source.add(path)
+    return _EffectivePaths(frozenset(source), frozenset(packaging), frozenset(unparsed))
+
+
+def _changed_packaging_paths(repo: str, diff_range: str) -> list[str]:
+    """Packaging carriers changed by *diff_range* (for gates and dossier)."""
+    return [
+        path
+        for path in _git_lines(repo, "diff", "--name-only", diff_range)
+        if is_packaging_path(path)
+    ]
+
+
+def _packaging_only(changed_files: list[str]) -> bool:
+    """True when every changed file packages source instead of being source."""
+    return bool(changed_files) and all(
+        is_packaging_path(path) for path in changed_files
+    )
+
+
+_TEST_TOP_DIRS = frozenset(
+    {"test", "tests", "testdata", "expected", "fixtures", "golden"}
+)
+
+
+def _is_test_top_dir(name: str) -> bool:
+    """Top-level directory names that hold tests, including derived names."""
+    lower = name.lower()
+    if lower in _TEST_TOP_DIRS:
+        return True
+    return any(
+        part in {"test", "tests", "testing"} or part.endswith("tests")
+        for part in re.split(r"[-_.]", lower)
+        if part
+    )
+
+
+def _repo_has_packaging(repo: str, ref: str) -> bool:
+    """True when the checked-in top level carries a spec or patch stack."""
+    return any(
+        is_packaging_marker(path)
+        for path in _git_lines(repo, "ls-tree", "--name-only", ref)
+    )
+
+
+def _pre_red_packaging_mode(
+    repo: str, base_head: str, untracked: Iterable[str]
+) -> bool:
+    """A real packaging checkout, not a source repo with a stray patch file."""
+    if _repo_has_packaging(repo, base_head) or _repo_has_packaging(repo, "HEAD"):
+        return True
+    return any(is_packaging_marker(path.split("/", 1)[0]) for path in untracked)
+
+
+def _untracked_paths(repo: str) -> list[str]:
+    """Untracked, non-ignored files, one path per entry (spaces are safe)."""
+    out = _run_git(repo, ["ls-files", "--others", "--exclude-standard", "-z"]).stdout
+    return [path for path in out.split("\0") if path]
+
+
+def _packaging_build_output_paths(
+    repo: str, base_ref: str, paths: Iterable[str]
+) -> set[str]:
+    """Paths introduced by a packaging build: extracted trees, RPMs, logs.
+
+    A source tarball unpacked by ``%prep`` and the RPM build tree are new
+    top-level content in a dist-git checkout.  Test files inside that extracted
+    tree are build input, not the session's test port; only a root-level test
+    file or a test directory that itself is top-level is kept.
+    """
+    top = set(_git_lines(repo, "ls-tree", "--name-only", base_ref))
+    if not any(is_packaging_marker(entry) for entry in top):
+        return set()
+    build_output: set[str] = set()
+    for path in paths:
+        top_dir = path.split("/", 1)[0]
+        if top_dir in top:
+            continue
+        if path == top_dir and is_packaging_path(path):
+            continue
+        if is_packaging_marker(top_dir) or _is_test_top_dir(top_dir):
+            continue
+        if path == top_dir and _is_test_path(path):
+            continue
+        build_output.add(path)
+    return build_output
 
 
 def _path_states(repo: str, target_ref: str, commit: str) -> list[_FixPath]:
@@ -1812,11 +1956,40 @@ def _run_fused_pre_red(
     ):
         Path(repo, name).unlink(missing_ok=True)
     if git_status_porcelain(repo):
-        _run_git(repo, ["add", "-A"])
-        git_commit(
-            repo,
-            f"fused-pre-red: commit remaining pre-RED changes for {config.issue_id}",
-        )
+        untracked = _untracked_paths(repo)
+        packaging = _pre_red_packaging_mode(repo, base_head, untracked)
+        if packaging:
+            # A dist-git build unpacks the source tarball into the repo.  That
+            # tree is build input, not session work: stage only tracked edits
+            # and top-level test/packaging carriers, so the leftovers commit
+            # does not turn the extracted tree into "production paths".
+            build_output = _packaging_build_output_paths(repo, base_head, untracked)
+            declared = set(_strings(result.get("test_files"))) | set(
+                identify_test_files(state.seed)
+            )
+            stage = [
+                path
+                for path in untracked
+                if path not in build_output
+                and (
+                    is_packaging_path(path)
+                    or _is_test_path(path)
+                    or _is_declared_test(path)
+                    or path in declared
+                )
+            ]
+            _run_git(repo, ["add", "-u"])
+            if stage and not _run_git_pathspec_batches(config, ["add", "--"], stage):
+                log.warning(
+                    "Fused pre-RED: could not stage leftover test/packaging files"
+                )
+        else:
+            _run_git(repo, ["add", "-A"])
+        if _run_git(repo, ["diff", "--cached", "--quiet"]).exit_code != 0:
+            git_commit(
+                repo,
+                f"fused-pre-red: commit remaining pre-RED changes for {config.issue_id}",
+            )
     # Validate after the leftovers commit: uncommitted production edits must
     # not slip past the "fix already applied" checks. The session's declared
     # tests count as test paths even when naming patterns do not (SQL pairs).
@@ -1825,23 +1998,38 @@ def _run_fused_pre_red(
     )
     problems = _validate_fused_pre_red(config, base_head, declared_tests)
     if problems:
+        if tracker:
+            tracker.record_gate("pre_red_reject", "; ".join(problems)[:300])
         log.warning(
             "Fused pre-RED session rejected (%s) — falling back", "; ".join(problems)
         )
         _discard_fused_session(repo, base_head)
         reject_attempt()
         return None
+    carriers = _changed_packaging_paths(repo, f"{base_head}..HEAD")
+    if carriers:
+        log.info(
+            "Fused pre-RED: change delivered via %d packaging carrier(s)",
+            len(carriers),
+        )
+        if tracker:
+            tracker.record_gate("pre_red_carrier", "packaging")
+        if state.dossier:
+            state.dossier.add(
+                "Packaging-carried pre-RED change",
+                "\n".join(carriers[:20]),
+                "Phase 0.5+0.5b+0.5c fused session",
+            )
 
     _strip_or_escalate(config, state, base_head, "Phase 0.5 fused pre-RED")
 
     # Attribute tests before the strip: squashing the session's commits would
     # otherwise lose the test-port subjects and silently fall back to the
     # session's self-reported list.
-    tests_ported = _session_test_files(repo, base_head) or _strings(
-        result.get("tests_ported")
-    )
-    # The leftovers commit is `git add -A`, so anything force-added here would
-    # reach the candidate patch; apply the same strip the resolver path uses.
+    session_tests = _session_test_files(repo, base_head)
+    tests_ported = session_tests or _strings(result.get("tests_ported"))
+    # The leftovers commit can still carry force-added scratch; apply the same
+    # strip the resolver path uses.
     stripped = _strip_session_scratch(repo, base_head, keep=set(state.seed))
     if stripped is None:
         log.warning("Fused pre-RED: could not strip session scratch — falling back")
@@ -1867,16 +2055,20 @@ def _run_fused_pre_red(
     # require a ported test: skipping cannot remove the floor entirely.
     expected = planned or identify_test_files(state.seed)
     # A planned path only counts when it still exists at HEAD: deleting the
-    # regression test must not satisfy the floor.
+    # regression test must not satisfy the floor.  Effective test paths from a
+    # carrier payload live inside the patch, not at a worktree path.
     changed = set(
         _git_lines(repo, "diff", "--name-only", "--diff-filter=d", base_head, "HEAD")
     )
-    ported = [
-        f
-        for f in dict.fromkeys(tests_ported + [p for p in planned if p in changed])
-        if f in changed
-    ]
-    if expected and not any(_is_test_path(f) for f in ported):
+    reported = _strings(result.get("tests_ported"))
+    ported = list(
+        dict.fromkeys(
+            tests_ported
+            + [p for p in reported if p in changed]
+            + [p for p in planned if p in changed]
+        )
+    )
+    if expected and not any(_is_test_path(f) or _is_declared_test(f) for f in ported):
         log.warning(
             "Fused pre-RED: no regression test was ported (planned %s) — falling back",
             ", ".join(expected[:5]),
@@ -1887,8 +2079,10 @@ def _run_fused_pre_red(
     uncovered = [p for p in planned if p not in set(ported)]
     if uncovered:
         # Adapted/renamed tests are legitimate; removal of the port is not.
-        log.warning(
-            "Fused pre-RED: planned tests were adapted or renamed: %s",
+        # In a packaging repo the payload paths differ from the fix's paths.
+        (log.info if carriers else log.warning)(
+            "Fused pre-RED: planned tests %s: %s",
+            "carried inside packaging patch" if carriers else "adapted or renamed",
             ", ".join(uncovered[:5]),
         )
     tests_ported = ported
@@ -1899,7 +2093,7 @@ def _run_fused_pre_red(
     ]
     unexpected = [t for t in tests_ported if t not in state.seed]
     if unexpected:
-        log.warning(
+        (log.info if carriers else log.warning)(
             "Fused pre-RED: ported tests outside the fix's file set: %s",
             ", ".join(unexpected[:5]),
         )
@@ -2851,6 +3045,10 @@ def _strip_committed_build_output(
             for path in candidates
             if digests.get(path) and committed.get(path) in digests[path]
         }
+        # A packaging build unpacks the source tarball and writes RPMs/logs
+        # into new top-level paths.  They are build output even though no
+        # learned/digest record exists for a session that ran the build itself.
+        removed |= _packaging_build_output_paths(config.repo_path, base_ref, paths)
         # An ignored path is only removed where the fence designates the
         # whole tree generated. Elsewhere the ignore rules cannot tell a
         # force-added source or fixture from an artifact.
@@ -4771,6 +4969,9 @@ def _run_fused_resolution(
         ),
     )
     _add_fused_report_to_dossier(state, report_path)
+    carriers = _changed_packaging_paths(repo, f"{base_head}..HEAD")
+    if carriers and tracker:
+        tracker.record_gate("resolution_carrier", "packaging")
 
     # Every later gate compares trees, so a session that reset to another
     # commit would pass them while silently dropping base_head's commits.
@@ -4827,20 +5028,25 @@ def _run_fused_resolution(
             "Phase 2+3a fused session",
         )
     if _fused_resolution_unmatched(config):
+        # Relatedness is a heuristic.  The session already committed, passed
+        # its own build/tests and is about to get an independent review; a low
+        # line overlap must not throw that work away.  Record it for humans.
         log.warning(
-            "%s: fused result shares too little with the fix — falling back", label
+            "%s: low line overlap with the fix — keeping the fused result "
+            "(build/test + 3a.2 decide)",
+            label,
         )
         if tracker:
             tracker.record_gate("semantic_equivalence", "fused_unmatched")
-        reject_attempt()
+            tracker.record_gate("fused_relatedness", "advisory")
         if state.dossier:
             state.dossier.add(
-                "Fused semantic check",
-                "The fused result has too little in common with the fix; the "
-                "per-chunk resolver is used instead.",
+                "Fused relatedness",
+                "Line overlap with the fix is low; the fused commit is kept and "
+                "the independent review decides.  Treat the semantic-equivalence "
+                "gate as a human spot-check, not a fallback.",
                 "Phase 2+3a fused session",
             )
-        return None
     if config.blind_review:
         _run_triage_blind_review(
             config, _phase_config(claude_config, config), state, tracker, base_head
@@ -4943,6 +5149,22 @@ def _finalize_resolution(
     _strip_or_escalate(config, state, base_head, f"Phase 3a ({label})")
 
     changed_files = git_diff_name_only_range(repo, base_head, "HEAD")
+    packaging_only = _packaging_only(changed_files)
+    if packaging_only:
+        log.info(
+            "Evidence checks: source is delivered via packaging carriers; "
+            "skipping token/line audits and snapback"
+        )
+        if tracker:
+            tracker.record_gate("evidence_scope", "packaging")
+        if state.dossier:
+            state.dossier.add(
+                "Evidence scope (packaging)",
+                "Source changes are delivered inside packaging patch files; "
+                "token/line audits and snapback need a source tree and are "
+                "skipped.  Build, tests and independent review carry the evidence.",
+                "Phase 3a post-pass",
+            )
 
     findings = []
     line_findings = []
@@ -4953,7 +5175,7 @@ def _finalize_resolution(
     marker_files: list[str] = []
 
     # --- Deterministic rewrites (run before any auditing) -----------------
-    if config.evidence_checks:
+    if config.evidence_checks and not packaging_only:
         try:
             port_diff = subprocess.run(
                 ["git", "diff", base_head, "HEAD"],
@@ -5054,7 +5276,7 @@ def _finalize_resolution(
         except Exception as e:
             log.warning("Evidence checks failed (continuing): %s", e)
 
-    if config.snapback:
+    if config.snapback and not packaging_only:
         try:
             snap_counts = snap_back_files(repo, changed_files, base_head, commit)
             if snap_counts:
@@ -5078,6 +5300,7 @@ def _finalize_resolution(
         subprocess.run(["git", "add", "-u"], cwd=repo, capture_output=True)
         git_amend(repo)
         changed_files = git_diff_name_only_range(repo, base_head, "HEAD")
+        packaging_only = _packaging_only(changed_files)
 
     # --- Deterministic audits (on the final rewritten state) --------------
     current_texts: dict[str, str] = {}
@@ -5116,7 +5339,7 @@ def _finalize_resolution(
     except Exception as e:
         log.warning("Conflict-marker scan failed (continuing): %s", e)
 
-    if config.evidence_checks:
+    if config.evidence_checks and not packaging_only:
         try:
             port_diff = subprocess.run(
                 ["git", "diff", base_head, "HEAD"],
@@ -5688,6 +5911,24 @@ def _changed_payload_lines(repo: str, diff_args: list[str]) -> set[tuple[str, st
     return lines
 
 
+def _expanded_payload_lines(repo: str, diff_args: list[str]) -> set[tuple[str, str]]:
+    """Payload lines of a diff plus the payloads of changed patch carriers.
+
+    The post-image is read from ``HEAD``; callers compare ranges ending there.
+    A carrier that cannot be parsed contributes nothing here — the fused path
+    keeps the work and reports the uncertainty instead of falling back.
+    """
+    lines = _changed_payload_lines(repo, diff_args)
+    changed = _run_git(repo, ["diff", "--name-only", *diff_args]).stdout.splitlines()
+    for path in changed:
+        if not is_patch_carrier(path):
+            continue
+        content = _git_blob(repo, "HEAD", path)
+        if content:
+            lines |= carrier_payload(content, _RELATEDNESS_MIN_LINE_LEN)
+    return lines
+
+
 def _shares_content_with_fix(config: BugFixConfig) -> bool:
     """Does the backport change any of the same lines the upstream fix changed?
 
@@ -5729,7 +5970,7 @@ def _shares_content_with_fix(config: BugFixConfig) -> bool:
         )
         if not target_base:
             return True
-        backport_lines = _changed_payload_lines(
+        backport_lines = _expanded_payload_lines(
             config.repo_path, [f"{target_base}..HEAD"]
         )
         if not backport_lines:

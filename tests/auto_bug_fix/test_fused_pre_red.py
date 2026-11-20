@@ -187,6 +187,32 @@ def _dirty_fix(rp, _fix):
     (Path(rp) / "base.c").write_text("int x = 2;\n")
 
 
+def test_fused_pre_red_accepts_dist_git_test_patch(tmp_path):
+    """A dist-git test port lives in a spec patch, not a test path."""
+    patch = """\
+diff --git a/tests/base_test.c b/tests/base_test.c
+new file mode 100644
+--- /dev/null
++++ b/tests/base_test.c
+@@ -0,0 +1 @@
++int test_base(void) { return 0; }
+"""
+
+    def act(rp, _fix):
+        (Path(rp) / "base-tests.patch").write_text(patch)
+        (Path(rp) / "pkg.spec").write_text("Name: test\nPatch1: base-tests.patch\n")
+        _git(rp, "add", "-A")
+        _git(rp, "commit", "-m", "test-port: TEST-1")
+
+    outcome, _rp, _fix, state = _run_session(tmp_path, act)
+
+    assert outcome is not None
+    assert state.ported_test_files == ["tests/base_test.c"]
+    assert any(
+        item.label == "Packaging-carried pre-RED change" for item in state.dossier.items
+    )
+
+
 def _cherry_pick_fix(rp, fix):
     _git(rp, "cherry-pick", fix)
 

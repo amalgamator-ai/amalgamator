@@ -795,6 +795,49 @@ def test_fused_resolution_rejects_history_rewrite(mock_claude, tmp_path):
     )
 
 
+@patch("auto_bug_fix.run_bug_fix.claude_run")
+def test_fused_resolution_keeps_unmatched_result_as_advisory(mock_claude, tmp_path):
+    """A low-overlap result is kept: build/test and 3a.2 decide, no rerun."""
+    diverged = BASE.replace("    int c = 3;", "    int c = 99;")
+    rp, fix_sha, path = _build_repo(tmp_path, diverged)
+    config = _make_config(rp, fix_sha)
+    config.fused_resolution = True
+    state = _make_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    tracker = Tracker(
+        issue_id="TEST-1", config_dict={}, model="test-model", output_dir=str(run_dir)
+    )
+    seen: list[str] = []
+
+    async def fake_claude_run(claude_config, prompts, tracker=None):
+        seen.append(prompts[0])
+        if "Backport Resolution Agent" in prompts[0]:
+            path.write_text(diverged.replace("    int d = 4;", "    int d = 40;"))
+            _git(rp, "add", "-A")
+            _git(rp, "commit", "-m", "unrelated rewrite")
+        return []
+
+    mock_claude.side_effect = fake_claude_run
+
+    with tracker.phase("test"):
+        result = cherry_pick_and_resolve(
+            config,
+            _make_claude_config(rp),
+            state,
+            tracker,
+            commit=fix_sha,
+            label="test port",
+        )
+
+    assert result == "resolved"
+    assert state.fused_resolution_ran is True
+    assert any("Independent Review Agent" in p for p in seen)
+    assert not any("Narrow Resolution Agent" in p for p in seen)
+    gates = tracker._run.phases[-1].gate_decisions
+    assert gates["fused_relatedness"] == "advisory"
+
+
 @patch("auto_bug_fix.run_bug_fix.cherry_pick_and_resolve")
 def test_prerequisite_chain_disables_fused_resolution(mock_cp, tmp_path):
     """Prerequisite ports must not inherit the main fix's fused session."""

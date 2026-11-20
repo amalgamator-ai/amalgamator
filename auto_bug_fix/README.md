@@ -88,8 +88,10 @@ backport, builds/tests, runs regeneration and commits. The triage-blind review
 (3a.2, default on) still runs on the clean diff. Cherry-pick strategies and
 `files_to_skip` reverts run first; afterwards the pipeline requires a commit
 with no conflicts or markers, folds leftovers in and strips scratch. A
-line-relatedness check rejects a result sharing nothing with the fix and falls
-back to the per-chunk resolver. Phase 4, 4.5 and 5 still run.
+line-relatedness check records low overlap as an advisory gate and keeps the
+result; build/test and 3a.2 decide. Only hard failures fall back to the
+per-chunk resolver: conflicts, markers, a rewritten history or unstrippable
+scratch. Phase 4, 4.5 and 5 still run.
 
 Not run in fused mode: the per-chunk retry loop, substitution/rename/snap-back
 post-passes, token/provenance/dead-config audits, 3a.1, and Phase 3b's rollback
@@ -98,6 +100,25 @@ caught only by the build or Phase 4.1. Prerequisite ports use the same commit
 and Phase 4 gates but not the per-chunk audits. Prefer the default mode when
 those nets matter more than cost; the dossier records the evidence scope and
 `summary.json` carries `resolution_mode`.
+
+### Packaging-carried changes (dist-git, patch stacks)
+
+Some targets (RPM/CentOS dist-git, Debian patch stacks) do not contain the
+source tree: source changes arrive as `.patch` files applied by a spec file.
+Those files are carriers — their payload is the effective change, the spec is
+packaging. Test-port commits that add a spec plus a tests-only patch are valid;
+the ported-test floor and production-edit checks run on the payload paths. The
+relatedness comparison also unwraps changed patch carriers before measuring
+line overlap. If every changed file is packaging, the source-tree audits and
+snapback are skipped (`evidence_scope=packaging`) and build/test plus review
+carry the evidence. The fused pre-RED leftovers commit stages only tracked
+edits plus top-level test/packaging carriers when the build unpacked a source
+tarball; the extracted tree, RPM directory and build logs are never session
+work. `_strip_committed_build_output` likewise untracks those packaging build
+outputs from a fused commit, so Phase 4 does not need a build-error recovery
+just to remove them. Pre-RED and resolution record `pre_red_carrier` /
+`resolution_carrier`, and an unparsable carrier is an advisory warning, not a
+fallback.
 
 ### Fused prompt and resolution optimizations
 
