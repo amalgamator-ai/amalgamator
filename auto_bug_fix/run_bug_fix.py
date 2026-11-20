@@ -4462,8 +4462,18 @@ def phase_4a_build_recovery(
             )
 
             failures = parse_test_failures(test_stdout, test_stderr)
-            no_regression, _ = check_regression(failures, state.baseline)
-            if test_exit != TIMEOUT_EXIT_CODE and no_regression:
+            if failures:
+                passed, _ = check_regression(failures, state.baseline)
+            elif test_exit != 0:
+                # A non-zero exit with nothing the parser recognizes (link
+                # error, missing tool) is a failure, not a pass: 4a would
+                # otherwise report a broken tree as repaired and spend a
+                # cycle. Excuse it only when the baseline failed the same
+                # opaque way.
+                passed = state.baseline_test_exit != 0
+            else:
+                passed = True
+            if test_exit != TIMEOUT_EXIT_CODE and passed:
                 log.info("Phase 4a: build+test passed on attempt %d", attempt)
                 # A passing attempt supersedes the ones before it: leaving
                 # their errors in <previous_failures> would tell 4b to start
