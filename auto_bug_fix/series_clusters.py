@@ -463,7 +463,14 @@ def build_partition(
             sha[:12],
         )
         clusters.append(Cluster(id=f"unclustered-{index + 1}", commits=[sha]))
-    clusters.sort(key=lambda c: position[c.commits[0]] if c.commits else len(position))
+    # A cluster may start with a commit the model also listed as dropped.
+    # Ordering must not raise on it: validate_partition below reports the
+    # overlap and the partition falls back cleanly.
+    clusters.sort(
+        key=lambda c: (
+            position.get(c.commits[0], len(position)) if c.commits else len(position)
+        )
+    )
 
     errors = rejections + validate_partition(clusters, effective, repo_path)
     if errors:

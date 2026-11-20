@@ -240,6 +240,23 @@ def test_dropped_commits_leave_the_partition(tmp_path):
     assert partition.dropped == [{"commit": series[2][:8], "reason": "docs"}]
 
 
+def test_dropped_commit_inside_a_cluster_falls_back_instead_of_crashing(tmp_path):
+    rp, _, series = _linear_series(tmp_path)
+
+    partition = build_partition(
+        [{"id": "covers-all", "commits": series}],
+        series,
+        rp,
+        dropped=[{"commit": series[0][:8], "reason": "docs"}],
+    )
+
+    assert partition.fell_back
+    assert [cluster.commits for cluster in partition.clusters] == [
+        [series[1]],
+        [series[2]],
+    ]
+
+
 def test_single_commit_clusters_preserve_order(tmp_path):
     rp, _, series = _linear_series(tmp_path)
     fallback = single_commit_clusters(series)
