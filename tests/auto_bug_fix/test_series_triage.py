@@ -1,7 +1,10 @@
 # Copyright (c) 2026 Red Hat, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Commit-series mode skips Phase 0.5 and derives its inputs deterministically."""
+"""Commit-series mode skips Phase 0.5.
+
+Skips come from triage; the other inputs are deterministic.
+"""
 
 from __future__ import annotations
 
@@ -11,8 +14,6 @@ from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.run_bug_fix import (
     PipelineState,
     _merge_series_assessment,
-    _series_changed_files,
-    _series_skip_files,
     _series_triage_assessment,
 )
 
@@ -87,34 +88,6 @@ def _make_config(rp, series):
     )
 
 
-def test_changed_files_unions_the_series(tmp_path):
-    rp, series = _build_series_repo(tmp_path)
-    changed = _series_changed_files(_make_config(rp, series))
-
-    assert changed == [
-        ".github/workflows/ci.yml",
-        "Changes",
-        "doc/reference.html",
-        "fuzz/parser.c",
-        "src/base.c",
-        "tests/alloc_tests.c",
-    ]
-
-
-def test_skip_files_excludes_code_and_tests(tmp_path):
-    rp, series = _build_series_repo(tmp_path)
-    skip = _series_skip_files(_make_config(rp, series))
-
-    assert skip == [
-        ".github/workflows/ci.yml",
-        "Changes",
-        "doc/reference.html",
-        "fuzz/parser.c",
-    ]
-    assert "src/base.c" not in skip
-    assert "tests/alloc_tests.c" not in skip
-
-
 def test_assessment_fills_the_keys_later_phases_read(tmp_path):
     rp, series = _build_series_repo(tmp_path)
     config = _make_config(rp, series)
@@ -125,7 +98,7 @@ def test_assessment_fills_the_keys_later_phases_read(tmp_path):
     assessment = _series_triage_assessment(config, state)
 
     assert assessment["mode"] == "commit_series_deterministic"
-    assert assessment["files_to_skip"] == _series_skip_files(config)
+    assert assessment["files_to_skip"] == []
     assert assessment["test_files"] == ["tests/alloc_tests.c"]
     assert assessment["priority_files"] == state.allowed_modules
     assert assessment["prerequisites"] == []
@@ -134,7 +107,7 @@ def test_assessment_fills_the_keys_later_phases_read(tmp_path):
 
 def test_merge_keeps_the_deterministic_floor_when_triage_returns_nothing():
     deterministic = {
-        "files_to_skip": ["docs/x.md"],
+        "files_to_skip": [],
         "test_files": ["tests/a.py"],
         "priority_files": ["src/a.c"],
         "estimated_difficulty": "unknown",
@@ -145,9 +118,9 @@ def test_merge_keeps_the_deterministic_floor_when_triage_returns_nothing():
     assert merged == deterministic
 
 
-def test_merge_unions_skips_and_lets_triage_set_other_keys():
+def test_merge_keeps_triage_skips_and_lets_triage_set_other_keys():
     deterministic = {
-        "files_to_skip": ["docs/x.md"],
+        "files_to_skip": [],
         "test_files": ["tests/a.py"],
         "priority_files": ["src/a.c"],
         "estimated_difficulty": "unknown",
@@ -163,7 +136,7 @@ def test_merge_unions_skips_and_lets_triage_set_other_keys():
 
     merged = _merge_series_assessment(deterministic, llm)
 
-    assert merged["files_to_skip"] == ["docs/x.md", "fuzz/"]
+    assert merged["files_to_skip"] == ["fuzz/", "docs/x.md"]
     assert merged["test_files"] == ["tests/a.py"]
     assert merged["priority_files"] == ["src/b.c"]
     assert merged["estimated_difficulty"] == "EXTREME"

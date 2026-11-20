@@ -54,6 +54,11 @@ flowchart TD
 | 4.5 — Semantic equivalence | `git range-diff` between the source fix and the backport (squashed into one synthetic commit, so test-port/review/recovery fixups don't skew the comparison), classified into an equivalence verdict. |
 | 5 — Dossier | Writes `dossier.md` — every decision, gate value, audit finding, and diff, organized for a human reviewer. |
 
+`files_to_skip` is generated-only in every mode: code-generated sources,
+generated headers, lock files and build output. Documentation, CI config, fuzz
+harnesses, tests and generator scripts are ported with the fix, in single-commit
+and series mode alike.
+
 ### Deterministic safety nets (Phase 3a)
 
 Each is individually toggleable under `advanced:` so runs can ablate them.

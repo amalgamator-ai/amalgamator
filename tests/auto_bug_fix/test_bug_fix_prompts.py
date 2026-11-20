@@ -6,6 +6,7 @@
 from auto_bug_fix.bug_fix_prompts import (
     BuildErrorRecoveryPrompt,
     ClusterPlanPrompt,
+    FusedPreRedPrompt,
     NarrowResolutionAgentPrompt,
     PostResolutionCheckPrompt,
     SemanticTriagePrompt,
@@ -336,6 +337,61 @@ def test_triage_prompt_asks_for_clusters_in_series_mode():
     assert '"dropped"' in text
     assert '"public_interface_files"' in text
     assert "1. abc123 lib: refactor" in text
+    assert "9. **Cluster the commit series**" in text
+
+
+def test_triage_prompt_skip_policy_is_generated_only():
+    prompt = SemanticTriagePrompt(
+        context="<ctx/>",
+        fix_diff="stat",
+        source_branch="origin/main",
+        target_branch="origin/rel",
+        seed_files=["a.c"],
+    )
+    text = " ".join(prompt.prompt().split())
+
+    assert "Unrelated scaffolding" not in text
+    assert "`files_to_skip` is only for auto-generated" in text
+    assert "never docs, CI, fuzz, tests, or generator scripts" in text
+    assert "Do not list documentation, CI configuration, fuzz harnesses" in text
+    assert "This applies in every mode" in text
+
+
+def test_series_triage_prompt_does_not_drop_docs_or_ci():
+    prompt = SemanticTriagePrompt(
+        context="<ctx/>",
+        fix_diff="stat",
+        source_branch="origin/main",
+        target_branch="origin/rel",
+        seed_files=["a.c"],
+        series_section="\n1. abc123 lib: refactor\n",
+        series_mode=True,
+    )
+    text = " ".join(prompt.prompt().split())
+
+    assert "docs, CI configuration, fuzz harnesses and release notes are ported" in text
+    assert "(docs, CI, unrelated fuzz fixes)" not in text
+
+
+def test_fused_pre_red_skip_policy_is_generated_only():
+    prompt = FusedPreRedPrompt(
+        context="ctx",
+        fix_diff="diff",
+        source_branch="main",
+        target_branch="target",
+        fix_commit="deadbeef",
+        base_head="base",
+        build_command="make",
+        test_command="make test",
+        seed_files=["a.go"],
+        result_path="/tmp/result.json",
+        report_path="/tmp/report.md",
+    )
+    text = " ".join(prompt.prompt().split())
+
+    assert "auto-generated build artifacts only" in text
+    assert "never docs, CI, fuzz, tests or generator scripts" in text
+    assert "plus tests that do not exercise" not in text
 
 
 def test_triage_prompt_skips_lint_discovery_when_configured():

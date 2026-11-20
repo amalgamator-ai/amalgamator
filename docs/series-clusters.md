@@ -195,6 +195,17 @@ The model's partition is a proposal; code enforces the contract.
 pipeline drops a commit only when **every path it touches** matches the skip
 policy. Otherwise the commit is kept and moved into its own cluster.
 
+The skip policy is now triage's `files_to_skip` only, and that list is
+restricted to auto-generated build artifacts. The former deterministic path set
+(`.github/`, `doc/`, `fuzz/`, release-note files) was removed: path shape is not
+a reliable signal. A generator script is source, not generated output, and API
+documentation is part of a public-API fix. Docs, CI, fuzz and release notes are
+ported with the fix. With no triage list, no file is skipped by path, so a commit
+is never dropped for path shape alone.
+
+The same generated-only rule applies to single-commit and fused pre-RED triage;
+series mode only changes how the skip list is applied.
+
 This is stricter than it sounds, because `files_to_skip` is currently applied
 only on the conflict path — a clean cherry-pick returns before the revert block
 (`run_bug_fix.py:4306-4310` vs `4354-4368`). Two fixes are prerequisites for this
@@ -363,8 +374,9 @@ reproducible reruns; the derived partition is recorded in the tracker either way
 1. **Phase 0.5 runs again in series mode.** The skip in `0f53cd9` is reverted
    (`run_bug_fix.py:7355-7363`). The deterministic assessment is computed
    *before* the LLM result and merged under it, so an unparseable triage JSON
-   still leaves `files_to_skip` and `test_files` populated — today a failed parse
-   leaves `{}` (`run_bug_fix.py:945-961`).
+   still leaves `test_files` populated. `files_to_skip` is triage-only: the
+   deterministic path-based skip set was removed, so without a triage list no
+   file is skipped by path shape.
 2. **New input and output fields** in `SemanticTriagePrompt` and
    `FusedPreRedPrompt`.
 3. **New lazy phase** between Phase 0.5 and Phase 2+3a: cluster planning.
@@ -379,7 +391,7 @@ reproducible reruns; the derived partition is recorded in the tracker either way
 | 1 | `auto_bug_fix/series_clusters.py`: model, measurement, validation, caps, mode | no | done |
 | 2 | Skip-path fixes: prune on the clean path and after resolution, glob matching, delete files the target never had | no | done |
 | 3 | Triage prompt: series input, `clusters`, `dropped`, `public_interface_files` | prompt only | done |
-| 4 | Revert triage skip; merge deterministic assessment under LLM result | no | done |
+| 4 | Merge deterministic assessment under LLM triage; skips are triage-only | no | done |
 | 5 | Cluster plan phase, loader, `verify` enforcement | yes at run time | done |
 | 6 | Phase 2+3a loop over clusters, gates, per-cluster verify | no | done |
 

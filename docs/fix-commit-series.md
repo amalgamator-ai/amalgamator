@@ -70,13 +70,12 @@ fix:
    Also skip Phase 0.5 (semantic triage) itself. On the 2.2.5 series it cost
    315s of 786s agent time, most of it tracing prerequisite commits that
    Phase 0.5b then discards. Its remaining products are all derivable from
-   git, so series mode builds the assessment deterministically:
+   git, so series mode builds the non-skip assessment deterministically
+   (skips come from triage):
 
-   - `files_to_skip` — paths whose components are bookkeeping only
-     (`.github/`, `doc/`, `docs/`, `fuzz/`, `fuzzing/`) plus release notes
-     (`Changes`, `CHANGELOG`, `NEWS`, `HISTORY`); on the expat series this
-     recovers 8 of the 12 files triage skipped and never skips source or
-     tests.
+   - `files_to_skip` — auto-generated build artifacts only, supplied by
+     triage; docs, CI, fuzz, tests and release notes are ported with the fix.
+     Path shape is not a skip signal.
    - `test_files` — `identify_test_files(seed)`; `_planned_test_files`
      unions this with the same function anyway.
    - `priority_files` — the allowlist, which is what triage's value falls

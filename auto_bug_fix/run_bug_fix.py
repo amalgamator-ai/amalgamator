@@ -1020,13 +1020,6 @@ def phase_0_5_semantic_triage(
     return assessment
 
 
-# Path components that never carry code a backport needs. Skipping them keeps
-# CI config, fuzz harnesses and documentation out of the candidate patch.
-_SERIES_SKIP_PATH_PARTS = frozenset({".github", "doc", "docs", "fuzz", "fuzzing"})
-# Release-note files: upstream bookkeeping that conflicts on every branch.
-_SERIES_SKIP_BASENAMES = frozenset({"changes", "changelog", "history", "news"})
-
-
 def _series_prompt_section(config: BugFixConfig) -> str:
     """The ordered commit list handed to triage in commit-series mode.
 
@@ -1052,35 +1045,6 @@ def _series_prompt_section(config: BugFixConfig) -> str:
         + "\n\nThe merged diff below is the sum of these commits; use it to analyse\n"
         "the fix, and the list above to cluster it.\n"
     )
-
-
-def _series_changed_files(config: BugFixConfig) -> list[str]:
-    """Every file touched by the commit series, sorted."""
-    changed: dict[str, None] = {}
-    for sha in config.source_fix_commits or [config.source_fix_commit]:
-        files = _git_lines(
-            config.repo_path, "diff-tree", "--no-commit-id", "--name-only", "-r", sha
-        )
-        for path in files:
-            changed.setdefault(path)
-    return sorted(changed)
-
-
-def _series_skip_files(config: BugFixConfig) -> list[str]:
-    """Files in the series that series mode will not port.
-
-    ``files_to_skip`` is the one triage product with a real effect on a
-    series run: it is reverted after each cherry-pick. Without the triage
-    session the set is derived from path shape alone, so it is deliberately
-    conservative — only components that carry no code and release notes.
-    """
-    skip = []
-    for path in _series_changed_files(config):
-        parts = path.lower().split("/")
-        in_bookkeeping_dir = any(part in _SERIES_SKIP_PATH_PARTS for part in parts[:-1])
-        if in_bookkeeping_dir or parts[-1] in _SERIES_SKIP_BASENAMES:
-            skip.append(path)
-    return skip
 
 
 def _cluster_journal(state: PipelineState) -> str:
@@ -1455,9 +1419,10 @@ def _merge_series_assessment(deterministic: dict, llm: dict) -> dict:
     """Merge the LLM triage on top of the deterministic series assessment.
 
     The deterministic keys are a floor: a failed or partial triage session must
-    not leave the run without ``files_to_skip`` or ``test_files``. Skip sets are
-    unioned because both sources carry real exclusions; every other key is the
-    model's to set when it produced one.
+    not leave the run without ``test_files``. ``files_to_skip`` is always empty
+    in the deterministic assessment now, so the triage list is its only source.
+    The union remains for callers/tests that pass a non-empty deterministic
+    mapping; it cannot drop triage entries.
     """
     merged = dict(deterministic)
     for key, value in (llm or {}).items():
@@ -1479,26 +1444,24 @@ def _series_triage_assessment(config: BugFixConfig, state: PipelineState) -> dic
     per-commit semantic pass cannot pay for itself. The later phases still
     read a few triage keys, and every one of them is derivable from git:
 
-    - ``files_to_skip`` — reverted after each cherry-pick (Phase 2+3a)
+    - ``files_to_skip`` — not derived here; the triage session decides skips
     - ``test_files`` — unioned with ``identify_test_files(seed)`` for the
       test port, which alone already covers the fix's test files
     - ``priority_files`` — the allowlist, used by Phase 3a resolution
     - ``prerequisites`` — never ported in series mode
     """
     test_files = identify_test_files(state.seed)
-    skip = _series_skip_files(config)
     log.info(
         "Phase 0.5: deterministic commit-series assessment "
-        "(%d test file(s), %d file(s) to skip) — merged under the triage result",
+        "(%d test file(s)) — merged under the triage result",
         len(test_files),
-        len(skip),
     )
     return {
         "mode": "commit_series_deterministic",
         "commit_type": "feature",
         "estimated_difficulty": "unknown",
         "recommendation": "series_mode",
-        "files_to_skip": skip,
+        "files_to_skip": [],
         "test_files": test_files,
         "priority_files": list(state.allowed_modules),
         "prerequisites": [],
