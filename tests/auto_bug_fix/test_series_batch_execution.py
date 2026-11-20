@@ -121,3 +121,26 @@ def test_skip_listed_files_never_enter_a_batch(tmp_path):
     assert outcome == "clean"
     assert not (repo / "docs/guide.md").exists()
     assert (repo / "src/a.c").read_text() == "ONE\ntwo\nthree\n"
+
+
+def test_failed_batch_apply_falls_back_to_single_commits(tmp_path, monkeypatch):
+    from auto_bug_fix import run_bug_fix
+
+    rp, repo, base, series = _setup(tmp_path)
+    # The target loses the path the series modifies, the shape of a dist-git
+    # repo whose source tree appears only at prep time. The combined diff
+    # cannot apply; each commit on its own becomes a modify/delete conflict.
+    _git(repo, "rm", "-q", "src/a.c")
+    _git(repo, "commit", "-q", "-m", "target without the fix's paths")
+
+    calls = []
+    monkeypatch.setattr(
+        run_bug_fix,
+        "cherry_pick_and_resolve",
+        lambda *a, **k: calls.append(k["commit"]) or "clean",
+    )
+
+    result = _run(rp, series, tmp_path)
+
+    assert calls == series
+    assert result == "clean"

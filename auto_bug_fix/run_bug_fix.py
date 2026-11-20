@@ -5152,9 +5152,33 @@ def cherry_pick_batch_and_resolve(
     uu_files = _conflicted_files(git_status_porcelain(repo))
 
     if not uu_files and not applied.success:
-        raise PipelineEscalation(
-            f"{label}: batched apply failed: {applied.stderr[:300]}"
+        # A target that does not carry the batch's paths — a dist-git repo
+        # whose source tree appears only at prep time — rejects the combined
+        # diff before any 3-way merge can run. The single-commit path turns
+        # that into a modify/delete conflict the resolver can handle, so retry
+        # the batch commit by commit instead of ending the run here.
+        detail = applied.stderr.strip().splitlines()
+        log.warning(
+            "%s: batched apply failed without conflicts (%s) — retrying "
+            "commit by commit",
+            label,
+            detail[0][:200] if detail else "no detail",
         )
+        _run_git(repo, ["reset", "--hard", base_head])
+        outcomes = [
+            cherry_pick_and_resolve(
+                config,
+                claude_config,
+                state,
+                tracker,
+                commit=commit,
+                label=f"{label} — single {index}/{len(commits)}",
+                files_to_skip=files_to_skip,
+                drop_empty=True,
+            )
+            for index, commit in enumerate(commits, start=1)
+        ]
+        return outcomes[-1] if outcomes else "clean"
 
     if uu_files:
         log.info(
@@ -8552,7 +8576,7 @@ def _run_pipeline_phases(
                         state.triage_assessment["cluster_plan"] = plan
                     state.current_cluster = cluster.id
                     batches = (
-                        batch_groups(cluster)
+                        batch_groups(cluster, max_commits=config.cluster_max_commits)
                         if config.batch_conflicting_commits
                         and cluster.predicted_conflicts
                         else [[commit] for commit in cluster.commits]
@@ -8578,8 +8602,9 @@ def _run_pipeline_phases(
                                 )
                             )
                         else:
+                            first = seen - len(batch) + 1
                             label = (
-                                f"commit {seen}/{total} "
+                                f"commits {first}-{seen}/{total} "
                                 f"(batch of {len(batch)}: {batch[0][:8]}..{batch[-1][:8]}) "
                                 f"[cluster {cluster.id} {position}/{len(batches)}]"
                             )
