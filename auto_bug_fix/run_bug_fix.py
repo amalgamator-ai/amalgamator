@@ -537,6 +537,7 @@ class PipelineState:
     dossier: Dossier = field(default_factory=Dossier)
     triage_assessment: dict = field(default_factory=dict)
     priority_files: list[str] = field(default_factory=list)
+    verify_failures: list = field(default_factory=list)
     baseline_build_exit: int = 0
     baseline_test_exit: int = 0
     baseline_build_output: str = ""
@@ -2369,8 +2370,13 @@ def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
 
 def _run_build_and_test(
     config: BugFixConfig, state: PipelineState
-) -> tuple[bool, str, str, str, str]:
-    """Run build, test, and lint commands. Return (passed, build_out, build_err, test_out, test_err).
+) -> tuple[bool, str, str, str, str, str]:
+    """Run build, test, and lint commands.
+
+    Return ``(passed, build_out, build_err, test_out, test_err, lint_out)``.
+    The lint slot keeps a lint failure out of the test slots, where Phase 4b
+    would otherwise read it as a broken test.
+
 
     Empty build/test commands are skipped (for interpreted languages).
     """
@@ -2380,7 +2386,7 @@ def _run_build_and_test(
             config.build_command, config.build_dir, timeout=config.command_timeout
         )
         if build_exit != 0:
-            return False, build_stdout, build_stderr, "", ""
+            return False, build_stdout, build_stderr, "", "", ""
 
     test_stdout = test_stderr = ""
     if config.test_command:
@@ -2392,7 +2398,7 @@ def _run_build_and_test(
                 "Test command timed out — treating as verification failure: %s",
                 config.test_command,
             )
-            return False, build_stdout, build_stderr, test_stdout, test_stderr
+            return False, build_stdout, build_stderr, test_stdout, test_stderr, ""
         failures = parse_test_failures(test_stdout, test_stderr)
         if failures:
             # Named failures — the baseline says which of them are pre-existing.
@@ -2426,17 +2432,30 @@ def _run_build_and_test(
         passed = True
 
     if not passed:
-        return False, build_stdout, build_stderr, test_stdout, test_stderr
+        return False, build_stdout, build_stderr, test_stdout, test_stderr, ""
 
     lint_cmd = _resolve_lint_command(config, state)
     if lint_cmd:
         lint_exit, lint_stdout, lint_stderr = run_test_suite(
             lint_cmd, config.build_dir, timeout=config.command_timeout
         )
-        if lint_exit == TIMEOUT_EXIT_CODE:
+        lint_output = lint_stdout + lint_stderr
+        unavailable = lint_exit == 127 or "command not found" in lint_output
+        if unavailable:
+            # Triage-discovered lint commands are advisory. A tool that is not
+            # installed says nothing about the port, and must not send the run
+            # into Phase 4b to "fix" a build that is fine.
+            log.warning("Lint tool unavailable — skipping: %s", lint_cmd)
+            if state.dossier:
+                state.dossier.add(
+                    "Lint tool unavailable",
+                    lint_cmd,
+                    "Phase 4 verify",
+                )
+        elif lint_exit == TIMEOUT_EXIT_CODE:
             log.warning("Lint command timed out — treating as failure: %s", lint_cmd)
-            return False, build_stdout, build_stderr, lint_stdout, lint_stderr
-        if lint_exit != 0:
+            return False, build_stdout, build_stderr, "", "", lint_output
+        elif lint_exit != 0:
             baseline_lint_failed = any(
                 e["cmd"] == lint_cmd and e["exit_code"] != 0
                 for e in state.baseline_verification
@@ -2445,7 +2464,7 @@ def _run_build_and_test(
                 log.info("Lint failed but pre-existing on baseline: %s", lint_cmd)
             else:
                 log.warning("Lint failed (NEW): %s", lint_cmd)
-                return False, build_stdout, build_stderr, lint_stdout, lint_stderr
+                return False, build_stdout, build_stderr, "", "", lint_output
 
     repo = config.repo_path
     ok, extra_files = enforce_allowlist(
@@ -2456,7 +2475,7 @@ def _run_build_and_test(
     test_ok, vetoed = enforce_test_file_veto(repo, state.seed)
     if not test_ok:
         log.info("Test files modified outside seed (advisory): %s", vetoed)
-    return True, build_stdout, build_stderr, test_stdout, test_stderr
+    return True, build_stdout, build_stderr, test_stdout, test_stderr, ""
 
 
 def phase_4_verify(
@@ -2475,9 +2494,24 @@ def phase_4_verify(
     """
     baseline = _worktree_snapshot(config)
     with _discarding_verification_dirt(config, baseline, state, "Phase 4 verify"):
-        passed, _, _, _, _ = _run_build_and_test(config, state)
+        passed, build_out, build_err, test_out, test_err, lint_out = (
+            _run_build_and_test(config, state)
+        )
     if passed:
         return True
+    # Phase 4b is the next step and has no other way to learn what failed:
+    # keep the commands and their output so its prompt can start from the
+    # real error instead of rediscovering it.
+    state.verify_failures.append(
+        {
+            "phase": "Phase 4 verify",
+            "build_output": (build_out + build_err)[-4000:],
+            "test_output": (test_out + test_err)[-4000:],
+            "lint_output": lint_out[-4000:],
+            "build_command": config.build_command,
+            "test_command": config.test_command,
+        }
+    )
     raise PipelineEscalation("Phase 4 verify failed")
 
 
@@ -4034,6 +4068,33 @@ def phase_4a_build_recovery(
     )
 
 
+def _previous_failures_section(state: PipelineState) -> str:
+    """Render the build/test failures that escalated the run to Phase 4b."""
+    failures = list(getattr(state, "verify_failures", None) or [])
+    if not failures:
+        return ""
+    lines = [
+        "",
+        "<previous_failures>",
+        "These verification runs already failed. Start from this output; do not",
+        "rediscover the error, and do not repeat a fix that is already in the tree.",
+    ]
+    for item in failures[-3:]:
+        lines.append(f"\n## {item.get('phase', 'verification')}")
+        if item.get("build_command"):
+            lines.append(f"build command: {item['build_command']}")
+        if item.get("test_command"):
+            lines.append(f"test command: {item['test_command']}")
+        if item.get("build_output"):
+            lines.append(f"<build_output>\n{item['build_output']}\n</build_output>")
+        if item.get("test_output"):
+            lines.append(f"<test_output>\n{item['test_output']}\n</test_output>")
+        if item.get("lint_output"):
+            lines.append(f"<lint_output>\n{item['lint_output']}\n</lint_output>")
+    lines.append("</previous_failures>")
+    return "\n".join(lines)
+
+
 def phase_4b_run_and_fix(
     config: BugFixConfig,
     claude_config: ClaudeConfig,
@@ -4065,6 +4126,10 @@ def phase_4b_run_and_fix(
         else "{}"
     )
 
+    # Failures collected by Phase 4 and the post-4a verify are the run's only
+    # description of what is broken; pass them in rather than making 4b rediscover.
+    previous_failures = _previous_failures_section(state)
+
     enriched_context = f"""
 <context>
 <output_dir>{config.repo_path}</output_dir>
@@ -4080,6 +4145,7 @@ def phase_4b_run_and_fix(
 <max_build_test_retries>{config.max_build_test_retries}</max_build_test_retries>
 </context>
 {_extra_verification_section(extra_verification)}
+{previous_failures}
 
 <pipeline_dossier>
 {dossier_text}
@@ -7960,7 +8026,22 @@ def _run_pipeline_phases(
                 _record_verify_gate(config, state, tracker)
         except PipelineEscalation:
             with tracker.phase("Phase 4b — Run-and-fix loop (build-test-fix)"):
-                phase_4b_run_and_fix(config, claude_config, state, tracker)
+                escalated_checks = [
+                    command
+                    for command in _triage_commands(
+                        state.triage_assessment.get("lint_commands")
+                    )
+                    if _validate_shell_command(command)
+                ]
+                if config.lint_command and config.lint_command not in escalated_checks:
+                    escalated_checks.insert(0, config.lint_command)
+                phase_4b_run_and_fix(
+                    config,
+                    claude_config,
+                    state,
+                    tracker,
+                    extra_verification=escalated_checks,
+                )
 
     phase4_lint = _resolve_lint_command(config, state)
     lint_cmds = [

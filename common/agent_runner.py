@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -45,9 +46,34 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-MAX_AGENT_ITERATIONS = (
-    9999  # Effectively unlimited — agent stops when it has no more tool calls
-)
+
+def _iteration_limit() -> int:
+    """Iteration ceiling, overridable from the environment.
+
+    Effectively unlimited by default: the agent stops when it has no more tool
+    calls. A model that does not converge (retrying failing tools forever) is
+    bounded from outside rather than silently burning tokens. A malformed value
+    is a typo, not a reason to fail the import.
+    """
+    raw = os.environ.get("AMALGAMATOR_MAX_AGENT_ITERATIONS")
+    if raw is None:
+        return 9999
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning(
+            "AMALGAMATOR_MAX_AGENT_ITERATIONS=%r is not an integer — using 9999",
+            raw,
+        )
+        return 9999
+
+
+MAX_AGENT_ITERATIONS = _iteration_limit()
+
+# An assistant turn with neither text nor tool calls is a failed turn, not a
+# decision to stop: the model can return one spuriously mid-session. Retry it
+# a couple of times before concluding that the session really is over.
+EMPTY_RESPONSE_RETRIES = 2
 
 
 def _litellm_completion_with_streaming(stream: bool = True, **kwargs):
@@ -1026,6 +1052,7 @@ class LiteLLMAgentRunner(AgentRunner):
             {"role": "user", "content": user_prompt},
         ]
 
+        empty_turns = 0
         timing = StepTiming(name="")
         iteration = 0
         last_tool_sig: str | None = None
@@ -1158,6 +1185,25 @@ class LiteLLMAgentRunner(AgentRunner):
             message = choice.message
 
             content_text = _strip_thinking(message.content or "")
+
+            if not message.tool_calls and not content_text:
+                empty_turns += 1
+                log.warning(
+                    "Empty assistant response on iteration %d "
+                    "(finish_reason=%s) - retry %d/%d",
+                    iteration,
+                    getattr(choice, "finish_reason", None),
+                    empty_turns,
+                    EMPTY_RESPONSE_RETRIES,
+                )
+                if empty_turns <= EMPTY_RESPONSE_RETRIES:
+                    continue
+                log.error(
+                    "Model returned empty responses %d times - stopping the session",
+                    empty_turns,
+                )
+                break
+            empty_turns = 0
 
             assistant_msg: dict = {
                 "role": "assistant",

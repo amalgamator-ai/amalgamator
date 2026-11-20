@@ -222,7 +222,7 @@ def test_lint_pass_means_verify_pass(mock_run, mock_allow, mock_veto):
     ]
     config = _make_config(lint_command="go vet ./...")
     state = PipelineState()
-    passed, _, _, _, _ = _run_build_and_test(config, state)
+    passed, *_ = _run_build_and_test(config, state)
     assert passed is True
     assert mock_run.call_count == 3
 
@@ -238,9 +238,11 @@ def test_lint_fail_means_verify_fail(mock_run, mock_allow, mock_veto):
     ]
     config = _make_config(lint_command="go vet ./...")
     state = PipelineState()
-    passed, _, _, test_out, test_err = _run_build_and_test(config, state)
+    passed, _, _, test_out, test_err, lint_out = _run_build_and_test(config, state)
     assert passed is False
-    assert "unused import" in test_out
+    assert "unused import" in lint_out
+    assert test_out == ""
+    assert test_err == ""
 
 
 @patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
@@ -257,7 +259,7 @@ def test_lint_fail_preexisting_means_verify_pass(mock_run, mock_allow, mock_veto
     state.baseline_verification = [
         {"cmd": "go vet ./...", "exit_code": 1, "output": "same error"}
     ]
-    passed, _, _, _, _ = _run_build_and_test(config, state)
+    passed, *_ = _run_build_and_test(config, state)
     assert passed is True
 
 
@@ -271,7 +273,7 @@ def test_no_lint_command_skips_lint(mock_run, mock_allow, mock_veto):
     ]
     config = _make_config(lint_command="")
     state = PipelineState()
-    passed, _, _, _, _ = _run_build_and_test(config, state)
+    passed, *_ = _run_build_and_test(config, state)
     assert passed is True
     assert mock_run.call_count == 2
 
@@ -346,7 +348,7 @@ def test_test_timeout_means_verify_fail(mock_run, mock_allow, mock_veto):
     ]
     config = _make_config()
     state = PipelineState()
-    passed, _, _, _, _ = _run_build_and_test(config, state)
+    passed, *_ = _run_build_and_test(config, state)
     assert passed is False
     assert mock_run.call_count == 2
 
@@ -369,7 +371,7 @@ def test_lint_timeout_not_masked_as_preexisting(mock_run, mock_allow, mock_veto)
             "output": "also timed out",
         }
     ]
-    passed, _, _, _, _ = _run_build_and_test(config, state)
+    passed, *_ = _run_build_and_test(config, state)
     assert passed is False
 
 
