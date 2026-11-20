@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from auto_bug_fix.bug_fix_config import BugFixConfig
 from auto_bug_fix.run_bug_fix import PipelineState, _run_build_and_test
@@ -44,7 +44,7 @@ def test_missing_lint_tool_is_skipped_not_failed(tmp_path):
     assert passed is True
 
 
-def test_lint_failure_with_the_tool_present_still_fails(tmp_path):
+def test_lint_failure_with_the_tool_present_is_advisory(tmp_path):
     state = _state()
     with patch(
         "auto_bug_fix.run_bug_fix.run_test_suite",
@@ -52,4 +52,20 @@ def test_lint_failure_with_the_tool_present_still_fails(tmp_path):
     ):
         passed, *_ = _run_build_and_test(_config(tmp_path), state)
 
-    assert passed is False
+    assert passed is True
+
+
+def test_lint_failure_is_recorded_in_the_dossier(tmp_path):
+    state = _state()
+    state.dossier = MagicMock()
+    with patch(
+        "auto_bug_fix.run_bug_fix.run_test_suite",
+        return_value=(1, "xmlparse.c:10: style error", ""),
+    ):
+        passed, *_ = _run_build_and_test(_config(tmp_path), state)
+
+    assert passed is True
+    state.dossier.add.assert_called_once()
+    args, _kwargs = state.dossier.add.call_args
+    assert args[0] == "Lint advisory (not a build/test failure)"
+    assert "xmlparse.c:10: style error" in args[1]

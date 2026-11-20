@@ -313,6 +313,8 @@ Rules:
 - every action MUST carry a `verify` shell command that exits 0 only when the
   action has actually been performed; it must be a single command with no
   pipes, redirection, or chaining (use one `grep -q` instead of a pipeline);
+  it must inspect exactly one path — a multi-file `grep -L` prints only the
+  files that lack the symbol, so it cannot prove the whole set;
   commands run from the repository root;
 - do not restate generic advice, do not add actions for symbols the target
   already provides;

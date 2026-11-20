@@ -54,7 +54,8 @@ resolution, and static verification.
   does not author them (an optional pinned form exists for reruns).
 - **Plans are per cluster and generated lazily**, against the tree as it is when
   the cluster starts.
-- **Plans are binding and statically verified**, not advisory prose.
+- **Plans are binding on the resolver; their static `verify` checks are
+  advisory evidence**, not gates. Build and test remain the gates.
 
 Division of labour:
 
@@ -164,6 +165,9 @@ Validation at load (this is new code, there is no plan loader today):
    (`run_bug_fix.py:7620-7624`, `7711-7721`).
 4. Commands run with `cwd=config.repo_path` (the examples are repo-relative) and
    `config.command_timeout`.
+5. Each `verify` command inspects exactly one path. A multi-file `grep -L`
+   prints only the files that lack the symbol, so it cannot prove that every
+   path is clean.
 
 A rejected plan is regenerated once with the rejection reason; a second failure
 falls back to per-commit mode for that cluster.
@@ -312,8 +316,8 @@ For each cluster, in order:
 5. **Verify** — run the plan's `verify` commands, then the configured **build**
    command. Tests are not run here: series mode defers the first test run to
    Phase 4 (commit `c940577`), because the test port lands before the series and
-   may not compile until later commits arrive. A cluster verify failure blocks
-   the next cluster.
+   may not compile until later commits arrive. A cluster verify failure is
+   recorded as `cluster_<id>=advisory` and does not block the next cluster.
 
 Repair commits created inside a cluster are left in place. Squashing them is
 deferred: a post-hoc rebase invalidates the commit ranges already checked by
@@ -327,7 +331,7 @@ deferred: a post-hoc rebase invalidates the commit ranges already checked by
 | Partition invalid | one cluster per commit, record gate, continue |
 | Plan unparseable or missing `verify` | regenerate once, then per-commit mode for that cluster |
 | A commit cannot be applied | raise as today; the per-commit path is not currently a fallback and making it one is a control-flow change, listed as a follow-up |
-| `verify` fails | escalate with the failing plan entry and its output; do not enter the generic Phase 4b loop first |
+| `verify` fails | record `cluster_<id>=advisory` with the failing entry and its output; continue. Build/test remain the gates |
 | Cluster ends with zero commits | drop the cluster, skip its verify, record it |
 | Agent commits during planning | `_agent_commit_guard` strips build output; the plan prompt forbids commits and any commit it makes is reported as a gate |
 

@@ -230,7 +230,7 @@ def test_lint_pass_means_verify_pass(mock_run, mock_allow, mock_veto):
 @patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
 @patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
 @patch("auto_bug_fix.run_bug_fix.run_test_suite")
-def test_lint_fail_means_verify_fail(mock_run, mock_allow, mock_veto):
+def test_lint_fail_is_advisory(mock_run, mock_allow, mock_veto):
     mock_run.side_effect = [
         (0, "", ""),  # build
         (0, "", ""),  # test
@@ -238,9 +238,8 @@ def test_lint_fail_means_verify_fail(mock_run, mock_allow, mock_veto):
     ]
     config = _make_config(lint_command="go vet ./...")
     state = PipelineState()
-    passed, _, _, test_out, test_err, lint_out = _run_build_and_test(config, state)
-    assert passed is False
-    assert "unused import" in lint_out
+    passed, _, _, test_out, test_err, _lint_out = _run_build_and_test(config, state)
+    assert passed is True
     assert test_out == ""
     assert test_err == ""
 
@@ -356,7 +355,7 @@ def test_test_timeout_means_verify_fail(mock_run, mock_allow, mock_veto):
 @patch("auto_bug_fix.run_bug_fix.enforce_test_file_veto", return_value=(True, []))
 @patch("auto_bug_fix.run_bug_fix.enforce_allowlist", return_value=(True, []))
 @patch("auto_bug_fix.run_bug_fix.run_test_suite")
-def test_lint_timeout_not_masked_as_preexisting(mock_run, mock_allow, mock_veto):
+def test_lint_timeout_is_advisory(mock_run, mock_allow, mock_veto):
     mock_run.side_effect = [
         (0, "", ""),  # build
         (0, "", ""),  # test
@@ -372,7 +371,7 @@ def test_lint_timeout_not_masked_as_preexisting(mock_run, mock_allow, mock_veto)
         }
     ]
     passed, *_ = _run_build_and_test(config, state)
-    assert passed is False
+    assert passed is True
 
 
 # --- _sanitize_ref tests (function lives in config_loader, imported here) ---
