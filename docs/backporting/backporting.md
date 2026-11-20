@@ -40,6 +40,7 @@ build:
 model: m1
 # advanced:
 #   phase_4b_model: m3
+#   reasoning_effort: medium   # provider reasoning budget (LiteLLM only)
 ```
 
 Run from the Amalgamator repository root:

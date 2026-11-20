@@ -62,6 +62,13 @@ class BugFixConfig:
     # None = auto-detect from litellm model info, else default 128K.
     context_length: int | None = None
 
+    # Provider reasoning budget for every agent request ("", "none", "low",
+    # "medium", "high"; provider-dependent). Empty keeps the provider default.
+    # Set via YAML advanced.reasoning_effort. Reasoning length is the largest
+    # wall-time term on adaptive-reasoning endpoints: on the PHP 8.3 benchmark
+    # "medium" cut wall time 4x while keeping the outcome.
+    reasoning_effort: str = ""
+
     # Patch-ID
     forward_patch_id_lookback: str = "12 months"
 

@@ -131,6 +131,13 @@ fallback.
   `context_keep_tokens` stay verbatim (defaults 120k/60k, LiteLLM only). The
   keep window is clamped to half the trigger budget so it cannot defeat
   elision on small-context models.
+- `reasoning_effort` (`""`, `none`, `low`, `medium`, `high`) — provider
+  reasoning budget for every agent request, sent as a per-request override on
+  top of the profile params (LiteLLM only; empty keeps the provider default).
+  This is the largest wall-time term on adaptive-reasoning endpoints: across
+  the ten benchmark cases `medium` cut aggregate wall time 2.34x and output
+  tokens 3.1x, with all ten outcomes still successful. Reasoning length is
+  model behaviour, so validate quality per case before adopting it.
 - `resolution_max_iterations` (600) is a runaway guard (LiteLLM only; the
   Claude SDK maps it to `max_turns`); `resolution_idle_turns` (100) asks the
   model to wrap up only after that many turns with an unchanged tree, so

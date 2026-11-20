@@ -847,6 +847,7 @@ def test_fused_optimization_flags_parse():
         _cfg_with_advanced(
             {
                 "fused_compact_prompts": True,
+                "reasoning_effort": "medium",
                 "tool_read_cap": 12000,
                 "tool_bash_cap": 8000,
                 "context_prune_tokens": 150000,
@@ -861,6 +862,7 @@ def test_fused_optimization_flags_parse():
         )
     )
     assert cfg.fused_compact_prompts is True
+    assert cfg.reasoning_effort == "medium"
     assert cfg.tool_read_cap == 12000
     assert cfg.tool_bash_cap == 8000
     assert cfg.context_prune_tokens == 150000
@@ -873,6 +875,7 @@ def test_fused_optimization_flags_parse():
     assert cfg.review_idle_turns == 15
     cfg, _, _ = parse_bug_fix_config(_cfg_with_advanced({}))
     assert cfg.fused_compact_prompts is False
+    assert cfg.reasoning_effort == ""
     assert cfg.tool_read_cap is None and cfg.tool_bash_cap is None
     assert cfg.context_prune_tokens is None and cfg.context_keep_tokens is None
     assert cfg.resolution_max_iterations == 600

@@ -110,6 +110,7 @@ def _phase_config(
         effort=effort or claude_config.effort,
         profile=effective_profile,
         xml_tool_fallback=claude_config.xml_tool_fallback,
+        reasoning_effort=claude_config.reasoning_effort,
     )
 
 

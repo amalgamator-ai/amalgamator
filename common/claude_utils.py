@@ -131,6 +131,9 @@ class ClaudeConfig:
     wrapup_message: str = ""
     # Wrap up when the repository tree has been unchanged for this many turns.
     idle_turns: int | None = None
+    # Provider reasoning budget; "" keeps the provider default. Sent as a
+    # per-request override on top of the profile params.
+    reasoning_effort: str = ""
 
     def __post_init__(self):
         if self.profile:

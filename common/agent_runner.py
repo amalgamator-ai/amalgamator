@@ -936,6 +936,7 @@ class LiteLLMAgentRunner(AgentRunner):
                 wrapup_at=getattr(config, "wrapup_at", None),
                 wrapup_message=getattr(config, "wrapup_message", ""),
                 idle_turns=getattr(config, "idle_turns", None),
+                reasoning_effort=getattr(config, "reasoning_effort", "") or "",
             )
             timing.name = step.name
 
@@ -981,6 +982,7 @@ class LiteLLMAgentRunner(AgentRunner):
         wrapup_at: int | None = None,
         wrapup_message: str = "",
         idle_turns: int | None = None,
+        reasoning_effort: str = "",
     ) -> StepTiming:
         """Core tool-use loop: prompt -> tool calls -> execute -> repeat.
 
@@ -1040,7 +1042,12 @@ class LiteLLMAgentRunner(AgentRunner):
         )
 
         extra_kwargs = build_request_kwargs(
-            model, profile=profile, default_max_tokens=16384
+            model,
+            profile=profile,
+            default_max_tokens=16384,
+            overrides=(
+                {"reasoning_effort": reasoning_effort} if reasoning_effort else None
+            ),
         )
 
         tools = _filter_tools(allowed_tools)

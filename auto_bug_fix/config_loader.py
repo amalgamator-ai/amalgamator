@@ -463,6 +463,7 @@ def parse_bug_fix_config(
         fused_resolution=bool(advanced.get("fused_resolution", False)),
         fused_pre_red=bool(advanced.get("fused_pre_red", False)),
         fused_compact_prompts=bool(advanced.get("fused_compact_prompts", False)),
+        reasoning_effort=str(advanced.get("reasoning_effort", "") or "").strip(),
         tool_read_cap=advanced_int(advanced, "tool_read_cap"),
         tool_bash_cap=advanced_int(advanced, "tool_bash_cap"),
         context_prune_tokens=advanced_int(advanced, "context_prune_tokens"),
@@ -627,6 +628,7 @@ def load_pipeline_config(
     )
     claude_config.command_timeout = bug_fix_config.command_timeout
     claude_config.context_length = bug_fix_config.context_length
+    claude_config.reasoning_effort = bug_fix_config.reasoning_effort
 
     return bug_fix_config, claude_config, workdir, source_path
 
@@ -761,5 +763,6 @@ def load_multi_target_config(
     )
     claude_config.command_timeout = bug_fix_config.command_timeout
     claude_config.context_length = bug_fix_config.context_length
+    claude_config.reasoning_effort = bug_fix_config.reasoning_effort
 
     return targets, bug_fix_config, claude_config, workdir, source_path
