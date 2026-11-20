@@ -46,11 +46,29 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-MAX_AGENT_ITERATIONS = int(
-    os.environ.get("AMALGAMATOR_MAX_AGENT_ITERATIONS", "9999")
-)  # Effectively unlimited by default — the agent stops when it has no more
-# tool calls. A model that does not converge (retrying failing tools forever)
-# is bounded from outside rather than silently burning tokens.
+
+def _iteration_limit() -> int:
+    """Iteration ceiling, overridable from the environment.
+
+    Effectively unlimited by default: the agent stops when it has no more tool
+    calls. A model that does not converge (retrying failing tools forever) is
+    bounded from outside rather than silently burning tokens. A malformed value
+    is a typo, not a reason to fail the import.
+    """
+    raw = os.environ.get("AMALGAMATOR_MAX_AGENT_ITERATIONS")
+    if raw is None:
+        return 9999
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning(
+            "AMALGAMATOR_MAX_AGENT_ITERATIONS=%r is not an integer — using 9999",
+            raw,
+        )
+        return 9999
+
+
+MAX_AGENT_ITERATIONS = _iteration_limit()
 
 # An assistant turn with neither text nor tool calls is a failed turn, not a
 # decision to stop: the model can return one spuriously mid-session. Retry it
