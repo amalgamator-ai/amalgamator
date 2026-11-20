@@ -4608,6 +4608,23 @@ def _previous_failures_section(state: PipelineState) -> str:
     failures = list(getattr(state, "verify_failures", None) or [])
     if not failures:
         return ""
+    # The same verification runs again after 4a. Repeating its output verbatim
+    # would spend the three-entry window on evidence 4b already has, so keep
+    # the latest copy of each distinct phase+output and drop the earlier ones.
+    deduped: list[dict] = []
+    seen: set[tuple[object, object, object, object]] = set()
+    for item in reversed(failures):
+        key = (
+            item.get("phase"),
+            item.get("build_output"),
+            item.get("test_output"),
+            item.get("lint_output"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    failures = list(reversed(deduped))
     lines = [
         "",
         "<previous_failures>",

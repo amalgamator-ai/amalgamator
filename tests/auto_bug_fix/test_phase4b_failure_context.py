@@ -47,6 +47,54 @@ def test_only_the_last_three_failures_are_rendered():
     assert "attempt 4" in text
 
 
+def test_identical_failures_are_rendered_once():
+    state = PipelineState()
+    entry = {
+        "phase": "Phase 4 verify",
+        "build_command": "make -C lib",
+        "test_command": "make -C tests check",
+        "build_output": "undefined reference to `expat_malloc'",
+        "test_output": "",
+    }
+    state.verify_failures.extend([entry, dict(entry)])
+
+    text = _previous_failures_section(state)
+
+    assert text.count("## Phase 4 verify") == 1
+
+
+def test_distinct_failures_under_the_same_phase_are_both_kept():
+    state = PipelineState()
+    state.verify_failures.extend(
+        [
+            {"phase": "Phase 4 verify", "build_output": "first error"},
+            {"phase": "Phase 4 verify", "build_output": "second error"},
+        ]
+    )
+
+    text = _previous_failures_section(state)
+
+    assert text.count("## Phase 4 verify") == 2
+    assert "first error" in text
+    assert "second error" in text
+
+
+def test_deduplication_keeps_the_latest_copy():
+    state = PipelineState()
+    state.verify_failures.extend(
+        [
+            {"phase": "Phase 4 verify", "build_output": "old failure"},
+            {"phase": "Phase 4a attempt 1", "build_output": "recovery failure"},
+            {"phase": "Phase 4 verify", "build_output": "old failure"},
+        ]
+    )
+
+    text = _previous_failures_section(state)
+
+    assert text.count("old failure") == 1
+    assert "recovery failure" in text
+
+
 def test_lint_failure_renders_in_its_own_slot():
     state = PipelineState()
     state.verify_failures.append(
