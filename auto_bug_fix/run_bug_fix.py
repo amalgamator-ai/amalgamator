@@ -4267,6 +4267,14 @@ def phase_4a_build_recovery(
             no_regression, _ = check_regression(failures, state.baseline)
             if test_exit != TIMEOUT_EXIT_CODE and no_regression:
                 log.info("Phase 4a: build+test passed on attempt %d", attempt)
+                # A passing attempt supersedes the ones before it: leaving
+                # their errors in <previous_failures> would tell 4b to start
+                # from failures that no longer exist.
+                state.verify_failures = [
+                    entry
+                    for entry in state.verify_failures
+                    if not str(entry.get("phase", "")).startswith("Phase 4a attempt ")
+                ]
                 # Any agent edits were already committed at the end of the
                 # previous iteration; anything still dirty here is build/test
                 # side effects, which must not reach the deliverables.

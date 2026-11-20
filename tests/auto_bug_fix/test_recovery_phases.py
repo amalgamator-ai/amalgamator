@@ -278,6 +278,29 @@ def test_phase_4a_escalates_when_the_agent_makes_no_changes(tmp_path, monkeypatc
     assert len(calls) == 1
 
 
+def test_phase_4a_drops_entries_of_attempts_it_superseded(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    calls = _patch_claude_run(monkeypatch)
+    state = PipelineState()
+    state.verify_failures.append(
+        {"phase": "Phase 4a attempt 1", "build_output": "old failure"}
+    )
+    state.verify_failures.append(
+        {"phase": "Phase 4 verify", "build_output": "escalation"}
+    )
+
+    phase_4a_build_recovery(
+        _config(repo, build_command="true", test_command="true"),
+        _claude_config(repo),
+        state,
+        tracker=None,
+        fix_diff="",
+    )
+
+    assert [entry["phase"] for entry in state.verify_failures] == ["Phase 4 verify"]
+    assert calls == []
+
+
 def test_phase_4a_records_its_failure_for_phase_4b(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path)
     _patch_claude_run(monkeypatch)
