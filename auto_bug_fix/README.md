@@ -178,7 +178,7 @@ session authored.
 ## Requirements
 
 - Python ≥ 3.14
-- git (the pipeline works in a disposable `git worktree` of your repo)
+- git ≥ 2.34 (the pipeline works in a disposable `git worktree` of your repo; commit-series mode emulates `cherry-pick --empty=drop` on git < 2.45)
 - Python packages: `claude-agent-sdk`, `litellm`, `pyyaml`, `colorama` (from the repo root: `pip install -e .`)
 - A reachable model service with tool/function calling support and the credentials it requires. Configure keys in a model profile or use the provider's environment/login setup. Local unauthenticated servers do not require a cloud API key.
 
