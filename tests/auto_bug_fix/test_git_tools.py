@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import subprocess
 
+from auto_bug_fix import git_tools
 from auto_bug_fix.git_tools import (
+    GitResult,
     git_cat_file_exists,
+    git_cherry_pick,
     git_diff_name_only,
     git_diff_name_only_range,
     git_is_ancestor,
@@ -330,3 +333,117 @@ def test_patch_id_matches_gits_own_on_non_utf8_content(latin1_repo):
         .split()[0]
     )
     assert git_patch_id(str(repo), head) == expected
+
+
+# --- cherry-pick --empty=drop portability ---------------------------------
+#
+# `--empty=drop` exists only in git >= 2.45. RHEL 8/9, Ubuntu 22.04/24.04,
+# Debian 12 and Fedora <= 40 ship older git, where the option is rejected
+# while parsing arguments: the pick exits non-zero with no conflicts, which
+# series mode reads as "unmappable cherry-pick (all strategies failed)".
+
+
+def test_cherry_pick_passes_empty_drop_when_supported(monkeypatch, tmp_git_repo):
+    calls = []
+
+    def fake_run_git(repo_path, args, **kwargs):
+        calls.append(args)
+        return GitResult(0, "", "")
+
+    monkeypatch.setattr(git_tools, "_git_cherry_pick_supports_empty_drop", lambda: True)
+    monkeypatch.setattr(git_tools, "is_merge_commit", lambda *_: False)
+    monkeypatch.setattr(git_tools, "_run_git", fake_run_git)
+
+    result = git_cherry_pick(tmp_git_repo.repo_path, "abc123", drop_empty=True)
+
+    assert result.success
+    assert "--empty=drop" in calls[0]
+
+
+def test_cherry_pick_omits_empty_drop_on_old_git(monkeypatch, tmp_git_repo):
+    calls = []
+
+    def fake_run_git(repo_path, args, **kwargs):
+        calls.append(args)
+        return GitResult(0, "", "")
+
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    monkeypatch.setattr(git_tools, "is_merge_commit", lambda *_: False)
+    monkeypatch.setattr(git_tools, "_run_git", fake_run_git)
+
+    result = git_cherry_pick(tmp_git_repo.repo_path, "abc123", drop_empty=True)
+
+    assert result.success
+    assert "--empty=drop" not in calls[0]
+
+
+def test_cherry_pick_skips_empty_pick_on_old_git(monkeypatch, tmp_git_repo):
+    """An empty pick must be dropped, exactly as --empty=drop would."""
+    calls = []
+
+    def fake_run_git(repo_path, args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["cherry-pick", "--skip"]:
+            return GitResult(0, "", "")
+        return GitResult(
+            1,
+            "",
+            "The previous cherry-pick is now empty, possibly due to conflict "
+            "resolution.\nIf you wish to commit it anyway, use:\n\n"
+            "    git commit --allow-empty\n",
+        )
+
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    monkeypatch.setattr(git_tools, "is_merge_commit", lambda *_: False)
+    monkeypatch.setattr(git_tools, "_run_git", fake_run_git)
+
+    result = git_cherry_pick(tmp_git_repo.repo_path, "abc123", drop_empty=True)
+
+    assert result.success
+    assert calls[1] == ["cherry-pick", "--skip"]
+
+
+def test_cherry_pick_does_not_skip_a_real_failure(monkeypatch, tmp_git_repo):
+    calls = []
+
+    def fake_run_git(repo_path, args, **kwargs):
+        calls.append(args)
+        return GitResult(128, "", "fatal: bad object abc123")
+
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    monkeypatch.setattr(git_tools, "is_merge_commit", lambda *_: False)
+    monkeypatch.setattr(git_tools, "_run_git", fake_run_git)
+
+    result = git_cherry_pick(tmp_git_repo.repo_path, "abc123", drop_empty=True)
+
+    assert not result.success
+    assert len(calls) == 1
+    assert calls[0][:2] != ["cherry-pick", "--skip"]
+
+
+def test_cherry_pick_drops_empty_commit_on_real_repo(monkeypatch, tmp_git_repo):
+    """End to end against real git: re-applying a commit is dropped, not fatal."""
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    rp = tmp_git_repo.repo_path
+    subprocess.run(
+        ["git", "checkout", "-q", tmp_git_repo.target_branch], check=True, cwd=rp
+    )
+
+    assert git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=True).success
+
+    # Second application leaves nothing to commit — the emulated drop keeps
+    # the series moving instead of failing the cluster.
+    assert git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=True).success
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=rp, capture_output=True, text=True
+    ).stdout
+    assert status.strip() == ""
