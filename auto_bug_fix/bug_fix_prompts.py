@@ -88,8 +88,8 @@ Write a JSON file to `{output_file}` with this exact structure:
       "reason": "why it is or isn't easily portable"
     }}
   ],
-  "files_to_skip": ["generated files, binary files, and unrelated test files — auto-resolved or excluded from test port"],
-  "test_files": ["test files the fix changes: code tests, golden/expected files, fixtures — excluding files_to_skip"],
+  "files_to_skip": ["auto-generated build artifacts only — codegen, generated headers, lock files; never docs, CI, fuzz, tests, or generator scripts"],
+  "test_files": ["test files the fix changes: code tests, golden/expected files, fixtures"],
   "regeneration_commands": ["commands to regenerate the skipped files, e.g. make generate"],
   "lint_commands": ["project lint/vet command, e.g. go vet ./..., cargo clippy, ruff check ."],
   "verification_commands": ["additional test commands beyond basic build, e.g. go test ./staging/src/k8s.io/api/... -run TestRoundTrip"],
@@ -118,13 +118,14 @@ Recommendation guidelines:
         series_schema = ""
         if self.series_mode:
             series_task = (
-                "10. **Cluster the commit series**: this fix is an ordered series applied one\n"
+                "9. **Cluster the commit series**: this fix is an ordered series applied one\n"
                 "   commit at a time. Group the commits into contiguous clusters, each handled\n"
                 "   as one unit with one intent: prerequisite refactors that only enable a\n"
                 "   later commit, the behaviour change itself, its tests. Never reorder a\n"
                 "   commit, and cover every commit exactly once. Put a commit in `dropped`\n"
-                "   only when it is unrelated to the fix (docs, CI, unrelated fuzz fixes) and\n"
-                "   say why. Cluster size is measured from git by the pipeline - do not guess\n"
+                "   only when it is genuinely unrelated to the fix and say why; docs, CI\n"
+                "   configuration, fuzz harnesses and release notes are ported, not reasons\n"
+                "   to drop. Cluster size is measured from git by the pipeline - do not guess\n"
                 "   line counts, and do not split a single commit.\n"
             )
             series_schema = (
@@ -154,26 +155,27 @@ Recommendation guidelines:
             )
 
         lint_task = (
-            "8. **Lint**: if the project has a lint or vet tool, record the single best\n"
+            "7. **Lint**: if the project has a lint or vet tool, record the single best\n"
             "   command in `lint_commands`; otherwise leave it empty."
             if self.discover_lint
-            else "8. **Lint**: leave `lint_commands` empty - the case configures it."
+            else "7. **Lint**: leave `lint_commands` empty - the case configures it."
         )
         verification_task = (
-            "9. **Verification**: record extra test commands beyond the configured suite\n"
+            "8. **Verification**: record extra test commands beyond the configured suite\n"
             "   in `verification_commands`; otherwise leave it empty."
             if self.discover_verification
-            else "9. **Verification**: leave `verification_commands` empty."
+            else "8. **Verification**: leave `verification_commands` empty."
         )
 
         task_list = (
             "1. **Classify the change**: bug-fix, feature, refactor, migration, cleanup or\n"
             "   api-change. One value in `commit_type`.\n"
-            "2. **Build the skip list**: files in the diff that must not be ported as code -\n"
-            "   generated files (generated headers, lock files), binary files, and tests that\n"
-            "   exercise behaviour the fix does not change. Put them in `files_to_skip`. When\n"
-            "   unsure about a test, keep it: a redundant port costs time, a missing one costs\n"
-            "   correctness.\n"
+            "2. **Build the skip list**: `files_to_skip` is only for auto-generated\n"
+            "   build artifacts — code-generated sources, generated headers, lock files,\n"
+            "   and files produced by the build. Do not list documentation, CI\n"
+            "   configuration, fuzz harnesses, test files, or generator scripts: those\n"
+            "   are ported with the fix. This applies in every mode: single-commit,\n"
+            "   fused pre-RED and series. When unsure, keep the file.\n"
             "3. **Plan the test port**: the test files the fix changes, in `test_files`,\n"
             "   excluding `files_to_skip`.\n"
             "4. **Check target capabilities**: for each symbol, type, package or import the fix\n"
@@ -185,8 +187,6 @@ Recommendation guidelines:
             "   excluding generated, binary and fixture files.\n"
             "6. **Regeneration**: if step 2 skipped a generated file, put the command that\n"
             "   regenerates it in `regeneration_commands`; otherwise leave it empty.\n"
-            "7. **Unrelated scaffolding**: note in `reasoning` anything in the diff that exists\n"
-            "   only to support the upstream project (CI config, docs, fuzz harnesses).\n"
             + lint_task
             + "\n"
             + verification_task
@@ -230,8 +230,8 @@ the behaviour change itself, its tests.
 Rules:
 - never reorder a commit, and cover every commit exactly once;
 - a clean commit does not need its own cluster, but it must still appear in one;
-- put a commit in `dropped` only when it is unrelated to the fix (docs, CI,
-  unrelated fuzz fixes) and say why;
+- put a commit in `dropped` only when it is genuinely unrelated to the fix and
+  say why; docs, CI, fuzz fixes and release notes are ported, not reasons to drop;
 - cluster size is measured from git by the pipeline: do not guess line counts;
 - do not analyse the diff again - the commit list is the input.
 
@@ -1059,7 +1059,7 @@ class FusedPreRedPrompt:
 {
   "triage": {
     "commit_type": "bug-fix | feature | refactor | migration | cleanup | api-change",
-    "files_to_skip": ["generated, binary, or unrelated-test paths"],
+    "files_to_skip": ["auto-generated build artifacts only; never docs, CI, fuzz, tests, or generator scripts"],
     "regeneration_commands": ["commands that rebuild the skipped generated files"],
     "lint_commands": ["project lint and formatting checks"],
     "verification_commands": ["extra test commands beyond the configured test"],
@@ -1125,11 +1125,12 @@ if you ran the build; omit it otherwise.
 
 ## Tasks
 
-1. SCOPE. Classify the commit. List generated and binary files in `files_to_skip`,
-   plus tests that do not exercise the fix's behavior. Name the hand-written source
-   files to check first. Discover the project's regeneration, lint and verification
-   commands from its build system, manifests, CI and scripts; use the project's own
-   commands, do not guess.
+1. SCOPE. Classify the commit. List only auto-generated build artifacts
+   (codegen, generated headers, lock files) in `files_to_skip`; never docs, CI,
+   fuzz, tests or generator scripts. Name the hand-written source files to check
+   first. Discover the project's regeneration, lint and verification commands from
+   its build system, manifests, CI and scripts; use the project's own commands,
+   do not guess.
 
 2. TESTS. Identify the test files the fix changes (unit/integration tests, golden or
    expected files, SQL regression pairs, fixtures). Port them, and only them,
