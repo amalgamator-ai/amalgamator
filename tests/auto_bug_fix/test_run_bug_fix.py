@@ -1234,7 +1234,7 @@ def _run_force_resolve_pipeline(
         state.triage_assessment = {}
         return {}
 
-    def fake_baseline(config, claude_config, state):
+    def fake_baseline(config, claude_config, state, **kwargs):
         return None
 
     def fake_resolve(config, claude_config, state, tracker, **kwargs):

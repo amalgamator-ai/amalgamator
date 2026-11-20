@@ -164,14 +164,23 @@ def git_cherry_pick(
     commit: str,
     strategy: str | None = None,
     strategy_option: str | None = None,
+    drop_empty: bool = False,
 ) -> GitResult:
     """Cherry-pick a commit with optional merge strategy.
 
     For merge commits, uses -m 1 to apply the combined diff relative
     to the first parent (the mainline), which captures all changes
     from the entire topic branch.
+
+    ``drop_empty`` keeps a commit series moving when an upstream commit
+    has nothing left to apply on the target (for example a CI, fuzzer or
+    documentation commit that only touches files absent from the older
+    release). It is only used by series mode; a single-fix run should
+    still fail loudly if its one commit becomes empty.
     """
     args = ["cherry-pick", "-x"]
+    if drop_empty:
+        args.append("--empty=drop")
     if is_merge_commit(repo_path, commit):
         args.append("-m1")
     args.append(commit)

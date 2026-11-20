@@ -34,6 +34,11 @@ class BugFixConfig:
     bug_description: str
     issue_id: str
 
+    # Optional ordered series of upstream commits to cherry-pick one at a
+    # time. ``source_fix_commit`` remains the analysis anchor (merge/topic
+    # head) for triage, test port and combined-diff prompts.
+    source_fix_commits: list[str] = field(default_factory=list)
+
     # Porting constraints
     allowed_modules: list[str] | None = None
     disallowed_modules: list[str] = field(default_factory=list)
@@ -102,6 +107,14 @@ class BugFixConfig:
     # (skipped and never regenerated) before the outcome is downgraded from
     # success to partial_success.
     partial_success_skip_ratio: float = 0.5
+    # Commit-series clustering: caps decide whether commits may be merged into
+    # one planning unit. They never split a single commit.
+    cluster_max_net_lines: int = 300
+    cluster_max_files: int = 8
+    cluster_max_commits: int = 8
+    # Apply a batch of commits whose predicted conflicts are identical as one
+    # diff, resolved in a single session. Commit-series mode only.
+    batch_conflicting_commits: bool = False
     # Model for Phase 4b recovery. Defaults to the pipeline model.
     # Set a different profile id in models.yaml to use a stronger model.
     phase_4b_model: str = ""

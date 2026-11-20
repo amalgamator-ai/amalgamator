@@ -167,39 +167,6 @@ def test_semantic_triage_prompt_contains_files():
     assert "origin/main" in text
 
 
-def test_semantic_triage_prompt_drops_fields_nothing_consumes():
-    prompt = SemanticTriagePrompt(
-        context="<context>test</context>",
-        fix_diff="10 files changed",
-        source_branch="origin/main",
-        target_branch="origin/release-1.0",
-        seed_files=["pkg/foo.go"],
-    )
-    text = prompt.prompt()
-    assert "new_packages" not in text
-    assert "dependency_depth" not in text
-    assert "generated_code_in_diff" not in text
-    assert "binary_files_in_diff" not in text
-    assert '"size"' not in text
-    assert "record the single best" in text
-
-
-def test_semantic_triage_prompt_skips_configured_discovery():
-    prompt = SemanticTriagePrompt(
-        context="<context/>",
-        fix_diff="stat",
-        source_branch="origin/main",
-        target_branch="origin/release-1.0",
-        seed_files=["a.c"],
-        discover_lint=False,
-        discover_verification=False,
-    )
-    text = prompt.prompt()
-    assert "leave `lint_commands` empty" in text
-    assert "leave `verification_commands` empty" in text
-    assert "record the single best" not in text
-
-
 def test_test_port_prompt_lists_test_files():
     prompt = TestPortAgentPrompt(
         context="<context>test</context>",
@@ -227,6 +194,22 @@ def test_test_port_prompt_uses_diff_command_for_merges():
     text = prompt.prompt()
     assert "git diff merge_abc^1..merge_abc --" in text
     assert "git show merge_abc --" not in text
+
+
+def test_test_port_prompt_can_defer_verification():
+    prompt = TestPortAgentPrompt(
+        context="<context>test</context>",
+        source_fix_commit="merge_abc",
+        target_branch="origin/release-1.0",
+        test_files=["pkg/foo_test.go"],
+        output_manifest_file="/tmp/manifest.txt",
+        diff_command="git diff merge_abc^1..merge_abc --",
+        run_verification=False,
+    )
+    text = prompt.prompt()
+    assert "Do NOT run the build, test, or any verification command" in text
+    assert "after the full commit series has been applied" in text
+    assert "run the build command to verify the test files compile" not in text
 
 
 def test_triage_blind_review_prompt_batches_checks():
@@ -310,9 +293,61 @@ def test_fused_prompts_carry_external_context():
         report_path="report.md",
         external_context_section="<external>RES</external>",
     )
-    text = res.prompt()
-    flat = " ".join(text.split())
-    assert "<external>RES</external>" in text
+    assert "<external>RES</external>" in res.prompt()
+
+    flat = " ".join(res.prompt().split())
     assert "Batch independent tool calls" in flat
     assert "~120 tool calls" in flat
     assert "no further verification passes" in flat
+
+
+def test_triage_prompt_has_no_clusters_outside_series_mode():
+    prompt = SemanticTriagePrompt(
+        context="<ctx/>",
+        fix_diff="stat",
+        source_branch="origin/main",
+        target_branch="origin/rel",
+        seed_files=["a.c"],
+    )
+    text = prompt.prompt()
+    assert '"clusters"' not in text
+    assert "Cluster the commit series" not in text
+
+
+def test_triage_prompt_asks_for_clusters_in_series_mode():
+    prompt = SemanticTriagePrompt(
+        context="<ctx/>",
+        fix_diff="stat",
+        source_branch="origin/main",
+        target_branch="origin/rel",
+        seed_files=["a.c"],
+        series_section="\n1. abc123 lib: refactor\n",
+        series_mode=True,
+    )
+    text = prompt.prompt()
+    assert "Cluster the commit series" in text
+    assert '"clusters"' in text
+    assert "new_packages" not in text
+    assert "dependency_depth" not in text
+    assert "generated_code_in_diff" not in text
+    assert '"size"' not in text
+    assert "do not trace the commit" in text
+    assert '"dropped"' in text
+    assert '"public_interface_files"' in text
+    assert "1. abc123 lib: refactor" in text
+
+
+def test_triage_prompt_skips_lint_discovery_when_configured():
+    prompt = SemanticTriagePrompt(
+        context="<ctx/>",
+        fix_diff="stat",
+        source_branch="origin/main",
+        target_branch="origin/rel",
+        seed_files=["a.c"],
+        discover_lint=False,
+        discover_verification=False,
+    )
+    text = prompt.prompt()
+    assert "leave `lint_commands` empty" in text
+    assert "leave `verification_commands` empty" in text
+    assert "record the single best" not in text

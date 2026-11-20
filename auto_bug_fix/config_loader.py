@@ -224,13 +224,29 @@ def validate_config(config: dict[str, Any], config_dir: str = "") -> None:
     fix = _require_mapping(config, "fix")
     has_commit = fix.get("commit") is not None
     has_patch = fix.get("patch") is not None
+    has_commits = fix.get("commits") is not None
 
     if has_commit and has_patch:
         raise ConfigError(
             "fix.commit and fix.patch are mutually exclusive — specify one, not both"
         )
+    if has_commits and has_patch:
+        raise ConfigError(
+            "fix.commits and fix.patch are mutually exclusive — specify one, not both"
+        )
+    if has_commits and not has_commit:
+        raise ConfigError(
+            "fix.commit is required with fix.commits: it is the analysis "
+            "anchor for triage, test port and combined-diff prompts"
+        )
     if not has_commit and not has_patch:
         raise ConfigError("fix.commit or fix.patch is required")
+    if has_commits:
+        commits = fix["commits"]
+        if not isinstance(commits, list) or not commits:
+            raise ConfigError("fix.commits must be a non-empty list of commit hashes")
+        if not all(isinstance(commit, str) and commit.strip() for commit in commits):
+            raise ConfigError("fix.commits entries must be non-empty strings")
 
     if has_patch:
         resolved = _resolve_patch_path(str(fix["patch"]), config_dir)
@@ -381,12 +397,16 @@ def parse_bug_fix_config(
     fix_patch = ""
     fix_upstream_ref = ""
     source_fix_commit = ""
+    source_fix_commits: list[str] = []
 
     if is_patch_mode:
         fix_patch = _resolve_patch_path(str(fix["patch"]), config_dir)
         fix_upstream_ref = str(fix.get("upstream_ref", "") or "")
     else:
         source_fix_commit = str(fix["commit"])
+        source_fix_commits = [
+            str(commit).strip() for commit in fix.get("commits") or []
+        ]
 
     # External resolver context: optional Markdown file with prior
     # resolver output + deterministic check findings. Missing file is a
@@ -417,6 +437,7 @@ def parse_bug_fix_config(
         source_branch=str(config["branches"]["source"]),
         target_branch=str(config["branches"]["target"]),
         source_fix_commit=source_fix_commit,
+        source_fix_commits=source_fix_commits,
         bug_description=str(config["bug_description"]),
         issue_id=str(config["issue_id"]),
         build_command=config["build"].get("command", ""),
@@ -463,6 +484,12 @@ def parse_bug_fix_config(
         review_idle_turns=advanced_int(advanced, "review_idle_turns"),
         partial_success_skip_ratio=advanced_float(
             advanced, "partial_success_skip_ratio", 0.5, minimum=0.0, maximum=1.0
+        ),
+        cluster_max_net_lines=advanced_int(advanced, "cluster_max_net_lines") or 300,
+        cluster_max_files=advanced_int(advanced, "cluster_max_files") or 8,
+        cluster_max_commits=advanced_int(advanced, "cluster_max_commits") or 8,
+        batch_conflicting_commits=bool(
+            advanced.get("batch_conflicting_commits", False)
         ),
         phase_4b_model=phase_4b_profile.model,
         phase_4b_profile=phase_4b_profile,

@@ -18,6 +18,11 @@ branches:
 
 fix:
   commit: "abc123def456"       # commit SHA of the fix on the source branch
+  # Optional: an ordered PR/branch commit series. The commits above is the
+  # analysis anchor (merge/topic head); these are applied one at a time.
+  # commits:
+  #   - "111111111111"
+  #   - "222222222222"
 
 build:
   command: "make -j$(nproc)"                    # build command
