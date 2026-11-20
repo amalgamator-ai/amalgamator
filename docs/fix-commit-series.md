@@ -121,6 +121,24 @@ Success criteria:
 4. build/test and the attack reproducer pass;
 5. wall time and cost recorded against the previous 2.2.5 attempt.
 
+## Escalation and baseline policy
+
+Two consequences of the design that are deliberate, and that a reviewer should
+not read as gaps:
+
+- **A failed cluster ends the run; it does not invoke Phase 4b.** Phase 4b is a
+  build-test-fix loop on the final tree, and in the middle of a series the tree
+  is a state whose later commits have not been applied. Handing it to 4b would
+  repair a tree that is not the deliverable, and the merge-commit re-apply it
+  was written for is what this mode removes. A cluster that cannot be planned,
+  applied or verified raises with the cluster name.
+- **Phase 1 captures the build only, so there is no test baseline.** The test
+  port runs before Phase 1, so the suite present at that point is the ported
+  one, and it cannot compile until later commits land. As a result,
+  pre-existing test failures on the target are charged to the port, and the
+  `baseline_test_exit != 0` excuse cannot fire in this mode. Capturing a real
+  baseline would mean running the target's own suite before the test port.
+
 ## Non-goals
 
 - This does not make the final patch identical to Ymir's; conflict resolution
