@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import subprocess
 from dataclasses import dataclass
@@ -159,6 +160,37 @@ def is_merge_commit(repo_path: str, commit: str) -> bool:
     return r.returncode == 0
 
 
+# Output git prints when a pick leaves nothing to commit. Matched only when
+# ``--empty=drop`` had to be emulated, never to reinterpret a real failure.
+_EMPTY_PICK_MARKERS = (
+    "is now empty",
+    "The previous cherry-pick is now empty",
+    "nothing to commit",
+)
+
+
+@functools.cache
+def _git_cherry_pick_supports_empty_drop() -> bool:
+    """Return True when this git understands ``cherry-pick --empty=drop``.
+
+    The flag was added in git 2.45. RHEL 8 and 9, Ubuntu 22.04 and 24.04,
+    Debian 12 and Fedora <= 40 all ship older git, where the option is
+    rejected while the arguments are parsed: the pick exits non-zero with no
+    conflicts, which series mode cannot distinguish from an unapplyable
+    commit and reports as "unmappable cherry-pick (all strategies failed)".
+    Probing the usage text works for distro backports of the feature too,
+    unlike parsing ``git --version``.
+    """
+    probe = subprocess.run(
+        ["git", "cherry-pick", "-h"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return "--empty" in (probe.stdout + probe.stderr)
+
+
 def git_cherry_pick(
     repo_path: str,
     commit: str,
@@ -177,9 +209,15 @@ def git_cherry_pick(
     documentation commit that only touches files absent from the older
     release). It is only used by series mode; a single-fix run should
     still fail loudly if its one commit becomes empty.
+
+    On git older than 2.45 the flag does not exist, so the drop is emulated:
+    the pick runs without it and, if it leaves nothing to commit, the
+    in-progress pick is skipped. The result then reports success, exactly as
+    ``--empty=drop`` would have.
     """
+    native_drop = drop_empty and _git_cherry_pick_supports_empty_drop()
     args = ["cherry-pick", "-x"]
-    if drop_empty:
+    if native_drop:
         args.append("--empty=drop")
     if is_merge_commit(repo_path, commit):
         args.append("-m1")
@@ -188,7 +226,20 @@ def git_cherry_pick(
         args.append(f"--strategy={strategy}")
     if strategy_option is not None:
         args.append(f"--strategy-option={strategy_option}")
-    return _run_git(repo_path, args)
+    result = _run_git(repo_path, args)
+
+    if drop_empty and not native_drop and not result.success:
+        output = result.stdout + result.stderr
+        if any(marker in output for marker in _EMPTY_PICK_MARKERS):
+            skip = _run_git(repo_path, ["cherry-pick", "--skip"])
+            if skip.success:
+                log.info(
+                    "%s: pick left nothing to apply — dropped "
+                    "(--empty=drop emulated; git < 2.45)",
+                    commit[:12],
+                )
+                return GitResult(0, result.stdout + skip.stdout, result.stderr)
+    return result
 
 
 def git_cherry_pick_abort(repo_path: str) -> GitResult:
