@@ -45,3 +45,23 @@ def test_only_the_last_three_failures_are_rendered():
     assert "attempt 0" not in text
     assert "attempt 1" not in text
     assert "attempt 4" in text
+
+
+def test_lint_failure_renders_in_its_own_slot():
+    state = PipelineState()
+    state.verify_failures.append(
+        {
+            "phase": "Phase 4 verify",
+            "build_command": "make",
+            "test_command": "make check",
+            "build_output": "",
+            "test_output": "",
+            "lint_output": "unused import",
+        }
+    )
+
+    text = _previous_failures_section(state)
+
+    assert "<lint_output>" in text
+    assert "unused import" in text
+    assert "<test_output>" not in text

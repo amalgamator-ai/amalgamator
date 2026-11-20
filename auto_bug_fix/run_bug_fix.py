@@ -2176,8 +2176,13 @@ def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
 
 def _run_build_and_test(
     config: BugFixConfig, state: PipelineState
-) -> tuple[bool, str, str, str, str]:
-    """Run build, test, and lint commands. Return (passed, build_out, build_err, test_out, test_err).
+) -> tuple[bool, str, str, str, str, str]:
+    """Run build, test, and lint commands.
+
+    Return ``(passed, build_out, build_err, test_out, test_err, lint_out)``.
+    The lint slot keeps a lint failure out of the test slots, where Phase 4b
+    would otherwise read it as a broken test.
+
 
     Empty build/test commands are skipped (for interpreted languages).
     """
@@ -2187,7 +2192,7 @@ def _run_build_and_test(
             config.build_command, config.build_dir, timeout=config.command_timeout
         )
         if build_exit != 0:
-            return False, build_stdout, build_stderr, "", ""
+            return False, build_stdout, build_stderr, "", "", ""
 
     test_stdout = test_stderr = ""
     if config.test_command:
@@ -2199,7 +2204,7 @@ def _run_build_and_test(
                 "Test command timed out — treating as verification failure: %s",
                 config.test_command,
             )
-            return False, build_stdout, build_stderr, test_stdout, test_stderr
+            return False, build_stdout, build_stderr, test_stdout, test_stderr, ""
         failures = parse_test_failures(test_stdout, test_stderr)
         if failures:
             # Named failures — the baseline says which of them are pre-existing.
@@ -2233,7 +2238,7 @@ def _run_build_and_test(
         passed = True
 
     if not passed:
-        return False, build_stdout, build_stderr, test_stdout, test_stderr
+        return False, build_stdout, build_stderr, test_stdout, test_stderr, ""
 
     lint_cmd = _resolve_lint_command(config, state)
     if lint_cmd:
@@ -2255,7 +2260,7 @@ def _run_build_and_test(
                 )
         elif lint_exit == TIMEOUT_EXIT_CODE:
             log.warning("Lint command timed out — treating as failure: %s", lint_cmd)
-            return False, build_stdout, build_stderr, lint_stdout, lint_stderr
+            return False, build_stdout, build_stderr, "", "", lint_output
         elif lint_exit != 0:
             baseline_lint_failed = any(
                 e["cmd"] == lint_cmd and e["exit_code"] != 0
@@ -2265,7 +2270,7 @@ def _run_build_and_test(
                 log.info("Lint failed but pre-existing on baseline: %s", lint_cmd)
             else:
                 log.warning("Lint failed (NEW): %s", lint_cmd)
-                return False, build_stdout, build_stderr, lint_stdout, lint_stderr
+                return False, build_stdout, build_stderr, "", "", lint_output
 
     repo = config.repo_path
     ok, extra_files = enforce_allowlist(
@@ -2276,7 +2281,7 @@ def _run_build_and_test(
     test_ok, vetoed = enforce_test_file_veto(repo, state.seed)
     if not test_ok:
         log.info("Test files modified outside seed (advisory): %s", vetoed)
-    return True, build_stdout, build_stderr, test_stdout, test_stderr
+    return True, build_stdout, build_stderr, test_stdout, test_stderr, ""
 
 
 def phase_4_verify(
@@ -2295,8 +2300,8 @@ def phase_4_verify(
     """
     baseline = _worktree_snapshot(config)
     with _discarding_verification_dirt(config, baseline, state, "Phase 4 verify"):
-        passed, build_out, build_err, test_out, test_err = _run_build_and_test(
-            config, state
+        passed, build_out, build_err, test_out, test_err, lint_out = (
+            _run_build_and_test(config, state)
         )
     if passed:
         return True
@@ -2308,6 +2313,7 @@ def phase_4_verify(
             "phase": "Phase 4 verify",
             "build_output": (build_out + build_err)[-4000:],
             "test_output": (test_out + test_err)[-4000:],
+            "lint_output": lint_out[-4000:],
             "build_command": config.build_command,
             "test_command": config.test_command,
         }
@@ -3885,6 +3891,8 @@ def _previous_failures_section(state: PipelineState) -> str:
             lines.append(f"<build_output>\n{item['build_output']}\n</build_output>")
         if item.get("test_output"):
             lines.append(f"<test_output>\n{item['test_output']}\n</test_output>")
+        if item.get("lint_output"):
+            lines.append(f"<lint_output>\n{item['lint_output']}\n</lint_output>")
     lines.append("</previous_failures>")
     return "\n".join(lines)
 
