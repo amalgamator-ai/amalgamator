@@ -966,6 +966,8 @@ def phase_0_5_semantic_triage(
         target_branch=config.target_branch,
         seed_files=state.seed,
         external_context_section=_external_context_section(config, "triage"),
+        discover_lint=not config.lint_command,
+        discover_verification=config.auto_discover_tests,
     )
 
     claude_config_triage = _phase_config(claude_config, config)

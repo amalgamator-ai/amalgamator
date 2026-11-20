@@ -167,6 +167,39 @@ def test_semantic_triage_prompt_contains_files():
     assert "origin/main" in text
 
 
+def test_semantic_triage_prompt_drops_fields_nothing_consumes():
+    prompt = SemanticTriagePrompt(
+        context="<context>test</context>",
+        fix_diff="10 files changed",
+        source_branch="origin/main",
+        target_branch="origin/release-1.0",
+        seed_files=["pkg/foo.go"],
+    )
+    text = prompt.prompt()
+    assert "new_packages" not in text
+    assert "dependency_depth" not in text
+    assert "generated_code_in_diff" not in text
+    assert "binary_files_in_diff" not in text
+    assert '"size"' not in text
+    assert "record the single best" in text
+
+
+def test_semantic_triage_prompt_skips_configured_discovery():
+    prompt = SemanticTriagePrompt(
+        context="<context/>",
+        fix_diff="stat",
+        source_branch="origin/main",
+        target_branch="origin/release-1.0",
+        seed_files=["a.c"],
+        discover_lint=False,
+        discover_verification=False,
+    )
+    text = prompt.prompt()
+    assert "leave `lint_commands` empty" in text
+    assert "leave `verification_commands` empty" in text
+    assert "record the single best" not in text
+
+
 def test_test_port_prompt_lists_test_files():
     prompt = TestPortAgentPrompt(
         context="<context>test</context>",
