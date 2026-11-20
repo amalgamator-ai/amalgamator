@@ -185,6 +185,70 @@ def test_verify_cluster_plan_reports_only_failures(tmp_path):
     assert "bad" in failures[0]
 
 
+def test_verify_cluster_plan_accepts_grep_L_for_absent_symbol(tmp_path):
+    rp, repo = _repo(tmp_path)
+    sha = _sha(repo)
+    config = _config(rp, [sha])
+
+    failures = _verify_cluster_plan(
+        config,
+        {
+            "actions": [
+                {
+                    "symbol": "ABSENT",
+                    "action": "translate",
+                    "verify": "grep -L ABSENT src/base.c",
+                }
+            ]
+        },
+    )
+
+    assert failures == []
+
+
+def test_verify_cluster_plan_rejects_grep_L_for_present_symbol(tmp_path):
+    rp, repo = _repo(tmp_path)
+    sha = _commit(repo, "src/base.c", "ABSENT\n", "change")
+    config = _config(rp, [sha])
+
+    failures = _verify_cluster_plan(
+        config,
+        {
+            "actions": [
+                {
+                    "symbol": "ABSENT",
+                    "action": "translate",
+                    "verify": "grep -L ABSENT src/base.c",
+                }
+            ]
+        },
+    )
+
+    assert len(failures) == 1
+
+
+def test_verify_cluster_plan_rejects_grep_L_on_missing_path(tmp_path):
+    rp, repo = _repo(tmp_path)
+    sha = _sha(repo)
+    config = _config(rp, [sha])
+
+    failures = _verify_cluster_plan(
+        config,
+        {
+            "actions": [
+                {
+                    "symbol": "ABSENT",
+                    "action": "translate",
+                    "verify": "grep -L ABSENT does-not-exist.c",
+                }
+            ]
+        },
+    )
+
+    assert len(failures) == 1
+    assert "does-not-exist.c" in failures[0]
+
+
 def test_merge_keeps_clusters_from_triage():
     merged = _merge_series_assessment(
         {"files_to_skip": [], "test_files": [], "priority_files": []},

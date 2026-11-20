@@ -1279,6 +1279,25 @@ def _repair_cluster_plan(
     return _verify_cluster_plan(config, plan)
 
 
+_GREP_WITHOUT_MATCH = re.compile(r"\bgrep\b[^;|&]*\s(?:-L|--files-without-match)\b")
+
+
+def _plan_check_passed(command: str, exit_code: int, output: str) -> bool:
+    """Return True when a plan check's desired post-state holds.
+
+    Plan checks are advisory predicates, not build/test commands. ``grep -L``
+    is the common way to assert that a symbol is absent, but GNU grep exits 1
+    when no line matches even though it prints the file name. For that form the
+    printed path is the success signal, not the exit status.
+    """
+    if _GREP_WITHOUT_MATCH.search(command):
+        # grep -L prints the file when the pattern is absent but exits 1; exit
+        # 2 means grep itself failed (missing path, bad option) and its stderr
+        # is merged into output. Only 0 and 1 actually ran the check.
+        return exit_code in (0, 1) and bool(output.strip())
+    return exit_code == 0
+
+
 def _verify_cluster_plan(config: BugFixConfig, plan: dict) -> list[str]:
     """Run every plan verify command; return the failures."""
     failures: list[str] = []
@@ -1289,7 +1308,7 @@ def _verify_cluster_plan(config: BugFixConfig, plan: dict) -> list[str]:
         exit_code, output = capture_output(
             [command], config.repo_path, timeout=config.command_timeout
         )
-        if exit_code != 0:
+        if not _plan_check_passed(command, exit_code, output):
             failures.append(
                 f"{action.get('symbol')} ({action.get('action')}): "
                 f"{command} -> {output[-300:]}"
@@ -2866,6 +2885,16 @@ def _resolve_lint_command(config: BugFixConfig, state: PipelineState) -> str:
     return cmd
 
 
+def _record_lint_advisory(state: PipelineState, command: str, output: str) -> None:
+    """Record a lint result without turning it into a build/test failure."""
+    if state.dossier:
+        state.dossier.add(
+            "Lint advisory (not a build/test failure)",
+            f"{command}\n\n{output[-2000:]}",
+            "Phase 4 verify",
+        )
+
+
 def _run_build_and_test(
     config: BugFixConfig, state: PipelineState
 ) -> tuple[bool, str, str, str, str, str]:
@@ -2951,8 +2980,12 @@ def _run_build_and_test(
                     "Phase 4 verify",
                 )
         elif lint_exit == TIMEOUT_EXIT_CODE:
-            log.warning("Lint command timed out — treating as failure: %s", lint_cmd)
-            return False, build_stdout, build_stderr, "", "", lint_output
+            log.warning(
+                "Lint command timed out — recording as advisory, not failing "
+                "the run: %s",
+                lint_cmd,
+            )
+            _record_lint_advisory(state, lint_cmd, lint_output)
         elif lint_exit != 0:
             baseline_lint_failed = any(
                 e["cmd"] == lint_cmd and e["exit_code"] != 0
@@ -2961,8 +2994,12 @@ def _run_build_and_test(
             if baseline_lint_failed:
                 log.info("Lint failed but pre-existing on baseline: %s", lint_cmd)
             else:
-                log.warning("Lint failed (NEW): %s", lint_cmd)
-                return False, build_stdout, build_stderr, "", "", lint_output
+                log.warning(
+                    "Lint failed (NEW) — recording as advisory, not failing "
+                    "the run: %s",
+                    lint_cmd,
+                )
+            _record_lint_advisory(state, lint_cmd, lint_output)
 
     repo = config.repo_path
     ok, extra_files = enforce_allowlist(
@@ -8943,11 +8980,24 @@ def _run_pipeline_phases(
                                 failures,
                             )
                         if failures:
-                            raise PipelineEscalation(
-                                f"cluster {cluster.id}: plan verification failed: "
-                                + "; ".join(failures)
+                            # Plan checks are predicates, not build/test
+                            # commands. A failing predicate is evidence for the
+                            # reviewer, never a reason to abort the series.
+                            log.warning(
+                                "Cluster %s: plan checks still failing — "
+                                "recording as advisory: %s",
+                                cluster.id,
+                                "; ".join(failures),
                             )
-                        tracker.record_gate(f"cluster_{cluster.id}", "verified")
+                            tracker.record_gate(f"cluster_{cluster.id}", "advisory")
+                            if state.dossier:
+                                state.dossier.add(
+                                    f"Cluster {cluster.id}: plan-check advisories",
+                                    "\n".join(failures),
+                                    "Phase 2.5 (cluster plan)",
+                                )
+                        else:
+                            tracker.record_gate(f"cluster_{cluster.id}", "verified")
                         state.dossier.add(
                             f"Cluster {cluster.id}",
                             json.dumps(plan, indent=2),

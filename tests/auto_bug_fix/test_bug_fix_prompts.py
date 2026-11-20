@@ -5,6 +5,7 @@
 
 from auto_bug_fix.bug_fix_prompts import (
     BuildErrorRecoveryPrompt,
+    ClusterPlanPrompt,
     NarrowResolutionAgentPrompt,
     PostResolutionCheckPrompt,
     SemanticTriagePrompt,
@@ -351,3 +352,20 @@ def test_triage_prompt_skips_lint_discovery_when_configured():
     assert "leave `lint_commands` empty" in text
     assert "leave `verification_commands` empty" in text
     assert "record the single best" not in text
+
+
+def test_cluster_plan_prompt_requires_one_path_per_verify():
+    prompt = ClusterPlanPrompt(
+        context="ctx",
+        cluster_id="cluster",
+        intent="intent",
+        commits="1. abc lib: change",
+        cluster_stat="1 file changed",
+        triage_json="{}",
+        journal="",
+        output_file="/tmp/plan.json",
+    )
+    text = " ".join(prompt.prompt().split())
+
+    assert "inspect exactly one path" in text
+    assert "multi-file `grep -L`" in text
