@@ -478,12 +478,22 @@ advanced:
   max_resolution_retries: 3      # LLM resolution attempts per conflict round
   partial_success_skip_ratio: 0.5  # non-bugfix ports only: dropped-file fraction that downgrades success to partial_success
   phase_4b_model: m3              # optional profile ID (from the quickstart registry)
+  triage_effort: low              # Phase 0.5 effort; inherit = use claude.effort
   forward_patch_id_lookback: "12 months"   # window for the already-applied check
 ```
 
 Phase 4b uses the pipeline profile by default. Set `phase_4b_model` explicitly
 when recovery should use a different model, endpoint, or credential. The selected
 model is named in the run log and each tracked query includes its profile ID.
+
+`advanced.triage_effort` sets Phase 0.5 effort independently of the rest of the
+run. In commit-series mode it defaults to `low`: triage there is a lookup over a
+supplied commit list, and the measured cheap and expensive runs produced the same
+partition while the expensive one made the only skip-list error (batching.md §10).
+Single-commit triage, which searches for the commits that introduced a missing
+prerequisite, keeps the run's `claude.effort`. Set `inherit` to use `claude.effort`
+in series mode too. On the LiteLLM path the value overrides a profile's
+`reasoning_effort` when the profile declares one; it is ignored otherwise.
 
 ### Context and diff budgets
 

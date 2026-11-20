@@ -113,6 +113,37 @@ def _phase_config(
     )
 
 
+def _triage_phase_config(
+    claude_config: ClaudeConfig,
+    config: BugFixConfig,
+) -> BugFixClaudeConfig:
+    """Phase 0.5 config with ``advanced.triage_effort`` applied.
+
+    Series triage is lookup-shaped: on the measured case the cheapest and the
+    most expensive effort produced the same partition, while the expensive run
+    made the only skip-list error (batching.md §10). The override is opt-out
+    through ``triage_effort: inherit``.
+
+    ``effort`` is a Claude SDK option. A LiteLLM profile expresses it as
+    ``reasoning_effort``, and is overridden only when the profile already
+    declares one: a model never configured for reasoning must not receive the
+    parameter just because the pipeline lowered its triage default.
+    """
+    effort = config.triage_effort
+    if not effort:
+        return _phase_config(claude_config, config)
+    profile = claude_config.profile
+    if (
+        profile is not None
+        and profile.provider != "anthropic"
+        and "reasoning_effort" in profile.params
+    ):
+        profile = replace(
+            profile, params={**profile.params, "reasoning_effort": effort}
+        )
+    return _phase_config(claude_config, config, effort=effort, profile=profile)
+
+
 async def _run_llm(claude_config, prompts, tracker=None):
     """Compatibility wrapper: call agent_run and feed timings into tracker.
 
@@ -985,7 +1016,11 @@ def phase_0_5_semantic_triage(
         discover_verification=config.auto_discover_tests,
     )
 
-    claude_config_triage = _phase_config(claude_config, config)
+    claude_config_triage = _triage_phase_config(claude_config, config)
+    log.info(
+        "Phase 0.5: triage effort %s",
+        config.triage_effort or f"inherit ({claude_config.effort})",
+    )
 
     # The triage session can commit for itself like any other agent. Nothing
     # is learned yet — Phase 1's baseline build has not run — so the strip can
@@ -1322,7 +1357,7 @@ def _ensure_series_clusters(
     try:
         asyncio.run(
             claude_run(
-                _phase_config(claude_config, config),
+                _triage_phase_config(claude_config, config),
                 [prompt.prompt()],
                 tracker=tracker,
             )
@@ -8656,6 +8691,9 @@ def _run_pipeline_phases(
         )
         tracker.record_gate(
             "recommendation", assessment.get("recommendation", "unknown")
+        )
+        tracker.record_gate(
+            "triage_effort", config.triage_effort or f"inherit:{claude_config.effort}"
         )
         triage_dest: str | None = None
         if assessment:

@@ -123,6 +123,32 @@ def advanced_str(advanced: dict[str, Any], key: str, default: str) -> str:
     return raw.strip()
 
 
+_TRIAGE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def _resolve_triage_effort(advanced: dict[str, Any], series: list[str]) -> str:
+    """Resolve ``advanced.triage_effort``; empty string means inherit.
+
+    Commit-series triage is a lookup over a supplied commit list: on the
+    measured case the cheapest and the most expensive effort produced the same
+    partition, while the expensive run made the only skip-list error — it
+    discarded the regression tests (batching.md §10). Series mode therefore
+    defaults to ``low``. Single-commit triage searches for the commits that
+    introduced a missing prerequisite, so it keeps the run's ``claude.effort``.
+    """
+    raw = advanced_str(advanced, "triage_effort", "")
+    if not raw:
+        return "low" if series else ""
+    if raw == "inherit":
+        return ""
+    if raw not in _TRIAGE_EFFORTS:
+        raise ConfigError(
+            "advanced.triage_effort must be one of "
+            + ", ".join((*_TRIAGE_EFFORTS, "inherit"))
+        )
+    return raw
+
+
 def advanced_int(advanced: dict[str, Any], key: str) -> int | None:
     """Read a positive integer from ``advanced:``, warning on unusable values.
 
@@ -431,6 +457,8 @@ def parse_bug_fix_config(
 
     _, phase_4b_profile = profiles or resolve_pipeline_profiles(config, registry)
 
+    triage_effort = _resolve_triage_effort(advanced, source_fix_commits)
+
     bug_fix_config = BugFixConfig(
         repo_path=repo_path,
         build_dir=build_dir,
@@ -491,6 +519,7 @@ def parse_bug_fix_config(
         batch_conflicting_commits=bool(
             advanced.get("batch_conflicting_commits", False)
         ),
+        triage_effort=triage_effort,
         phase_4b_model=phase_4b_profile.model,
         phase_4b_profile=phase_4b_profile,
         fix_patch=fix_patch,

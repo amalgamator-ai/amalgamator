@@ -115,6 +115,12 @@ class BugFixConfig:
     # Apply a batch of commits whose predicted conflicts are identical as one
     # diff, resolved in a single session. Commit-series mode only.
     batch_conflicting_commits: bool = False
+    # Phase 0.5 semantic-triage effort: the Claude SDK ``effort`` level, or the
+    # ``reasoning_effort`` of a LiteLLM profile that already declares one.
+    # Empty = inherit the run's ``claude.effort``. The loader defaults this to
+    # "low" in commit-series mode, where triage is lookup-shaped (batching.md
+    # §10), and leaves single-commit triage on the run's effort.
+    triage_effort: str = ""
     # Model for Phase 4b recovery. Defaults to the pipeline model.
     # Set a different profile id in models.yaml to use a stronger model.
     phase_4b_model: str = ""

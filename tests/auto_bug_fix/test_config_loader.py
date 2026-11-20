@@ -21,7 +21,8 @@ from auto_bug_fix.config_loader import (
     parse_targets,
     validate_config,
 )
-from auto_bug_fix.run_bug_fix import _phase_config
+from auto_bug_fix.run_bug_fix import _phase_config, _triage_phase_config
+from common.model_registry import ModelProfile
 
 
 def test_load_yaml_config():
@@ -194,6 +195,53 @@ def test_parse_bug_fix_config_fix_commits():
     assert parsed.source_fix_commits == ["abc123", "def456"]
 
 
+# ---------- advanced.triage_effort ----------
+
+
+def _triage_cfg(advanced=None, fix=None):
+    config = _fix_cfg(fix or {"commit": "abc123"})
+    if advanced is not None:
+        config["advanced"] = advanced
+    return config
+
+
+def test_triage_effort_defaults_to_low_for_series():
+    parsed, _, _ = parse_bug_fix_config(
+        _triage_cfg(fix={"commit": "merge123", "commits": ["abc123", "def456"]})
+    )
+    assert parsed.triage_effort == "low"
+
+
+def test_triage_effort_defaults_to_inherit_for_single_commit():
+    parsed, _, _ = parse_bug_fix_config(_triage_cfg())
+    assert parsed.triage_effort == ""
+
+
+def test_triage_effort_override():
+    parsed, _, _ = parse_bug_fix_config(
+        _triage_cfg(
+            {"triage_effort": "high"},
+            fix={"commit": "merge123", "commits": ["abc123"]},
+        )
+    )
+    assert parsed.triage_effort == "high"
+
+
+def test_triage_effort_inherit_clears_series_default():
+    parsed, _, _ = parse_bug_fix_config(
+        _triage_cfg(
+            {"triage_effort": "inherit"},
+            fix={"commit": "merge123", "commits": ["abc123"]},
+        )
+    )
+    assert parsed.triage_effort == ""
+
+
+def test_triage_effort_rejects_unknown_level():
+    with pytest.raises(ConfigError, match="triage_effort"):
+        parse_bug_fix_config(_triage_cfg({"triage_effort": "turbo"}))
+
+
 def test_validate_config_patch_mode_defaults_source(tmp_path):
     config = _fix_cfg({"patch": _write_patch(tmp_path)}, branches={"target": "v1.0"})
     validate_config(config)
@@ -358,6 +406,74 @@ def test_phase_config_thinking_override_wins():
     )
 
     assert phase_config.thinking == {"type": "disabled"}
+
+
+# ---------- _triage_phase_config: advanced.triage_effort ----------
+
+
+def _bug_fix_config(**overrides) -> BugFixConfig:
+    fields = {
+        "repo_path": "/tmp/repo",
+        "build_dir": "/tmp/repo",
+        "source_branch": "origin/main",
+        "target_branch": "abc123",
+        "source_fix_commit": "abc123",
+        "bug_description": "test",
+        "issue_id": "TEST-1",
+    }
+    fields.update(overrides)
+    return BugFixConfig(**fields)
+
+
+def test_triage_phase_config_applies_effort():
+    claude_config = parse_claude_config({"claude": {"effort": "max"}}, "/tmp/output")
+    phase_config = _triage_phase_config(
+        claude_config, _bug_fix_config(triage_effort="low")
+    )
+    assert phase_config.effort == "low"
+    assert phase_config.thinking == claude_config.thinking
+
+
+def test_triage_phase_config_inherits_when_empty():
+    claude_config = parse_claude_config({"claude": {"effort": "high"}}, "/tmp/output")
+    phase_config = _triage_phase_config(claude_config, _bug_fix_config())
+    assert phase_config.effort == "high"
+
+
+def test_triage_phase_config_overrides_litellm_reasoning_effort():
+    profile = ModelProfile(
+        id="m1",
+        provider="litellm",
+        model="openai/deepseek",
+        params={"reasoning_effort": "max", "temperature": 0.2},
+    )
+    claude_config = parse_claude_config({"claude": {"effort": "max"}}, "/tmp/output")
+    claude_config.profile = profile
+
+    phase_config = _triage_phase_config(
+        claude_config, _bug_fix_config(triage_effort="low")
+    )
+
+    assert phase_config.profile is not profile
+    assert phase_config.profile.params["reasoning_effort"] == "low"
+    assert phase_config.profile.params["temperature"] == 0.2
+    # The run's profile must stay untouched for every other phase.
+    assert profile.params["reasoning_effort"] == "max"
+
+
+def test_triage_phase_config_leaves_unsupported_litellm_profile_alone():
+    profile = ModelProfile(
+        id="m1", provider="litellm", model="openai/plain", params={"temperature": 0.2}
+    )
+    claude_config = parse_claude_config({"claude": {"effort": "max"}}, "/tmp/output")
+    claude_config.profile = profile
+
+    phase_config = _triage_phase_config(
+        claude_config, _bug_fix_config(triage_effort="low")
+    )
+
+    assert phase_config.profile is profile
+    assert "reasoning_effort" not in phase_config.profile.params
 
 
 def test_parse_claude_config_invalid_effort():
