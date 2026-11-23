@@ -343,6 +343,8 @@ def test_patch_id_matches_gits_own_on_non_utf8_content(latin1_repo):
 # while parsing arguments: the pick exits non-zero with no conflicts, which
 # series mode reads as "unmappable cherry-pick (all strategies failed)".
 
+# Abbreviated: faithful for every option whose name can contain "empty", not a
+# byte-for-byte capture of `git cherry-pick -h`.
 GIT_243_USAGE = """usage: git cherry-pick [--edit] [-n] [-m <parent-number>] [-s] [-x] [--ff]
                        [-S[<keyid>]] <commit>...
    or: git cherry-pick (--continue | --skip | --abort | --quit)
@@ -462,7 +464,14 @@ def test_cherry_pick_skips_an_empty_pick_on_old_git(monkeypatch, tmp_git_repo):
         calls.append(args)
         if args[:2] == ["cherry-pick", "--skip"]:
             return GitResult(0, "", "")
-        return GitResult(1, "", "The previous cherry-pick is now empty")
+        # Translated on purpose: detection is state-based, so the message must
+        # not matter. This is git's de_DE advice line.
+        return GitResult(
+            1,
+            "",
+            'Der letzte "cherry-pick" ist jetzt leer, vermutlich wegen '
+            "Konfliktauflösung.",
+        )
 
     monkeypatch.setattr(
         git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
@@ -553,6 +562,25 @@ def test_pick_left_nothing_to_apply_is_false_on_a_conflict(monkeypatch, tmp_git_
     failed = git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=False)
     assert not failed.success
     assert git_tools._pick_left_nothing_to_apply(rp, tmp_git_repo.fix_sha) is False
+
+
+def test_empty_pick_is_dropped_with_untracked_artifacts(monkeypatch, tmp_git_repo):
+    """Detection uses git diff, not git status: run artifacts must not block it."""
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    rp = tmp_git_repo.repo_path
+    subprocess.run(
+        ["git", "checkout", "-q", tmp_git_repo.target_branch], check=True, cwd=rp
+    )
+    assert git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=True).success
+    (Path(rp) / "run-artifact.patch").write_text("diff --git a/x b/x\n")
+
+    dropped = git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=True)
+
+    assert dropped.success
+    assert dropped.dropped_empty is True
+    assert (Path(rp) / "run-artifact.patch").exists()
 
 
 def test_cherry_pick_drops_empty_commit_on_real_repo(monkeypatch, tmp_git_repo):

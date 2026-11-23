@@ -5302,6 +5302,8 @@ def _apply_cherry_pick(
                 label,
                 strat["name"],
             )
+            if state.dossier:
+                state.dossier.add_strategy(strat["name"], "dropped (empty)")
         else:
             log.info(
                 "%s: clean cherry-pick on retry (strategy: %s)", label, strat["name"]
