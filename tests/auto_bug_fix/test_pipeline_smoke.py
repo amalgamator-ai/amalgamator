@@ -276,12 +276,19 @@ def test_run_targets_executes_the_full_pipeline(tmp_path, monkeypatch, provider)
     assert "## Semantic equivalence" in dossier
     assert "mechanical:" in dossier
 
+    human = (target_run / "dossier_human.md").read_text()
+    assert "# Bug-Fix Porting Review: SMOKE-1" in human
+    assert "| Outcome | **success** |" in human
+    assert "| Build / test | passed |" in human
+    assert "`dossier.md`" in human
+
     summary = json.loads((parent_run_dir / "summary.json").read_text())
     assert summary["total_targets"] == 1
     assert summary["succeeded"] == 1
     assert summary["failed"] == 0
     assert summary["targets"][0]["outcome"] == "success"
     assert summary["targets"][0]["dossier_path"] == "target/dossier.md"
+    assert summary["targets"][0]["dossier_human_path"] == "target/dossier_human.md"
     assert summary["targets"][0]["tracker_path"].startswith("target/SMOKE-1_")
 
     # The ported commits survive worktree cleanup on a preserved branch.

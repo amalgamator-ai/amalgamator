@@ -236,6 +236,11 @@ class Tracker:
         """The recorded pipeline outcome ('in_progress' until set)."""
         return self._run.outcome
 
+    @property
+    def phases(self) -> list[PhaseRecord]:
+        """Completed phase records in execution order."""
+        return list(self._run.phases)
+
     def _compute_rollups(self) -> None:
         """Aggregate token counts and costs across all phases."""
         total_queries = 0

@@ -1,6 +1,6 @@
 # Auto Bug Fix — git-first backport pipeline
 
-Automatically backports a bug fix commit from one branch to another (e.g. upstream `main` → a release or distribution branch), producing a reviewable commit, a patch file, and a human-readable dossier of everything it did and why.
+Automatically backports a bug fix commit from one branch to another (e.g. upstream `main` → a release or distribution branch), producing a reviewable commit, a patch file, a full evidence dossier, and a deterministic human-review view of everything it did and why.
 
 The design is **git-first**: the pipeline exhausts deterministic, byte-exact mechanisms before letting an LLM touch anything, and every LLM edit is audited against deterministic evidence afterwards.
 
@@ -52,7 +52,7 @@ flowchart TD
 | 3b — Regeneration | Runs the validated regeneration commands for generated files that were deliberately skipped, keeping the result only if the build still passes. |
 | 4 — Verify | Build + test. On failure, an agent diagnoses and repairs iteratively (4a); if unrecoverable, escalates to the autonomous build-test-fix loop (4b, `phase_4b.py`) as a last resort — entered only when build and/or test commands are configured (with an empty command set the loop has nothing to run and is skipped, rather than rubber-stamping via marker files). 4b is a single long-running agent using the pipeline profile or an explicit Phase 4b override, fed the full dossier, which writes `run_and_fix_success.txt` or `run_and_fix_failure.txt` to report back. Successful 4a/4b recovery edits are committed as a fixup so they reach the candidate patch and preserved branch. |
 | 4.5 — Semantic equivalence | `git range-diff` between the source fix and the backport (squashed into one synthetic commit, so test-port/review/recovery fixups don't skew the comparison), classified into an equivalence verdict. |
-| 5 — Dossier | Writes `dossier.md` — every decision, gate value, audit finding, and diff, organized for a human reviewer. |
+| 5 — Dossier | Writes `dossier.md` (full evidence: every decision, gate value, audit finding, and diff) and `dossier_human.md` (deterministic review view: outcome, patch surface, triage/cluster decisions, checks, review focus, and evidence index). |
 
 `files_to_skip` is generated-only in every mode: code-generated sources,
 generated headers, lock files and build output. Documentation, CI config, fuzz
@@ -292,13 +292,16 @@ runs/case_20260929_153000/
 ├── run_log.txt                  # full console log of the whole run
 └── release-1.0/                 # one directory per target branch
     ├── run_log.txt              # per-target log
-    ├── dossier.md               # ← start here: the human-review dossier
+    ├── dossier_human.md         # ← start here for review: deterministic review view
+    ├── dossier.md               # full audit evidence
     ├── candidate.patch          # the ported change as a patch file
     ├── semantic_triage.json     # the triage assessment
     └── <issue>_<ts>.json        # machine-readable tracker (gates, phases, outcome)
 ```
 
 The ported commits are also preserved as a branch in the worktree's repo, named `amalgamator/<issue-id>` (or `amalgamator/<commit>-to-<target>` when `issue_id` is empty), for `success`, `partial_success`, and `unverified` outcomes, so the result survives worktree cleanup and can be pushed or cherry-picked from directly.
+
+For an existing run, `python -m auto_bug_fix.dossier_human path/to/dossier.md` writes or refreshes `dossier_human.md` from the full dossier. No LLM is involved.
 
 ---
 
@@ -553,7 +556,7 @@ Per-target override keys: `issue_id`, `bug_description`, `build_command`, `test_
 | `PIPELINE ESCALATION` | The pipeline could not finish safely and handed off (Phase 4b) or stopped with a partial, force-resolved state for a human |
 | `PIPELINE ERROR` | Unexpected failure; see `run_log.txt` |
 
-The dossier is written in every case that reaches Phase 2; the tracker JSON is written in all cases.
+Both dossier files are written in every case that reaches Phase 2; the tracker JSON is written in all cases.
 
 ---
 
@@ -623,7 +626,7 @@ Audit the external surface any time with `grep -rnE "^\s*(from|import) (common|a
 | `allowlist.py` | Symbol allowlist derivation for the resolution agents |
 | `signature.py` | Function-signature comparison between branches |
 | `range_diff.py` | Phase 4.5 semantic-equivalence via `git range-diff` |
-| `dossier.py` | Dossier assembly and rendering |
+| `dossier.py` | Dossier assembly and deterministic human-review rendering |
 | `tracker.py` | Machine-readable run tracking (phases, gates, outcome) |
 | `worktree.py` | Worktree cleanup |
 | `configs/` | Example YAML configs |
