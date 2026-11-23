@@ -123,29 +123,32 @@ def advanced_str(advanced: dict[str, Any], key: str, default: str) -> str:
     return raw.strip()
 
 
-_TRIAGE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
-def _resolve_triage_effort(advanced: dict[str, Any], series: list[str]) -> str:
+def _resolve_triage_effort(advanced: dict[str, Any]) -> str:
     """Resolve ``advanced.triage_effort``; ``inherit`` means use run effort.
 
-    Triage defaults to ``low`` in both modes. Series triage is a lookup over a
+    Triage defaults to ``low`` in every mode. Series triage is a lookup over a
     supplied commit list: on the measured case the cheapest and the most
     expensive effort produced the same partition, while the expensive run made
     the only skip-list error — it discarded the regression tests
-    (batching.md §10). Single-commit triage is search-shaped and also runs the
-    test port in the fused pre-RED session, so ``inherit`` is the opt-out when
-    the run effort is required.
+    (batching.md §10).
+
+    The single-commit default is a deliberate cost/quality trade-off, not a
+    measured one: that triage is search-shaped but the fused pre-RED session
+    also runs the test port, where effort could plausibly matter. ``inherit``
+    is the opt-out when the run effort is required.
     """
     raw = advanced_str(advanced, "triage_effort", "")
     if not raw:
         return "low"
     if raw == "inherit":
         return ""
-    if raw not in _TRIAGE_EFFORTS:
+    if raw not in _EFFORT_LEVELS:
         raise ConfigError(
             "advanced.triage_effort must be one of "
-            + ", ".join((*_TRIAGE_EFFORTS, "inherit"))
+            + ", ".join((*_EFFORT_LEVELS, "inherit"))
         )
     return raw
 
@@ -458,7 +461,7 @@ def parse_bug_fix_config(
 
     _, phase_4b_profile = profiles or resolve_pipeline_profiles(config, registry)
 
-    triage_effort = _resolve_triage_effort(advanced, source_fix_commits)
+    triage_effort = _resolve_triage_effort(advanced)
 
     bug_fix_config = BugFixConfig(
         repo_path=repo_path,
@@ -596,8 +599,8 @@ def parse_claude_config(
         raise ConfigError("claude.xml_tool_fallback must be a boolean")
 
     effort = claude.get("effort", "max")
-    if effort not in ("low", "medium", "high", "xhigh", "max"):
-        raise ConfigError("claude.effort must be one of low, medium, high, xhigh, max")
+    if effort not in _EFFORT_LEVELS:
+        raise ConfigError("claude.effort must be one of " + ", ".join(_EFFORT_LEVELS))
 
     thinking = claude.get("thinking")
     if thinking is not None and not isinstance(thinking, dict):

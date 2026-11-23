@@ -478,7 +478,7 @@ advanced:
   max_resolution_retries: 3      # LLM resolution attempts per conflict round
   partial_success_skip_ratio: 0.5  # non-bugfix ports only: dropped-file fraction that downgrades success to partial_success
   phase_4b_model: m3              # optional profile ID (from the quickstart registry)
-  triage_effort: low              # triage effort (Phase 0.5 / fused pre-RED); inherit = run effort
+  triage_effort: low              # triage effort (Phase 0.5, fused pre-RED, series partition); inherit = run effort
   forward_patch_id_lookback: "12 months"   # window for the already-applied check
 ```
 
@@ -487,17 +487,28 @@ when recovery should use a different model, endpoint, or credential. The selecte
 model is named in the run log and each tracked query includes its profile ID.
 
 `advanced.triage_effort` sets triage effort independently of the rest of the
-run. It applies to both triage paths: the separate Phase 0.5 session and the
-fused pre-RED session (`fused_pre_red: true`), which absorbs Phase 0.5. It
-defaults to `low` in every mode; set `inherit` to use the run's
+run. It applies to all three triage sessions: the separate Phase 0.5 session,
+the fused pre-RED session (`fused_pre_red: true`), which absorbs Phase 0.5, and
+the series cluster-partition session that runs when triage returns no clusters.
+It defaults to `low` in every mode; set `inherit` to use the run's
 `claude.effort` instead. Resolution and every later phase keep the run effort.
+Phase 1.5 RED triage is deliberately excluded: it decides whether the target is
+vulnerable at all, so it keeps the run effort.
+
 Series triage is a lookup over a supplied commit list, and the measured cheap
 and expensive runs produced the same partition while the expensive one made the
-only skip-list error (batching.md §10). Single-commit triage is search-shaped
-and also runs the test port in the fused session, so `inherit` is the opt-out
-when the run effort is required. On the LiteLLM path the value overrides a
-profile's `reasoning_effort` when the profile declares one; it is ignored
-otherwise.
+only skip-list error (batching.md §10). The single-commit default is not backed
+by that measurement: that triage is search-shaped, but the fused session also
+runs the test port, where effort could affect quality. **Single-commit triage
+therefore now runs at `low` by default too** — a deliberate cost/quality
+trade-off. Set `inherit` to restore the run effort, and treat a test-port
+regression at low effort as the expected first signal.
+
+On the LiteLLM path the value overrides a profile's `reasoning_effort` when the
+profile declares one; it is ignored otherwise. The run log reports whether the
+requested effort was actually applied, and the tracker gate records the
+configured value (`low`, another level, or `inherit`); the run-level effort is
+in the tracker's config snapshot.
 
 ### Context and diff budgets
 

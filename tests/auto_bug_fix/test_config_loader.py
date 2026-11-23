@@ -23,6 +23,7 @@ from auto_bug_fix.config_loader import (
 )
 from auto_bug_fix.run_bug_fix import (
     PipelineState,
+    _describe_triage_effort,
     _phase_config,
     _run_fused_pre_red_phase,
     _triage_phase_config,
@@ -542,6 +543,35 @@ def test_fused_pre_red_phase_inherits_run_effort(monkeypatch):
     _run_fused_pre_red_phase(config, claude_config, PipelineState(), None)
 
     assert seen["claude_config"].effort == "high"
+
+
+def test_describe_triage_effort_reports_applied_sdk_effort():
+    claude_config = parse_claude_config({"claude": {"effort": "max"}}, "/tmp/output")
+    config = _bug_fix_config(triage_effort="low")
+
+    assert _describe_triage_effort(claude_config, config) == "low (applied)"
+
+
+def test_describe_triage_effort_reports_unapplied_litellm_effort():
+    profile = ModelProfile(
+        id="m1", provider="litellm", model="openai/plain", params={"temperature": 0.2}
+    )
+    claude_config = parse_claude_config({"claude": {"effort": "max"}}, "/tmp/output")
+    claude_config.profile = profile
+    config = _bug_fix_config(triage_effort="low")
+
+    assert _describe_triage_effort(claude_config, config) == (
+        "low (not applied: profile declares no reasoning_effort)"
+    )
+
+
+def test_describe_triage_effort_reports_inherited_run_effort():
+    claude_config = parse_claude_config({"claude": {"effort": "high"}}, "/tmp/output")
+    config = _bug_fix_config(triage_effort="")
+
+    assert _describe_triage_effort(claude_config, config) == (
+        "inherit (run effort: high)"
+    )
 
 
 def test_parse_claude_config_invalid_effort():

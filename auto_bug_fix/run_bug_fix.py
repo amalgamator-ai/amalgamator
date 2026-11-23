@@ -113,6 +113,36 @@ def _phase_config(
     )
 
 
+def _triage_effort_applied(claude_config: ClaudeConfig) -> bool:
+    """Whether ``advanced.triage_effort`` reaches the backend.
+
+    ``effort`` is a Claude SDK option. A LiteLLM profile expresses it as
+    ``reasoning_effort``, and is overridden only when the profile already
+    declares one: a model never configured for reasoning must not receive the
+    parameter just because the pipeline lowered its triage default.
+    """
+    profile = claude_config.profile
+    return not (
+        profile is not None
+        and profile.provider != "anthropic"
+        and "reasoning_effort" not in profile.params
+    )
+
+
+def _describe_triage_effort(claude_config: ClaudeConfig, config: BugFixConfig) -> str:
+    """Describe the triage effort in force, not just the requested value.
+
+    Logging the request alone would claim ``low`` on a LiteLLM profile that
+    silently ignores it.
+    """
+    effort = config.triage_effort
+    if not effort:
+        return f"inherit (run effort: {claude_config.effort or 'unset'})"
+    if _triage_effort_applied(claude_config):
+        return f"{effort} (applied)"
+    return f"{effort} (not applied: profile declares no reasoning_effort)"
+
+
 def _triage_phase_config(
     claude_config: ClaudeConfig,
     config: BugFixConfig,
@@ -121,22 +151,14 @@ def _triage_phase_config(
 
     Used by the separate Phase 0.5 triage and by the fused pre-RED session,
     which absorbs Phase 0.5. Triage defaults to ``low`` in every mode; the
-    override is opt-out through ``triage_effort: inherit``.
-
-    ``effort`` is a Claude SDK option. A LiteLLM profile expresses it as
-    ``reasoning_effort``, and is overridden only when the profile already
-    declares one: a model never configured for reasoning must not receive the
-    parameter just because the pipeline lowered its triage default.
+    override is opt-out through ``triage_effort: inherit``. The series
+    cluster-partition session uses the same config.
     """
     effort = config.triage_effort
     if not effort:
         return _phase_config(claude_config, config)
     profile = claude_config.profile
-    if (
-        profile is not None
-        and profile.provider != "anthropic"
-        and "reasoning_effort" in profile.params
-    ):
+    if profile is not None and _triage_effort_applied(claude_config):
         profile = replace(
             profile, params={**profile.params, "reasoning_effort": effort}
         )
@@ -157,7 +179,7 @@ def _run_fused_pre_red_phase(
     """
     log.info(
         "Fused pre-RED effort: %s",
-        config.triage_effort or f"inherit ({claude_config.effort})",
+        _describe_triage_effort(claude_config, config),
     )
     return _run_fused_pre_red(
         config,
@@ -1042,7 +1064,7 @@ def phase_0_5_semantic_triage(
     claude_config_triage = _triage_phase_config(claude_config, config)
     log.info(
         "Phase 0.5: triage effort %s",
-        config.triage_effort or f"inherit ({claude_config.effort})",
+        _describe_triage_effort(claude_config, config),
     )
 
     # The triage session can commit for itself like any other agent. Nothing
@@ -8717,9 +8739,7 @@ def _run_pipeline_phases(
         tracker.record_gate(
             "recommendation", assessment.get("recommendation", "unknown")
         )
-        tracker.record_gate(
-            "triage_effort", config.triage_effort or f"inherit:{claude_config.effort}"
-        )
+        tracker.record_gate("triage_effort", config.triage_effort or "inherit")
         triage_dest: str | None = None
         if assessment:
             triage_dest = os.path.join(tracker.output_dir, "semantic_triage.json")
