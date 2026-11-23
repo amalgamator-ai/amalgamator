@@ -116,16 +116,32 @@ def _phase_config(
 def _triage_effort_applied(claude_config: ClaudeConfig) -> bool:
     """Whether ``advanced.triage_effort`` reaches the backend.
 
-    ``effort`` is a Claude SDK option. A LiteLLM profile expresses it as
-    ``reasoning_effort``, and is overridden only when the profile already
-    declares one: a model never configured for reasoning must not receive the
-    parameter just because the pipeline lowered its triage default.
+    This describes the outcome, so it is not the condition for rewriting a
+    profile — see :func:`_needs_reasoning_effort_override`. The Claude SDK
+    takes ``effort`` directly; a LiteLLM profile expresses it as
+    ``reasoning_effort`` and only honours it when the profile already declares
+    one.
     """
     profile = claude_config.profile
     return not (
         profile is not None
         and profile.provider != "anthropic"
         and "reasoning_effort" not in profile.params
+    )
+
+
+def _needs_reasoning_effort_override(profile: ModelProfile | None) -> bool:
+    """Whether triage effort must rewrite a profile's ``reasoning_effort``.
+
+    Only a non-anthropic profile that already declares the parameter may be
+    rewritten: the SDK path takes ``effort`` separately, and a model never
+    configured for reasoning must not receive ``reasoning_effort`` just
+    because the pipeline lowered its triage default.
+    """
+    return (
+        profile is not None
+        and profile.provider != "anthropic"
+        and "reasoning_effort" in profile.params
     )
 
 
@@ -158,7 +174,7 @@ def _triage_phase_config(
     if not effort:
         return _phase_config(claude_config, config)
     profile = claude_config.profile
-    if profile is not None and _triage_effort_applied(claude_config):
+    if profile is not None and _needs_reasoning_effort_override(profile):
         profile = replace(
             profile, params={**profile.params, "reasoning_effort": effort}
         )

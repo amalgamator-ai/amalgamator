@@ -24,6 +24,7 @@ from auto_bug_fix.config_loader import (
 from auto_bug_fix.run_bug_fix import (
     PipelineState,
     _describe_triage_effort,
+    _ensure_series_clusters,
     _phase_config,
     _run_fused_pre_red_phase,
     _triage_phase_config,
@@ -488,6 +489,26 @@ def test_triage_phase_config_leaves_unsupported_litellm_profile_alone():
     assert "reasoning_effort" not in phase_config.profile.params
 
 
+def test_triage_phase_config_leaves_anthropic_profile_alone():
+    """The SDK path takes effort separately; never rewrite anthropic params."""
+    profile = ModelProfile(
+        id="m1",
+        provider="anthropic",
+        model="claude-opus-4-6",
+        params={"temperature": 0.2},
+    )
+    claude_config = parse_claude_config({"claude": {"effort": "max"}}, "/tmp/output")
+    claude_config.profile = profile
+
+    phase_config = _triage_phase_config(
+        claude_config, _bug_fix_config(triage_effort="low")
+    )
+
+    assert phase_config.profile is profile
+    assert phase_config.effort == "low"
+    assert "reasoning_effort" not in phase_config.profile.params
+
+
 def test_fused_pre_red_phase_runs_at_triage_effort(monkeypatch):
     """fused_pre_red replaces Phase 0.5, so it must honour triage_effort."""
     profile = ModelProfile(
@@ -543,6 +564,47 @@ def test_fused_pre_red_phase_inherits_run_effort(monkeypatch):
     _run_fused_pre_red_phase(config, claude_config, PipelineState(), None)
 
     assert seen["claude_config"].effort == "high"
+
+
+def test_series_partition_runs_at_triage_effort(monkeypatch, tmp_path):
+    """The series cluster partition is the third triage path; same effort."""
+    profile = ModelProfile(
+        id="m1",
+        provider="litellm",
+        model="openai/deepseek",
+        params={"reasoning_effort": "high"},
+    )
+    claude_config = parse_claude_config({"claude": {"effort": "high"}}, "/tmp/output")
+    claude_config.profile = profile
+    config = _bug_fix_config(
+        triage_effort="low", source_fix_commits=["abc123", "def456"]
+    )
+
+    class _Tracker:
+        output_dir = str(tmp_path)
+
+        def record_gate(self, name, value):
+            pass
+
+    seen = {}
+
+    async def fake_claude_run(cfg, prompts, tracker=None):
+        seen["claude_config"] = cfg
+        return []
+
+    monkeypatch.setattr("auto_bug_fix.run_bug_fix.claude_run", fake_claude_run)
+    monkeypatch.setattr(
+        "auto_bug_fix.run_bug_fix._series_prompt_section", lambda cfg: ""
+    )
+
+    _ensure_series_clusters(config, claude_config, PipelineState(), _Tracker())
+
+    used = seen["claude_config"]
+    assert used.effort == "low"
+    assert used.profile is not None
+    assert used.profile.params["reasoning_effort"] == "low"
+    # The run-wide config keeps the run effort for resolution.
+    assert claude_config.profile.params["reasoning_effort"] == "high"
 
 
 def test_describe_triage_effort_reports_applied_sdk_effort():
