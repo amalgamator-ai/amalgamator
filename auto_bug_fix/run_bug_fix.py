@@ -117,12 +117,11 @@ def _triage_phase_config(
     claude_config: ClaudeConfig,
     config: BugFixConfig,
 ) -> BugFixClaudeConfig:
-    """Phase 0.5 config with ``advanced.triage_effort`` applied.
+    """Triage config with ``advanced.triage_effort`` applied.
 
-    Series triage is lookup-shaped: on the measured case the cheapest and the
-    most expensive effort produced the same partition, while the expensive run
-    made the only skip-list error (batching.md §10). The override is opt-out
-    through ``triage_effort: inherit``.
+    Used by the separate Phase 0.5 triage and by the fused pre-RED session,
+    which absorbs Phase 0.5. Triage defaults to ``low`` in every mode; the
+    override is opt-out through ``triage_effort: inherit``.
 
     ``effort`` is a Claude SDK option. A LiteLLM profile expresses it as
     ``reasoning_effort``, and is overridden only when the profile already
@@ -142,6 +141,30 @@ def _triage_phase_config(
             profile, params={**profile.params, "reasoning_effort": effort}
         )
     return _phase_config(claude_config, config, effort=effort, profile=profile)
+
+
+def _run_fused_pre_red_phase(
+    config: BugFixConfig,
+    claude_config: ClaudeConfig,
+    state: PipelineState,
+    tracker,
+) -> dict | None:
+    """Run the fused pre-RED session at ``advanced.triage_effort``.
+
+    The fused session replaces Phase 0.5, so it must honour the same effort
+    setting as the separate triage path. Resolution and every later phase keep
+    the run's effort.
+    """
+    log.info(
+        "Fused pre-RED effort: %s",
+        config.triage_effort or f"inherit ({claude_config.effort})",
+    )
+    return _run_fused_pre_red(
+        config,
+        _triage_phase_config(claude_config, config),
+        state,
+        tracker,
+    )
 
 
 async def _run_llm(claude_config, prompts, tracker=None):
@@ -8657,7 +8680,9 @@ def _run_pipeline_phases(
             )
             tracker.record_gate("pre_red_mode", "series_legacy")
         if config.fused_pre_red and not config.source_fix_commits:
-            assessment = _run_fused_pre_red(config, claude_config, state, tracker) or {}
+            assessment = (
+                _run_fused_pre_red_phase(config, claude_config, state, tracker) or {}
+            )
             fused_pre_red_ok = bool(assessment)
             if not fused_pre_red_ok:
                 log.warning(

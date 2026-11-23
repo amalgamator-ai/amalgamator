@@ -127,18 +127,19 @@ _TRIAGE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def _resolve_triage_effort(advanced: dict[str, Any], series: list[str]) -> str:
-    """Resolve ``advanced.triage_effort``; empty string means inherit.
+    """Resolve ``advanced.triage_effort``; ``inherit`` means use run effort.
 
-    Commit-series triage is a lookup over a supplied commit list: on the
-    measured case the cheapest and the most expensive effort produced the same
-    partition, while the expensive run made the only skip-list error — it
-    discarded the regression tests (batching.md §10). Series mode therefore
-    defaults to ``low``. Single-commit triage searches for the commits that
-    introduced a missing prerequisite, so it keeps the run's ``claude.effort``.
+    Triage defaults to ``low`` in both modes. Series triage is a lookup over a
+    supplied commit list: on the measured case the cheapest and the most
+    expensive effort produced the same partition, while the expensive run made
+    the only skip-list error — it discarded the regression tests
+    (batching.md §10). Single-commit triage is search-shaped and also runs the
+    test port in the fused pre-RED session, so ``inherit`` is the opt-out when
+    the run effort is required.
     """
     raw = advanced_str(advanced, "triage_effort", "")
     if not raw:
-        return "low" if series else ""
+        return "low"
     if raw == "inherit":
         return ""
     if raw not in _TRIAGE_EFFORTS:

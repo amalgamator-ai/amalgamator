@@ -21,7 +21,11 @@ from auto_bug_fix.config_loader import (
     parse_targets,
     validate_config,
 )
-from auto_bug_fix.run_bug_fix import _phase_config, _triage_phase_config
+from auto_bug_fix.run_bug_fix import (
+    _phase_config,
+    _run_fused_pre_red_phase,
+    _triage_phase_config,
+)
 from common.model_registry import ModelProfile
 
 
@@ -212,8 +216,13 @@ def test_triage_effort_defaults_to_low_for_series():
     assert parsed.triage_effort == "low"
 
 
-def test_triage_effort_defaults_to_inherit_for_single_commit():
+def test_triage_effort_defaults_to_low_for_single_commit():
     parsed, _, _ = parse_bug_fix_config(_triage_cfg())
+    assert parsed.triage_effort == "low"
+
+
+def test_triage_effort_inherit_clears_single_commit_default():
+    parsed, _, _ = parse_bug_fix_config(_triage_cfg({"triage_effort": "inherit"}))
     assert parsed.triage_effort == ""
 
 
@@ -474,6 +483,63 @@ def test_triage_phase_config_leaves_unsupported_litellm_profile_alone():
 
     assert phase_config.profile is profile
     assert "reasoning_effort" not in phase_config.profile.params
+
+
+def test_fused_pre_red_phase_runs_at_triage_effort(monkeypatch):
+    """fused_pre_red replaces Phase 0.5, so it must honour triage_effort."""
+    profile = ModelProfile(
+        id="m1",
+        provider="litellm",
+        model="openai/deepseek",
+        params={"reasoning_effort": "high"},
+    )
+    claude_config = parse_claude_config({"claude": {"effort": "high"}}, "/tmp/output")
+    claude_config.profile = profile
+    config = _bug_fix_config(
+        triage_effort="low", fused_pre_red=True, source_fix_commits=[]
+    )
+
+    seen = {}
+
+    def fake_run_fused_pre_red(cfg, phase_config, state, tracker):
+        seen["claude_config"] = phase_config
+        return {"commit_type": "bug-fix"}
+
+    monkeypatch.setattr(
+        "auto_bug_fix.run_bug_fix._run_fused_pre_red", fake_run_fused_pre_red
+    )
+
+    _run_fused_pre_red_phase(config, claude_config, object(), object())
+
+    used = seen["claude_config"]
+    assert used.profile is not None
+    assert used.profile.params["reasoning_effort"] == "low"
+    assert used.effort == "low"
+    # The run-wide config must stay at high effort for resolution and later phases.
+    assert claude_config.profile.params["reasoning_effort"] == "high"
+    assert claude_config.effort == "high"
+
+
+def test_fused_pre_red_phase_inherits_run_effort(monkeypatch):
+    """triage_effort: inherit keeps the run effort in the fused session."""
+    claude_config = parse_claude_config({"claude": {"effort": "high"}}, "/tmp/output")
+    config = _bug_fix_config(
+        triage_effort="", fused_pre_red=True, source_fix_commits=[]
+    )
+
+    seen = {}
+
+    def fake_run_fused_pre_red(cfg, phase_config, state, tracker):
+        seen["claude_config"] = phase_config
+        return {"commit_type": "bug-fix"}
+
+    monkeypatch.setattr(
+        "auto_bug_fix.run_bug_fix._run_fused_pre_red", fake_run_fused_pre_red
+    )
+
+    _run_fused_pre_red_phase(config, claude_config, object(), object())
+
+    assert seen["claude_config"].effort == "high"
 
 
 def test_parse_claude_config_invalid_effort():
