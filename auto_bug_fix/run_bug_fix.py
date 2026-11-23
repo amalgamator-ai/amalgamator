@@ -28,7 +28,15 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, TextIO, TypedDict, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    NamedTuple,
+    TextIO,
+    TypedDict,
+    TypeGuard,
+    cast,
+)
 
 from auto_bug_fix.claude_utils import (
     BugFixClaudeConfig,
@@ -130,7 +138,9 @@ def _triage_effort_applied(claude_config: ClaudeConfig) -> bool:
     )
 
 
-def _needs_reasoning_effort_override(profile: ModelProfile | None) -> bool:
+def _needs_reasoning_effort_override(
+    profile: ModelProfile | None,
+) -> TypeGuard[ModelProfile]:
     """Whether triage effort must rewrite a profile's ``reasoning_effort``.
 
     Only a non-anthropic profile that already declares the parameter may be
@@ -174,7 +184,7 @@ def _triage_phase_config(
     if not effort:
         return _phase_config(claude_config, config)
     profile = claude_config.profile
-    if profile is not None and _needs_reasoning_effort_override(profile):
+    if _needs_reasoning_effort_override(profile):
         profile = replace(
             profile, params={**profile.params, "reasoning_effort": effort}
         )
@@ -8756,6 +8766,7 @@ def _run_pipeline_phases(
             "recommendation", assessment.get("recommendation", "unknown")
         )
         tracker.record_gate("triage_effort", config.triage_effort or "inherit")
+        tracker.record_gate("run_effort", claude_config.effort or "unset")
         triage_dest: str | None = None
         if assessment:
             triage_dest = os.path.join(tracker.output_dir, "semantic_triage.json")

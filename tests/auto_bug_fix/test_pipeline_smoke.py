@@ -246,6 +246,10 @@ def test_run_targets_executes_the_full_pipeline(tmp_path, monkeypatch, provider)
         for phase in tracker["phases"]
         for name, decision in phase.get("gate_decisions", {}).items()
     }
+    # The gate keeps the configured value; the actual run effort is recorded
+    # beside it so ``inherit`` stays resolvable from the tracker alone.
+    assert gates["triage_effort"] == "inherit"
+    assert gates["run_effort"] == "max"
     assert gates["forward_patch_id"] == "not_found"
     # The fix is not an ancestor and its patch-id is absent, but the seed file
     # exists on the target branch — the normal "port me" ancestry outcome.

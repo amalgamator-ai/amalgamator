@@ -139,18 +139,24 @@ def _resolve_triage_effort(advanced: dict[str, Any]) -> str:
     measured one: that triage is search-shaped but the fused pre-RED session
     also runs the test port, where effort could plausibly matter. ``inherit``
     is the opt-out when the run effort is required.
+
+    An absent key defaults to ``low``. A present but unusable value raises
+    rather than warning and falling back: the fallback is a behaviour change,
+    not a neutral empty value, so a typo must not quietly lower the effort.
     """
-    raw = advanced_str(advanced, "triage_effort", "")
-    if not raw:
+    raw = advanced.get("triage_effort")
+    if raw is None:
         return "low"
-    if raw == "inherit":
+    value = raw.strip() if isinstance(raw, str) else ""
+    if value == "inherit":
         return ""
-    if raw not in _EFFORT_LEVELS:
+    if value not in _EFFORT_LEVELS:
         raise ConfigError(
             "advanced.triage_effort must be one of "
             + ", ".join((*_EFFORT_LEVELS, "inherit"))
+            + f" (got {raw!r})"
         )
-    return raw
+    return value
 
 
 def advanced_int(advanced: dict[str, Any], key: str) -> int | None:

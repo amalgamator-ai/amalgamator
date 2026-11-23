@@ -506,9 +506,10 @@ regression at low effort as the expected first signal.
 
 On the LiteLLM path the value overrides a profile's `reasoning_effort` when the
 profile declares one; it is ignored otherwise. The run log reports whether the
-requested effort was actually applied, and the tracker gate records the
-configured value (`low`, another level, or `inherit`); the run-level effort is
-in the tracker's config snapshot.
+requested effort was actually applied. The tracker records two gates:
+`triage_effort` (the configured value — `low`, another level, or `inherit`) and
+`run_effort` (the effort every other phase uses), so an `inherit` setting can
+still be resolved after the run.
 
 ### Context and diff budgets
 

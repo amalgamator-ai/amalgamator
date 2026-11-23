@@ -254,6 +254,16 @@ def test_triage_effort_rejects_unknown_level():
         parse_bug_fix_config(_triage_cfg({"triage_effort": "turbo"}))
 
 
+def test_triage_effort_rejects_non_string_value():
+    with pytest.raises(ConfigError, match="triage_effort"):
+        parse_bug_fix_config(_triage_cfg({"triage_effort": True}))
+
+
+def test_triage_effort_rejects_blank_value():
+    with pytest.raises(ConfigError, match="triage_effort"):
+        parse_bug_fix_config(_triage_cfg({"triage_effort": "   "}))
+
+
 def test_validate_config_patch_mode_defaults_source(tmp_path):
     config = _fix_cfg({"patch": _write_patch(tmp_path)}, branches={"target": "v1.0"})
     validate_config(config)
@@ -600,6 +610,8 @@ def test_series_partition_runs_at_triage_effort(monkeypatch, tmp_path):
     _ensure_series_clusters(config, claude_config, PipelineState(), _Tracker())
 
     used = seen["claude_config"]
+    # ``effort`` is the SDK option; on this LiteLLM profile the override that
+    # reaches the backend is the rewritten ``reasoning_effort``.
     assert used.effort == "low"
     assert used.profile is not None
     assert used.profile.params["reasoning_effort"] == "low"
@@ -609,6 +621,20 @@ def test_series_partition_runs_at_triage_effort(monkeypatch, tmp_path):
 
 def test_describe_triage_effort_reports_applied_sdk_effort():
     claude_config = parse_claude_config({"claude": {"effort": "max"}}, "/tmp/output")
+    config = _bug_fix_config(triage_effort="low")
+
+    assert _describe_triage_effort(claude_config, config) == "low (applied)"
+
+
+def test_describe_triage_effort_reports_applied_anthropic_profile():
+    profile = ModelProfile(
+        id="m1",
+        provider="anthropic",
+        model="claude-opus-4-6",
+        params={"temperature": 0.2},
+    )
+    claude_config = parse_claude_config({"claude": {"effort": "max"}}, "/tmp/output")
+    claude_config.profile = profile
     config = _bug_fix_config(triage_effort="low")
 
     assert _describe_triage_effort(claude_config, config) == "low (applied)"
