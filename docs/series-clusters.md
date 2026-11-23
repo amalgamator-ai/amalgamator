@@ -376,7 +376,10 @@ reproducible reruns; the derived partition is recorded in the tracker either way
    *before* the LLM result and merged under it, so an unparseable triage JSON
    still leaves `test_files` populated. `files_to_skip` is triage-only: the
    deterministic path-based skip set was removed, so without a triage list no
-   file is skipped by path shape.
+   file is skipped by path shape. Series triage also defaults to
+   `advanced.triage_effort: low` (`auto_bug_fix/README.md`): it is a lookup over
+   the supplied commit list, and the measured cheap and expensive runs produced
+   the same partition (batching.md §10).
 2. **New input and output fields** in `SemanticTriagePrompt` and
    `FusedPreRedPrompt`.
 3. **New lazy phase** between Phase 0.5 and Phase 2+3a: cluster planning.
