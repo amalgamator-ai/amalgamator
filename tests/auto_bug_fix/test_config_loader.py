@@ -22,6 +22,7 @@ from auto_bug_fix.config_loader import (
     validate_config,
 )
 from auto_bug_fix.run_bug_fix import (
+    PipelineState,
     _phase_config,
     _run_fused_pre_red_phase,
     _triage_phase_config,
@@ -463,6 +464,7 @@ def test_triage_phase_config_overrides_litellm_reasoning_effort():
         claude_config, _bug_fix_config(triage_effort="low")
     )
 
+    assert phase_config.profile is not None
     assert phase_config.profile is not profile
     assert phase_config.profile.params["reasoning_effort"] == "low"
     assert phase_config.profile.params["temperature"] == 0.2
@@ -509,7 +511,7 @@ def test_fused_pre_red_phase_runs_at_triage_effort(monkeypatch):
         "auto_bug_fix.run_bug_fix._run_fused_pre_red", fake_run_fused_pre_red
     )
 
-    _run_fused_pre_red_phase(config, claude_config, object(), object())
+    _run_fused_pre_red_phase(config, claude_config, PipelineState(), None)
 
     used = seen["claude_config"]
     assert used.profile is not None
@@ -537,7 +539,7 @@ def test_fused_pre_red_phase_inherits_run_effort(monkeypatch):
         "auto_bug_fix.run_bug_fix._run_fused_pre_red", fake_run_fused_pre_red
     )
 
-    _run_fused_pre_red_phase(config, claude_config, object(), object())
+    _run_fused_pre_red_phase(config, claude_config, PipelineState(), None)
 
     assert seen["claude_config"].effort == "high"
 
