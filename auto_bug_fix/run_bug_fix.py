@@ -5345,9 +5345,21 @@ def _apply_cherry_pick(
         )
 
         if result.success and not uu_files:
-            log.info("%s: clean cherry-pick (strategy: %s)", label, strat["name"])
-            if state.dossier:
-                state.dossier.add_strategy(strat["name"], "clean")
+            if result.dropped_empty:
+                # Emulated --empty=drop on git < 2.45: the commit had nothing
+                # left to apply. Saying "clean cherry-pick" here would report a
+                # series as cleaner than it was.
+                log.info(
+                    "%s: commit dropped, nothing left to apply (strategy: %s)",
+                    label,
+                    strat["name"],
+                )
+                if state.dossier:
+                    state.dossier.add_strategy(strat["name"], "dropped (empty)")
+            else:
+                log.info("%s: clean cherry-pick (strategy: %s)", label, strat["name"])
+                if state.dossier:
+                    state.dossier.add_strategy(strat["name"], "clean")
             _prune_skipped_after_pick(config, state, label, entry_head)
             return "clean", [], []
 
@@ -5381,7 +5393,7 @@ def _apply_cherry_pick(
         best_strategy[1],
     )
     strat = best_strategy[0]
-    git_cherry_pick(
+    retry_result = git_cherry_pick(
         config.repo_path,
         commit,
         strategy=strat["strategy"],
@@ -5390,7 +5402,18 @@ def _apply_cherry_pick(
     )
     uu_files = _conflicted_files(git_status_porcelain(config.repo_path))
     if not uu_files:
-        log.info("%s: clean cherry-pick on retry (strategy: %s)", label, strat["name"])
+        if retry_result.dropped_empty:
+            log.info(
+                "%s: commit dropped on retry, nothing left to apply (strategy: %s)",
+                label,
+                strat["name"],
+            )
+            if state.dossier:
+                state.dossier.add_strategy(strat["name"], "dropped (empty)")
+        else:
+            log.info(
+                "%s: clean cherry-pick on retry (strategy: %s)", label, strat["name"]
+            )
         _prune_skipped_after_pick(config, state, label, entry_head)
         return "clean", [], []
 

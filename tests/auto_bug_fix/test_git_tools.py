@@ -6,9 +6,15 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
+import pytest
+
+from auto_bug_fix import git_tools
 from auto_bug_fix.git_tools import (
+    GitResult,
     git_cat_file_exists,
+    git_cherry_pick,
     git_diff_name_only,
     git_diff_name_only_range,
     git_is_ancestor,
@@ -216,8 +222,6 @@ def test_git_diff_name_only_range_merge(tmp_git_repo):
 # aborts the whole run, so git output must degrade rather than raise — except
 # where byte-exactness is the point.
 
-import pytest
-
 from auto_bug_fix.git_tools import (
     _run_git,
     git_format_patch,
@@ -330,3 +334,296 @@ def test_patch_id_matches_gits_own_on_non_utf8_content(latin1_repo):
         .split()[0]
     )
     assert git_patch_id(str(repo), head) == expected
+
+
+# --- cherry-pick --empty=drop portability ---------------------------------
+#
+# `--empty=drop` exists only in git >= 2.45. RHEL 8/9, Ubuntu 22.04/24.04,
+# Debian 12 and Fedora <= 40 ship older git, where the option is rejected
+# while parsing arguments: the pick exits non-zero with no conflicts, which
+# series mode reads as "unmappable cherry-pick (all strategies failed)".
+
+# Abbreviated: faithful for every option whose name can contain "empty", not a
+# byte-for-byte capture of `git cherry-pick -h`.
+GIT_243_USAGE = """usage: git cherry-pick [--edit] [-n] [-m <parent-number>] [-s] [-x] [--ff]
+                       [-S[<keyid>]] <commit>...
+   or: git cherry-pick (--continue | --skip | --abort | --quit)
+
+    --quit                end revert/cherry-pick sequence
+    --continue            resume revert/cherry-pick sequence
+    --abort               abort revert/cherry-pick sequence
+    --skip                skip current commit and continue
+    --cleanup <mode>      how to strip trailing whitespaces
+    -n, --no-commit       don't make a commit
+    -e, --edit            edit commit message
+    -s, --signoff         add Signed-off-by line
+    -m, --mainline <n>    parent number
+    --rerere-autoupdate   update the index with reused conflict resolution if possible
+    --strategy <strategy>
+                          merge strategy to use
+    --[no-]allow-empty    preserve initially empty commits
+    --[no-]keep-redundant-commits
+                          keep redundant, empty commits
+"""
+
+GIT_245_USAGE = """usage: git cherry-pick [--edit] [-n] [-m <parent-number>] [-s] [-x] [--ff]
+                       [-S[<keyid>]] <commit>...
+   or: git cherry-pick (--continue | --skip | --abort | --quit)
+
+    --quit                end revert/cherry-pick sequence
+    --continue            resume revert/cherry-pick sequence
+    --abort               abort revert/cherry-pick sequence
+    --skip                skip current commit and continue
+    --cleanup <mode>      how to strip trailing whitespaces
+    -n, --no-commit       don't make a commit
+    -e, --edit            edit commit message
+    -s, --signoff         add Signed-off-by line
+    -m, --mainline <n>    parent number
+    --rerere-autoupdate   update the index with reused conflict resolution if possible
+    --strategy <strategy>
+                          merge strategy to use
+    --empty (stop|drop|keep)
+                          how to handle commits that become empty
+"""
+
+
+@pytest.mark.parametrize(
+    "usage, expected",
+    [(GIT_243_USAGE, False), (GIT_245_USAGE, True)],
+    ids=["git-2.43-no-empty", "git-2.45-empty"],
+)
+def test_probe_reads_the_usage_text(monkeypatch, usage, expected):
+    """The probes must not confuse --allow-empty or --keep-redundant-commits."""
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 129, usage, "")
+
+    monkeypatch.setattr(git_tools.subprocess, "run", fake_run)
+    git_tools._git_cherry_pick_supports_empty_drop.cache_clear()
+    try:
+        assert git_tools._git_cherry_pick_supports_empty_drop() is expected
+    finally:
+        git_tools._git_cherry_pick_supports_empty_drop.cache_clear()
+
+
+def test_probe_reads_stderr_too(monkeypatch):
+    """Some builds print usage to stderr; the probe concatenates both streams."""
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 129, "", GIT_245_USAGE)
+
+    monkeypatch.setattr(git_tools.subprocess, "run", fake_run)
+    git_tools._git_cherry_pick_supports_empty_drop.cache_clear()
+    try:
+        assert git_tools._git_cherry_pick_supports_empty_drop() is True
+    finally:
+        git_tools._git_cherry_pick_supports_empty_drop.cache_clear()
+
+
+def test_cherry_pick_passes_empty_drop_when_supported(monkeypatch, tmp_git_repo):
+    calls = []
+
+    def fake_run_git(repo_path, args, **kwargs):
+        calls.append(args)
+        return GitResult(0, "", "")
+
+    monkeypatch.setattr(git_tools, "_git_cherry_pick_supports_empty_drop", lambda: True)
+    monkeypatch.setattr(git_tools, "is_merge_commit", lambda *_: False)
+    monkeypatch.setattr(git_tools, "_run_git", fake_run_git)
+
+    result = git_cherry_pick(tmp_git_repo.repo_path, "abc123", drop_empty=True)
+
+    assert result.success
+    assert "--empty=drop" in calls[0]
+
+
+def test_cherry_pick_omits_empty_drop_on_old_git(monkeypatch, tmp_git_repo):
+    calls = []
+
+    def fake_run_git(repo_path, args, **kwargs):
+        calls.append(args)
+        return GitResult(0, "", "")
+
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    monkeypatch.setattr(git_tools, "is_merge_commit", lambda *_: False)
+    monkeypatch.setattr(git_tools, "_run_git", fake_run_git)
+
+    result = git_cherry_pick(tmp_git_repo.repo_path, "abc123", drop_empty=True)
+
+    assert result.success
+    assert "--empty=drop" not in calls[0]
+
+
+def test_cherry_pick_skips_an_empty_pick_on_old_git(monkeypatch, tmp_git_repo):
+    """An empty pick must be dropped, and reported as dropped."""
+    calls = []
+
+    def fake_run_git(repo_path, args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["cherry-pick", "--skip"]:
+            return GitResult(0, "", "")
+        # Translated on purpose: detection is state-based, so the message must
+        # not matter. This is git's de_DE advice line.
+        return GitResult(
+            1,
+            "",
+            'Der letzte "cherry-pick" ist jetzt leer, vermutlich wegen '
+            "Konfliktauflösung.",
+        )
+
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    monkeypatch.setattr(git_tools, "is_merge_commit", lambda *_: False)
+    monkeypatch.setattr(git_tools, "_pick_left_nothing_to_apply", lambda *_: True)
+    monkeypatch.setattr(git_tools, "_run_git", fake_run_git)
+
+    result = git_cherry_pick(tmp_git_repo.repo_path, "abc123", drop_empty=True)
+
+    assert result.success
+    assert result.dropped_empty is True
+    assert calls[1] == ["cherry-pick", "--skip"]
+
+
+def test_cherry_pick_does_not_skip_a_conflicted_pick(monkeypatch, tmp_git_repo):
+    calls = []
+
+    def fake_run_git(repo_path, args, **kwargs):
+        calls.append(args)
+        return GitResult(1, "", "CONFLICT (modify/delete)")
+
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    monkeypatch.setattr(git_tools, "is_merge_commit", lambda *_: False)
+    monkeypatch.setattr(git_tools, "_pick_left_nothing_to_apply", lambda *_: False)
+    monkeypatch.setattr(git_tools, "_run_git", fake_run_git)
+
+    result = git_cherry_pick(tmp_git_repo.repo_path, "abc123", drop_empty=True)
+
+    assert not result.success
+    assert result.dropped_empty is False
+    assert all(args[:2] != ["cherry-pick", "--skip"] for args in calls)
+
+
+def test_cherry_pick_fails_loudly_when_drop_empty_is_off(monkeypatch, tmp_git_repo):
+    """Single-fix mode keeps its contract: an empty pick is an error."""
+    calls = []
+
+    def fake_run_git(repo_path, args, **kwargs):
+        calls.append(args)
+        return GitResult(1, "", "The previous cherry-pick is now empty")
+
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    monkeypatch.setattr(git_tools, "is_merge_commit", lambda *_: False)
+    monkeypatch.setattr(git_tools, "_run_git", fake_run_git)
+
+    result = git_cherry_pick(tmp_git_repo.repo_path, "abc123", drop_empty=False)
+
+    assert not result.success
+    assert len(calls) == 1
+    assert calls[0][:2] != ["cherry-pick", "--skip"]
+
+
+def test_pick_left_nothing_to_apply_on_a_real_empty_pick(monkeypatch, tmp_git_repo):
+    """State-based detection, against real git: no reliance on English prose."""
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    rp = tmp_git_repo.repo_path
+    subprocess.run(
+        ["git", "checkout", "-q", tmp_git_repo.target_branch], check=True, cwd=rp
+    )
+    assert git_tools._pick_left_nothing_to_apply(rp, tmp_git_repo.fix_sha) is False
+
+    assert git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=False).success
+    # Re-applying the same commit leaves nothing to apply.
+    failed = git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=False)
+    assert not failed.success
+    assert git_tools._pick_left_nothing_to_apply(rp, tmp_git_repo.fix_sha) is True
+
+
+def test_pick_left_nothing_to_apply_is_false_on_a_conflict(monkeypatch, tmp_git_repo):
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    rp = tmp_git_repo.repo_path
+    subprocess.run(
+        ["git", "checkout", "-q", tmp_git_repo.target_branch], check=True, cwd=rp
+    )
+    # Diverge the target so the fix conflicts instead of landing empty.
+    (Path(rp) / "lib" / "url.c").write_text("void vulnerable_func() { /* ours */ }\n")
+    subprocess.run(["git", "commit", "-qam", "diverge"], check=True, cwd=rp)
+
+    failed = git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=False)
+    assert not failed.success
+    assert git_tools._pick_left_nothing_to_apply(rp, tmp_git_repo.fix_sha) is False
+
+
+def test_empty_pick_is_dropped_with_untracked_artifacts(monkeypatch, tmp_git_repo):
+    """Detection uses git diff, not git status: run artifacts must not block it."""
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    rp = tmp_git_repo.repo_path
+    subprocess.run(
+        ["git", "checkout", "-q", tmp_git_repo.target_branch], check=True, cwd=rp
+    )
+    assert git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=True).success
+    (Path(rp) / "run-artifact.patch").write_text("diff --git a/x b/x\n")
+
+    dropped = git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=True)
+
+    assert dropped.success
+    assert dropped.dropped_empty is True
+    assert (Path(rp) / "run-artifact.patch").exists()
+
+
+def test_cherry_pick_drops_empty_commit_on_real_repo(monkeypatch, tmp_git_repo):
+    """First pick applies, second is dropped, and the sequencer is left clean."""
+    monkeypatch.setattr(
+        git_tools, "_git_cherry_pick_supports_empty_drop", lambda: False
+    )
+    rp = tmp_git_repo.repo_path
+    subprocess.run(
+        ["git", "checkout", "-q", tmp_git_repo.target_branch], check=True, cwd=rp
+    )
+
+    def commit_count() -> int:
+        return int(
+            subprocess.run(
+                ["git", "rev-list", "--count", "HEAD"],
+                cwd=rp,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )
+
+    before = commit_count()
+    first = git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=True)
+    assert first.success
+    assert first.dropped_empty is False
+    applied = commit_count()
+    assert applied == before + 1
+
+    second = git_cherry_pick(rp, tmp_git_repo.fix_sha, drop_empty=True)
+    assert second.success
+    assert second.dropped_empty is True
+    assert commit_count() == applied
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=rp, capture_output=True, text=True
+    ).stdout
+    assert status.strip() == ""
+    cherry_pick_head = subprocess.run(
+        ["git", "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"],
+        cwd=rp,
+        capture_output=True,
+    )
+    assert cherry_pick_head.returncode != 0
+    assert not (Path(rp) / ".git" / "sequencer").exists()
