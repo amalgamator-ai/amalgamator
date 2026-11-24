@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from auto_bug_fix.dossier import format_dossier_human, parse_dossier_markdown
@@ -51,6 +52,12 @@ def main(argv: list[str] | None = None) -> int:
             tracker = candidates[-1]
     if tracker is not None and tracker.exists():
         outcome, gates = _tracker_info(tracker)
+    else:
+        where = f" at {tracker}" if tracker is not None else ""
+        print(
+            f"No tracker JSON found{where}; outcome and gates are not recorded.",
+            file=sys.stderr,
+        )
 
     output = args.output or args.dossier.with_name("dossier_human.md")
     output.write_text(

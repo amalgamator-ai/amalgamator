@@ -204,3 +204,96 @@ def test_human_dossier_renders_python_literal_gates_as_table():
     assert "| forward_patch_id | not_found |" in text
     assert "| ancestry | seed_files_only |" in text
     assert "{'forward_patch_id'" not in text
+
+
+def test_patch_stats_survive_form_feed_in_added_line():
+    """``str.splitlines()`` halves ``+\\x0c``; the count must stay correct."""
+    patch = (
+        "diff --git a/COPYING b/COPYING\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/COPYING\n"
+        "@@ -0,0 +1,4 @@\n"
+        "+line1\n"
+        "+\x0c\n"
+        "+line3\n"
+        "+line4\n"
+    )
+    dossier = Dossier(issue_id="RHEL-5")
+    dossier.add("Candidate patch", patch, "Phase 5")
+
+    text = format_dossier_human(dossier)
+
+    assert "1 files, +4/−0" in text
+    assert "| `COPYING` | added | 4 | 0 |" in text
+
+
+def test_binary_patch_is_marked():
+    patch = (
+        "diff --git a/aarch64/pkg.rpm b/aarch64/pkg.rpm\n"
+        "new file mode 100644\n"
+        "index 0000000..1111111\n"
+        "Binary files /dev/null and b/aarch64/pkg.rpm differ\n"
+    )
+    dossier = Dossier(issue_id="RHEL-6")
+    dossier.add("Candidate patch", patch, "Phase 5")
+
+    text = format_dossier_human(dossier)
+
+    assert "1 files, +0/−0, 1 binary" in text
+    assert "| `aarch64/pkg.rpm` | binary | — | — |" in text
+
+
+def test_modified_equivalence_is_not_review_focus():
+    text = format_dossier_human(
+        _dossier(), outcome="success", gates={"semantic_equivalence": "modified"}
+    )
+
+    assert "Semantic equivalence is `modified`" not in text
+    assert "| Semantic equivalence | modified |" in text
+
+
+def test_parse_round_trip_survives_inner_code_fence():
+    content = (
+        "diff --git a/README.md b/README.md\n"
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1,2 +1,4 @@\n"
+        "+```bash\n"
+        "+echo hi\n"
+        "+```\n"
+        " context\n"
+    )
+    dossier = Dossier(issue_id="RHEL-7")
+    dossier.add("Candidate patch", content, "Phase 5")
+
+    rendered = format_dossier(dossier)
+    parsed = parse_dossier_markdown(rendered)
+
+    assert "````" in rendered
+    assert parsed.items[0].content == content
+
+
+def test_unknown_labels_are_kept_in_other_evidence():
+    dossier = Dossier(issue_id="RHEL-8")
+    dossier.add("Renamed evidence", "still here", "Phase X")
+
+    text = format_dossier_human(dossier)
+
+    assert "## Other evidence" in text
+    assert "still here" in text
+
+
+def test_cli_warns_when_no_tracker(tmp_path, capsys):
+    from auto_bug_fix import dossier_human
+
+    path = tmp_path / "dossier.md"
+    path.write_text(format_dossier(_dossier()), encoding="utf-8")
+
+    assert dossier_human.main([str(path)]) == 0
+
+    captured = capsys.readouterr()
+    assert "No tracker JSON found" in captured.err
+    output = tmp_path / "dossier_human.md"
+    assert output.exists()
+    assert "RHEL-1" in output.read_text(encoding="utf-8")

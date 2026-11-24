@@ -301,7 +301,7 @@ runs/case_20260929_153000/
 
 The ported commits are also preserved as a branch in the worktree's repo, named `amalgamator/<issue-id>` (or `amalgamator/<commit>-to-<target>` when `issue_id` is empty), for `success`, `partial_success`, and `unverified` outcomes, so the result survives worktree cleanup and can be pushed or cherry-picked from directly.
 
-For an existing run, `python -m auto_bug_fix.dossier_human path/to/dossier.md` writes or refreshes `dossier_human.md` from the full dossier. No LLM is involved.
+For an existing run, `python -m auto_bug_fix.dossier_human path/to/dossier.md` writes or refreshes `dossier_human.md` from the full dossier. No LLM is involved. It auto-discovers `<issue>_*.json` beside the dossier for the outcome and gates; if no tracker is found (for example because the artefact bundle renamed it), it says so and leaves those fields unrecorded rather than implying the run recorded nothing.
 
 ---
 

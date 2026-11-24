@@ -76,6 +76,16 @@ def build_trailers(
     return trailers
 
 
+def _fence_for(content: str) -> str:
+    """A code fence longer than any backtick run inside *content*.
+
+    A fixed ``` fence truncates the item when the payload itself contains a
+    fenced block (a README or docs change, for example).
+    """
+    longest = max((len(run) for run in re.findall(r"`+", content)), default=0)
+    return "`" * max(3, longest + 1)
+
+
 def format_dossier(dossier: Dossier) -> str:
     """Render the dossier as a human-readable Markdown string."""
     lines = [
@@ -94,13 +104,14 @@ def format_dossier(dossier: Dossier) -> str:
     ]
 
     for item in dossier.items:
+        fence = _fence_for(item.content)
         lines.append(f"## {item.label}")
         lines.append("")
         lines.append(f"**Source**: {item.source}")
         lines.append("")
-        lines.append("```")
+        lines.append(fence)
         lines.append(item.content)
-        lines.append("```")
+        lines.append(fence)
         lines.append("")
 
     if dossier.strategies:
@@ -131,6 +142,7 @@ class _PatchFile:
     added: int = 0
     removed: int = 0
     status: str = "modified"
+    binary: bool = False
 
 
 def _first_item(dossier: Dossier, label: str) -> DossierItem | None:
@@ -182,7 +194,11 @@ def _patch_stats(text: str) -> list[_PatchFile]:
     files: OrderedDict[str, _PatchFile] = OrderedDict()
     current: _PatchFile | None = None
     in_hunk = False
-    for line in text.splitlines():
+    # ``str.splitlines()`` also splits on form feeds and other control
+    # characters that occur inside patch payloads (GNU licence texts, man
+    # pages), which halves a diff line and stops the count early. Split on
+    # newlines only.
+    for line in text.split("\n"):
         if line.startswith("diff --git "):
             match = re.search(r" b/(.+)$", line)
             path = match.group(1) if match else line
@@ -194,11 +210,21 @@ def _patch_stats(text: str) -> list[_PatchFile]:
             current.status = "added"
         elif current is not None and line.startswith("deleted file mode"):
             current.status = "deleted"
+        elif current is not None and (
+            line.startswith("GIT binary patch") or line.startswith("Binary files ")
+        ):
+            current.binary = True
+            current.status = "binary"
+            in_hunk = False
         elif line.startswith("@@"):
             in_hunk = True
         elif in_hunk and current is not None:
             if line == "-- ":
                 in_hunk = False
+            elif line == "":
+                # A stripped context line or a control-character artifact; it
+                # does not end the hunk.
+                continue
             elif line.startswith("+"):
                 current.added += 1
             elif line.startswith("-"):
@@ -327,6 +353,9 @@ def _render_patch(item: DossierItem | None, candidate_patch: str) -> list[str]:
     files = _patch_stats(item.content)
     added = sum(file.added for file in files)
     removed = sum(file.removed for file in files)
+    counts = f"+{added}/−{removed}"
+    if any(file.binary for file in files):
+        counts += f", {sum(1 for file in files if file.binary)} binary"
     lines = [
         "### Patch",
         "",
@@ -336,7 +365,7 @@ def _render_patch(item: DossierItem | None, candidate_patch: str) -> list[str]:
             else "- **Patch file:** not recorded"
         ),
         f"- **Files changed:** {len(files)}",
-        f"- **Line counts:** +{added}/−{removed} (summed across commits)",
+        f"- **Line counts:** {counts} (summed across commits)",
         "",
     ]
     if files:
@@ -345,6 +374,9 @@ def _render_patch(item: DossierItem | None, candidate_patch: str) -> list[str]:
             "|---|---|---:|---:|",
         ]
         for file in files:
+            if file.binary:
+                lines.append(f"| `{_cell(file.path)}` | binary | — | — |")
+                continue
             lines.append(
                 f"| `{_cell(file.path)}` | {file.status} | "
                 f"{file.added} | {file.removed} |"
@@ -396,7 +428,9 @@ def _review_focus(
             "considering the patch."
         )
     equivalence = gates.get("semantic_equivalence")
-    if equivalence in {"unmatched", "modified"}:
+    # ``modified`` is the normal outcome of a port onto a distant baseline;
+    # flagging it would make the section noise on almost every adapted backport.
+    if equivalence and equivalence not in {"identical", "modified"}:
         focus.append(
             f"Semantic equivalence is `{equivalence}`; review the range-diff "
             "and the resolution reports."
@@ -451,6 +485,10 @@ def format_dossier_human(
     patch_files = _patch_stats(patch_item.content) if patch_item else []
     added = sum(file.added for file in patch_files)
     removed = sum(file.removed for file in patch_files)
+    binary = sum(1 for file in patch_files if file.binary)
+    counts = f"+{added}/−{removed}"
+    if binary:
+        counts += f", {binary} binary"
 
     lines = [
         f"# Bug-Fix Porting Review: {dossier.issue_id}",
@@ -478,7 +516,7 @@ def format_dossier_human(
         f"| Semantic equivalence | "
         f"{_cell(gates.get('semantic_equivalence', 'not recorded'))} |",
         f"| Relatedness | {_cell(gates.get('fused_relatedness', 'not recorded'))} |",
-        f"| Patch | {len(patch_files)} files, +{added}/−{removed} |",
+        f"| Patch | {len(patch_files)} files, {counts} |",
         "",
         "## Review focus",
         "",
@@ -668,6 +706,7 @@ def format_dossier_human(
 
 
 _HEADER_RE = re.compile(r"^- \*\*(.+?)\*\*: (.*)$")
+_FENCE_RE = re.compile(r"^(`{3,})\s*$")
 
 
 def parse_dossier_markdown(text: str) -> Dossier:
@@ -677,13 +716,21 @@ def parse_dossier_markdown(text: str) -> Dossier:
     view. It understands the generator's own layout; it is not a general
     Markdown parser.
     """
-    lines = text.splitlines()
+    lines = text.split("\n")
     dossier = Dossier()
-    for line in lines:
+
+    separator = next(
+        (i for i, line in enumerate(lines) if line.strip() == "---"), len(lines)
+    )
+    for line in lines[:separator]:
         if line.startswith("# Bug-Fix Porting Dossier: "):
             dossier.issue_id = line.split(": ", 1)[1].strip()
         elif line.startswith("**") and line.endswith("**"):
-            dossier.bug_description = line.strip("*").strip()
+            # Only the header block, so a later bold-only line cannot be
+            # mistaken for the description.
+            description = line.strip("*").strip()
+            if description:
+                dossier.bug_description = description
         match = _HEADER_RE.match(line)
         if not match:
             continue
@@ -699,10 +746,7 @@ def parse_dossier_markdown(text: str) -> Dossier:
         elif key == "Generated":
             dossier.created_at = value
 
-    index = 0
-    while index < len(lines) and lines[index].strip() != "---":
-        index += 1
-    index += 1
+    index = separator + 1
 
     while index < len(lines):
         if not lines[index].startswith("## "):
@@ -752,15 +796,20 @@ def parse_dossier_markdown(text: str) -> Dossier:
             source = lines[index][len("**Source**: ") :].strip()
             index += 1
 
-        while index < len(lines) and lines[index].strip() != "```":
+        fence = ""
+        while index < len(lines) and not _FENCE_RE.match(lines[index].strip()):
             if lines[index].startswith("## "):
                 break
             index += 1
-        if index >= len(lines) or lines[index].strip() != "```":
+        if index < len(lines):
+            match = _FENCE_RE.match(lines[index].strip())
+            if match:
+                fence = match.group(1)
+        if not fence:
             continue
         index += 1
         content: list[str] = []
-        while index < len(lines) and lines[index].strip() != "```":
+        while index < len(lines) and lines[index].strip() != fence:
             content.append(lines[index])
             index += 1
         index += 1
