@@ -298,7 +298,12 @@ from auto_bug_fix.config_loader import (
     _sanitize_ref,
     load_multi_target_config,
 )
-from auto_bug_fix.dossier import Dossier, build_trailers, format_dossier
+from auto_bug_fix.dossier import (
+    Dossier,
+    build_trailers,
+    format_dossier,
+    format_dossier_human,
+)
 from auto_bug_fix.evidence import (
     added_lines_by_file,
     annotate_dead_config,
@@ -374,6 +379,7 @@ from auto_bug_fix.worktree import (
 
 LOG_FILE = "__run_log_bug_fix.txt"
 DOSSIER_FILE = "dossier.md"
+DOSSIER_HUMAN_FILE = "dossier_human.md"
 PATCH_FILE = "candidate.patch"
 FUSED_RESOLUTION_REPORT_FILE = "fused_resolution_report.md"
 FUSED_PRE_RED_REPORT_FILE = "fused_pre_red_report.md"
@@ -7138,8 +7144,18 @@ def phase_4_5_semantic_equivalence(
     return equivalence
 
 
+def _tracker_gates(tracker) -> dict[str, str]:
+    """All deterministic gate decisions recorded by the tracker."""
+    gates: dict[str, str] = {}
+    if tracker is None:
+        return gates
+    for phase in getattr(tracker, "phases", []):
+        gates.update(getattr(phase, "gate_decisions", {}) or {})
+    return gates
+
+
 def _write_dossier_on_failure(state: PipelineState, tracker: Tracker) -> None:
-    """Persist dossier.md even when the pipeline aborts.
+    """Persist dossier.md and dossier_human.md even when the pipeline aborts.
 
     ``run_targets`` drops the dossier object on PipelineStop/Escalation and
     unexpected errors; without this write those runs leave no dossier.md
@@ -7153,7 +7169,19 @@ def _write_dossier_on_failure(state: PipelineState, tracker: Tracker) -> None:
         path = os.path.join(tracker.output_dir, DOSSIER_FILE)
         with open(path, "w", encoding="utf-8") as f:
             f.write(format_dossier(state.dossier))
+        human = os.path.join(tracker.output_dir, DOSSIER_HUMAN_FILE)
+        with open(human, "w", encoding="utf-8") as f:
+            f.write(
+                format_dossier_human(
+                    state.dossier,
+                    outcome=getattr(tracker, "outcome", ""),
+                    gates=_tracker_gates(tracker),
+                    dossier_name=DOSSIER_FILE,
+                    candidate_patch="candidate.patch",
+                )
+            )
         log.info("Failure path: dossier written to %s", path)
+        log.info("Failure path: human dossier written to %s", human)
     except Exception as e:
         log.warning("Failure-path dossier write failed: %s", e)
 
@@ -9521,6 +9549,7 @@ class TargetResult:
     error: str = ""
     pre_red_mode: str = ""
     resolution_mode: str = ""
+    dossier_human_path: str = ""
 
 
 def _read_tracker_info(
@@ -9660,6 +9689,8 @@ def run_targets(
         outcome = "error"
         error_msg = ""
         dossier_path = ""
+        human_dossier_path = ""
+        run_tracker = None
 
         try:
             # --- Worktree setup ---
@@ -9726,7 +9757,19 @@ def run_targets(
                     with open(dp, "w", encoding="utf-8") as f:
                         f.write(dossier_text)
                     dossier_path = os.path.join(sanitized, DOSSIER_FILE)
+                    human_text = format_dossier_human(
+                        dossier,
+                        outcome=outcome,
+                        gates=_tracker_gates(run_tracker),
+                        dossier_name=DOSSIER_FILE,
+                        candidate_patch="candidate.patch",
+                    )
+                    hp = os.path.join(target_run_dir, DOSSIER_HUMAN_FILE)
+                    with open(hp, "w", encoding="utf-8") as f:
+                        f.write(human_text)
+                    human_dossier_path = os.path.join(sanitized, DOSSIER_HUMAN_FILE)
                     print(f"Dossier written to {dp}")
+                    print(f"Human dossier written to {hp}")
                 except Exception as e:
                     log.warning("Failed to write dossier: %s", e)
 
@@ -9762,6 +9805,7 @@ def run_targets(
                     duration_s=duration,
                     cost_usd=cost_usd,
                     dossier_path=dossier_path,
+                    dossier_human_path=human_dossier_path,
                     tracker_path=tracker_rel,
                     error=error_msg,
                     pre_red_mode=pre_red_mode,

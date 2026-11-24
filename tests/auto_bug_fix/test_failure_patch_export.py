@@ -228,6 +228,13 @@ class TestWriteDossierOnFailure:
         with open(path) as f:
             assert "Triage result" in f.read()
 
+        human = os.path.join(tracker._output_dir, "dossier_human.md")
+        assert os.path.exists(human)
+        with open(human) as f:
+            text = f.read()
+        assert "# Bug-Fix Porting Review: CVE-2024-1234" in text
+        assert "`dossier.md`" in text
+
     def test_fresh_state_still_writes(self, tmp_path):
         """A state whose phases never ran still produces an (empty) dossier."""
         state = PipelineState()
